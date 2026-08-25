@@ -7,12 +7,9 @@ if ! gh copilot --help >/dev/null 2>&1; then
   fi
 fi
 
-
-echo "Installing workshop tools..."
-echo "Installing Squad CLI..."
-npm config set registry "https://packagefeedproxy.microsoft.io/npm/"
-npm config get registry
-npm install -g @bradygaster/squad-cli
+#echo "Installing workshop tools..."
+#echo "Installing Squad CLI..."
+npm install --global --prefix "$HOME/.local" @bradygaster/squad-cli
 
 echo 'Installed workshop tools:'
 git --version
