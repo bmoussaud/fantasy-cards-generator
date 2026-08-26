@@ -9,3 +9,6 @@
 
 <!-- Append new learnings below. Each entry is something lasting about the project. -->
 📌 Team update (2026-08-26T09:17:30Z): Initial architecture decisions were proposed in .squad/decisions.md (Azure App Service hosting; Azure AI Foundry text + image model flow), pending user confirmation on open questions.
+📌 Team policy (2026-08-26T10:05:50Z): Use Conventional Commits for every future commit in this repo (`<type>[optional scope]: <description>`).
+📌 Team policy (2026-08-26T09:36:32Z): Backend/API implementation standardizes on Python; use `uv` for dependency/env/command workflows and keep Python project/tool configuration in `pyproject.toml`, not scattered config files where avoidable.
+📌 Team policy (2026-08-26T09:42:05Z): Backend CLI/application entry points must call `python-dotenv` (for example `load_dotenv()`) on startup for local development, add the dependency with `uv`, and never treat `.env` as a production config source.

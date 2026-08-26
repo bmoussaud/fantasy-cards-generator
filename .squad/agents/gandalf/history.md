@@ -9,3 +9,10 @@
 
 <!-- Append new learnings below. Each entry is something lasting about the project. -->
 📌 Team update (2026-08-26T09:30:49Z): Benoit Moussaud explicitly overrode the initial hosting recommendation; the architecture now standardizes on Azure Container Apps instead of Azure App Service.
+📌 Team policy (2026-08-26T09:34:19Z): All Azure resources must be provisioned through Bicep, preferring Azure Verified Modules (AVM) when suitable and using native/custom Bicep only as fallback.
+📌 Team policy (2026-08-26T09:36:32Z): Python is now the primary application language for backend/API and project tooling; use `uv` workflows and keep Python config centered on `pyproject.toml`, with secrets staying in env/Key Vault/deployment config.
+📌 Architecture update (2026-08-26T09:36:32Z): The frontend direction is now Python-served/server-rendered; keep UI architecture inside the Python app rather than planning a separate JS/TS frontend unless a later decision explicitly reopens that choice.
+📌 Team policy (2026-08-26T09:39:08Z): Use Azure Developer CLI (`azd`) as the standard Azure provisioning/deployment workflow; ensure `azure.yaml` and an azd-compatible `infra/` structure sit on top of the Bicep + AVM baseline when infra work starts.
+📌 Team policy (2026-08-26T09:42:05Z): Every CLI entry point must load local `.env` via `python-dotenv` for development convenience, while deployed runtime config still comes from injected env vars / Key Vault and `.env` must stay gitignored.
+📌 Architecture draft (2026-08-26T09:50:16Z): Added a detailed MVP operating-decisions proposal covering 16 implementation gaps, with six items explicitly flagged for Benoit's confirmation: auth, cost caps, moderation, retention/deletion, async generation, and legal/IP posture.
+📌 Team policy (2026-08-26T10:05:50Z): All future commits must use Conventional Commits (`<type>[optional scope]: <description>`); Gandalf and reviewers enforce this repo-wide.
