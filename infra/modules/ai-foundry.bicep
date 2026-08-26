@@ -56,6 +56,9 @@ resource foundryAccount 'Microsoft.CognitiveServices/accounts@2025-06-01' = {
   location: location
   tags: tags
   kind: 'AIServices'
+  identity: {
+    type: 'SystemAssigned'
+  }
   sku: {
     name: 'S0'
   }
@@ -71,6 +74,9 @@ resource foundryAccount 'Microsoft.CognitiveServices/accounts@2025-06-01' = {
 resource textModelDeployment 'Microsoft.CognitiveServices/accounts/deployments@2025-06-01' = {
   parent: foundryAccount
   name: textDeploymentName
+  dependsOn: [
+    aiFoundryProject
+  ]
   sku: {
     capacity: textDeploymentCapacity
     name: textDeploymentSkuName
@@ -87,6 +93,9 @@ resource textModelDeployment 'Microsoft.CognitiveServices/accounts/deployments@2
 resource imageModelDeployment 'Microsoft.CognitiveServices/accounts/deployments@2025-06-01' = {
   parent: foundryAccount
   name: imageDeploymentName
+  dependsOn: [
+    textModelDeployment
+  ]
   sku: {
     capacity: imageDeploymentCapacity
     name: imageDeploymentSkuName

@@ -36,7 +36,7 @@ param aiFoundryTextDeploymentName string = 'gpt-5-5'
 param aiFoundryTextModelName string = 'gpt-5.5'
 
 @description('Azure AI Foundry model version for text generation. Verify against the live catalog before deployment.')
-param aiFoundryTextModelVersion string = '1'
+param aiFoundryTextModelVersion string = '2026-04-24'
 
 @description('Azure AI Foundry SKU for the text deployment. Verify against regional quota availability before deployment.')
 param aiFoundryTextDeploymentSkuName string = 'GlobalStandard'
@@ -48,10 +48,10 @@ param aiFoundryTextDeploymentCapacity int = 1
 param aiFoundryImageDeploymentName string = 'gpt-image-2'
 
 @description('Azure AI Foundry model name for image generation.')
-param aiFoundryImageModelName string = 'GPT-image-2'
+param aiFoundryImageModelName string = 'gpt-image-2'
 
 @description('Azure AI Foundry model version for image generation. Verify against the live catalog before deployment.')
-param aiFoundryImageModelVersion string = '1'
+param aiFoundryImageModelVersion string = '2026-04-21'
 
 @description('Azure AI Foundry SKU for the image deployment. Verify against regional quota availability before deployment.')
 param aiFoundryImageDeploymentSkuName string = 'GlobalStandard'
