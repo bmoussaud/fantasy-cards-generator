@@ -13,39 +13,59 @@ param containerAppPrincipalId string
 @description('Optional tags shared by storage resources.')
 param tags object = {}
 
-module storageAccount 'br/public:avm/res/storage/storage-account:0.9.1' = {
-  name: 'storage-account'
-  params: {
-    name: storageAccountName
-    location: location
+var storageBlobDataContributorRoleDefinitionId = 'ba92f5b4-2d11-453d-a403-e96b0029c9fe'
+
+resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
+  name: storageAccountName
+  location: location
+  tags: tags
+  kind: 'StorageV2'
+  sku: {
+    name: 'Standard_LRS'
+  }
+  properties: {
     accessTier: 'Hot'
     allowBlobPublicAccess: false
     allowSharedKeyAccess: false
-    blobServices: {
-      containers: [
-        {
-          name: containerName
-          publicAccess: 'None'
-        }
-      ]
-    }
     defaultToOAuthAuthentication: true
-    kind: 'StorageV2'
+    minimumTlsVersion: 'TLS1_2'
+    networkAcls: {
+      bypass: 'AzureServices'
+      defaultAction: 'Allow'
+    }
     publicNetworkAccess: 'Enabled'
-    roleAssignments: [
-      {
-        principalId: containerAppPrincipalId
-        principalType: 'ServicePrincipal'
-        roleDefinitionIdOrName: 'Storage Blob Data Contributor'
-      }
-    ]
-    sasExpirationPeriod: '0.00:15:00'
-    skuName: 'Standard_LRS'
-    tags: tags
+    sasPolicy: {
+      expirationAction: 'Log'
+      sasExpirationPeriod: '0.00:15:00'
+    }
+    supportsHttpsTrafficOnly: true
   }
 }
 
-output storageAccountName string = storageAccount.outputs.name
-output storageAccountResourceId string = storageAccount.outputs.resourceId
-output storageBlobEndpoint string = storageAccount.outputs.primaryBlobEndpoint
+resource blobService 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01' = {
+  parent: storageAccount
+  name: 'default'
+}
+
+resource cardAssetsContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
+  parent: blobService
+  name: containerName
+  properties: {
+    publicAccess: 'None'
+  }
+}
+
+resource storageBlobDataContributorRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: storageAccount
+  name: guid(storageAccount.id, containerAppPrincipalId, storageBlobDataContributorRoleDefinitionId)
+  properties: {
+    principalId: containerAppPrincipalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', storageBlobDataContributorRoleDefinitionId)
+  }
+}
+
+output storageAccountName string = storageAccount.name
+output storageAccountResourceId string = storageAccount.id
+output storageBlobEndpoint string = storageAccount.properties.primaryEndpoints.blob
 output storageContainerName string = containerName

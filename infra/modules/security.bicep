@@ -7,18 +7,25 @@ param keyVaultName string
 @description('Optional tags shared by security resources.')
 param tags object = {}
 
-module keyVault 'br/public:avm/res/key-vault/vault:0.13.3' = {
-  name: 'key-vault'
-  params: {
-    name: keyVaultName
-    location: location
-    enableRbacAuthorization: true
+resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
+  name: keyVaultName
+  location: location
+  tags: tags
+  properties: {
     enablePurgeProtection: true
+    enableRbacAuthorization: true
+    networkAcls: {
+      bypass: 'AzureServices'
+      defaultAction: 'Allow'
+    }
     publicNetworkAccess: 'Enabled'
-    sku: 'standard'
-    tags: tags
+    sku: {
+      family: 'A'
+      name: 'standard'
+    }
+    tenantId: tenant().tenantId
   }
 }
 
-output keyVaultName string = keyVault.outputs.name
-output keyVaultUri string = keyVault.outputs.uri
+output keyVaultName string = keyVault.name
+output keyVaultUri string = keyVault.properties.vaultUri

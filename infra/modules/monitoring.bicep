@@ -10,28 +10,33 @@ param appInsightsName string
 @description('Optional tags shared by monitoring resources.')
 param tags object = {}
 
-module logAnalyticsWorkspace 'br/public:avm/res/operational-insights/workspace:0.15.0' = {
-  name: 'log-analytics-workspace'
-  params: {
-    name: logAnalyticsWorkspaceName
-    location: location
-    dataRetention: 30
-    tags: tags
+resource logAnalyticsWorkspace 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
+  name: logAnalyticsWorkspaceName
+  location: location
+  tags: tags
+  properties: {
+    retentionInDays: 30
+    sku: {
+      name: 'PerGB2018'
+    }
   }
 }
 
-module applicationInsights 'br/public:avm/res/insights/component:0.7.1' = {
-  name: 'application-insights'
-  params: {
-    name: appInsightsName
-    location: location
-    workspaceResourceId: logAnalyticsWorkspace.outputs.resourceId
-    applicationType: 'web'
-    tags: tags
+resource applicationInsights 'Microsoft.Insights/components@2020-02-02' = {
+  name: appInsightsName
+  location: location
+  kind: 'web'
+  tags: tags
+  properties: {
+    Application_Type: 'web'
+    WorkspaceResourceId: logAnalyticsWorkspace.id
   }
 }
 
-output appInsightsConnectionString string = applicationInsights.outputs.connectionString
-output appInsightsName string = applicationInsights.outputs.name
-output logAnalyticsWorkspaceName string = logAnalyticsWorkspace.outputs.name
-output logAnalyticsWorkspaceResourceId string = logAnalyticsWorkspace.outputs.resourceId
+output appInsightsConnectionString string = applicationInsights.properties.ConnectionString
+output appInsightsName string = applicationInsights.name
+output logAnalyticsWorkspaceCustomerId string = logAnalyticsWorkspace.properties.customerId
+output logAnalyticsWorkspaceName string = logAnalyticsWorkspace.name
+output logAnalyticsWorkspaceResourceId string = logAnalyticsWorkspace.id
+@secure()
+output logAnalyticsWorkspaceSharedKey string = logAnalyticsWorkspace.listKeys().primarySharedKey
