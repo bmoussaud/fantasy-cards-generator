@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Fantasy Cards Generator</title>
+    <script src="https://unpkg.com/htmx.org@2.0.6"></script>
+</head>
+<body>
+    <h1>Fantasy Cards Generator</h1>
+    <p>FastAPI + Jinja2 + HTMX scaffold is running.</p>
+    <button hx-get="/partials/ping" hx-target="#status" hx-swap="innerHTML">Check HTMX wiring</button>
+    <div id="status"></div>
+</body>
+</html>
