@@ -7,9 +7,6 @@
     },
     "location": {
       "value": "${AZURE_LOCATION}"
-    },
-    "namePrefix": {
-      "value": "fcg"
     }
   }
 }

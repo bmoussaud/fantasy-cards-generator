@@ -28,7 +28,6 @@ module containerAppsEnvironment 'br/public:avm/res/app/managed-environment:0.13.
   params: {
     name: containerAppsEnvironmentName
     location: location
-    appInsightsConnectionString: appInsightsConnectionString
     appLogsConfiguration: {
       destination: 'log-analytics'
       logAnalyticsWorkspaceResourceId: logAnalyticsWorkspaceResourceId
@@ -55,6 +54,12 @@ module containerApp 'br/public:avm/res/app/container-app:0.22.1' = {
       minReplicas: 1
       maxReplicas: 2
     }
+    secrets: [
+      {
+        name: 'applicationinsights-connection-string'
+        value: appInsightsConnectionString
+      }
+    ]
     containers: [
       {
         name: 'web'
@@ -66,7 +71,7 @@ module containerApp 'br/public:avm/res/app/container-app:0.22.1' = {
         env: [
           {
             name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
-            value: appInsightsConnectionString
+            secretRef: 'applicationinsights-connection-string'
           }
           {
             name: 'KEY_VAULT_URI'

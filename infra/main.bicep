@@ -8,26 +8,22 @@ param location string = resourceGroup().location
 ])
 param environmentName string
 
-@description('Name prefix used for Azure resources.')
-@minLength(2)
-@maxLength(10)
-param namePrefix string = 'fcg'
-
 @description('Optional tags shared by all deployed resources.')
 param tags object = {}
 
 @description('Placeholder container image for the initial Container App scaffold.')
 param containerImage string = 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest'
 
+var namePrefix = 'fcg'
 var resourceToken = toLower('${namePrefix}-${environmentName}')
 var logAnalyticsName = take('${resourceToken}-law', 63)
-var appInsightsName = take('${resourceToken}-appi', 64)
+var appInsightsName = take('${resourceToken}-appi', 63)
 var keyVaultBase = replace(
-  '${namePrefix}${environmentName}${uniqueString(subscription().id, resourceGroup().id)}',
+  'kv${namePrefix}${environmentName}${uniqueString(subscription().id, resourceGroup().id)}',
   '-',
   ''
 )
-var keyVaultName = toLower(substring(keyVaultBase, 0, 24))
+var keyVaultName = toLower(take(keyVaultBase, 24))
 var containerAppsEnvironmentName = take('${resourceToken}-cae', 32)
 var containerAppName = take('${resourceToken}-app', 32)
 
