@@ -12,3 +12,4 @@
 📌 Team policy (2026-08-26T10:05:50Z): Use Conventional Commits for every future commit in this repo (`<type>[optional scope]: <description>`).
 📌 Team policy (2026-08-26T09:36:32Z): Backend/API implementation standardizes on Python; use `uv` for dependency/env/command workflows and keep Python project/tool configuration in `pyproject.toml`, not scattered config files where avoidable.
 📌 Team policy (2026-08-26T09:42:05Z): Backend CLI/application entry points must call `python-dotenv` (for example `load_dotenv()`) on startup for local development, add the dependency with `uv`, and never treat `.env` as a production config source.
+📌 Team update (2026-08-26T12:15:37Z): Core data infra landed in PR #13 (`squad/5-provision-core-data-services`) with Bicep/AVM bindings for Cosmos DB, Blob Storage, and Azure AI Foundry; use those new infra modules as the backend integration baseline for issues #6 and #7.
