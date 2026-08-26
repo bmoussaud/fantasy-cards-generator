@@ -12,11 +12,19 @@
 
 | Name | Role | Charter | Status |
 |------|------|---------|--------|
-
+| Gandalf | Lead / Architect | .squad/agents/gandalf/charter.md | 🏗️ Active |
+| Legolas | Frontend Dev | .squad/agents/legolas/charter.md | ⚛️ Active |
+| Aragorn | Backend Dev | .squad/agents/aragorn/charter.md | 🔧 Active |
+| Gimli | DevOps / Infra | .squad/agents/gimli/charter.md | ⚙️ Active |
+| Samwise | Tester | .squad/agents/samwise/charter.md | 🧪 Active |
+| Scribe | Scribe | .squad/agents/scribe/charter.md | 📋 Scribe |
+| Ralph | Work Monitor | .squad/agents/ralph/charter.md | 🔄 Ralph |
+| Rai | RAI Reviewer | .squad/agents/Rai/charter.md | 🛡️ RAI |
+| Fact Checker | Fact Checker | .squad/agents/fact-checker/charter.md | 🔍 Verifier |
 
 ## Coding Agent
 
-<!-- copilot-auto-assign: false -->
+<!-- copilot-auto-assign: true -->
 
 | Name | Role | Charter | Status |
 |------|------|---------|--------|
@@ -49,5 +57,17 @@
 
 ## Project Context
 
-- **Project:** fantasy-cards-generator
+- **Project:** fantasy-cards-generator — web application on Azure using Azure AI Foundry AI services
+- **Owner:** Benoit Moussaud
 - **Created:** 2026-08-26
+- **Universe:** The Lord of the Rings
+
+## Issue Source
+
+**Repository:** bmoussaud/fantasy-cards-generator
+**Connected:** 2026-08-26
+**Platform:** GitHub
+**Filters:**
+- Labels: `squad`, `squad:{member}`
+
+> ⚠️ Not yet queryable — `gh` CLI is unauthenticated in this environment. Run `gh auth login` (or set `GH_TOKEN`) to enable issue listing/triage.

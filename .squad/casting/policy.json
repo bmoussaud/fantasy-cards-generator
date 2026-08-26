@@ -17,7 +17,8 @@
     "Lost",
     "Marvel Cinematic Universe",
     "DC Universe",
-    "Futurama"
+    "Futurama",
+    "The Lord of the Rings"
   ],
   "universe_capacity": {
     "The Usual Suspects": 6,
@@ -34,6 +35,7 @@
     "Lost": 18,
     "Marvel Cinematic Universe": 25,
     "DC Universe": 18,
-    "Futurama": 12
+    "Futurama": 12,
+    "The Lord of the Rings": 12
   }
 }

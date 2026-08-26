@@ -6,14 +6,16 @@ How to decide who handles what.
 
 | Work Type | Route To | Examples |
 |-----------|----------|----------|
-| {domain 1} | {Name} | {example tasks} |
-| {domain 2} | {Name} | {example tasks} |
-| {domain 3} | {Name} | {example tasks} |
-| Code review | {Name} | Review PRs, check quality, suggest improvements |
-| Testing | {Name} | Write tests, find edge cases, verify fixes |
-| Scope & priorities | {Name} | What to build next, trade-offs, decisions |
+| Architecture & Azure AI Foundry design | Gandalf | Service boundaries, model/agent choice, cross-cutting design |
+| Frontend / Web UI | Legolas | React components, UX, client-side API integration |
+| Backend / API / AI Foundry integration | Aragorn | API endpoints, Azure AI Foundry SDK calls, business logic |
+| Infra & Deployment | Gimli | Bicep/Terraform, CI/CD, Azure resource provisioning, monitoring |
+| Code review | Gandalf | Review PRs, check quality, suggest improvements |
+| Testing | Samwise | Write tests, find edge cases, verify fixes |
+| Scope & priorities | Gandalf | What to build next, trade-offs, decisions |
 | Session logging | Scribe | Automatic — never needs routing |
 | RAI review | Rai | Content safety, bias checks, credential detection, ethical review |
+| Fact-check / Devil's Advocate | Fact Checker | Verify claims, challenge design assumptions, pre-mortems |
 
 ## Issue Routing
 
@@ -28,6 +30,7 @@ How to decide who handles what.
 2. When a `squad:{member}` label is applied, that member picks up the issue in their next session.
 3. Members can reassign by removing their label and adding another member's label.
 4. The `squad` label is the "inbox" — untriaged issues waiting for Lead review.
+5. During triage, Gandalf (Lead) also checks each issue against @copilot's capability profile in `team.md`. Auto-assign is **enabled** — 🟢/🟡 matches are assigned to `@copilot` automatically via `gh issue edit --add-assignee @copilot`; 🔴 matches route to a squad member instead.
 
 ## Rules
 
