@@ -1,0 +1,16 @@
+# Project Context
+
+- **Project:** fantasy-cards-generator
+- **Created:** 2026-08-26
+
+## Core Context
+
+Agent Ralph initialized and ready for work.
+
+## Recent Updates
+
+📌 Team initialized on 2026-08-26
+
+## Learnings
+
+Initial setup complete.

@@ -1,0 +1,16 @@
+
+{
+  "comment":"Not used by the extension, but used by the MCP server to know which servers to start",
+  "mcpServers": {
+    "EXAMPLE-github": {
+      "command": "npx",git c
+      "args": [
+        "-y",
+        "@anthropic/github-mcp-server"
+      ],
+      "env": {
+        "GITHUB_TOKEN": "${GITHUB_TOKEN}"
+      }
+    }
+  }
+}
