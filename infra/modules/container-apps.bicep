@@ -84,7 +84,12 @@ module containerApp 'br/public:avm/res/app/container-app:0.22.1' = {
   }
 }
 
+resource deployedContainerApp 'Microsoft.App/containerApps@2024-03-01' existing = {
+  name: containerApp.outputs.name
+}
+
 output containerAppName string = containerApp.outputs.name
+output containerAppPrincipalId string = deployedContainerApp.identity.principalId!
 output containerAppResourceId string = containerApp.outputs.resourceId
 output containerAppsEnvironmentName string = containerAppsEnvironment.outputs.name
 output containerAppsEnvironmentResourceId string = containerAppsEnvironment.outputs.resourceId

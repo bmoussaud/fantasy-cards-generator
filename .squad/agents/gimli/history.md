@@ -16,3 +16,4 @@
 📌 Team policy (2026-08-26T09:42:05Z): Ensure `.env` remains gitignored and `.env.sample` / `.env.example` exists for local developer setup, while deployed runtime config continues to come from Azure-injected env vars, `azd`, and Key Vault rather than `.env`.
 📌 Team policy (2026-08-26T10:04:13Z): Standardize on exactly two `azd` environments — `dev` and `prod` only — with no staging tier for future provisioning and pipeline work.
 📌 Team policy (2026-08-26T10:05:50Z): Use Conventional Commits for every future commit in this repo (`<type>[optional scope]: <description>`).
+📌 Team update (2026-08-26T12:05:01Z): Added Bicep modules for Cosmos DB serverless (`cards` container only), private Blob Storage (`card-assets`), and Azure AI Foundry account/project/model deployments with Container Apps managed-identity RBAC; exact Foundry model versions/SKUs still need live quota/catalog confirmation.
