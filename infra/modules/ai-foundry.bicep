@@ -49,72 +49,80 @@ param imageDeploymentCapacity int = 1
 @description('Optional tags shared by Azure AI Foundry resources.')
 param tags object = {}
 
-module foundryAccount 'br/public:avm/res/cognitive-services/account:0.9.2' = {
-  name: 'ai-foundry-account'
-  params: {
-    name: accountName
-    kind: 'AIServices'
-    location: location
+var cognitiveServicesUserRoleDefinitionId = 'a97b65f3-24c7-4388-baec-2e87135dc908'
+
+resource foundryAccount 'Microsoft.CognitiveServices/accounts@2025-06-01' = {
+  name: accountName
+  location: location
+  tags: tags
+  kind: 'AIServices'
+  sku: {
+    name: 'S0'
+  }
+  properties: {
     allowProjectManagement: true
     customSubDomainName: customSubDomainName
-    deployments: [
-      {
-        model: {
-          format: 'OpenAI'
-          name: textModelName
-          version: textModelVersion
-        }
-        name: textDeploymentName
-        sku: {
-          capacity: textDeploymentCapacity
-          name: textDeploymentSkuName
-        }
-      }
-      {
-        model: {
-          format: 'OpenAI'
-          name: imageModelName
-          version: imageModelVersion
-        }
-        name: imageDeploymentName
-        sku: {
-          capacity: imageDeploymentCapacity
-          name: imageDeploymentSkuName
-        }
-      }
-    ]
     disableLocalAuth: true
     publicNetworkAccess: 'Enabled'
     restrictOutboundNetworkAccess: false
-    roleAssignments: [
-      {
-        principalId: containerAppPrincipalId
-        principalType: 'ServicePrincipal'
-        roleDefinitionIdOrName: 'Cognitive Services User'
-      }
-    ]
-    sku: 'S0'
-    tags: tags
   }
 }
 
-resource aiFoundryAccount 'Microsoft.CognitiveServices/accounts@2025-06-01' existing = {
-  name: foundryAccount.outputs.name
+resource textModelDeployment 'Microsoft.CognitiveServices/accounts/deployments@2025-06-01' = {
+  parent: foundryAccount
+  name: textDeploymentName
+  sku: {
+    capacity: textDeploymentCapacity
+    name: textDeploymentSkuName
+  }
+  properties: {
+    model: {
+      format: 'OpenAI'
+      name: textModelName
+      version: textModelVersion
+    }
+  }
+}
+
+resource imageModelDeployment 'Microsoft.CognitiveServices/accounts/deployments@2025-06-01' = {
+  parent: foundryAccount
+  name: imageDeploymentName
+  sku: {
+    capacity: imageDeploymentCapacity
+    name: imageDeploymentSkuName
+  }
+  properties: {
+    model: {
+      format: 'OpenAI'
+      name: imageModelName
+      version: imageModelVersion
+    }
+  }
 }
 
 resource aiFoundryProject 'Microsoft.CognitiveServices/accounts/projects@2025-06-01' = {
   name: projectName
   location: location
-  parent: aiFoundryAccount
+  parent: foundryAccount
   properties: {
     description: 'Azure AI Foundry project for the Fantasy Cards Generator ${projectName} environment.'
     displayName: projectDisplayName
   }
 }
 
-output aiFoundryAccountName string = foundryAccount.outputs.name
-output aiFoundryAccountResourceId string = foundryAccount.outputs.resourceId
-output aiFoundryAccountEndpoint string = foundryAccount.outputs.endpoint
+resource cognitiveServicesUserRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: foundryAccount
+  name: guid(foundryAccount.id, containerAppPrincipalId, cognitiveServicesUserRoleDefinitionId)
+  properties: {
+    principalId: containerAppPrincipalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', cognitiveServicesUserRoleDefinitionId)
+  }
+}
+
+output aiFoundryAccountName string = foundryAccount.name
+output aiFoundryAccountResourceId string = foundryAccount.id
+output aiFoundryAccountEndpoint string = foundryAccount.properties.endpoint
 output aiFoundryProjectName string = aiFoundryProject.name
 output aiFoundryProjectResourceId string = aiFoundryProject.id
 output aiFoundryTextDeploymentName string = textDeploymentName

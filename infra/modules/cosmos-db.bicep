@@ -16,48 +16,79 @@ param containerAppPrincipalId string
 @description('Optional tags shared by Cosmos DB resources.')
 param tags object = {}
 
-module databaseAccount 'br/public:avm/res/document-db/database-account:0.9.0' = {
-  name: 'cosmos-db-account'
-  params: {
-    name: accountName
-    location: location
-    capacityMode: 'Serverless'
-    defaultConsistencyLevel: 'Session'
+var cosmosDataContributorRoleDefinitionId = '00000000-0000-0000-0000-000000000002'
+
+resource databaseAccount 'Microsoft.DocumentDB/databaseAccounts@2024-05-15' = {
+  name: accountName
+  location: location
+  tags: tags
+  kind: 'GlobalDocumentDB'
+  properties: {
+    capabilities: [
+      {
+        name: 'EnableServerless'
+      }
+    ]
+    consistencyPolicy: {
+      defaultConsistencyLevel: 'Session'
+    }
+    databaseAccountOfferType: 'Standard'
     disableKeyBasedMetadataWriteAccess: true
-    disableLocalAuthentication: true
+    disableLocalAuth: true
     enableAutomaticFailover: false
     enableMultipleWriteLocations: false
-    networkRestrictions: {
-      publicNetworkAccess: 'Enabled'
-    }
-    sqlDatabases: [
+    locations: [
       {
-        name: databaseName
-        containers: [
-          {
-            kind: 'Hash'
-            name: containerName
-            paths: [
-              '/userId'
-            ]
-          }
-        ]
+        failoverPriority: 0
+        isZoneRedundant: false
+        locationName: location
       }
     ]
-    sqlRoleAssignments: [
-      {
-        principalId: containerAppPrincipalId
-        roleDefinitionId: '00000000-0000-0000-0000-000000000002'
-        scope: '/dbs/${databaseName}/colls/${containerName}'
-      }
-    ]
-    zoneRedundant: false
-    tags: tags
+    publicNetworkAccess: 'Enabled'
   }
 }
 
-output cosmosAccountName string = databaseAccount.outputs.name
-output cosmosAccountResourceId string = databaseAccount.outputs.resourceId
-output cosmosAccountEndpoint string = databaseAccount.outputs.endpoint
+resource sqlDatabase 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases@2024-05-15' = {
+  parent: databaseAccount
+  name: databaseName
+  properties: {
+    resource: {
+      id: databaseName
+    }
+  }
+}
+
+resource sqlContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/containers@2024-05-15' = {
+  parent: sqlDatabase
+  name: containerName
+  properties: {
+    resource: {
+      id: containerName
+      partitionKey: {
+        kind: 'Hash'
+        paths: [
+          '/userId'
+        ]
+      }
+    }
+  }
+}
+
+resource sqlRoleAssignment 'Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments@2024-05-15' = {
+  parent: databaseAccount
+  name: guid(databaseAccount.id, containerAppPrincipalId, databaseName, containerName, cosmosDataContributorRoleDefinitionId)
+  properties: {
+    principalId: containerAppPrincipalId
+    roleDefinitionId: '${databaseAccount.id}/sqlRoleDefinitions/${cosmosDataContributorRoleDefinitionId}'
+    scope: '${databaseAccount.id}/dbs/${databaseName}/colls/${containerName}'
+  }
+  dependsOn: [
+    sqlContainer
+  ]
+}
+
+output cosmosAccountName string = databaseAccount.name
+output cosmosAccountResourceId string = databaseAccount.id
+output cosmosAccountEndpoint string = databaseAccount.properties.documentEndpoint
 output cosmosDatabaseName string = databaseName
 output cosmosContainerName string = containerName

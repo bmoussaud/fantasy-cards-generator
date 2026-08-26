@@ -10,8 +10,12 @@ param containerAppName string
 @description('Container image used by the initial scaffold app.')
 param containerImage string
 
-@description('Log Analytics workspace resource ID for Container Apps logging.')
-param logAnalyticsWorkspaceResourceId string
+@description('Log Analytics workspace customer ID for Container Apps logging.')
+param logAnalyticsWorkspaceCustomerId string
+
+@secure()
+@description('Log Analytics workspace shared key for Container Apps logging.')
+param logAnalyticsWorkspaceSharedKey string
 
 @secure()
 @description('Application Insights connection string used by the app foundation.')
@@ -23,73 +27,78 @@ param keyVaultUri string
 @description('Optional tags shared by Container Apps resources.')
 param tags object = {}
 
-module containerAppsEnvironment 'br/public:avm/res/app/managed-environment:0.13.3' = {
-  name: 'container-apps-environment'
-  params: {
-    name: containerAppsEnvironmentName
-    location: location
+resource containerAppsEnvironment 'Microsoft.App/managedEnvironments@2024-03-01' = {
+  name: containerAppsEnvironmentName
+  location: location
+  tags: tags
+  properties: {
     appLogsConfiguration: {
       destination: 'log-analytics'
-      logAnalyticsWorkspaceResourceId: logAnalyticsWorkspaceResourceId
+      logAnalyticsConfiguration: {
+        customerId: logAnalyticsWorkspaceCustomerId
+        sharedKey: logAnalyticsWorkspaceSharedKey
+      }
     }
-    publicNetworkAccess: 'Enabled'
     zoneRedundant: false
-    tags: tags
   }
 }
 
-module containerApp 'br/public:avm/res/app/container-app:0.22.1' = {
-  name: 'container-app'
-  params: {
-    name: containerAppName
-    location: location
-    environmentResourceId: containerAppsEnvironment.outputs.resourceId
-    ingressExternal: true
-    ingressAllowInsecure: false
-    ingressTargetPort: 8000
-    managedIdentities: {
-      systemAssigned: true
-    }
-    scaleSettings: {
-      minReplicas: 1
-      maxReplicas: 2
-    }
-    secrets: [
-      {
-        name: 'applicationinsights-connection-string'
-        value: appInsightsConnectionString
+resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
+  name: containerAppName
+  location: location
+  tags: tags
+  identity: {
+    type: 'SystemAssigned'
+  }
+  properties: {
+    configuration: {
+      activeRevisionsMode: 'Single'
+      ingress: {
+        allowInsecure: false
+        external: true
+        targetPort: 8000
+        transport: 'auto'
       }
-    ]
-    containers: [
-      {
-        name: 'web'
-        image: containerImage
-        resources: {
-          cpu: 0.5
-          memory: '1Gi'
+      secrets: [
+        {
+          name: 'applicationinsights-connection-string'
+          value: appInsightsConnectionString
         }
-        env: [
-          {
-            name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
-            secretRef: 'applicationinsights-connection-string'
+      ]
+    }
+    managedEnvironmentId: containerAppsEnvironment.id
+    template: {
+      containers: [
+        {
+          name: 'web'
+          image: containerImage
+          resources: {
+            cpu: json('0.5')
+            memory: '1Gi'
           }
-          {
-            name: 'KEY_VAULT_URI'
-            value: keyVaultUri
-          }
-        ]
+          env: [
+            {
+              name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
+              secretRef: 'applicationinsights-connection-string'
+            }
+            {
+              name: 'KEY_VAULT_URI'
+              value: keyVaultUri
+            }
+          ]
+        }
+      ]
+      scale: {
+        minReplicas: 1
+        maxReplicas: 2
+        rules: []
       }
-    ]
-    tags: tags
+    }
   }
 }
 
-resource deployedContainerApp 'Microsoft.App/containerApps@2024-03-01' existing = {
-  name: containerApp.outputs.name
-}
-
-output containerAppName string = containerApp.outputs.name
-output containerAppPrincipalId string = deployedContainerApp.identity.principalId!
-output containerAppResourceId string = containerApp.outputs.resourceId
-output containerAppsEnvironmentName string = containerAppsEnvironment.outputs.name
-output containerAppsEnvironmentResourceId string = containerAppsEnvironment.outputs.resourceId
+output containerAppName string = containerApp.name
+output containerAppPrincipalId string = containerApp.identity.principalId
+output containerAppResourceId string = containerApp.id
+output containerAppsEnvironmentName string = containerAppsEnvironment.name
+output containerAppsEnvironmentResourceId string = containerAppsEnvironment.id

@@ -17,6 +17,21 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  bicep-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Bicep CLI
+        run: az bicep install --version v0.46.1
+
+      - name: Restore Bicep modules
+        run: az bicep restore --file infra/main.bicep
+
+      - name: Build root Bicep template
+        run: az bicep build --file infra/main.bicep --stdout > /dev/null
+
   lint-and-test:
     runs-on: ubuntu-latest
     steps:

@@ -106,7 +106,8 @@ module containerApps './modules/container-apps.bicep' = {
     containerImage: containerImage
     keyVaultUri: security.outputs.keyVaultUri
     location: location
-    logAnalyticsWorkspaceResourceId: monitoring.outputs.logAnalyticsWorkspaceResourceId
+    logAnalyticsWorkspaceCustomerId: monitoring.outputs.logAnalyticsWorkspaceCustomerId
+    logAnalyticsWorkspaceSharedKey: monitoring.outputs.logAnalyticsWorkspaceSharedKey
     tags: tags
   }
 }
