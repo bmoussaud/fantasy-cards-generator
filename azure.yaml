@@ -1,0 +1,4 @@
+name: fantasy-cards-generator
+infra:
+  provider: bicep
+  path: infra
