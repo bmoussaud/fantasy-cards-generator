@@ -13,6 +13,9 @@ dev = ["black>=26.0.0", "pytest>=8.4.0", "ruff>=0.12.10"]
 requires = ["hatchling>=1.27.0"]
 build-backend = "hatchling.build"
 
+[tool.hatch.build.targets.wheel]
+packages = ["src/fantasy_cards_generator"]
+
 [tool.black]
 line-length = 100
 target-version = ["py311"]
