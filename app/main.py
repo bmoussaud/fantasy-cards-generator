@@ -13,7 +13,7 @@ templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request) -> HTMLResponse:
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse(request, "index.html")
 
 
 @app.get("/healthz")
@@ -22,5 +22,5 @@ async def healthz() -> dict[str, str]:
 
 
 @app.get("/partials/ping", response_class=HTMLResponse)
-async def ping_partial() -> HTMLResponse:
-    return templates.TemplateResponse("partials/ping.html", {"message": "HTMX is wired."})
+async def ping_partial(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(request, "partials/ping.html", {"message": "HTMX is wired."})
