@@ -31,6 +31,7 @@ How to decide who handles what.
 3. Members can reassign by removing their label and adding another member's label.
 4. The `squad` label is the "inbox" — untriaged issues waiting for Lead review.
 5. During triage, Gandalf (Lead) also checks each issue against @copilot's capability profile in `team.md`. Auto-assign is **enabled** — 🟢/🟡 matches are assigned to `@copilot` automatically via `gh issue edit --add-assignee @copilot`; 🔴 matches route to a squad member instead.
+6. **@copilot concurrency limit: max 1 in-flight.** Before auto-assigning a new issue to `@copilot`, Gandalf checks whether `@copilot` already has an open, unmerged PR (or an assigned issue without a merged/closed PR yet) via `gh pr list --assignee "@copilot" --state open` and `gh issue list --assignee "@copilot" --state open`. If one exists, do **not** assign the new issue yet — leave it labeled `squad` (or add a `squad:queued-copilot` label) so it's picked up on the next triage pass once the prior PR is merged/closed. This avoids parallel `@copilot` branches touching overlapping files and causing merge conflicts. To change the limit, edit the number here and re-triage.
 
 ## Rules
 
