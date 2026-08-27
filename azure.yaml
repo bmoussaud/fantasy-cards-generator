@@ -1,4 +1,16 @@
 name: fantasy-cards-generator
+services:
+  web:
+    project: .
+    host: containerapp
+    language: python
+    docker:
+      path: Dockerfile
+      registry: ${AZURE_CONTAINER_REGISTRY_ENDPOINT}
+resources:
+  web:
+    type: host.containerapp
+    port: 8000
 infra:
   provider: bicep
   path: infra

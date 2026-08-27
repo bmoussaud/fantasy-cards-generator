@@ -57,3 +57,6 @@ jobs:
 
       - name: Run tests
         run: uv run pytest
+
+      - name: Build container image
+        run: docker build -f Dockerfile -t fantasy-cards-generator:test .
