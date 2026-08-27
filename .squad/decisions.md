@@ -11,12 +11,14 @@
 - Added a regression test that verifies `create_app()` raises that clear error when `APP_SESSION_SECRET_KEY` is missing.
 - Added test bootstrap environment defaults in `tests/conftest.py` so application-importing tests remain explicit and stable after the fail-closed change.
 - Clarified the local-auth docs: plain HTTP localhost is fine for anonymous pages, but sign-in testing requires HTTPS because the session cookie is `Secure` and the documented redirect URIs use `https://localhost:8000`.
+- Pushed the revision to `squad/6-entra-external-id-auth-foundation`, commented on PR #24 with the validation summary, and recorded that GitHub blocked self-approval for the revision owner identity.
 
 ## Why
 
 - A fixed default session secret creates a cookie-forgery risk whenever configuration is incomplete, so the application must not start without an explicit secret.
 - The regression test protects the exact reviewer finding on PR #24 from silently returning in a future refactor.
 - The doc update resolves the mismatch between secure-cookie auth behavior and the existing plain-HTTP quick-start note, reducing local setup confusion for the next revision cycle.
+- The explicit PR note closes the reviewer loop without bypassing GitHub's self-approval guardrail; merge remains a maintainer decision after CI settles.
 
 # 2026-08-27T12:53:40Z — PR #24 auth review requests changes
 
