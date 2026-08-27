@@ -1,15 +1,17 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Fantasy Cards Generator</title>
-    <script src="https://unpkg.com/htmx.org@2.0.6"></script>
-</head>
-<body>
+{% extends "layout.html" %}
+
+{% block content %}
     <h1>Fantasy Cards Generator</h1>
     <p>FastAPI + Jinja2 + HTMX scaffold is running.</p>
+    {% if user %}
+        <p>You are signed in as <strong>{{ user.name or user.email or user.sub }}</strong>.</p>
+        <p><a href="/app">Open the authenticated app shell</a>.</p>
+    {% elif auth_configured %}
+        <p>Sign in with Microsoft Entra External ID to access the authenticated app shell baseline.</p>
+        <p><a href="/auth/login">Sign in</a></p>
+    {% else %}
+        <p>Authentication is not configured yet. Follow <code>docs/auth-setup.md</code> to enable sign-in.</p>
+    {% endif %}
     <button hx-get="/partials/ping" hx-target="#status" hx-swap="innerHTML">Check HTMX wiring</button>
     <div id="status"></div>
-</body>
-</html>
+{% endblock %}

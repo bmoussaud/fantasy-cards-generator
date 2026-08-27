@@ -24,6 +24,10 @@ uv run uvicorn app.main:app --reload
 
 Open http://127.0.0.1:8000.
 
+## Authentication setup
+
+Authentication is implemented with Microsoft Entra External ID using OIDC authorization code flow + PKCE. Copy `.env.example` to `.env`, provide the Entra values, and follow `docs/auth-setup.md` for registration details.
+
 ## Run tests
 
 ```bash
