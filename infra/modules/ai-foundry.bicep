@@ -113,6 +113,9 @@ resource aiFoundryProject 'Microsoft.CognitiveServices/accounts/projects@2025-06
   name: projectName
   location: location
   parent: foundryAccount
+  identity: {
+    type: 'SystemAssigned'
+  }
   properties: {
     description: 'Azure AI Foundry project for the Fantasy Cards Generator ${projectName} environment.'
     displayName: projectDisplayName
