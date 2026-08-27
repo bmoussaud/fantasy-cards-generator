@@ -83,7 +83,12 @@ endpoint, JWKS signing keys, and issuer metadata needed to validate the ID
 token. In a multi-tenant flow, the validated token issuer will be the
 signing tenant's Entra issuer (for example
 `https://login.microsoftonline.com/<tenant-id>/v2.0`), not the literal
-`/organizations` authority string.
+`/organizations` authority string. Microsoft publishes the discovery issuer for
+`/organizations` as the template
+`https://login.microsoftonline.com/{tenantid}/v2.0`, so the app substitutes the
+signed token's `tid` claim into that template before doing issuer validation.
+This preserves strict issuer validation while still allowing real partner-tenant
+sign-ins to pass.
 
 ## What the app implements
 

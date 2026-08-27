@@ -4,6 +4,7 @@ import os
 from dataclasses import dataclass
 from typing import Any, TypedDict
 from urllib.parse import urlencode, urlsplit, urlunsplit
+from uuid import UUID
 
 from authlib.integrations.starlette_client import OAuth, StarletteOAuth2App
 from fastapi import HTTPException, Request, status
@@ -11,6 +12,7 @@ from fastapi import HTTPException, Request, status
 AUTH_SESSION_KEY = "user"
 AUTH_NONCE_SESSION_KEY = "auth_nonce"
 DEFAULT_ENTRA_AUTHORITY = "https://login.microsoftonline.com/organizations/v2.0"
+ENTRA_TENANT_ID_PLACEHOLDER = "{tenantid}"
 
 
 class AuthenticatedUser(TypedDict):
@@ -132,6 +134,51 @@ def create_oauth_client(settings: AuthSettings) -> StarletteOAuth2App:
     return client
 
 
+def build_claims_options(server_metadata_issuer: str | None) -> dict[str, dict[str, Any]] | None:
+    issuer = _optional_string(server_metadata_issuer)
+    if issuer is None:
+        return None
+
+    return {
+        "iss": {
+            "validate": lambda claims, value: validate_issuer_claim(
+                claims,
+                value,
+                issuer,
+            )
+        }
+    }
+
+
+def validate_issuer_claim(
+    claims: dict[str, Any],
+    issuer: Any,
+    server_metadata_issuer: str,
+) -> bool:
+    issuer_value = _optional_string(issuer)
+    if issuer_value is None:
+        return False
+
+    if ENTRA_TENANT_ID_PLACEHOLDER not in server_metadata_issuer:
+        return issuer_value == server_metadata_issuer
+
+    tenant_id = _canonical_tenant_id(claims.get("tid"))
+    if tenant_id is None:
+        return False
+
+    expected_issuer = server_metadata_issuer.replace(ENTRA_TENANT_ID_PLACEHOLDER, tenant_id)
+    parsed_issuer = urlsplit(issuer_value)
+
+    return (
+        parsed_issuer.scheme == "https"
+        and parsed_issuer.netloc == "login.microsoftonline.com"
+        and not parsed_issuer.query
+        and not parsed_issuer.fragment
+        and parsed_issuer.path.rstrip("/") == f"/{tenant_id}/v2.0"
+        and issuer_value == expected_issuer
+    )
+
+
 def get_session_user(request: Request) -> AuthenticatedUser | None:
     raw_user = request.session.get(AUTH_SESSION_KEY)
     if not isinstance(raw_user, dict) or "sub" not in raw_user:
@@ -190,6 +237,17 @@ def _optional_string(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _canonical_tenant_id(value: Any) -> str | None:
+    tenant_id = _optional_string(value)
+    if tenant_id is None:
+        return None
+
+    try:
+        return str(UUID(tenant_id))
+    except ValueError:
+        return None
 
 
 def _first_env(*names: str, default: str | None = None) -> str | None:

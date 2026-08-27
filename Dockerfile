@@ -13,6 +13,8 @@ RUN apt-get update \
 
 COPY pyproject.toml README.md ./
 
+ENV UV_INDEX_URL=https://packagefeedproxy.microsoft.io/pypi/simple/
+
 RUN uv pip install --system --no-cache -r pyproject.toml \
     && useradd --create-home --shell /usr/sbin/nologin appuser
 
