@@ -2,6 +2,36 @@
 
 ## Active Decisions
 
+# 2026-08-27T12:44:06Z — Issue #6 Entra External ID auth foundation implemented in PR #24
+
+## Decision
+
+- Implemented Microsoft Entra External ID authentication foundation in PR #24: https://github.com/bmoussaud/fantasy-cards-generator/pull/24
+- Chose **Authlib** for OIDC authorization code flow handling and ID-token validation via OIDC discovery/JWKS instead of hand-rolled token validation.
+- Chose FastAPI/Starlette **SessionMiddleware** backed by `itsdangerous` for the signed session cookie, storing only minimal user claims (`sub`, `name`, `email`) and no Entra tokens.
+- Added an authenticated app shell baseline, login/callback/logout routes, a reusable auth-required dependency, focused mocked auth tests, and `docs/auth-setup.md` for Entra External ID registration guidance.
+- Recorded a release caveat: automated tests mock the identity provider, so a real Entra External ID tenant still needs manual end-to-end verification before production rollout.
+
+## Why
+
+- The issue required secure OIDC code-flow foundations with PKCE, state/nonce validation, signed session cookies, and app-registration documentation for a server-rendered FastAPI app.
+- Authlib is a well-vetted OIDC client for FastAPI/Starlette and lets the app validate issuer, audience, expiry, and signing keys through standard provider metadata instead of custom JWT code.
+- SessionMiddleware met the MVP requirement for a signed cookie session while keeping the stored session footprint minimal and auditable.
+
+# 2026-08-27T12:40:46Z — Issue #6 re-routed from @copilot to Aragorn
+
+## Decision
+
+- Removed `@copilot` (`Copilot`) as an assignee from GitHub issue #6 and removed the `squad:copilot` label.
+- Added the `squad:aragorn` label so the backend/auth implementation routes to **Aragorn**.
+- Recorded that **Gandalf** will provide the architecture and code review oversight for this security-critical authentication work.
+
+## Why
+
+- Issue #6 is security-critical authentication foundation work, which `team.md` explicitly marks as 🔴 outside `@copilot`'s capability profile.
+- `routing.md` assigns backend/API/auth foundation work to **Aragorn**, while security-sensitive cross-cutting review belongs with **Gandalf**.
+- The reassignment confirms the capability-profile guardrail worked as intended: `@copilot` declined correctly, and triage moved the work to the right squad members instead of bypassing policy.
+
 # 2026-08-27T12:23:00Z — Issue #21 azd dev deploy unblocked and validated
 
 ## Decision
