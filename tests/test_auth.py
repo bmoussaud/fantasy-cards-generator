@@ -1,18 +1,26 @@
 from __future__ import annotations
 
 import json
+import time
 from base64 import b64decode
 from collections.abc import Generator
+from typing import Any
+from uuid import uuid4
 
 import pytest
+from authlib.integrations.base_client.async_openid import AsyncOpenIDMixin
 from authlib.integrations.base_client.errors import OAuthError
 from fastapi.testclient import TestClient
 from itsdangerous import TimestampSigner
+from joserfc import jwt
+from joserfc.errors import InvalidClaimError
+from joserfc.jwk import OctKey
 from starlette.responses import RedirectResponse
 
 from app import main as main_module
 from app.auth import (
     DEFAULT_ENTRA_AUTHORITY,
+    build_claims_options,
     build_logout_redirect_target,
     extract_user_claims,
     load_auth_settings,
@@ -21,6 +29,13 @@ from app.main import create_app
 
 
 class FakeOAuthClient:
+    server_metadata = {
+        "issuer": "https://login.microsoftonline.com/{tenantid}/v2.0",
+    }
+
+    async def load_server_metadata(self) -> dict[str, str]:
+        return self.server_metadata
+
     async def authorize_redirect(
         self,
         request,
@@ -35,26 +50,33 @@ class FakeOAuthClient:
             status_code=307,
         )
 
-    async def authorize_access_token(self, request) -> dict[str, str]:
+    async def authorize_access_token(self, request, **_: object) -> dict[str, Any]:
         assert request.query_params["code"] == "valid-code"
-        return {"id_token": "signed-id-token", "access_token": "unused"}
-
-    async def parse_id_token(
-        self,
-        request,
-        token: dict[str, str],
-        nonce: str | None = None,
-        **_: object,
-    ) -> dict[str, str]:
-        assert token["id_token"] == "signed-id-token"
-        assert nonce
         return {
-            "sub": "user-123",
-            "name": "Aragorn",
-            "email": "aragorn@example.com",
-            "tid": "partner-tenant-id",
-            "roles": "ignored",
+            "id_token": "signed-id-token",
+            "access_token": "unused",
+            "userinfo": {
+                "sub": "user-123",
+                "name": "Aragorn",
+                "email": "aragorn@example.com",
+                "tid": "partner-tenant-id",
+                "roles": "ignored",
+            },
         }
+
+
+class FakeAsyncOpenIDClient(AsyncOpenIDMixin):
+    client_id = "client-id"
+
+    def __init__(self, metadata: dict[str, Any], jwks: dict[str, Any]) -> None:
+        self.server_metadata = metadata
+        self._jwks = jwks
+
+    async def load_server_metadata(self) -> dict[str, Any]:
+        return self.server_metadata
+
+    async def fetch_jwk_set(self, force: bool = False) -> dict[str, Any]:
+        return self._jwks
 
 
 def decode_session_cookie(cookie_value: str, secret_key: str) -> dict[str, object]:
@@ -206,7 +228,7 @@ def test_callback_rejects_missing_nonce_session(monkeypatch: pytest.MonkeyPatch)
 
 def test_callback_rejects_oauth_validation_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     class FailingOAuthClient(FakeOAuthClient):
-        async def authorize_access_token(self, request) -> dict[str, str]:
+        async def authorize_access_token(self, request, **_: object) -> dict[str, Any]:
             raise OAuthError(error="mismatching_state")
 
     monkeypatch.setattr(main_module, "create_oauth_client", lambda settings: FailingOAuthClient())
@@ -217,6 +239,27 @@ def test_callback_rejects_oauth_validation_errors(monkeypatch: pytest.MonkeyPatc
 
     assert response.status_code == 400
     assert response.json()["detail"] == "Authentication failed: mismatching_state"
+
+
+def test_callback_logs_unhandled_validation_exceptions(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class BrokenOAuthClient(FakeOAuthClient):
+        async def authorize_access_token(self, request, **_: object) -> dict[str, Any]:
+            raise RuntimeError("issuer mismatch")
+
+    monkeypatch.setattr(main_module, "create_oauth_client", lambda settings: BrokenOAuthClient())
+    client = TestClient(create_app(), base_url="https://testserver")
+
+    client.get("/auth/login", follow_redirects=False)
+    with caplog.at_level("ERROR"):
+        response = client.get("/auth/callback?code=valid-code&state=opaque")
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Authentication failed while validating the Entra callback."
+    assert "Unhandled exception while validating the Entra callback." in caplog.text
+    assert "issuer mismatch" in caplog.text
 
 
 def test_extract_user_claims_does_not_enforce_tid_allowlists() -> None:
@@ -244,3 +287,93 @@ def test_logout_uses_organizations_logout_endpoint() -> None:
         == "https://login.microsoftonline.com/organizations/oauth2/v2.0/logout"
         "?post_logout_redirect_uri=https%3A%2F%2Ftestserver%2F"
     )
+
+
+def test_build_claims_options_accepts_multitenant_entra_issuer_template() -> None:
+    tenant_id = str(uuid4())
+    metadata = {
+        "issuer": "https://login.microsoftonline.com/{tenantid}/v2.0",
+        "id_token_signing_alg_values_supported": ["HS256"],
+    }
+    token, jwks = make_signed_id_token(
+        issuer=f"https://login.microsoftonline.com/{tenant_id}/v2.0",
+        tenant_id=tenant_id,
+    )
+    client = FakeAsyncOpenIDClient(metadata, jwks)
+
+    claims = asyncio_run(
+        client.parse_id_token(
+            {"id_token": token, "access_token": "unused"},
+            nonce="test-nonce",
+            claims_options=build_claims_options(metadata["issuer"]),
+        )
+    )
+
+    assert claims["iss"] == f"https://login.microsoftonline.com/{tenant_id}/v2.0"
+    assert claims["tid"] == tenant_id
+
+
+@pytest.mark.parametrize(
+    ("issuer", "tenant_id"),
+    [
+        ("https://evil.example.invalid/tenant/v2.0", str(uuid4())),
+        (
+            f"https://login.microsoftonline.com/{uuid4()}/v2.0",
+            str(uuid4()),
+        ),
+    ],
+)
+def test_build_claims_options_rejects_invalid_multitenant_issuer_variants(
+    issuer: str,
+    tenant_id: str,
+) -> None:
+    metadata = {
+        "issuer": "https://login.microsoftonline.com/{tenantid}/v2.0",
+        "id_token_signing_alg_values_supported": ["HS256"],
+    }
+    token, jwks = make_signed_id_token(
+        issuer=issuer,
+        tenant_id=tenant_id,
+    )
+    client = FakeAsyncOpenIDClient(metadata, jwks)
+
+    with pytest.raises(InvalidClaimError, match="iss"):
+        asyncio_run(
+            client.parse_id_token(
+                {"id_token": token, "access_token": "unused"},
+                nonce="test-nonce",
+                claims_options=build_claims_options(metadata["issuer"]),
+            )
+        )
+
+
+def asyncio_run(awaitable: Any) -> Any:
+    import asyncio
+
+    return asyncio.run(awaitable)
+
+
+def make_signed_id_token(issuer: str, tenant_id: str) -> tuple[str, dict[str, Any]]:
+    signing_key = OctKey.import_key(
+        "test-signing-secret",
+        {
+            "kid": "test-key",
+            "alg": "HS256",
+        },
+    )
+    now = int(time.time())
+    token = jwt.encode(
+        {"alg": "HS256", "kid": "test-key"},
+        {
+            "iss": issuer,
+            "sub": "user-123",
+            "aud": "client-id",
+            "exp": now + 300,
+            "iat": now,
+            "nonce": "test-nonce",
+            "tid": tenant_id,
+        },
+        signing_key,
+        algorithms=["HS256"],
+    )
+    return token, {"keys": [signing_key.as_dict()]}

@@ -1,3 +1,4 @@
+import logging
 import secrets
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from app.auth import (
     AUTH_NONCE_SESSION_KEY,
     AUTH_SESSION_KEY,
     AuthenticatedUser,
+    build_claims_options,
     build_logout_redirect_target,
     create_oauth_client,
     ensure_auth_configured,
@@ -22,6 +24,7 @@ from app.auth import (
 )
 
 load_dotenv()
+logger = logging.getLogger(__name__)
 
 
 def create_app() -> FastAPI:
@@ -93,8 +96,15 @@ def create_app() -> FastAPI:
         oauth_client = create_oauth_client(auth_settings)
 
         try:
-            token = await oauth_client.authorize_access_token(request)
-            claims = await oauth_client.parse_id_token(request, token, nonce=nonce)
+            server_metadata = await oauth_client.load_server_metadata()
+            claims_options = build_claims_options(server_metadata.get("issuer"))
+            token = await oauth_client.authorize_access_token(
+                request,
+                claims_options=claims_options,
+            )
+            claims = token.get("userinfo")
+            if claims is None:
+                raise RuntimeError("Authentication response did not include validated userinfo.")
         except OAuthError as exc:
             request.session.pop(AUTH_SESSION_KEY, None)
             raise HTTPException(
@@ -103,6 +113,7 @@ def create_app() -> FastAPI:
             ) from exc
         except Exception as exc:
             request.session.pop(AUTH_SESSION_KEY, None)
+            logger.exception("Unhandled exception while validating the Entra callback.")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Authentication failed while validating the Entra callback.",
