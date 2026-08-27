@@ -24,6 +24,14 @@ uv run uvicorn app.main:app --reload
 
 Open http://127.0.0.1:8000.
 
+Authentication testing requires HTTPS on `https://localhost:8000` because the session cookie is
+`Secure` and the default Entra redirect URIs in `.env.example` use HTTPS. Plain HTTP is fine only
+for anonymous local UI work.
+
+## Authentication setup
+
+Authentication is implemented with Microsoft Entra External ID using OIDC authorization code flow + PKCE. Copy `.env.example` to `.env`, provide the Entra values, and follow `docs/auth-setup.md` for registration details.
+
 ## Run tests
 
 ```bash

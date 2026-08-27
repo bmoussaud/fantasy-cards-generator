@@ -1,7 +1,9 @@
 FROM python:3.12-slim
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    UV_DEFAULT_INDEX=https://packagefeedproxy.microsoft.io/pypi/simple/
 
 WORKDIR /app
 
@@ -11,9 +13,7 @@ RUN apt-get update \
 
 COPY pyproject.toml README.md ./
 
-RUN python -c "import tomllib; print('\n'.join(tomllib.load(open('pyproject.toml', 'rb'))['project']['dependencies']))" > /tmp/requirements.txt \
-    && pip install --no-cache-dir -r /tmp/requirements.txt \
-    && rm /tmp/requirements.txt \
+RUN uv pip install --system --no-cache -r pyproject.toml \
     && useradd --create-home --shell /usr/sbin/nologin appuser
 
 COPY app ./app

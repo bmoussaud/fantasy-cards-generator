@@ -1,0 +1,11 @@
+{% extends "layout.html" %}
+
+{% block content %}
+    <h1>Authenticated app shell</h1>
+    <p>This baseline layout is reserved for signed-in users.</p>
+    <ul>
+        <li><strong>Subject:</strong> {{ user.sub }}</li>
+        <li><strong>Name:</strong> {{ user.name or "Not provided" }}</li>
+        <li><strong>Email:</strong> {{ user.email or "Not provided" }}</li>
+    </ul>
+{% endblock %}

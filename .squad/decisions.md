@@ -2,6 +2,84 @@
 
 ## Active Decisions
 
+# 2026-08-27T13:01:00Z — PR #24 auth revision fails closed on missing session secret
+
+## Decision
+
+- Removed the development/test fallback that injected the hardcoded session signing key `dev-session-secret-change-me` when `APP_SESSION_SECRET_KEY` was unset.
+- `load_auth_settings()` now raises `RuntimeError("APP_SESSION_SECRET_KEY must be set before starting the application.")` in every environment, so auth/session configuration fails closed at startup.
+- Added a regression test that verifies `create_app()` raises that clear error when `APP_SESSION_SECRET_KEY` is missing.
+- Added test bootstrap environment defaults in `tests/conftest.py` so application-importing tests remain explicit and stable after the fail-closed change.
+- Clarified the local-auth docs: plain HTTP localhost is fine for anonymous pages, but sign-in testing requires HTTPS because the session cookie is `Secure` and the documented redirect URIs use `https://localhost:8000`.
+- Pushed the revision to `squad/6-entra-external-id-auth-foundation`, commented on PR #24 with the validation summary, and recorded that GitHub blocked self-approval for the revision owner identity.
+
+## Why
+
+- A fixed default session secret creates a cookie-forgery risk whenever configuration is incomplete, so the application must not start without an explicit secret.
+- The regression test protects the exact reviewer finding on PR #24 from silently returning in a future refactor.
+- The doc update resolves the mismatch between secure-cookie auth behavior and the existing plain-HTTP quick-start note, reducing local setup confusion for the next revision cycle.
+- The explicit PR note closes the reviewer loop without bypassing GitHub's self-approval guardrail; merge remains a maintainer decision after CI settles.
+
+# 2026-08-27T12:53:40Z — PR #24 auth review requests changes
+
+## Decision
+
+- Reviewed PR #24 (`feat(auth): implement Entra External ID authentication foundation`) against the auth/security checklist and **requested changes** rather than approving it.
+- Confirmed the implementation correctly uses Authlib OIDC discovery/JWKS, PKCE (`S256`), Authlib-managed `state`, explicit `nonce`, fail-closed callback handling, minimal signed session claims, and local session clearing on logout.
+- Rejected the PR on one blocking issue: `load_auth_settings()` falls back to the hardcoded session signing key `dev-session-secret-change-me` whenever `APP_SESSION_SECRET_KEY` is unset and `APP_ENV` is unset/defaults to `development`.
+- Per reviewer protocol, **Aragorn is locked out of this revision cycle for this auth artifact**. The follow-up fix must be owned by **Gandalf** or escalated to another backend-capable reviewer, not by Aragorn.
+
+## Why
+
+- A predictable session signing key allows forged authentication cookies if the app is deployed without an explicit secret, and the risk is amplified because the current default path is active when `APP_ENV` is omitted.
+- Security-critical auth foundation code must fail closed on missing secrets in all real environments; a convenience default is acceptable in isolated tests, but not as the process default.
+- The remaining concerns are advisory rather than blocking: current tests mock the OAuth client and therefore do not truly exercise Authlib's persisted `state` / `code_verifier` path or logout behavior, and the local docs still need to reconcile HTTPS-required auth cookies with the plain HTTP dev-server instructions.
+
+# 2026-08-27T12:44:06Z — Issue #6 Entra External ID auth foundation implemented in PR #24
+
+## Decision
+
+- Implemented Microsoft Entra External ID authentication foundation in PR #24: https://github.com/bmoussaud/fantasy-cards-generator/pull/24
+- Chose **Authlib** for OIDC authorization code flow handling and ID-token validation via OIDC discovery/JWKS instead of hand-rolled token validation.
+- Chose FastAPI/Starlette **SessionMiddleware** backed by `itsdangerous` for the signed session cookie, storing only minimal user claims (`sub`, `name`, `email`) and no Entra tokens.
+- Added an authenticated app shell baseline, login/callback/logout routes, a reusable auth-required dependency, focused mocked auth tests, and `docs/auth-setup.md` for Entra External ID registration guidance.
+- Recorded a release caveat: automated tests mock the identity provider, so a real Entra External ID tenant still needs manual end-to-end verification before production rollout.
+
+## Why
+
+- The issue required secure OIDC code-flow foundations with PKCE, state/nonce validation, signed session cookies, and app-registration documentation for a server-rendered FastAPI app.
+- Authlib is a well-vetted OIDC client for FastAPI/Starlette and lets the app validate issuer, audience, expiry, and signing keys through standard provider metadata instead of custom JWT code.
+- SessionMiddleware met the MVP requirement for a signed cookie session while keeping the stored session footprint minimal and auditable.
+
+# 2026-08-27T12:40:46Z — Issue #6 re-routed from @copilot to Aragorn
+
+## Decision
+
+- Removed `@copilot` (`Copilot`) as an assignee from GitHub issue #6 and removed the `squad:copilot` label.
+- Added the `squad:aragorn` label so the backend/auth implementation routes to **Aragorn**.
+- Recorded that **Gandalf** will provide the architecture and code review oversight for this security-critical authentication work.
+
+## Why
+
+- Issue #6 is security-critical authentication foundation work, which `team.md` explicitly marks as 🔴 outside `@copilot`'s capability profile.
+- `routing.md` assigns backend/API/auth foundation work to **Aragorn**, while security-sensitive cross-cutting review belongs with **Gandalf**.
+- The reassignment confirms the capability-profile guardrail worked as intended: `@copilot` declined correctly, and triage moved the work to the right squad members instead of bypassing policy.
+
+# 2026-08-27T12:23:00Z — Issue #21 azd dev deploy unblocked and validated
+
+## Decision
+
+- Ran `azd provision --environment dev --no-prompt` in the repo root. The first run created the new Azure Container Registry but failed while updating `fcg-dev-app` because the target image tag did not exist in ACR yet.
+- Populated `.azure/dev/.env` with `AZURE_CONTAINER_REGISTRY_ENDPOINT` and `AZURE_CONTAINER_REGISTRY_NAME`, then ran `azd deploy --environment dev --no-prompt` to build, push, and deploy the real application image.
+- Re-ran `azd provision --environment dev --no-prompt` after the image existed so the Bicep deployment could converge cleanly, then re-ran `azd deploy --environment dev --no-prompt`, which succeeded.
+- Verified `fcg-dev-app` is now running image `fcgdev5a7waraj5zp5iacr.azurecr.io/fantasy-cards-generator/web-dev:azd-deploy-1787833266` instead of the placeholder hello-world image, and the app endpoint serves the FastAPI/Jinja scaffold page.
+
+## Why
+
+- The original `azd deploy` failure was caused by a stale `.azure/dev/.env` that was missing the ACR endpoint/name introduced by the newer Bicep outputs.
+- Provisioning alone did not settle cleanly on the first pass because the Container App template had already been switched to the real ACR image path, but that image had not been pushed yet; once `azd deploy` published the image, a second `azd provision` completed successfully.
+- This confirms the `azd` path for issue #21 is now operational in `dev`: infra includes ACR, the environment has the required registry variables, and the live Container App is serving the repository app rather than the placeholder image.
+
 # 2026-08-27T08:30:46Z — Issue #21 triaged to Gimli and marked high priority
 
 ## Decision

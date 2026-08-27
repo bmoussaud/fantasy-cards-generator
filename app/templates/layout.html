@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{{ page_title or "Fantasy Cards Generator" }}</title>
+    <script src="https://unpkg.com/htmx.org@2.0.6"></script>
+</head>
+<body>
+    <header>
+        <nav>
+            <a href="/">Home</a>
+            {% if user %}
+                <span>Signed in as {{ user.name or user.email or user.sub }}</span>
+                <a href="/app">App shell</a>
+                <a href="/auth/logout">Logout</a>
+            {% elif auth_configured %}
+                <a href="/auth/login">Sign in</a>
+            {% endif %}
+        </nav>
+    </header>
+    <main>
+        {% block content %}{% endblock %}
+    </main>
+</body>
+</html>
