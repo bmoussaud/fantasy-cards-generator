@@ -11,6 +11,7 @@
 - Added `bicepconfig.json` with the `graphBeta` extension alias and documented that `ENTRA_CLIENT_SECRET` still cannot be created declaratively because Microsoft Graph rejects declarative `passwordCredentials`; the secret must be created separately and stored securely, preferably in Key Vault.
 - Exposed Container Apps FQDN/URL outputs so the deployed callback URI can be registered automatically, and aligned `.env.example` with the HTTPS localhost redirect used by the auth docs/tests.
 - Validation scope for this change is limited to local Bicep compilation; live Graph-backed provisioning was intentionally not exercised from this environment because it requires tenant permissions/consent outside this session.
+- Tracked in issue #28 and opened for review in PR #29: https://github.com/bmoussaud/fantasy-cards-generator/pull/29
 
 ## Why
 
