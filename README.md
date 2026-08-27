@@ -40,6 +40,10 @@ azd env set AZURE_LOCATION eastus2
 azd up
 ```
 
+`azd up` provisions Azure Container Registry and Azure Container Apps, builds the
+production Docker image from `Dockerfile`, pushes it to the provisioned registry,
+and deploys the `web` service to Container Apps on port 8000.
+
 The default Foundry deployment aliases remain `gpt-5-5` and `gpt-image-2` for
 application compatibility. In `eastus2`, they target `gpt-5.5`
 (`2026-04-24`, `GlobalStandard`) and `gpt-image-2`

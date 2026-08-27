@@ -7,8 +7,17 @@ param containerAppsEnvironmentName string
 @description('Container App name.')
 param containerAppName string
 
-@description('Container image used by the initial scaffold app.')
+@description('Container image used by the web app.')
 param containerImage string
+
+@description('Azure Container Registry login server used by the web app image.')
+param acrLoginServer string
+
+@description('Managed identity resource ID used by Container Apps to pull from the registry.')
+param acrPullIdentityResourceId string
+
+@description('Service name as defined in azure.yaml.')
+param serviceName string = 'web'
 
 @description('Log Analytics workspace customer ID for Container Apps logging.')
 param logAnalyticsWorkspaceCustomerId string
@@ -21,7 +30,7 @@ param logAnalyticsWorkspaceSharedKey string
 @description('Application Insights connection string used by the app foundation.')
 param appInsightsConnectionString string
 
-@description('Key Vault URI injected in the scaffold app environment.')
+@description('Key Vault URI injected in the web app environment.')
 param keyVaultUri string
 
 @description('Optional tags shared by Container Apps resources.')
@@ -46,9 +55,14 @@ resource containerAppsEnvironment 'Microsoft.App/managedEnvironments@2024-03-01'
 resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: containerAppName
   location: location
-  tags: tags
+  tags: union(tags, {
+    'azd-service-name': serviceName
+  })
   identity: {
-    type: 'SystemAssigned'
+    type: 'SystemAssigned,UserAssigned'
+    userAssignedIdentities: {
+      '${acrPullIdentityResourceId}': {}
+    }
   }
   properties: {
     configuration: {
@@ -63,6 +77,12 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
         {
           name: 'applicationinsights-connection-string'
           value: appInsightsConnectionString
+        }
+      ]
+      registries: [
+        {
+          server: acrLoginServer
+          identity: acrPullIdentityResourceId
         }
       ]
     }

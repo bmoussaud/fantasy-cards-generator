@@ -11,8 +11,11 @@ param environmentName string
 @description('Optional tags shared by all deployed resources.')
 param tags object = {}
 
-@description('Placeholder container image for the initial Container App scaffold.')
-param containerImage string = 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest'
+@description('Optional container image URI override. By default azd deploy updates the app with the image it builds and pushes to the provisioned registry.')
+param containerImage string = ''
+
+@description('Service name as defined in azure.yaml.')
+param serviceName string = 'web'
 
 @description('Cosmos DB SQL database name for application data.')
 param cosmosDatabaseName string = 'appdb'
@@ -77,6 +80,8 @@ var storageAccountBase = replace('st${namePrefix}${environmentName}${uniqueToken
 var storageAccountName = toLower(take(storageAccountBase, 24))
 var aiFoundryAccountBase = replace('ai${namePrefix}${environmentName}${uniqueToken}', '-', '')
 var aiFoundryAccountName = toLower(take(aiFoundryAccountBase, 24))
+var registryName = toLower(take('${namePrefix}${environmentName}${uniqueToken}acr', 50))
+var acrPullIdentityName = take('${resourceToken}-acr-pull', 128)
 
 module monitoring './modules/monitoring.bicep' = {
   name: 'monitoring'
@@ -97,17 +102,30 @@ module security './modules/security.bicep' = {
   }
 }
 
+module registry './modules/container-registry.bicep' = {
+  name: 'container-registry'
+  params: {
+    acrPullIdentityName: acrPullIdentityName
+    location: location
+    registryName: registryName
+    tags: tags
+  }
+}
+
 module containerApps './modules/container-apps.bicep' = {
   name: 'container-apps'
   params: {
+    acrLoginServer: registry.outputs.registryLoginServer
+    acrPullIdentityResourceId: registry.outputs.acrPullIdentityResourceId
     appInsightsConnectionString: monitoring.outputs.appInsightsConnectionString
     containerAppName: containerAppName
     containerAppsEnvironmentName: containerAppsEnvironmentName
-    containerImage: containerImage
+    containerImage: empty(containerImage) ? '${registry.outputs.registryLoginServer}/fantasy-cards-generator:latest' : containerImage
     keyVaultUri: security.outputs.keyVaultUri
     location: location
     logAnalyticsWorkspaceCustomerId: monitoring.outputs.logAnalyticsWorkspaceCustomerId
     logAnalyticsWorkspaceSharedKey: monitoring.outputs.logAnalyticsWorkspaceSharedKey
+    serviceName: serviceName
     tags: tags
   }
 }
@@ -184,3 +202,7 @@ output storageAccountName string = storage.outputs.storageAccountName
 output storageAccountResourceId string = storage.outputs.storageAccountResourceId
 output storageBlobEndpoint string = storage.outputs.storageBlobEndpoint
 output storageContainerName string = storage.outputs.storageContainerName
+output AZURE_CONTAINER_APP_NAME string = containerApps.outputs.containerAppName
+output AZURE_CONTAINER_APPS_ENVIRONMENT_NAME string = containerApps.outputs.containerAppsEnvironmentName
+output AZURE_CONTAINER_REGISTRY_ENDPOINT string = registry.outputs.registryLoginServer
+output AZURE_CONTAINER_REGISTRY_NAME string = registry.outputs.registryName
