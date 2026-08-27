@@ -2,7 +2,16 @@
 
 ## Active Decisions
 
-No decisions recorded yet.
+# 2026-08-27T08:20:13Z — Issue #18 triaged to Gimli for infra verification
+
+## Decision
+
+- Route GitHub issue #18 (`azd up` Foundry managed-identity failure) to **Gimli** with `squad:gimli`.
+
+## Why
+
+- Static analysis of `infra/modules/ai-foundry.bicep` on `main` shows the code-level mitigations are already present: the Foundry account has `identity: { type: 'SystemAssigned' }`, the project is a child resource of that account, and the project itself now also has a system-assigned identity.
+- Git history shows those mitigations landed via recent infra fixes and were merged in PR #20, so the remaining work is verifying `azd up` against Azure and cleaning up any stale account / identity / soft-delete state, which is operational infra work and fits Gimli's remit better than a fresh @copilot coding task.
 
 ## Governance
 
