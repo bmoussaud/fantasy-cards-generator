@@ -11,6 +11,12 @@ from itsdangerous import TimestampSigner
 from starlette.responses import RedirectResponse
 
 from app import main as main_module
+from app.auth import (
+    DEFAULT_ENTRA_AUTHORITY,
+    build_logout_redirect_target,
+    extract_user_claims,
+    load_auth_settings,
+)
 from app.main import create_app
 
 
@@ -25,7 +31,7 @@ class FakeOAuthClient:
         assert redirect_uri == "https://testserver/auth/callback"
         assert nonce
         return RedirectResponse(
-            url="https://example.ciamlogin.com/oauth2/v2.0/authorize?code_challenge=test",
+            url="https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize?code_challenge=test",
             status_code=307,
         )
 
@@ -46,6 +52,7 @@ class FakeOAuthClient:
             "sub": "user-123",
             "name": "Aragorn",
             "email": "aragorn@example.com",
+            "tid": "partner-tenant-id",
             "roles": "ignored",
         }
 
@@ -60,15 +67,53 @@ def decode_session_cookie(cookie_value: str, secret_key: str) -> dict[str, objec
 def auth_environment(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
     monkeypatch.setenv("APP_ENV", "test")
     monkeypatch.setenv("APP_SESSION_SECRET_KEY", "test-session-secret")
-    monkeypatch.setenv("ENTRA_EXTERNAL_ID_CLIENT_ID", "client-id")
-    monkeypatch.setenv("ENTRA_EXTERNAL_ID_CLIENT_SECRET", "client-secret")
+    monkeypatch.setenv("ENTRA_CLIENT_ID", "client-id")
+    monkeypatch.setenv("ENTRA_CLIENT_SECRET", "client-secret")
+    monkeypatch.setenv("ENTRA_AUTHORITY", DEFAULT_ENTRA_AUTHORITY)
+    monkeypatch.setenv("ENTRA_REDIRECT_URI", "https://testserver/auth/callback")
+    monkeypatch.setenv("ENTRA_POST_LOGOUT_REDIRECT_URI", "https://testserver/")
+    yield
+
+
+def test_load_auth_settings_defaults_to_organizations_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("ENTRA_AUTHORITY", raising=False)
+    monkeypatch.delenv("ENTRA_EXTERNAL_ID_AUTHORITY", raising=False)
+
+    settings = load_auth_settings()
+
+    assert settings.authority == DEFAULT_ENTRA_AUTHORITY
+    assert (
+        settings.metadata_url
+        == "https://login.microsoftonline.com/organizations/v2.0/.well-known/openid-configuration"
+    )
+
+
+def test_load_auth_settings_accepts_legacy_external_id_env_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("ENTRA_CLIENT_ID", raising=False)
+    monkeypatch.delenv("ENTRA_CLIENT_SECRET", raising=False)
+    monkeypatch.delenv("ENTRA_AUTHORITY", raising=False)
+    monkeypatch.delenv("ENTRA_REDIRECT_URI", raising=False)
+    monkeypatch.delenv("ENTRA_POST_LOGOUT_REDIRECT_URI", raising=False)
+    monkeypatch.setenv("ENTRA_EXTERNAL_ID_CLIENT_ID", "legacy-client-id")
+    monkeypatch.setenv("ENTRA_EXTERNAL_ID_CLIENT_SECRET", "legacy-client-secret")
     monkeypatch.setenv(
         "ENTRA_EXTERNAL_ID_AUTHORITY",
-        "https://tenant.ciamlogin.com/tenant-id/v2.0",
+        "https://login.microsoftonline.com/organizations/v2.0",
     )
-    monkeypatch.setenv("ENTRA_EXTERNAL_ID_REDIRECT_URI", "https://testserver/auth/callback")
-    monkeypatch.setenv("ENTRA_EXTERNAL_ID_POST_LOGOUT_REDIRECT_URI", "https://testserver/")
-    yield
+    monkeypatch.setenv("ENTRA_EXTERNAL_ID_REDIRECT_URI", "https://legacy.example/auth/callback")
+    monkeypatch.setenv("ENTRA_EXTERNAL_ID_POST_LOGOUT_REDIRECT_URI", "https://legacy.example/")
+
+    settings = load_auth_settings()
+
+    assert settings.client_id == "legacy-client-id"
+    assert settings.client_secret == "legacy-client-secret"
+    assert settings.authority == DEFAULT_ENTRA_AUTHORITY
+    assert settings.redirect_uri == "https://legacy.example/auth/callback"
+    assert settings.post_logout_redirect_uri == "https://legacy.example/"
 
 
 def test_protected_shell_redirects_anonymous_users_to_login() -> None:
@@ -101,7 +146,10 @@ def test_login_redirects_to_entra_and_sets_secure_session_cookie(
     response = client.get("/auth/login", follow_redirects=False)
 
     assert response.status_code == 307
-    assert "example.ciamlogin.com" in response.headers["location"]
+    assert (
+        "login.microsoftonline.com/organizations/oauth2/v2.0/authorize"
+        in response.headers["location"]
+    )
     assert "code_challenge=" in response.headers["location"]
     set_cookie = response.headers["set-cookie"].lower()
     assert "fantasy_cards_session=" in set_cookie
@@ -169,3 +217,30 @@ def test_callback_rejects_oauth_validation_errors(monkeypatch: pytest.MonkeyPatc
 
     assert response.status_code == 400
     assert response.json()["detail"] == "Authentication failed: mismatching_state"
+
+
+def test_extract_user_claims_does_not_enforce_tid_allowlists() -> None:
+    claims = extract_user_claims(
+        {
+            "sub": "user-123",
+            "name": "Aragorn",
+            "email": "aragorn@example.com",
+            "tid": "any-partner-tenant-id",
+        }
+    )
+
+    assert claims == {
+        "sub": "user-123",
+        "name": "Aragorn",
+        "email": "aragorn@example.com",
+    }
+
+
+def test_logout_uses_organizations_logout_endpoint() -> None:
+    settings = load_auth_settings()
+
+    assert (
+        build_logout_redirect_target(settings)
+        == "https://login.microsoftonline.com/organizations/oauth2/v2.0/logout"
+        "?post_logout_redirect_uri=https%3A%2F%2Ftestserver%2F"
+    )
