@@ -39,6 +39,13 @@ ENTRA_SCOPES=openid profile email
 
 ## Register the application in Microsoft Entra ID
 
+The primary, best-understood path is still the manual portal flow below. This
+repo now also includes an **optional** Graph-based Bicep module at
+`infra/modules/app-registration.bicep` that can create the multi-tenant app
+registration declaratively when `infra/main.bicep` is deployed with
+`deployEntraAppRegistration=true`. Keep the manual steps handy until the Bicep
+path has seen more real-world use.
+
 1. Sign in to the
    [Microsoft Entra admin center](https://entra.microsoft.com/) in your home
    tenant.
@@ -53,6 +60,40 @@ ENTRA_SCOPES=openid profile email
 6. Record the **Application (client) ID** and the **client secret**.
 7. Ensure the sign-in flow requests OpenID Connect scopes `openid profile
    email`.
+
+### Optional: provision the app registration via Bicep
+
+If you prefer Infrastructure as Code over portal setup, this repo now ships a
+Graph-backed Bicep module that provisions the app registration with:
+
+- **Supported account types** = `AzureADMultipleOrgs` (any Entra organization)
+- standard web-platform redirect URIs only; no custom exposed API scopes
+- implicit grant disabled for both ID and access tokens
+- redirect URIs for:
+  - local development (`https://localhost:8000/auth/callback` by default)
+  - the deployed Azure Container Apps URL plus `/auth/callback`
+
+To use it:
+
+1. Ensure the root `bicepconfig.json` is present so the `graphBeta` extension
+   alias resolves to the Microsoft Graph Bicep extension.
+2. Set `deployEntraAppRegistration=true` when deploying `infra/main.bicep`.
+3. Optionally override `entraAppRegistrationName`,
+   `entraAppRegistrationDescription`, `entraLocalRedirectUri`, or
+   `entraRedirectPath`.
+4. Read the deployment outputs for `entraClientId`, `entraAppObjectId`, and
+   `entraServicePrincipalId`.
+
+> `ENTRA_CLIENT_SECRET` still **cannot** be provisioned declaratively by this
+> Bicep module. Microsoft Graph rejects declarative `passwordCredentials` for
+> this flow. Create the secret separately, for example:
+>
+> ```bash
+> az ad app credential reset --id <appId>
+> ```
+>
+> Then store the secret securely, ideally in Azure Key Vault, before wiring it
+> into your runtime environment.
 
 No External ID tenant, CIAM user flow, or tenant allow-list is required for the
 current MVP. Any partner organization's Entra work account can sign in as long

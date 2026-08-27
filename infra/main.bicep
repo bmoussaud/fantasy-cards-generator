@@ -17,6 +17,21 @@ param containerImage string = ''
 @description('Service name as defined in azure.yaml.')
 param serviceName string = 'web'
 
+@description('Set to true to provision the Microsoft Entra ID app registration via the Graph Bicep extension.')
+param deployEntraAppRegistration bool = false
+
+@description('Display name used for the Microsoft Entra ID app registration when deployEntraAppRegistration is true.')
+param entraAppRegistrationName string = take('Fantasy Cards Generator (${toUpper(environmentName)})', 120)
+
+@description('Description used for the Microsoft Entra ID app registration when deployEntraAppRegistration is true.')
+param entraAppRegistrationDescription string = 'Multi-tenant Microsoft Entra ID app registration for the fantasy-cards-generator web app.'
+
+@description('Local-development OIDC redirect URI to register when deployEntraAppRegistration is true.')
+param entraLocalRedirectUri string = 'https://localhost:8000/auth/callback'
+
+@description('Path appended to the deployed Container Apps URL to form the production OIDC redirect URI.')
+param entraRedirectPath string = '/auth/callback'
+
 @description('Cosmos DB SQL database name for application data.')
 param cosmosDatabaseName string = 'appdb'
 
@@ -130,6 +145,18 @@ module containerApps './modules/container-apps.bicep' = {
   }
 }
 
+module appRegistration './modules/app-registration.bicep' = if (deployEntraAppRegistration) {
+  name: 'app-registration'
+  params: {
+    appDescription: entraAppRegistrationDescription
+    appName: entraAppRegistrationName
+    redirectUris: [
+      entraLocalRedirectUri
+      '${containerApps.outputs.containerAppUrl}${entraRedirectPath}'
+    ]
+  }
+}
+
 module cosmosDb './modules/cosmos-db.bicep' = {
   name: 'cosmos-db'
   params: {
@@ -184,9 +211,12 @@ output aiFoundryImageDeploymentName string = aiFoundry.outputs.aiFoundryImageDep
 output aiFoundryProjectName string = aiFoundry.outputs.aiFoundryProjectName
 output aiFoundryProjectResourceId string = aiFoundry.outputs.aiFoundryProjectResourceId
 output aiFoundryTextDeploymentName string = aiFoundry.outputs.aiFoundryTextDeploymentName
+output deployedAuthRedirectUri string = '${containerApps.outputs.containerAppUrl}${entraRedirectPath}'
 output containerAppName string = containerApps.outputs.containerAppName
+output containerAppFqdn string = containerApps.outputs.containerAppFqdn
 output containerAppPrincipalId string = containerApps.outputs.containerAppPrincipalId
 output containerAppResourceId string = containerApps.outputs.containerAppResourceId
+output containerAppUrl string = containerApps.outputs.containerAppUrl
 output containerAppsEnvironmentName string = containerApps.outputs.containerAppsEnvironmentName
 output containerAppsEnvironmentResourceId string = containerApps.outputs.containerAppsEnvironmentResourceId
 output cosmosAccountEndpoint string = cosmosDb.outputs.cosmosAccountEndpoint
@@ -202,7 +232,13 @@ output storageAccountName string = storage.outputs.storageAccountName
 output storageAccountResourceId string = storage.outputs.storageAccountResourceId
 output storageBlobEndpoint string = storage.outputs.storageBlobEndpoint
 output storageContainerName string = storage.outputs.storageContainerName
+output entraClientId string = deployEntraAppRegistration ? appRegistration!.outputs.appId : ''
+output entraAppObjectId string = deployEntraAppRegistration ? appRegistration!.outputs.appObjectId : ''
+output entraServicePrincipalId string = deployEntraAppRegistration ? appRegistration!.outputs.servicePrincipalId : ''
+output entraTenantId string = deployEntraAppRegistration ? appRegistration!.outputs.tenantId : tenant().tenantId
+output entraLocalRedirectUri string = entraLocalRedirectUri
 output AZURE_CONTAINER_APP_NAME string = containerApps.outputs.containerAppName
 output AZURE_CONTAINER_APPS_ENVIRONMENT_NAME string = containerApps.outputs.containerAppsEnvironmentName
 output AZURE_CONTAINER_REGISTRY_ENDPOINT string = registry.outputs.registryLoginServer
 output AZURE_CONTAINER_REGISTRY_NAME string = registry.outputs.registryName
+output ENTRA_CLIENT_ID string = deployEntraAppRegistration ? appRegistration!.outputs.appId : ''
