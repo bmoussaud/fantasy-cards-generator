@@ -9,6 +9,7 @@
 - Confirmed the post-PR-#26 live sign-in failure was caused by Authlib's default OIDC issuer check using the cached discovery `issuer` value verbatim; for `https://login.microsoftonline.com/organizations/v2.0` Microsoft publishes the template `https://login.microsoftonline.com/{tenantid}/v2.0`, so Authlib rejected every real tenant-specific `iss` claim.
 - Updated the callback flow to load server metadata, pass Authlib a custom `claims_options["iss"]["validate"]` hook, and validate the concrete issuer as `https://login.microsoftonline.com/<tid>/v2.0` where `<tid>` comes from the signed token's `tid` claim and must be a valid tenant GUID.
 - Added server-side exception logging for the generic `/auth/callback` failure path and regression coverage that accepts a valid tenant-specific Microsoft issuer while rejecting spoofed domains and tenant/issuer mismatches.
+- Opened follow-up PR #27 for review: https://github.com/bmoussaud/fantasy-cards-generator/pull/27
 
 ## Why
 
