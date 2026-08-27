@@ -8,7 +8,8 @@
 
 - Added `infra/modules/app-registration.bicep` and wired it into `infra/main.bicep` behind `deployEntraAppRegistration`, so the existing multi-tenant Entra ID web-app registration can now be provisioned declaratively as IaC.
 - Standardized the module on `signInAudience: 'AzureADMultipleOrgs'`, standard web redirect URIs only, and disabled implicit grant because this app uses the OIDC authorization code flow with PKCE rather than an exposed custom API.
-- Added `bicepconfig.json` with the `graphBeta` extension alias and documented that `ENTRA_CLIENT_SECRET` still cannot be created declaratively because Microsoft Graph rejects declarative `passwordCredentials`; the secret must be created separately and stored securely, preferably in Key Vault.
+- Added `bicepconfig.json` with the `graphBeta` extension alias and documented that `ENTRA_CLIENT_SECRET` still cannot be created declaratively because Microsoft Graph rejects declarative `passwordCredentials`.
+- Closed the manual-secret gap in PR #29 by wiring `azure.yaml` `postprovision` to `hooks/gen_client_secret.sh`, which reads `ENTRA_CLIENT_ID`, mints a short-lived 21-day secret via `az ad app credential reset`, stores it as `ENTRA_CLIENT_SECRET` in the active azd environment, and cleanly no-ops when app-registration deployment is disabled.
 - Exposed Container Apps FQDN/URL outputs so the deployed callback URI can be registered automatically, and aligned `.env.example` with the HTTPS localhost redirect used by the auth docs/tests.
 - Validation scope for this change is limited to local Bicep compilation; live Graph-backed provisioning was intentionally not exercised from this environment because it requires tenant permissions/consent outside this session.
 - Tracked in issue #28 and opened for review in PR #29: https://github.com/bmoussaud/fantasy-cards-generator/pull/29
@@ -17,6 +18,7 @@
 
 - This keeps the team's "everything as code" direction for Azure resources while preserving the confirmed auth requirements from issues #25/#26/#27: unrestricted organizational multi-tenant sign-in via `/organizations`.
 - The deployment toggle keeps existing infra safer by default until the Graph extension path is more battle-tested, while still making the declarative option available for tenants that grant the necessary Microsoft Graph deployment permissions.
+- Reusing the same post-provision secret-generation pattern from `bmoussaud/mcp-azure-apim` gives operators an auditable automated path today, while making the 21-day secret lifetime an explicit operational follow-up rather than a silent manual step.
 
 # 2026-08-27T14:13:34Z — PR #26 multi-tenant Entra callback issuer validation fixed after live sign-in failure
 

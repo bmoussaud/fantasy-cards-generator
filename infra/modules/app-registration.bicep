@@ -39,7 +39,7 @@ resource servicePrincipal 'Microsoft.Graph/servicePrincipals@beta' = {
 }
 
 // Microsoft Graph rejects declarative passwordCredentials for this resource type.
-// Create ENTRA_CLIENT_SECRET separately (for example: az ad app credential reset --id <appId>)
+// Generate ENTRA_CLIENT_SECRET post-provisioning (for example via hooks/gen_client_secret.sh)
 // and store the resulting secret in Key Vault or another secure secret store.
 output appId string = application.appId
 output appObjectId string = application.id

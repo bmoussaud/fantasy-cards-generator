@@ -39,12 +39,13 @@ ENTRA_SCOPES=openid profile email
 
 ## Register the application in Microsoft Entra ID
 
-The primary, best-understood path is still the manual portal flow below. This
-repo now also includes an **optional** Graph-based Bicep module at
+The primary, best-understood fallback path is still the manual portal flow
+below. This repo now also includes an **optional** Graph-based Bicep module at
 `infra/modules/app-registration.bicep` that can create the multi-tenant app
 registration declaratively when `infra/main.bicep` is deployed with
-`deployEntraAppRegistration=true`. Keep the manual steps handy until the Bicep
-path has seen more real-world use.
+`deployEntraAppRegistration=true`, and `azd provision` can now generate the
+client secret automatically after provisioning. Keep the manual steps handy as
+an alternative for operators who do not use the Bicep-based flow.
 
 1. Sign in to the
    [Microsoft Entra admin center](https://entra.microsoft.com/) in your home
@@ -81,12 +82,20 @@ To use it:
 3. Optionally override `entraAppRegistrationName`,
    `entraAppRegistrationDescription`, `entraLocalRedirectUri`, or
    `entraRedirectPath`.
-4. Read the deployment outputs for `entraClientId`, `entraAppObjectId`, and
-   `entraServicePrincipalId`.
+4. Read the deployment outputs for `entraClientId`, `entraAppObjectId`,
+   `entraServicePrincipalId`, and `ENTRA_CLIENT_ID`.
+5. If you use `azd provision`, the `postprovision` hook automatically runs
+   `./hooks/gen_client_secret.sh ENTRA_CLIENT_ID ENTRA_CLIENT_SECRET`. That
+   hook uses `az ad app credential reset` to mint a short-lived client secret
+   (21-day expiry) and stores it in the active azd environment as
+   `ENTRA_CLIENT_SECRET`.
+6. If `deployEntraAppRegistration=false`, the hook detects that
+   `ENTRA_CLIENT_ID` is absent and exits without error.
 
-> `ENTRA_CLIENT_SECRET` still **cannot** be provisioned declaratively by this
-> Bicep module. Microsoft Graph rejects declarative `passwordCredentials` for
-> this flow. Create the secret separately, for example:
+> `ENTRA_CLIENT_SECRET` still is not created **declaratively** by the Bicep
+> module itself because Microsoft Graph rejects declarative
+> `passwordCredentials` for this flow. The automated azd hook closes the gap
+> for the IaC path, but you can still create the secret manually if you prefer:
 >
 > ```bash
 > az ad app credential reset --id <appId>
