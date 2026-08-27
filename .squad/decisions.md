@@ -2,6 +2,20 @@
 
 ## Active Decisions
 
+# 2026-08-27T08:30:46Z — Issue #21 triaged to Gimli and marked high priority
+
+## Decision
+
+- Mark GitHub issue #21 ("Build and deploy the real app container to Azure Container Apps") with `priority:high`.
+- Reassign the issue from `squad:legolas` to `squad:gimli`.
+- Remove the stale `go:needs-research` label.
+
+## Why
+
+- Repository inspection shows the gap is operational deployment work, not frontend work: `infra/main.bicep` still defaults `containerImage` to the hello-world placeholder, `infra/modules/container-apps.bicep` wires that image into the live Container App, `azure.yaml` defines infra only, the current GitHub workflow validates Bicep/Python but does not build or push an application image, and no ACR resource exists in `infra/`.
+- The running app is a small Python/FastAPI service (`app/main.py`), so the missing work is primarily Docker packaging, ACR provisioning, and `azd`/CI deployment automation. Per `routing.md`, that belongs with **Gimli (Infra & Deployment)** rather than **Legolas (Frontend / Web UI)**.
+- `go:needs-research` is a generic workflow label in this repo, not a Go-language marker, but issue #21 already contains the necessary investigation and the repository state confirms the implementation path. The label was no longer adding useful triage signal.
+
 # 2026-08-27T08:20:13Z — Issue #18 triaged to Gimli for infra verification
 
 ## Decision
