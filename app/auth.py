@@ -62,12 +62,9 @@ class AuthSettings:
 
 
 def load_auth_settings() -> AuthSettings:
-    app_env = os.getenv("APP_ENV", "development").lower()
     session_secret_key = os.getenv("APP_SESSION_SECRET_KEY")
-    if not session_secret_key and app_env in {"development", "test"}:
-        session_secret_key = "dev-session-secret-change-me"
     if not session_secret_key:
-        raise RuntimeError("APP_SESSION_SECRET_KEY must be set.")
+        raise RuntimeError("APP_SESSION_SECRET_KEY must be set before starting the application.")
 
     configured_scopes = os.getenv("ENTRA_EXTERNAL_ID_SCOPES", "openid profile email").split()
     deduplicated_scopes = tuple(dict.fromkeys(configured_scopes))

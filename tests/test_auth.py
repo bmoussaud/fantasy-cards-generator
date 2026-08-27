@@ -80,6 +80,18 @@ def test_protected_shell_redirects_anonymous_users_to_login() -> None:
     assert response.headers["location"] == "/auth/login"
 
 
+def test_create_app_fails_closed_when_session_secret_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("APP_SESSION_SECRET_KEY", raising=False)
+
+    with pytest.raises(
+        RuntimeError,
+        match="APP_SESSION_SECRET_KEY must be set before starting the application.",
+    ):
+        create_app()
+
+
 def test_login_redirects_to_entra_and_sets_secure_session_cookie(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

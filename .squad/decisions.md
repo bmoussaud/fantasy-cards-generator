@@ -2,6 +2,37 @@
 
 ## Active Decisions
 
+# 2026-08-27T13:01:00Z — PR #24 auth revision fails closed on missing session secret
+
+## Decision
+
+- Removed the development/test fallback that injected the hardcoded session signing key `dev-session-secret-change-me` when `APP_SESSION_SECRET_KEY` was unset.
+- `load_auth_settings()` now raises `RuntimeError("APP_SESSION_SECRET_KEY must be set before starting the application.")` in every environment, so auth/session configuration fails closed at startup.
+- Added a regression test that verifies `create_app()` raises that clear error when `APP_SESSION_SECRET_KEY` is missing.
+- Added test bootstrap environment defaults in `tests/conftest.py` so application-importing tests remain explicit and stable after the fail-closed change.
+- Clarified the local-auth docs: plain HTTP localhost is fine for anonymous pages, but sign-in testing requires HTTPS because the session cookie is `Secure` and the documented redirect URIs use `https://localhost:8000`.
+
+## Why
+
+- A fixed default session secret creates a cookie-forgery risk whenever configuration is incomplete, so the application must not start without an explicit secret.
+- The regression test protects the exact reviewer finding on PR #24 from silently returning in a future refactor.
+- The doc update resolves the mismatch between secure-cookie auth behavior and the existing plain-HTTP quick-start note, reducing local setup confusion for the next revision cycle.
+
+# 2026-08-27T12:53:40Z — PR #24 auth review requests changes
+
+## Decision
+
+- Reviewed PR #24 (`feat(auth): implement Entra External ID authentication foundation`) against the auth/security checklist and **requested changes** rather than approving it.
+- Confirmed the implementation correctly uses Authlib OIDC discovery/JWKS, PKCE (`S256`), Authlib-managed `state`, explicit `nonce`, fail-closed callback handling, minimal signed session claims, and local session clearing on logout.
+- Rejected the PR on one blocking issue: `load_auth_settings()` falls back to the hardcoded session signing key `dev-session-secret-change-me` whenever `APP_SESSION_SECRET_KEY` is unset and `APP_ENV` is unset/defaults to `development`.
+- Per reviewer protocol, **Aragorn is locked out of this revision cycle for this auth artifact**. The follow-up fix must be owned by **Gandalf** or escalated to another backend-capable reviewer, not by Aragorn.
+
+## Why
+
+- A predictable session signing key allows forged authentication cookies if the app is deployed without an explicit secret, and the risk is amplified because the current default path is active when `APP_ENV` is omitted.
+- Security-critical auth foundation code must fail closed on missing secrets in all real environments; a convenience default is acceptable in isolated tests, but not as the process default.
+- The remaining concerns are advisory rather than blocking: current tests mock the OAuth client and therefore do not truly exercise Authlib's persisted `state` / `code_verifier` path or logout behavior, and the local docs still need to reconcile HTTPS-required auth cookies with the plain HTTP dev-server instructions.
+
 # 2026-08-27T12:44:06Z — Issue #6 Entra External ID auth foundation implemented in PR #24
 
 ## Decision

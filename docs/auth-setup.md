@@ -17,9 +17,14 @@ ENTRA_EXTERNAL_ID_SCOPES=openid profile email
 ```
 
 - `APP_SESSION_SECRET_KEY` must be a strong random value generated per environment.
+- Local development must still set `APP_SESSION_SECRET_KEY`; the app now refuses to start if it
+  is missing.
 - `ENTRA_EXTERNAL_ID_AUTHORITY` should match the tenant that issues the ID token. For External ID customer tenants, use the `ciamlogin.com` authority, not `login.microsoftonline.com`.
 - `ENTRA_EXTERNAL_ID_REDIRECT_URI` must exactly match the app registration.
 - `ENTRA_EXTERNAL_ID_SCOPES` defaults to `openid profile email`.
+- Authentication testing on localhost requires HTTPS because the session cookie is marked
+  `Secure`, and the default Entra redirect URIs use `https://localhost:8000/...`. Plain HTTP is
+  fine only for anonymous pages that do not exercise sign-in.
 
 ## Register the application in Microsoft Entra External ID
 
