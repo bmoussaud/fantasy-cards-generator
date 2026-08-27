@@ -2,6 +2,34 @@
 
 ## Active Decisions
 
+# 2026-08-27T13:32:16Z — Partner-org corporate logins require multi-tenant Entra ID, not External ID
+
+## Decision
+
+- Supersede the earlier auth-product choice for this use case: the clarified requirement is **partner-organization corporate/work-account sign-in**, so PR #24's **Microsoft Entra External ID (CIAM)** implementation should be migrated to a **plain multi-tenant Microsoft Entra ID** app registration.
+- Standardize the OIDC authority on the workforce multi-tenant endpoint `https://login.microsoftonline.com/organizations/v2.0` for this scenario, rather than a tenant-specific `ciamlogin.com` authority.
+- Update app registration guidance to use a normal app registration in the home Entra ID tenant with **Supported account types = Accounts in any organizational directory**.
+- Treat partner-tenant restriction as an application authorization concern: if sign-in must be limited to specific partner organizations, enforce an allow-list against the `tid` claim rather than assuming Entra will restrict this automatically.
+
+## Why
+
+- External ID is the wrong identity product when the goal is to let users authenticate with their own employer-managed Entra ID tenants; multi-tenant workforce sign-in is the native Entra ID pattern for that requirement.
+- Using `/organizations` matches the confirmed "corporate/work account only" scope and avoids accidentally opening the app to personal Microsoft accounts via `/common`.
+- Recording the `tid` allow-list consideration now prevents the next implementation pass from conflating authentication ("can sign in") with partner authorization ("which tenant IDs are allowed").
+
+# 2026-08-27T13:36:22Z — Issue #25 migration delivered in PR #26
+
+## Decision
+
+- Completed the auth migration for issue #25 in PR #26: https://github.com/bmoussaud/fantasy-cards-generator/pull/26
+- Switched runtime/docs/test defaults from Entra External ID (CIAM) to multi-tenant Entra ID using `https://login.microsoftonline.com/organizations/v2.0`.
+- Kept sign-in intentionally unrestricted to any Entra organizational tenant for MVP; no `tid` allow-list was added.
+
+## Why
+
+- This aligns the shipped implementation with the clarified partner-organization corporate login requirement.
+- Recording the PR link here gives the squad a stable pointer to the exact migration work and validation status.
+
 # 2026-08-27T13:01:00Z — PR #24 auth revision fails closed on missing session secret
 
 ## Decision

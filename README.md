@@ -30,7 +30,10 @@ for anonymous local UI work.
 
 ## Authentication setup
 
-Authentication is implemented with Microsoft Entra External ID using OIDC authorization code flow + PKCE. Copy `.env.example` to `.env`, provide the Entra values, and follow `docs/auth-setup.md` for registration details.
+Authentication is implemented with Microsoft Entra ID using the multi-tenant
+`/organizations` OIDC authorization code flow + PKCE. Copy `.env.example` to
+`.env`, provide the Entra values, and follow `docs/auth-setup.md` for app
+registration details.
 
 ## Run tests
 

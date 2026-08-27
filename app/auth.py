@@ -3,13 +3,14 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from typing import Any, TypedDict
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
 from authlib.integrations.starlette_client import OAuth, StarletteOAuth2App
 from fastapi import HTTPException, Request, status
 
 AUTH_SESSION_KEY = "user"
 AUTH_NONCE_SESSION_KEY = "auth_nonce"
+DEFAULT_ENTRA_AUTHORITY = "https://login.microsoftonline.com/organizations/v2.0"
 
 
 class AuthenticatedUser(TypedDict):
@@ -41,6 +42,18 @@ class AuthSettings:
         return f"{self.authority_url}/.well-known/openid-configuration"
 
     @property
+    def logout_url(self) -> str | None:
+        if not self.authority_url:
+            return None
+
+        parsed = urlsplit(self.authority_url)
+        path = parsed.path.rstrip("/")
+        if path.endswith("/v2.0"):
+            path = path[: -len("/v2.0")]
+        logout_path = f"{path}/oauth2/v2.0/logout"
+        return urlunsplit((parsed.scheme, parsed.netloc, logout_path, "", ""))
+
+    @property
     def scope(self) -> str:
         return " ".join(self.scopes)
 
@@ -51,13 +64,11 @@ class AuthSettings:
     def missing_required(self) -> tuple[str, ...]:
         missing: list[str] = []
         if not self.client_id:
-            missing.append("ENTRA_EXTERNAL_ID_CLIENT_ID")
+            missing.append("ENTRA_CLIENT_ID")
         if not self.client_secret:
-            missing.append("ENTRA_EXTERNAL_ID_CLIENT_SECRET")
-        if not self.authority_url:
-            missing.append("ENTRA_EXTERNAL_ID_AUTHORITY")
+            missing.append("ENTRA_CLIENT_SECRET")
         if not self.redirect_uri:
-            missing.append("ENTRA_EXTERNAL_ID_REDIRECT_URI")
+            missing.append("ENTRA_REDIRECT_URI")
         return tuple(missing)
 
 
@@ -66,18 +77,27 @@ def load_auth_settings() -> AuthSettings:
     if not session_secret_key:
         raise RuntimeError("APP_SESSION_SECRET_KEY must be set before starting the application.")
 
-    configured_scopes = os.getenv("ENTRA_EXTERNAL_ID_SCOPES", "openid profile email").split()
+    configured_scopes = _first_env(
+        "ENTRA_SCOPES", "ENTRA_EXTERNAL_ID_SCOPES", default="openid profile email"
+    ).split()
     deduplicated_scopes = tuple(dict.fromkeys(configured_scopes))
     scopes = (
         deduplicated_scopes if "openid" in deduplicated_scopes else ("openid", *deduplicated_scopes)
     )
 
     return AuthSettings(
-        client_id=os.getenv("ENTRA_EXTERNAL_ID_CLIENT_ID"),
-        client_secret=os.getenv("ENTRA_EXTERNAL_ID_CLIENT_SECRET"),
-        authority=os.getenv("ENTRA_EXTERNAL_ID_AUTHORITY"),
-        redirect_uri=os.getenv("ENTRA_EXTERNAL_ID_REDIRECT_URI"),
-        post_logout_redirect_uri=os.getenv("ENTRA_EXTERNAL_ID_POST_LOGOUT_REDIRECT_URI"),
+        client_id=_first_env("ENTRA_CLIENT_ID", "ENTRA_EXTERNAL_ID_CLIENT_ID"),
+        client_secret=_first_env("ENTRA_CLIENT_SECRET", "ENTRA_EXTERNAL_ID_CLIENT_SECRET"),
+        authority=_first_env(
+            "ENTRA_AUTHORITY",
+            "ENTRA_EXTERNAL_ID_AUTHORITY",
+            default=DEFAULT_ENTRA_AUTHORITY,
+        ),
+        redirect_uri=_first_env("ENTRA_REDIRECT_URI", "ENTRA_EXTERNAL_ID_REDIRECT_URI"),
+        post_logout_redirect_uri=_first_env(
+            "ENTRA_POST_LOGOUT_REDIRECT_URI",
+            "ENTRA_EXTERNAL_ID_POST_LOGOUT_REDIRECT_URI",
+        ),
         session_secret_key=session_secret_key,
         scopes=scopes,
     )
@@ -96,7 +116,7 @@ def ensure_auth_configured(settings: AuthSettings) -> None:
 def create_oauth_client(settings: AuthSettings) -> StarletteOAuth2App:
     oauth = OAuth()
     oauth.register(
-        name="entra_external_id",
+        name="entra_id",
         client_id=settings.client_id,
         client_secret=settings.client_secret,
         server_metadata_url=settings.metadata_url,
@@ -106,9 +126,9 @@ def create_oauth_client(settings: AuthSettings) -> StarletteOAuth2App:
         },
     )
 
-    client = oauth.create_client("entra_external_id")
+    client = oauth.create_client("entra_id")
     if client is None:
-        raise RuntimeError("Failed to create the Entra External ID OAuth client.")
+        raise RuntimeError("Failed to create the Entra ID OAuth client.")
     return client
 
 
@@ -159,9 +179,9 @@ def extract_user_claims(claims: dict[str, Any]) -> AuthenticatedUser:
 
 
 def build_logout_redirect_target(settings: AuthSettings) -> str:
-    if settings.authority_url and settings.post_logout_redirect_uri:
+    if settings.logout_url and settings.post_logout_redirect_uri:
         query = urlencode({"post_logout_redirect_uri": settings.post_logout_redirect_uri})
-        return f"{settings.authority_url}/oauth2/v2.0/logout?{query}"
+        return f"{settings.logout_url}?{query}"
     return "/"
 
 
@@ -170,3 +190,11 @@ def _optional_string(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _first_env(*names: str, default: str | None = None) -> str | None:
+    for name in names:
+        value = os.getenv(name)
+        if value:
+            return value
+    return default
