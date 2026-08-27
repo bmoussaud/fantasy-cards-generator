@@ -2,6 +2,21 @@
 
 ## Active Decisions
 
+# 2026-08-27T12:23:00Z — Issue #21 azd dev deploy unblocked and validated
+
+## Decision
+
+- Ran `azd provision --environment dev --no-prompt` in the repo root. The first run created the new Azure Container Registry but failed while updating `fcg-dev-app` because the target image tag did not exist in ACR yet.
+- Populated `.azure/dev/.env` with `AZURE_CONTAINER_REGISTRY_ENDPOINT` and `AZURE_CONTAINER_REGISTRY_NAME`, then ran `azd deploy --environment dev --no-prompt` to build, push, and deploy the real application image.
+- Re-ran `azd provision --environment dev --no-prompt` after the image existed so the Bicep deployment could converge cleanly, then re-ran `azd deploy --environment dev --no-prompt`, which succeeded.
+- Verified `fcg-dev-app` is now running image `fcgdev5a7waraj5zp5iacr.azurecr.io/fantasy-cards-generator/web-dev:azd-deploy-1787833266` instead of the placeholder hello-world image, and the app endpoint serves the FastAPI/Jinja scaffold page.
+
+## Why
+
+- The original `azd deploy` failure was caused by a stale `.azure/dev/.env` that was missing the ACR endpoint/name introduced by the newer Bicep outputs.
+- Provisioning alone did not settle cleanly on the first pass because the Container App template had already been switched to the real ACR image path, but that image had not been pushed yet; once `azd deploy` published the image, a second `azd provision` completed successfully.
+- This confirms the `azd` path for issue #21 is now operational in `dev`: infra includes ACR, the environment has the required registry variables, and the live Container App is serving the repository app rather than the placeholder image.
+
 # 2026-08-27T08:30:46Z — Issue #21 triaged to Gimli and marked high priority
 
 ## Decision
