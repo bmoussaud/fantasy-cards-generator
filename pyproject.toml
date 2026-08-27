@@ -1,7 +1,7 @@
 [project]
 name = "fantasy-cards-generator"
 version = "0.1.0"
-description = "Fantasy cards generator MVP"
+description = "Fantasy cards generator"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
