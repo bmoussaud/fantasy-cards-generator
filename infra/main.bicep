@@ -32,6 +32,17 @@ param entraLocalRedirectUri string = 'https://localhost:8000/auth/callback'
 @description('Path appended to the deployed Container Apps URL to form the production OIDC redirect URI.')
 param entraRedirectPath string = '/auth/callback'
 
+@description('Path appended to the deployed Container Apps URL to form the production OIDC post-logout redirect URI.')
+param entraPostLogoutRedirectPath string = '/'
+
+@secure()
+@description('Session cookie signing secret stored in Key Vault and wired into the Container App as a secretRef (APP_SESSION_SECRET_KEY). Set via `azd env set APP_SESSION_SECRET_KEY <value>` before provisioning.')
+param appSessionSecretKeyValue string = ''
+
+@secure()
+@description('Microsoft Entra ID client secret stored in Key Vault and wired into the Container App as a secretRef (ENTRA_CLIENT_SECRET). Populated automatically by hooks/gen_client_secret.sh when deployEntraAppRegistration=true.')
+param entraClientSecretValue string = ''
+
 @description('Cosmos DB SQL database name for application data.')
 param cosmosDatabaseName string = 'appdb'
 
@@ -108,15 +119,6 @@ module monitoring './modules/monitoring.bicep' = {
   }
 }
 
-module security './modules/security.bicep' = {
-  name: 'security'
-  params: {
-    keyVaultName: keyVaultName
-    location: location
-    tags: tags
-  }
-}
-
 module registry './modules/container-registry.bicep' = {
   name: 'container-registry'
   params: {
@@ -127,23 +129,32 @@ module registry './modules/container-registry.bicep' = {
   }
 }
 
-module containerApps './modules/container-apps.bicep' = {
-  name: 'container-apps'
+module security './modules/security.bicep' = {
+  name: 'security'
   params: {
-    acrLoginServer: registry.outputs.registryLoginServer
-    acrPullIdentityResourceId: registry.outputs.acrPullIdentityResourceId
-    appInsightsConnectionString: monitoring.outputs.appInsightsConnectionString
-    containerAppName: containerAppName
-    containerAppsEnvironmentName: containerAppsEnvironmentName
-    containerImage: empty(containerImage) ? '${registry.outputs.registryLoginServer}/fantasy-cards-generator:latest' : containerImage
-    keyVaultUri: security.outputs.keyVaultUri
+    appSessionSecretKeyValue: appSessionSecretKeyValue
+    entraClientSecretValue: entraClientSecretValue
+    keyVaultName: keyVaultName
+    keyVaultAccessPrincipalId: registry.outputs.acrPullIdentityPrincipalId
     location: location
-    logAnalyticsWorkspaceCustomerId: monitoring.outputs.logAnalyticsWorkspaceCustomerId
-    logAnalyticsWorkspaceSharedKey: monitoring.outputs.logAnalyticsWorkspaceSharedKey
-    serviceName: serviceName
     tags: tags
   }
 }
+
+module containerAppsEnvironment './modules/container-apps-environment.bicep' = {
+  name: 'container-apps-environment'
+  params: {
+    containerAppsEnvironmentName: containerAppsEnvironmentName
+    location: location
+    logAnalyticsWorkspaceCustomerId: monitoring.outputs.logAnalyticsWorkspaceCustomerId
+    logAnalyticsWorkspaceSharedKey: monitoring.outputs.logAnalyticsWorkspaceSharedKey
+    tags: tags
+  }
+}
+
+var predictedContainerAppUrl = 'https://${containerAppName}.${containerAppsEnvironment.outputs.containerAppsEnvironmentDefaultDomain}'
+var deployedAuthRedirectUri = '${predictedContainerAppUrl}${entraRedirectPath}'
+var deployedPostLogoutRedirectUri = '${predictedContainerAppUrl}${entraPostLogoutRedirectPath}'
 
 module appRegistration './modules/app-registration.bicep' = if (deployEntraAppRegistration) {
   name: 'app-registration'
@@ -153,8 +164,31 @@ module appRegistration './modules/app-registration.bicep' = if (deployEntraAppRe
     appUniqueName: take('fantasy-cards-generator-${environmentName}', 64)
     redirectUris: [
       entraLocalRedirectUri
-      '${containerApps.outputs.containerAppUrl}${entraRedirectPath}'
+      deployedAuthRedirectUri
     ]
+  }
+}
+
+var entraClientId = deployEntraAppRegistration ? appRegistration!.outputs.appId : ''
+
+module containerApps './modules/container-apps.bicep' = {
+  name: 'container-apps'
+  params: {
+    acrLoginServer: registry.outputs.registryLoginServer
+    acrPullIdentityResourceId: registry.outputs.acrPullIdentityResourceId
+    appInsightsConnectionString: monitoring.outputs.appInsightsConnectionString
+    appSessionSecretKeySecretUri: security.outputs.appSessionSecretKeySecretUri
+    containerAppName: containerAppName
+    containerAppsEnvironmentResourceId: containerAppsEnvironment.outputs.containerAppsEnvironmentResourceId
+    containerImage: empty(containerImage) ? '${registry.outputs.registryLoginServer}/fantasy-cards-generator:latest' : containerImage
+    entraClientId: entraClientId
+    entraClientSecretSecretUri: security.outputs.entraClientSecretSecretUri
+    entraPostLogoutRedirectUri: deployEntraAppRegistration ? deployedPostLogoutRedirectUri : ''
+    entraRedirectUri: deployEntraAppRegistration ? deployedAuthRedirectUri : ''
+    keyVaultUri: security.outputs.keyVaultUri
+    location: location
+    serviceName: serviceName
+    tags: tags
   }
 }
 
@@ -218,8 +252,8 @@ output containerAppFqdn string = containerApps.outputs.containerAppFqdn
 output containerAppPrincipalId string = containerApps.outputs.containerAppPrincipalId
 output containerAppResourceId string = containerApps.outputs.containerAppResourceId
 output containerAppUrl string = containerApps.outputs.containerAppUrl
-output containerAppsEnvironmentName string = containerApps.outputs.containerAppsEnvironmentName
-output containerAppsEnvironmentResourceId string = containerApps.outputs.containerAppsEnvironmentResourceId
+output containerAppsEnvironmentName string = containerAppsEnvironment.outputs.containerAppsEnvironmentName
+output containerAppsEnvironmentResourceId string = containerAppsEnvironment.outputs.containerAppsEnvironmentResourceId
 output cosmosAccountEndpoint string = cosmosDb.outputs.cosmosAccountEndpoint
 output cosmosAccountName string = cosmosDb.outputs.cosmosAccountName
 output cosmosAccountResourceId string = cosmosDb.outputs.cosmosAccountResourceId
@@ -233,13 +267,13 @@ output storageAccountName string = storage.outputs.storageAccountName
 output storageAccountResourceId string = storage.outputs.storageAccountResourceId
 output storageBlobEndpoint string = storage.outputs.storageBlobEndpoint
 output storageContainerName string = storage.outputs.storageContainerName
-output entraClientId string = deployEntraAppRegistration ? appRegistration!.outputs.appId : ''
+output entraClientId string = entraClientId
 output entraAppObjectId string = deployEntraAppRegistration ? appRegistration!.outputs.appObjectId : ''
 output entraServicePrincipalId string = deployEntraAppRegistration ? appRegistration!.outputs.servicePrincipalId : ''
 output entraTenantId string = deployEntraAppRegistration ? appRegistration!.outputs.tenantId : tenant().tenantId
 output entraLocalRedirectUri string = entraLocalRedirectUri
 output AZURE_CONTAINER_APP_NAME string = containerApps.outputs.containerAppName
-output AZURE_CONTAINER_APPS_ENVIRONMENT_NAME string = containerApps.outputs.containerAppsEnvironmentName
+output AZURE_CONTAINER_APPS_ENVIRONMENT_NAME string = containerAppsEnvironment.outputs.containerAppsEnvironmentName
 output AZURE_CONTAINER_REGISTRY_ENDPOINT string = registry.outputs.registryLoginServer
 output AZURE_CONTAINER_REGISTRY_NAME string = registry.outputs.registryName
-output ENTRA_CLIENT_ID string = deployEntraAppRegistration ? appRegistration!.outputs.appId : ''
+output ENTRA_CLIENT_ID string = entraClientId

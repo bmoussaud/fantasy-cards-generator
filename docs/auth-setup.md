@@ -37,6 +37,44 @@ ENTRA_SCOPES=openid profile email
   `https://localhost:8000/...`. Plain HTTP is fine only for anonymous pages
   that do not exercise sign-in.
 
+## Deployed environments: Key Vault-backed wiring
+
+`.env` is intentionally **not** shipped in the container image (it stays
+gitignored and is for local development only). Deployed Container Apps get
+their runtime configuration entirely from `infra/main.bicep` /
+`infra/modules/container-apps.bicep`:
+
+| Variable | Source in deployed environments |
+|---|---|
+| `APP_SESSION_SECRET_KEY` | Key Vault secret `app-session-secret-key`, mounted as a Container Apps `secretRef` (`keyVaultUrl` + the existing ACR-pull managed identity) |
+| `ENTRA_CLIENT_SECRET` | Key Vault secret `entra-client-secret`, mounted the same way |
+| `ENTRA_CLIENT_ID` | Plain env var, sourced from the Entra app-registration Bicep module output |
+| `ENTRA_REDIRECT_URI` | Plain env var, auto-derived from the deployed Container Apps hostname (`deployedAuthRedirectUri` output) — never set manually |
+| `ENTRA_POST_LOGOUT_REDIRECT_URI` | Plain env var, auto-derived the same way |
+| `ENTRA_AUTHORITY`, `ENTRA_SCOPES` | Not injected; the app's code defaults are used in every environment |
+
+To populate the two Key Vault-backed values before `azd provision`:
+
+```bash
+azd env set APP_SESSION_SECRET_KEY "$(openssl rand -base64 48)"
+# ENTRA_CLIENT_SECRET is normally set automatically by the postprovision hook
+# (hooks/gen_client_secret.sh) after the first `azd provision` run when
+# deployEntraAppRegistration=true. Re-run `azd provision` afterwards so the
+# secret is written into Key Vault and wired into the Container App.
+```
+
+Both values flow into Bicep via `infra/main.parameters.json`
+(`appSessionSecretKeyValue` / `entraClientSecretValue`) as `@secure()`
+parameters, so they are never written into the Container App's own JSON
+configuration in plaintext — only the Key Vault secret URIs are, and the
+Container App resolves the actual values at runtime using its managed
+identity's `Key Vault Secrets User` role assignment on the Key Vault.
+
+If `APP_SESSION_SECRET_KEY` or `ENTRA_CLIENT_SECRET` are unset when
+`azd provision` runs, the corresponding Key Vault secret (and therefore the
+corresponding Container App env var) is simply not created — the app then
+fails closed at startup exactly as it does locally when `.env` is incomplete.
+
 ## Register the application in Microsoft Entra ID
 
 The primary, best-understood fallback path is still the manual portal flow

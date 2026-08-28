@@ -10,6 +10,12 @@
     },
     "deployEntraAppRegistration": {
       "value": "${deployEntraAppRegistration}"
+    },
+    "appSessionSecretKeyValue": {
+      "value": "${APP_SESSION_SECRET_KEY=}"
+    },
+    "entraClientSecretValue": {
+      "value": "${ENTRA_CLIENT_SECRET=}"
     }
   }
 }

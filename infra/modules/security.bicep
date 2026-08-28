@@ -4,8 +4,23 @@ param location string
 @description('Key Vault resource name. Must be globally unique.')
 param keyVaultName string
 
+@description('Principal ID of the managed identity granted read access to Key Vault secrets (the Container App\'s ACR-pull identity).')
+param keyVaultAccessPrincipalId string
+
+@secure()
+@description('Session cookie signing secret stored in Key Vault as APP_SESSION_SECRET_KEY. Empty skips creating the secret.')
+param appSessionSecretKeyValue string = ''
+
+@secure()
+@description('Microsoft Entra ID client secret stored in Key Vault as ENTRA_CLIENT_SECRET. Empty skips creating the secret.')
+param entraClientSecretValue string = ''
+
 @description('Optional tags shared by security resources.')
 param tags object = {}
+
+var keyVaultSecretsUserRoleDefinitionId = '4633458b-17de-408a-b874-0445c86b69e6'
+var hasAppSessionSecretKeyValue = !empty(appSessionSecretKeyValue)
+var hasEntraClientSecretValue = !empty(entraClientSecretValue)
 
 resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
   name: keyVaultName
@@ -27,5 +42,33 @@ resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
   }
 }
 
+resource keyVaultSecretsUserRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(keyVault.id, keyVaultAccessPrincipalId, keyVaultSecretsUserRoleDefinitionId)
+  scope: keyVault
+  properties: {
+    principalId: keyVaultAccessPrincipalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', keyVaultSecretsUserRoleDefinitionId)
+  }
+}
+
+resource appSessionSecretKeySecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (hasAppSessionSecretKeyValue) {
+  parent: keyVault
+  name: 'app-session-secret-key'
+  properties: {
+    value: appSessionSecretKeyValue
+  }
+}
+
+resource entraClientSecretSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (hasEntraClientSecretValue) {
+  parent: keyVault
+  name: 'entra-client-secret'
+  properties: {
+    value: entraClientSecretValue
+  }
+}
+
 output keyVaultName string = keyVault.name
 output keyVaultUri string = keyVault.properties.vaultUri
+output appSessionSecretKeySecretUri string = hasAppSessionSecretKeyValue ? appSessionSecretKeySecret!.properties.secretUri : ''
+output entraClientSecretSecretUri string = hasEntraClientSecretValue ? entraClientSecretSecret!.properties.secretUri : ''
