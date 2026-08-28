@@ -23,6 +23,7 @@ from app.generation import (
     create_services,
 )
 from app.main import create_app
+from app.problems import ProblemDetails
 from app.settings import load_app_settings
 from tests.conftest import TEST_OWNER_ID, extract_hidden_value, make_authenticated_client
 
@@ -557,6 +558,99 @@ def test_concurrent_duplicates_do_not_duplicate_model_calls(
     assert results[0]["cardId"] == results[1]["cardId"]
     assert text_calls == 1
     assert image_calls == 1
+
+
+def test_concurrent_duplicate_replays_rate_limit_rejection_instead_of_timing_out() -> None:
+    class BlockingRateLimiter:
+        def __init__(self) -> None:
+            self.first_request_reserved = asyncio.Event()
+            self.release_first_request = asyncio.Event()
+            self.calls = 0
+
+        async def enforce(self, key: str, _settings, *, error_suffix: str) -> None:
+            self.calls += 1
+            if self.calls == 1:
+                self.first_request_reserved.set()
+                await self.release_first_request.wait()
+                raise ProblemDetails(
+                    status_code=429,
+                    title="Too Many Requests",
+                    detail=(
+                        f"Rate limit exceeded for {error_suffix}. Retry after "
+                        "60 seconds."
+                    ),
+                    type="/problems/rate-limit",
+                    error_code="rate_limit_exceeded",
+                    headers={"Retry-After": "60"},
+                )
+
+    async def run_concurrency() -> tuple[list[ProblemDetails], InMemoryAuditRepository]:
+        settings = load_app_settings()
+        defaults = create_services(settings)
+        audit_repository = InMemoryAuditRepository()
+        rate_limiter = BlockingRateLimiter()
+        services = AppServices(
+            settings=settings,
+            card_repository=InMemoryCardRepository(),
+            audit_repository=audit_repository,
+            asset_store=InMemoryAssetStore(),
+            ai_client=MockAIClient(settings),
+            moderation_service=defaults.moderation_service,
+            rate_limiter=rate_limiter,
+            csrf_protector=defaults.csrf_protector,
+        )
+        service = CardGenerationService(services)
+        owner = AuthenticatedOwner(
+            owner_id=TEST_OWNER_ID,
+            tenant_id=None,
+            object_id=None,
+            subject="sub",
+            display_name="Legolas",
+            email="legolas@example.com",
+        )
+
+        first = asyncio.create_task(
+            service.generate_card(
+                owner=owner,
+                prompt="create a safe fantasy knight with a moonlit shield",
+                idempotency_key="idem-concurrent-rate-limit",
+                request_id="req-rate-limit-1",
+                client_ip="127.0.0.1",
+            )
+        )
+        await rate_limiter.first_request_reserved.wait()
+
+        second = asyncio.create_task(
+            service.generate_card(
+                owner=owner,
+                prompt="create a safe fantasy knight with a moonlit shield",
+                idempotency_key="idem-concurrent-rate-limit",
+                request_id="req-rate-limit-2",
+                client_ip="127.0.0.1",
+            )
+        )
+
+        await asyncio.sleep(0.1)
+        rate_limiter.release_first_request.set()
+
+        results = await asyncio.gather(first, second, return_exceptions=True)
+        problems = [result for result in results if isinstance(result, ProblemDetails)]
+        return problems, audit_repository
+
+    problems, audit_repository = asyncio.run(run_concurrency())
+
+    assert len(problems) == 2
+    assert [problem.status_code for problem in problems] == [429, 429]
+    assert [problem.error_code for problem in problems] == [
+        "rate_limit_exceeded",
+        "rate_limit_exceeded",
+    ]
+    assert [problem.headers.get("Retry-After") for problem in problems] == ["60", "60"]
+
+    audit = next(iter(audit_repository._records.values()))
+    assert audit.status == "audit_failed"
+    assert audit.failure_status_code == 429
+    assert audit.failure_headers == {"Retry-After": "60"}
 
 
 def test_concurrent_artwork_retries_do_not_duplicate_image_calls(

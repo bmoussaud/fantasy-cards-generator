@@ -163,6 +163,12 @@ class StoredCard:
     updated_at: str = field(default_factory=lambda: now_iso())
     completed_at: str | None = None
     error_code: str | None = None
+    failure_status_code: int | None = None
+    failure_error_code: str | None = None
+    failure_title: str | None = None
+    failure_detail: str | None = None
+    failure_type: str | None = None
+    failure_headers: dict[str, str] = field(default_factory=dict)
     retryable: bool = False
     ttl_seconds: int | None = None
 
@@ -198,6 +204,12 @@ class StoredCard:
             "updatedAt": self.updated_at,
             "completedAt": self.completed_at,
             "errorCode": self.error_code,
+            "failureStatusCode": self.failure_status_code,
+            "failureErrorCode": self.failure_error_code,
+            "failureTitle": self.failure_title,
+            "failureDetail": self.failure_detail,
+            "failureType": self.failure_type,
+            "failureHeaders": self.failure_headers,
             "retryable": self.retryable,
             "ttl": self.ttl_seconds,
         }
@@ -230,6 +242,12 @@ class StoredCard:
             updated_at=str(document.get("updatedAt", now_iso())),
             completed_at=document.get("completedAt"),
             error_code=document.get("errorCode"),
+            failure_status_code=document.get("failureStatusCode"),
+            failure_error_code=document.get("failureErrorCode"),
+            failure_title=document.get("failureTitle"),
+            failure_detail=document.get("failureDetail"),
+            failure_type=document.get("failureType"),
+            failure_headers=dict(document.get("failureHeaders") or {}),
             retryable=bool(document.get("retryable", False)),
             ttl_seconds=document.get("ttl"),
         )
@@ -1001,7 +1019,16 @@ class CardGenerationService:
 
         try:
             await self._enforce_rate_limits(owner.owner_id, client_ip)
-        except ProblemDetails:
+        except ProblemDetails as exc:
+            await self._save_audit_failure(
+                owner.owner_id,
+                card_id,
+                request_id,
+                idempotency_key,
+                request_hash,
+                exc.error_code,
+                problem=exc,
+            )
             await self.services.card_repository.delete(owner.owner_id, card_id)
             raise
 
@@ -1018,6 +1045,13 @@ class CardGenerationService:
                 timeout=self.services.settings.retry.overall_timeout_seconds,
             )
         except asyncio.TimeoutError as exc:
+            problem = ProblemDetails(
+                status_code=504,
+                title="Gateway Timeout",
+                detail="The generation request exceeded the overall timeout.",
+                type="/problems/upstream-timeout",
+                error_code="upstream_timeout",
+            )
             await self.services.card_repository.delete(owner.owner_id, card_id)
             await self._save_audit_failure(
                 owner.owner_id,
@@ -1025,15 +1059,10 @@ class CardGenerationService:
                 request_id,
                 idempotency_key,
                 request_hash,
-                "upstream_timeout",
+                problem.error_code,
+                problem=problem,
             )
-            raise ProblemDetails(
-                status_code=504,
-                title="Gateway Timeout",
-                detail="The generation request exceeded the overall timeout.",
-                type="/problems/upstream-timeout",
-                error_code="upstream_timeout",
-            ) from exc
+            raise problem from exc
 
     async def retry_artwork(
         self,
@@ -1080,8 +1109,16 @@ class CardGenerationService:
 
         try:
             await self._enforce_rate_limits(owner.owner_id, client_ip)
-        except ProblemDetails:
-            await self.services.audit_repository.delete_audit(owner.owner_id, retry_card_id)
+        except ProblemDetails as exc:
+            await self._save_audit_failure(
+                owner.owner_id,
+                retry_card_id,
+                request_id,
+                idempotency_key,
+                request_hash,
+                exc.error_code,
+                problem=exc,
+            )
             raise
 
         try:
@@ -1093,22 +1130,35 @@ class CardGenerationService:
                 ),
                 timeout=self.services.settings.retry.overall_timeout_seconds,
             )
-        except asyncio.TimeoutError as exc:
+        except ProblemDetails as exc:
             await self._save_audit_failure(
                 owner.owner_id,
                 retry_card_id,
                 request_id,
                 idempotency_key,
                 request_hash,
-                "upstream_timeout",
+                exc.error_code,
+                problem=exc,
             )
-            raise ProblemDetails(
+            raise
+        except asyncio.TimeoutError as exc:
+            problem = ProblemDetails(
                 status_code=504,
                 title="Gateway Timeout",
                 detail="The artwork retry exceeded the overall timeout.",
                 type="/problems/upstream-timeout",
                 error_code="upstream_timeout",
-            ) from exc
+            )
+            await self._save_audit_failure(
+                owner.owner_id,
+                retry_card_id,
+                request_id,
+                idempotency_key,
+                request_hash,
+                problem.error_code,
+                problem=problem,
+            )
+            raise problem from exc
 
     async def fetch_image(self, owner: AuthenticatedOwner, card_id: str) -> tuple[bytes, str]:
         record = await self.services.card_repository.get(owner.owner_id, card_id)
@@ -1148,6 +1198,13 @@ class CardGenerationService:
         )
         moderation.append(pre_decision)
         if not pre_decision.allowed:
+            problem = ProblemDetails(
+                status_code=422,
+                title="Prompt Rejected",
+                detail="The prompt was rejected by the moderation policy.",
+                type="/problems/prompt-rejected",
+                error_code="prompt_rejected",
+            )
             await self.services.card_repository.delete(owner.owner_id, card_id)
             await self._save_audit_failure(
                 owner.owner_id,
@@ -1156,14 +1213,9 @@ class CardGenerationService:
                 idempotency_key,
                 request_hash,
                 pre_decision.reasonCode,
+                problem=problem,
             )
-            raise ProblemDetails(
-                status_code=422,
-                title="Prompt Rejected",
-                detail="The prompt was rejected by the moderation policy.",
-                type="/problems/prompt-rejected",
-                error_code="prompt_rejected",
-            )
+            raise problem
 
         try:
             text_result = await self._retry_upstream(
@@ -1180,11 +1232,19 @@ class CardGenerationService:
                 idempotency_key,
                 request_hash,
                 exc.error_code,
+                problem=exc,
             )
             raise
         try:
             validated_payload = GeneratedCardModel.model_validate(text_result.payload)
         except ValidationError as exc:
+            problem = ProblemDetails(
+                status_code=502,
+                title="Bad Gateway",
+                detail="The text model returned invalid structured output.",
+                type="/problems/invalid-model-output",
+                error_code="invalid_model_output",
+            )
             await self.services.card_repository.delete(owner.owner_id, card_id)
             await self._save_audit_failure(
                 owner.owner_id,
@@ -1192,15 +1252,10 @@ class CardGenerationService:
                 request_id,
                 idempotency_key,
                 request_hash,
-                "invalid_model_output",
+                problem.error_code,
+                problem=problem,
             )
-            raise ProblemDetails(
-                status_code=502,
-                title="Bad Gateway",
-                detail="The text model returned invalid structured output.",
-                type="/problems/invalid-model-output",
-                error_code="invalid_model_output",
-            ) from exc
+            raise problem from exc
 
         post_text = await self.services.moderation_service.moderate_text(
             " ".join(
@@ -1215,6 +1270,13 @@ class CardGenerationService:
         )
         moderation.append(post_text)
         if not post_text.allowed:
+            problem = ProblemDetails(
+                status_code=422,
+                title="Generated Content Rejected",
+                detail="The generated card text was rejected by moderation.",
+                type="/problems/generated-text-rejected",
+                error_code="generated_text_rejected",
+            )
             await self.services.card_repository.delete(owner.owner_id, card_id)
             await self._save_audit_failure(
                 owner.owner_id,
@@ -1223,14 +1285,9 @@ class CardGenerationService:
                 idempotency_key,
                 request_hash,
                 post_text.reasonCode,
+                problem=problem,
             )
-            raise ProblemDetails(
-                status_code=422,
-                title="Generated Content Rejected",
-                detail="The generated card text was rejected by moderation.",
-                type="/problems/generated-text-rejected",
-                error_code="generated_text_rejected",
-            )
+            raise problem
 
         derived_art_prompt = derive_art_prompt(validated_payload)
         post_art_prompt = await self.services.moderation_service.moderate_text(
@@ -1239,6 +1296,13 @@ class CardGenerationService:
         )
         moderation.append(post_art_prompt)
         if not post_art_prompt.allowed:
+            problem = ProblemDetails(
+                status_code=422,
+                title="Artwork Prompt Rejected",
+                detail="The derived artwork prompt was rejected by moderation.",
+                type="/problems/generated-art-rejected",
+                error_code="generated_art_rejected",
+            )
             await self.services.card_repository.delete(owner.owner_id, card_id)
             await self._save_audit_failure(
                 owner.owner_id,
@@ -1247,14 +1311,9 @@ class CardGenerationService:
                 idempotency_key,
                 request_hash,
                 post_art_prompt.reasonCode,
+                problem=problem,
             )
-            raise ProblemDetails(
-                status_code=422,
-                title="Artwork Prompt Rejected",
-                detail="The derived artwork prompt was rejected by moderation.",
-                type="/problems/generated-art-rejected",
-                error_code="generated_art_rejected",
-            )
+            raise problem
 
         try:
             image_result = await self._retry_upstream(
@@ -1353,6 +1412,7 @@ class CardGenerationService:
                 retry_idempotency_key,
                 request_hash,
                 exc.error_code,
+                problem=exc,
             )
             return self._as_response(record)
         post_image = await self.services.moderation_service.moderate_image(image_result.image)
@@ -1508,6 +1568,13 @@ class CardGenerationService:
                 idempotency_key,
                 request_hash,
                 "persistence_failure",
+                problem=ProblemDetails(
+                    status_code=503,
+                    title="Service Unavailable",
+                    detail="The generated card could not be persisted safely.",
+                    type="/problems/persistence-failure",
+                    error_code="persistence_failure",
+                ),
             )
             raise ProblemDetails(
                 status_code=503,
@@ -1525,6 +1592,8 @@ class CardGenerationService:
         idempotency_key: str,
         request_hash: str,
         error_code: str,
+        *,
+        problem: ProblemDetails | None = None,
     ) -> None:
         await self.services.audit_repository.save_audit(
             StoredCard(
@@ -1536,6 +1605,12 @@ class CardGenerationService:
                 request_hash=request_hash,
                 status="audit_failed",
                 error_code=error_code,
+                failure_status_code=problem.status_code if problem is not None else None,
+                failure_error_code=problem.error_code if problem is not None else None,
+                failure_title=problem.title if problem is not None else None,
+                failure_detail=problem.detail if problem is not None else None,
+                failure_type=problem.type if problem is not None else None,
+                failure_headers=dict(problem.headers) if problem is not None else {},
                 ttl_seconds=self.services.settings.audit_retention_days * 24 * 60 * 60,
             )
         )
@@ -1549,29 +1624,7 @@ class CardGenerationService:
 
             audit = await self.services.audit_repository.get_audit(owner_id, card_id)
             if audit is not None and audit.status == "audit_failed":
-                error_code = audit.error_code or "generation_failed"
-                if error_code in {
-                    "prompt_rejected",
-                    "living-artist-imitation",
-                    "copyrighted-character",
-                }:
-                    raise ProblemDetails(
-                        status_code=422,
-                        title="Prompt Rejected",
-                        detail="The prompt was rejected by the moderation policy.",
-                        type="/problems/prompt-rejected",
-                        error_code="prompt_rejected",
-                    )
-                raise ProblemDetails(
-                    status_code=503,
-                    title="Service Unavailable",
-                    detail=(
-                        "The same request previously failed safely and can be "
-                        "retried with a new idempotency key."
-                    ),
-                    type="/problems/replayed-failure",
-                    error_code=error_code,
-                )
+                raise self._problem_from_audit(audit)
             await asyncio.sleep(0.05)
 
         raise ProblemDetails(
@@ -1599,6 +1652,11 @@ class CardGenerationService:
                     if refreshed is not None:
                         return self._as_response(refreshed)
                 if audit.status == "audit_failed":
+                    if (
+                        audit.failure_status_code is not None
+                        and audit.failure_status_code >= 400
+                    ):
+                        raise self._problem_from_audit(audit)
                     refreshed = await self.services.card_repository.get(owner_id, card_id)
                     return self._as_response(refreshed or fallback_record)
             await asyncio.sleep(0.05)
@@ -1608,6 +1666,46 @@ class CardGenerationService:
             detail="An identical artwork retry did not complete before the replay timeout.",
             type="/problems/request-replay-timeout",
             error_code="request_replay_timeout",
+        )
+
+    def _problem_from_audit(self, audit: StoredCard) -> ProblemDetails:
+        if (
+            audit.failure_status_code is not None
+            and audit.failure_title is not None
+            and audit.failure_detail is not None
+            and audit.failure_type is not None
+        ):
+            return ProblemDetails(
+                status_code=audit.failure_status_code,
+                title=audit.failure_title,
+                detail=audit.failure_detail,
+                type=audit.failure_type,
+                error_code=audit.failure_error_code or audit.error_code or "generation_failed",
+                headers=dict(audit.failure_headers),
+            )
+
+        error_code = audit.error_code or "generation_failed"
+        if error_code in {
+            "prompt_rejected",
+            "living-artist-imitation",
+            "copyrighted-character",
+        }:
+            return ProblemDetails(
+                status_code=422,
+                title="Prompt Rejected",
+                detail="The prompt was rejected by the moderation policy.",
+                type="/problems/prompt-rejected",
+                error_code="prompt_rejected",
+            )
+        return ProblemDetails(
+            status_code=503,
+            title="Service Unavailable",
+            detail=(
+                "The same request previously failed safely and can be "
+                "retried with a new idempotency key."
+            ),
+            type="/problems/replayed-failure",
+            error_code=error_code,
         )
 
     async def _retry_upstream(
