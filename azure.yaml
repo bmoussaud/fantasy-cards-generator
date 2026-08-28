@@ -14,3 +14,9 @@ resources:
 infra:
   provider: bicep
   path: infra
+hooks:
+  postprovision:
+    # This hook is a no-op when ENTRA_CLIENT_ID is not present, which covers
+    # environments provisioned with deployEntraAppRegistration=false.
+    - shell: sh
+      run: ./hooks/gen_client_secret.sh ENTRA_CLIENT_ID ENTRA_CLIENT_SECRET

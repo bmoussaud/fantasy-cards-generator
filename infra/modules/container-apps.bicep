@@ -118,7 +118,9 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
 }
 
 output containerAppName string = containerApp.name
+output containerAppFqdn string = containerApp.properties.configuration.ingress.fqdn
 output containerAppPrincipalId string = containerApp.identity.principalId
 output containerAppResourceId string = containerApp.id
+output containerAppUrl string = 'https://${containerApp.properties.configuration.ingress.fqdn}'
 output containerAppsEnvironmentName string = containerAppsEnvironment.name
 output containerAppsEnvironmentResourceId string = containerAppsEnvironment.id
