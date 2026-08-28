@@ -134,6 +134,7 @@ Additional operational settings:
 
 - `RATE_LIMIT_USER_REQUESTS`, `RATE_LIMIT_USER_WINDOW_SECONDS`
 - `RATE_LIMIT_IP_REQUESTS`, `RATE_LIMIT_IP_WINDOW_SECONDS`
+- `TRUSTED_PROXY_HOPS` (`0` by default; set to `1` behind Azure Container Apps ingress so the app trusts only ACA's rightmost appended `X-Forwarded-For` hop)
 - `UPSTREAM_MAX_RETRIES`, `UPSTREAM_BASE_BACKOFF_SECONDS`
 - `UPSTREAM_TIMEOUT_SECONDS`, `OVERALL_TIMEOUT_SECONDS`
 - `AUDIT_RETENTION_DAYS`

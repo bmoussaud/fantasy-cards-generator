@@ -40,6 +40,7 @@ class AppSettings:
     moderation_policy_name: str
     user_rate_limit: RateLimitSettings
     ip_rate_limit: RateLimitSettings
+    trusted_proxy_hops: int
     retry: RetrySettings
     audit_retention_days: int
     image_size: str
@@ -86,6 +87,7 @@ def load_app_settings() -> AppSettings:
             requests=_int_env("RATE_LIMIT_IP_REQUESTS", default=12, minimum=1),
             window_seconds=_int_env("RATE_LIMIT_IP_WINDOW_SECONDS", default=60, minimum=1),
         ),
+        trusted_proxy_hops=_int_env("TRUSTED_PROXY_HOPS", default=0, minimum=0),
         retry=RetrySettings(
             max_retries=_int_env("UPSTREAM_MAX_RETRIES", default=2, minimum=0),
             base_backoff_seconds=_float_env(

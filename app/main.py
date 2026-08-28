@@ -260,7 +260,10 @@ def create_app(services: AppServices | None = None) -> FastAPI:
             prompt=body.prompt,
             idempotency_key=body.idempotencyKey or uuid4().hex,
             request_id=request.state.request_id,
-            client_ip=client_ip_from_request(request),
+            client_ip=client_ip_from_request(
+                request,
+                trusted_proxy_hops=app_services.settings.trusted_proxy_hops,
+            ),
         )
 
     @app.post("/api/v1/cards/{card_id}/artwork/retry", response_model=CardResponseModel)
@@ -286,7 +289,10 @@ def create_app(services: AppServices | None = None) -> FastAPI:
             card_id=card_id,
             idempotency_key=body.idempotencyKey or uuid4().hex,
             request_id=request.state.request_id,
-            client_ip=client_ip_from_request(request),
+            client_ip=client_ip_from_request(
+                request,
+                trusted_proxy_hops=app_services.settings.trusted_proxy_hops,
+            ),
         )
 
     @app.post("/ui/cards/generate", response_class=HTMLResponse)
@@ -309,7 +315,10 @@ def create_app(services: AppServices | None = None) -> FastAPI:
             prompt=form.get("prompt", ""),
             idempotency_key=form.get("idempotency_key") or uuid4().hex,
             request_id=request.state.request_id,
-            client_ip=client_ip_from_request(request),
+            client_ip=client_ip_from_request(
+                request,
+                trusted_proxy_hops=app_services.settings.trusted_proxy_hops,
+            ),
         )
         return templates.TemplateResponse(
             request,
@@ -343,7 +352,10 @@ def create_app(services: AppServices | None = None) -> FastAPI:
             card_id=card_id,
             idempotency_key=form.get("idempotency_key") or uuid4().hex,
             request_id=request.state.request_id,
-            client_ip=client_ip_from_request(request),
+            client_ip=client_ip_from_request(
+                request,
+                trusted_proxy_hops=app_services.settings.trusted_proxy_hops,
+            ),
         )
         return templates.TemplateResponse(
             request,

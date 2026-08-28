@@ -1,19 +1,25 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
+from app import generation as generation_module
 from app.generation import (
     AppServices,
     AuthenticatedOwner,
+    AzureFoundryAIClient,
     CardGenerationService,
     InMemoryAssetStore,
     InMemoryAuditRepository,
     InMemoryCardRepository,
     MockAIClient,
     StoredCard,
+    client_ip_from_request,
     create_services,
 )
 from app.main import create_app
@@ -87,8 +93,64 @@ def test_generate_card_success_persists_card_and_private_asset(
     assert "sas" not in str(card.to_document()).lower()
 
 
-def test_rate_limits_apply_per_user_and_ip(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("RATE_LIMIT_USER_REQUESTS", "1")
+def test_live_mode_foundry_client_sends_real_bearer_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AI_MODE", "live")
+    monkeypatch.setenv("PERSISTENCE_MODE", "memory")
+    monkeypatch.setenv("FOUNDRY_ENDPOINT", "https://foundry.example")
+    monkeypatch.setenv("FOUNDRY_TEXT_DEPLOYMENT", "gpt-5-5")
+    monkeypatch.setenv("FOUNDRY_IMAGE_DEPLOYMENT", "gpt-image-2")
+
+    captured: dict[str, str] = {}
+    real_async_client = httpx.AsyncClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["authorization"] = request.headers["Authorization"]
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"name":"Knight of Dawn","cardType":"hero","rarity":"rare",'
+                                '"manaCost":4,"attack":5,"health":4,'
+                                '"rulesText":"Charge into the dawning light.",'
+                                '"flavorText":"Dawn follows.",'
+                                '"artBrief":"A radiant knight raising a silver shield.",'
+                                '"schemaVersion":1}'
+                            )
+                        }
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    def build_client(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_async_client(*args, **kwargs)
+
+    monkeypatch.setattr(generation_module.httpx, "AsyncClient", build_client)
+    client = AzureFoundryAIClient(load_app_settings())
+    client._credential = SimpleNamespace(  # type: ignore[attr-defined]
+        get_token=lambda *_args, **_kwargs: SimpleNamespace(token="live-access-token")
+    )
+
+    result = asyncio.run(
+        client.generate_card(
+            "create a safe fantasy knight with a moonlit shield",
+            request_id="req-live",
+        )
+    )
+
+    assert captured["authorization"] == "Bearer live-access-token"
+    assert result.metadata.mode == "live"
+
+
+def test_rate_limits_ignore_untrusted_forwarded_for(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RATE_LIMIT_USER_REQUESTS", "5")
     monkeypatch.setenv("RATE_LIMIT_IP_REQUESTS", "1")
     client = make_authenticated_client(monkeypatch)
     csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
@@ -114,6 +176,23 @@ def test_rate_limits_apply_per_user_and_ip(monkeypatch: pytest.MonkeyPatch) -> N
     assert first.status_code == 200
     assert second.status_code == 429
     assert second.headers["retry-after"] == "60"
+
+
+def test_trusted_proxy_uses_rightmost_forwarded_hop() -> None:
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/v1/cards/generate",
+            "headers": [
+                (b"x-forwarded-for", b"203.0.113.10, 198.51.100.7"),
+                (b"x-forwarded-proto", b"https"),
+            ],
+            "client": ("10.0.0.4", 443),
+        }
+    )
+
+    assert client_ip_from_request(request, trusted_proxy_hops=1) == "198.51.100.7"
 
 
 def test_pre_moderation_rejection_records_sanitized_audit(
@@ -407,18 +486,28 @@ def test_persistence_cleanup_deletes_orphaned_blob(monkeypatch: pytest.MonkeyPat
     assert services.card_repository._records == {}
 
 
-def test_concurrent_duplicates_do_not_duplicate_model_calls() -> None:
+def test_concurrent_duplicates_do_not_duplicate_model_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class SlowMockAIClient(MockAIClient):
         def __init__(self, settings) -> None:
             super().__init__(settings)
             self.text_calls = 0
+            self.image_calls = 0
 
         async def generate_card(self, prompt: str, *, request_id: str):
             self.text_calls += 1
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.45)
             return await super().generate_card(prompt, request_id=request_id)
 
-    async def run_concurrency() -> tuple[list[dict[str, str]], int]:
+        async def generate_image(self, art_prompt: str, *, request_id: str):
+            self.image_calls += 1
+            return await super().generate_image(art_prompt, request_id=request_id)
+
+    monkeypatch.setenv("UPSTREAM_TIMEOUT_SECONDS", "0.8")
+    monkeypatch.setenv("OVERALL_TIMEOUT_SECONDS", "1.6")
+
+    async def run_concurrency() -> tuple[list[dict[str, str]], int, int]:
         settings = load_app_settings()
         ai_client = SlowMockAIClient(settings)
         defaults = create_services(settings)
@@ -457,9 +546,100 @@ def test_concurrent_duplicates_do_not_duplicate_model_calls() -> None:
                 client_ip="127.0.0.1",
             ),
         )
-        return [result.model_dump() for result in results], ai_client.text_calls
+        return (
+            [result.model_dump() for result in results],
+            ai_client.text_calls,
+            ai_client.image_calls,
+        )
 
-    results, text_calls = asyncio.run(run_concurrency())
+    results, text_calls, image_calls = asyncio.run(run_concurrency())
 
     assert results[0]["cardId"] == results[1]["cardId"]
     assert text_calls == 1
+    assert image_calls == 1
+
+
+def test_concurrent_artwork_retries_do_not_duplicate_image_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class SlowRetryAIClient(MockAIClient):
+        def __init__(self, settings) -> None:
+            super().__init__(settings)
+            self.initial_image_calls = 0
+            self.retry_image_calls = 0
+
+        async def generate_image(self, art_prompt: str, *, request_id: str):
+            if "[[mock:image-500]]" in art_prompt:
+                self.initial_image_calls += 1
+            else:
+                self.retry_image_calls += 1
+            await asyncio.sleep(0.45)
+            return await super().generate_image(art_prompt, request_id=request_id)
+
+    monkeypatch.setenv("UPSTREAM_TIMEOUT_SECONDS", "0.8")
+    monkeypatch.setenv("OVERALL_TIMEOUT_SECONDS", "1.6")
+
+    async def run_concurrency() -> tuple[list[dict[str, str]], int, int]:
+        settings = load_app_settings()
+        ai_client = SlowRetryAIClient(settings)
+        defaults = create_services(settings)
+        services = AppServices(
+            settings=settings,
+            card_repository=InMemoryCardRepository(),
+            audit_repository=InMemoryAuditRepository(),
+            asset_store=InMemoryAssetStore(),
+            ai_client=ai_client,
+            moderation_service=defaults.moderation_service,
+            rate_limiter=defaults.rate_limiter,
+            csrf_protector=defaults.csrf_protector,
+        )
+        service = CardGenerationService(services)
+        owner = AuthenticatedOwner(
+            owner_id=TEST_OWNER_ID,
+            tenant_id=None,
+            object_id=None,
+            subject="sub",
+            display_name="Gimli",
+            email="gimli@example.com",
+        )
+        partial = await service.generate_card(
+            owner=owner,
+            prompt="create a safe fantasy knight [[mock:image-500]]",
+            idempotency_key="idem-artwork-partial",
+            request_id="req-partial",
+            client_ip="127.0.0.1",
+        )
+        record = await services.card_repository.get(owner.owner_id, partial.cardId)
+        assert record is not None
+        record.derived_art_prompt = record.derived_art_prompt.replace("[[mock:image-500]]", "")
+        await services.card_repository.save(record)
+
+        results = await asyncio.gather(
+            service.retry_artwork(
+                owner=owner,
+                card_id=partial.cardId,
+                idempotency_key="idem-artwork-retry",
+                request_id="req-retry-1",
+                client_ip="127.0.0.1",
+            ),
+            service.retry_artwork(
+                owner=owner,
+                card_id=partial.cardId,
+                idempotency_key="idem-artwork-retry",
+                request_id="req-retry-2",
+                client_ip="127.0.0.1",
+            ),
+        )
+        return (
+            [result.model_dump() for result in results],
+            ai_client.initial_image_calls,
+            ai_client.retry_image_calls,
+        )
+
+    results, initial_image_calls, retry_image_calls = asyncio.run(run_concurrency())
+
+    assert results[0]["cardId"] == results[1]["cardId"]
+    assert results[0]["status"] == "completed"
+    assert results[1]["status"] == "completed"
+    assert initial_image_calls == 1
+    assert retry_image_calls == 1

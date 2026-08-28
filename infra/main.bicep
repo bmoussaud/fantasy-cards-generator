@@ -112,6 +112,9 @@ param rateLimitIpRequests int = 12
 @description('Per-IP rate-limit window in seconds.')
 param rateLimitIpWindowSeconds int = 60
 
+@description('Trusted reverse-proxy hops for request IP extraction. Keep 0 for direct app access; use 1 behind Azure Container Apps ingress so only ACA''s rightmost appended X-Forwarded-For hop is trusted.')
+param trustedProxyHops int = 1
+
 @description('Maximum retries for retryable upstream dependencies.')
 param upstreamMaxRetries int = 2
 
@@ -251,6 +254,7 @@ module containerApps './modules/container-apps.bicep' = {
     rateLimitUserWindowSeconds: rateLimitUserWindowSeconds
     serviceName: serviceName
     tags: tags
+    trustedProxyHops: trustedProxyHops
     upstreamBaseBackoffSeconds: upstreamBaseBackoffSeconds
     upstreamMaxRetries: upstreamMaxRetries
     upstreamTimeoutSeconds: upstreamTimeoutSeconds

@@ -94,6 +94,9 @@ param rateLimitIpRequests int = 12
 @description('Per-IP rate-limit window injected as RATE_LIMIT_IP_WINDOW_SECONDS.')
 param rateLimitIpWindowSeconds int = 60
 
+@description('Trusted reverse-proxy hops injected as TRUSTED_PROXY_HOPS. Azure Container Apps ingress appends the trustworthy client IP on the rightmost X-Forwarded-For hop.')
+param trustedProxyHops int = 1
+
 @description('Maximum upstream retries injected as UPSTREAM_MAX_RETRIES.')
 param upstreamMaxRetries int = 2
 
@@ -213,6 +216,10 @@ var containerAppEnv = concat(
     {
       name: 'RATE_LIMIT_IP_WINDOW_SECONDS'
       value: string(rateLimitIpWindowSeconds)
+    }
+    {
+      name: 'TRUSTED_PROXY_HOPS'
+      value: string(trustedProxyHops)
     }
     {
       name: 'UPSTREAM_MAX_RETRIES'

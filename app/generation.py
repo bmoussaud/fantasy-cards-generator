@@ -390,10 +390,24 @@ class AbstractCardRepository:
 
 
 class AbstractAuditRepository:
+    async def reserve_audit(
+        self,
+        *,
+        owner_id: str,
+        card_id: str,
+        request_hash: str,
+        idempotency_key: str,
+        request_id: str,
+    ) -> tuple[StoredCard | None, bool]:
+        raise NotImplementedError
+
     async def save_audit(self, record: StoredCard) -> None:
         raise NotImplementedError
 
     async def get_audit(self, owner_id: str, card_id: str) -> StoredCard | None:
+        raise NotImplementedError
+
+    async def delete_audit(self, owner_id: str, card_id: str) -> None:
         raise NotImplementedError
 
 
@@ -459,6 +473,32 @@ class InMemoryAuditRepository(AbstractAuditRepository):
         self._records: dict[tuple[str, str], StoredCard] = {}
         self._lock = asyncio.Lock()
 
+    async def reserve_audit(
+        self,
+        *,
+        owner_id: str,
+        card_id: str,
+        request_hash: str,
+        idempotency_key: str,
+        request_id: str,
+    ) -> tuple[StoredCard | None, bool]:
+        async with self._lock:
+            key = (owner_id, card_id)
+            existing = self._records.get(key)
+            if existing is not None:
+                return existing, False
+            placeholder = StoredCard(
+                id=card_id,
+                document_type="generation-audit",
+                owner_id=owner_id,
+                request_id=request_id,
+                idempotency_key=idempotency_key,
+                request_hash=request_hash,
+                status="audit_processing",
+            )
+            self._records[key] = placeholder
+            return placeholder, True
+
     async def save_audit(self, record: StoredCard) -> None:
         async with self._lock:
             self._records[(record.owner_id, record.id)] = record
@@ -466,6 +506,10 @@ class InMemoryAuditRepository(AbstractAuditRepository):
     async def get_audit(self, owner_id: str, card_id: str) -> StoredCard | None:
         async with self._lock:
             return self._records.get((owner_id, card_id))
+
+    async def delete_audit(self, owner_id: str, card_id: str) -> None:
+        async with self._lock:
+            self._records.pop((owner_id, card_id), None)
 
 
 class InMemoryAssetStore(AbstractAssetStore):
@@ -572,6 +616,37 @@ class AzureCosmosCardRepository(AbstractCardRepository, AbstractAuditRepository)
 
     async def get_audit(self, owner_id: str, card_id: str) -> StoredCard | None:
         return await self.get(owner_id, card_id)
+
+    async def reserve_audit(
+        self,
+        *,
+        owner_id: str,
+        card_id: str,
+        request_hash: str,
+        idempotency_key: str,
+        request_id: str,
+    ) -> tuple[StoredCard | None, bool]:
+        from azure.cosmos.exceptions import CosmosResourceExistsError
+
+        record = StoredCard(
+            id=card_id,
+            document_type="generation-audit",
+            owner_id=owner_id,
+            request_id=request_id,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+            status="audit_processing",
+        )
+        container = await self._get_container()
+        try:
+            await container.create_item(record.to_document())
+            return record, True
+        except CosmosResourceExistsError:
+            existing = await self.get_audit(owner_id, card_id)
+            return existing, False
+
+    async def delete_audit(self, owner_id: str, card_id: str) -> None:
+        await self.delete(owner_id, card_id)
 
 
 class AzureBlobAssetStore(AbstractAssetStore):
@@ -900,7 +975,6 @@ class CardGenerationService:
         request_id: str,
         client_ip: str,
     ) -> CardResponseModel:
-        await self._enforce_rate_limits(owner.owner_id, client_ip)
         normalized_prompt = normalize_prompt(prompt)
         request_hash = digest_text(normalized_prompt)
         card_id = deterministic_card_id(owner.owner_id, idempotency_key)
@@ -924,6 +998,12 @@ class CardGenerationService:
                     error_code="idempotency_conflict",
                 )
             return await self._replay_existing_or_wait(owner.owner_id, card_id)
+
+        try:
+            await self._enforce_rate_limits(owner.owner_id, client_ip)
+        except ProblemDetails:
+            await self.services.card_repository.delete(owner.owner_id, card_id)
+            raise
 
         try:
             return await asyncio.wait_for(
@@ -964,7 +1044,6 @@ class CardGenerationService:
         request_id: str,
         client_ip: str,
     ) -> CardResponseModel:
-        await self._enforce_rate_limits(owner.owner_id, client_ip)
         record = await self.services.card_repository.get(owner.owner_id, card_id)
         if record is None or record.status != "awaiting_artwork_retry":
             raise ProblemDetails(
@@ -976,9 +1055,15 @@ class CardGenerationService:
             )
         request_hash = digest_text(f"retry:{card_id}")
         retry_card_id = deterministic_card_id(owner.owner_id, idempotency_key)
-        audit = await self.services.audit_repository.get_audit(owner.owner_id, retry_card_id)
-        if audit is not None:
-            if audit.request_hash != request_hash:
+        reservation, created = await self.services.audit_repository.reserve_audit(
+            owner_id=owner.owner_id,
+            card_id=retry_card_id,
+            request_hash=request_hash,
+            idempotency_key=idempotency_key,
+            request_id=request_id,
+        )
+        if reservation is not None and not created:
+            if reservation.request_hash != request_hash:
                 raise ProblemDetails(
                     status_code=409,
                     title="Conflict",
@@ -986,31 +1071,44 @@ class CardGenerationService:
                     type="/problems/idempotency-conflict",
                     error_code="idempotency_conflict",
                 )
-            if audit.status == "audit_completed" or audit.status == "completed":
-                refreshed = await self.services.card_repository.get(owner.owner_id, card_id)
-                return self._as_response(refreshed or record)
-            if audit.status == "audit_failed":
-                return self._as_response(record)
-        await self.services.audit_repository.save_audit(
-            StoredCard(
-                id=retry_card_id,
-                document_type="generation-audit",
+            return await self._replay_artwork_retry_or_wait(
                 owner_id=owner.owner_id,
-                request_id=request_id,
-                idempotency_key=idempotency_key,
-                request_hash=request_hash,
-                status="audit_processing",
-                ttl_seconds=self.services.settings.audit_retention_days * 24 * 60 * 60,
+                card_id=card_id,
+                retry_card_id=retry_card_id,
+                fallback_record=record,
             )
-        )
-        return await asyncio.wait_for(
-            self._complete_artwork(
-                record,
-                request_id=request_id,
-                retry_idempotency_key=idempotency_key,
-            ),
-            timeout=self.services.settings.retry.overall_timeout_seconds,
-        )
+
+        try:
+            await self._enforce_rate_limits(owner.owner_id, client_ip)
+        except ProblemDetails:
+            await self.services.audit_repository.delete_audit(owner.owner_id, retry_card_id)
+            raise
+
+        try:
+            return await asyncio.wait_for(
+                self._complete_artwork(
+                    record,
+                    request_id=request_id,
+                    retry_idempotency_key=idempotency_key,
+                ),
+                timeout=self.services.settings.retry.overall_timeout_seconds,
+            )
+        except asyncio.TimeoutError as exc:
+            await self._save_audit_failure(
+                owner.owner_id,
+                retry_card_id,
+                request_id,
+                idempotency_key,
+                request_hash,
+                "upstream_timeout",
+            )
+            raise ProblemDetails(
+                status_code=504,
+                title="Gateway Timeout",
+                detail="The artwork retry exceeded the overall timeout.",
+                type="/problems/upstream-timeout",
+                error_code="upstream_timeout",
+            ) from exc
 
     async def fetch_image(self, owner: AuthenticatedOwner, card_id: str) -> tuple[bytes, str]:
         record = await self.services.card_repository.get(owner.owner_id, card_id)
@@ -1229,6 +1327,8 @@ class CardGenerationService:
         request_id: str,
         retry_idempotency_key: str,
     ) -> CardResponseModel:
+        retry_card_id = deterministic_card_id(record.owner_id, retry_idempotency_key)
+        request_hash = digest_text(f"retry:{record.id}")
         if record.validated_payload is None or record.derived_art_prompt is None:
             raise ProblemDetails(
                 status_code=409,
@@ -1245,7 +1345,15 @@ class CardGenerationService:
                 service_name="foundry-image",
                 request_id=request_id,
             )
-        except ProblemDetails:
+        except ProblemDetails as exc:
+            await self._save_audit_failure(
+                record.owner_id,
+                retry_card_id,
+                request_id,
+                retry_idempotency_key,
+                request_hash,
+                exc.error_code,
+            )
             return self._as_response(record)
         post_image = await self.services.moderation_service.moderate_image(image_result.image)
         moderation = [ModerationDecision.model_validate(item) for item in record.moderation]
@@ -1253,10 +1361,10 @@ class CardGenerationService:
         if not post_image.allowed:
             await self._save_audit_failure(
                 record.owner_id,
-                f"{record.id}:unsafe-retry-image",
+                retry_card_id,
                 request_id,
                 retry_idempotency_key,
-                digest_text(f"retry:{record.id}"),
+                request_hash,
                 post_image.reasonCode,
             )
             return self._as_response(record)
@@ -1287,12 +1395,12 @@ class CardGenerationService:
         )
         await self.services.audit_repository.save_audit(
             StoredCard(
-                id=deterministic_card_id(record.owner_id, retry_idempotency_key),
+                id=retry_card_id,
                 document_type="generation-audit",
                 owner_id=record.owner_id,
                 request_id=request_id,
                 idempotency_key=retry_idempotency_key,
-                request_hash=digest_text(f"retry:{record.id}"),
+                request_hash=request_hash,
                 status="audit_completed",
                 ttl_seconds=self.services.settings.audit_retention_days * 24 * 60 * 60,
             )
@@ -1433,44 +1541,73 @@ class CardGenerationService:
         )
 
     async def _replay_existing_or_wait(self, owner_id: str, card_id: str) -> CardResponseModel:
-        for _ in range(8):
+        deadline = time.monotonic() + self.services.settings.retry.overall_timeout_seconds + 0.5
+        while time.monotonic() < deadline:
             record = await self.services.card_repository.get(owner_id, card_id)
-            if record is None:
-                break
-            if record.status in {"completed", "awaiting_artwork_retry"}:
+            if record is not None and record.status in {"completed", "awaiting_artwork_retry"}:
                 return self._as_response(record)
-            await asyncio.sleep(0.05)
-        audit = await self.services.audit_repository.get_audit(owner_id, card_id)
-        if audit is not None and audit.status == "audit_failed":
-            error_code = audit.error_code or "generation_failed"
-            if error_code in {
-                "prompt_rejected",
-                "living-artist-imitation",
-                "copyrighted-character",
-            }:
+
+            audit = await self.services.audit_repository.get_audit(owner_id, card_id)
+            if audit is not None and audit.status == "audit_failed":
+                error_code = audit.error_code or "generation_failed"
+                if error_code in {
+                    "prompt_rejected",
+                    "living-artist-imitation",
+                    "copyrighted-character",
+                }:
+                    raise ProblemDetails(
+                        status_code=422,
+                        title="Prompt Rejected",
+                        detail="The prompt was rejected by the moderation policy.",
+                        type="/problems/prompt-rejected",
+                        error_code="prompt_rejected",
+                    )
                 raise ProblemDetails(
-                    status_code=422,
-                    title="Prompt Rejected",
-                    detail="The prompt was rejected by the moderation policy.",
-                    type="/problems/prompt-rejected",
-                    error_code="prompt_rejected",
+                    status_code=503,
+                    title="Service Unavailable",
+                    detail=(
+                        "The same request previously failed safely and can be "
+                        "retried with a new idempotency key."
+                    ),
+                    type="/problems/replayed-failure",
+                    error_code=error_code,
                 )
-            raise ProblemDetails(
-                status_code=503,
-                title="Service Unavailable",
-                detail=(
-                    "The same request previously failed safely and can be "
-                    "retried with a new idempotency key."
-                ),
-                type="/problems/replayed-failure",
-                error_code=error_code,
-            )
+            await asyncio.sleep(0.05)
+
         raise ProblemDetails(
-            status_code=409,
-            title="Conflict",
-            detail="An identical request is already being processed.",
-            type="/problems/request-in-progress",
-            error_code="request_in_progress",
+            status_code=504,
+            title="Gateway Timeout",
+            detail="An identical request did not complete before the replay timeout.",
+            type="/problems/request-replay-timeout",
+            error_code="request_replay_timeout",
+        )
+
+    async def _replay_artwork_retry_or_wait(
+        self,
+        *,
+        owner_id: str,
+        card_id: str,
+        retry_card_id: str,
+        fallback_record: StoredCard,
+    ) -> CardResponseModel:
+        deadline = time.monotonic() + self.services.settings.retry.overall_timeout_seconds + 0.5
+        while time.monotonic() < deadline:
+            audit = await self.services.audit_repository.get_audit(owner_id, retry_card_id)
+            if audit is not None:
+                if audit.status in {"audit_completed", "completed"}:
+                    refreshed = await self.services.card_repository.get(owner_id, card_id)
+                    if refreshed is not None:
+                        return self._as_response(refreshed)
+                if audit.status == "audit_failed":
+                    refreshed = await self.services.card_repository.get(owner_id, card_id)
+                    return self._as_response(refreshed or fallback_record)
+            await asyncio.sleep(0.05)
+        raise ProblemDetails(
+            status_code=504,
+            title="Gateway Timeout",
+            detail="An identical artwork retry did not complete before the replay timeout.",
+            type="/problems/request-replay-timeout",
+            error_code="request_replay_timeout",
         )
 
     async def _retry_upstream(
@@ -1692,10 +1829,13 @@ def title_from_prompt(prompt: str) -> str:
     return " ".join(words)[:80] or "Unnamed Hero"
 
 
-def client_ip_from_request(request) -> str:
+def client_ip_from_request(request, *, trusted_proxy_hops: int = 0) -> str:
     forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",", 1)[0].strip()
+    forwarded_proto = request.headers.get("x-forwarded-proto")
+    if trusted_proxy_hops > 0 and forwarded and forwarded_proto:
+        hops = [segment.strip() for segment in forwarded.split(",") if segment.strip()]
+        if len(hops) >= trusted_proxy_hops:
+            return hops[-trusted_proxy_hops]
     if request.client and request.client.host:
         return request.client.host
     return "unknown"
