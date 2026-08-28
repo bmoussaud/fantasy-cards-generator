@@ -128,3 +128,14 @@ def test_cosmos_container_enables_item_level_ttl() -> None:
     cosmos_bicep = (REPO_ROOT / "infra" / "modules" / "cosmos-db.bicep").read_text()
 
     assert "defaultTtl: -1" in cosmos_bicep
+
+
+def test_cosmos_account_explicitly_keeps_public_network_access_for_mvp() -> None:
+    cosmos_bicep = (REPO_ROOT / "infra" / "modules" / "cosmos-db.bicep").read_text()
+
+    assert "ipRules: []" in cosmos_bicep
+    assert "isVirtualNetworkFilterEnabled: false" in cosmos_bicep
+    assert "networkAclBypass: 'None'" in cosmos_bicep
+    assert "networkAclBypassResourceIds: []" in cosmos_bicep
+    assert "publicNetworkAccess: 'Enabled'" in cosmos_bicep
+    assert "virtualNetworkRules: []" in cosmos_bicep
