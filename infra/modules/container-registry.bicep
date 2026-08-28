@@ -42,6 +42,7 @@ resource acrPullRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-
 }
 
 output acrPullIdentityResourceId string = acrPullIdentity.id
+output acrPullIdentityPrincipalId string = acrPullIdentity.properties.principalId
 output registryLoginServer string = containerRegistry.properties.loginServer
 output registryName string = containerRegistry.name
 output registryResourceId string = containerRegistry.id
