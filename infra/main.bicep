@@ -88,6 +88,51 @@ param aiFoundryImageDeploymentSkuName string = 'GlobalStandard'
 @description('Azure AI Foundry capacity units for the image deployment. Verify against live quota before deployment.')
 param aiFoundryImageDeploymentCapacity int = 1
 
+@description('AI orchestration mode for the app runtime.')
+param aiMode string = 'live'
+
+@description('Persistence mode for the app runtime.')
+param persistenceMode string = 'azure'
+
+@description('Moderation service for the app runtime.')
+param moderationService string = 'heuristic'
+
+@description('Moderation policy name for the app runtime.')
+param moderationPolicyName string = 'conservative-v1'
+
+@description('Per-user request limit for generation endpoints.')
+param rateLimitUserRequests int = 6
+
+@description('Per-user rate-limit window in seconds.')
+param rateLimitUserWindowSeconds int = 60
+
+@description('Per-IP request limit for generation endpoints.')
+param rateLimitIpRequests int = 12
+
+@description('Per-IP rate-limit window in seconds.')
+param rateLimitIpWindowSeconds int = 60
+
+@description('Trusted reverse-proxy hops for request IP extraction. Keep 0 for direct app access; use 1 behind Azure Container Apps ingress so only ACA''s rightmost appended X-Forwarded-For hop is trusted.')
+param trustedProxyHops int = 1
+
+@description('Maximum retries for retryable upstream dependencies.')
+param upstreamMaxRetries int = 2
+
+@description('Base backoff in seconds between retry attempts.')
+param upstreamBaseBackoffSeconds string = '0.15'
+
+@description('Per-upstream timeout in seconds.')
+param upstreamTimeoutSeconds string = '8'
+
+@description('Overall request timeout in seconds.')
+param overallTimeoutSeconds string = '18'
+
+@description('Sanitized audit retention in days.')
+param auditRetentionDays int = 30
+
+@description('Requested image size for artwork generation.')
+param imageSize string = '1024x1024'
+
 var namePrefix = 'fcg'
 var resourceToken = toLower('${namePrefix}-${environmentName}')
 var uniqueToken = uniqueString(subscription().id, resourceGroup().id)
@@ -176,19 +221,43 @@ module containerApps './modules/container-apps.bicep' = {
   params: {
     acrLoginServer: registry.outputs.registryLoginServer
     acrPullIdentityResourceId: registry.outputs.acrPullIdentityResourceId
+    aiMode: aiMode
     appInsightsConnectionString: monitoring.outputs.appInsightsConnectionString
     appSessionSecretKeyValue: appSessionSecretKeyValue
+    auditRetentionDays: auditRetentionDays
+    blobContainerName: cardAssetsContainerName
+    blobEndpoint: 'https://${storageAccountName}.blob.core.windows.net/'
     containerAppName: containerAppName
     containerAppsEnvironmentResourceId: containerAppsEnvironment.outputs.containerAppsEnvironmentResourceId
     containerImage: empty(containerImage) ? '${registry.outputs.registryLoginServer}/fantasy-cards-generator:latest' : containerImage
+    cosmosContainerName: cosmosContainerName
+    cosmosDatabaseName: cosmosDatabaseName
+    cosmosEndpoint: 'https://${cosmosAccountName}.documents.azure.com:443/'
     entraClientId: entraClientId
     entraClientSecretValue: entraClientSecretValue
     entraPostLogoutRedirectUri: deployEntraAppRegistration ? deployedPostLogoutRedirectUri : ''
     entraRedirectUri: deployEntraAppRegistration ? deployedAuthRedirectUri : ''
+    foundryApiVersion: '2025-03-01-preview'
+    foundryEndpoint: 'https://${aiFoundryAccountName}.cognitiveservices.azure.com/'
+    foundryImageDeployment: aiFoundryImageDeploymentName
+    foundryTextDeployment: aiFoundryTextDeploymentName
+    imageSize: imageSize
     keyVaultUri: security.outputs.keyVaultUri
     location: location
+    moderationPolicyName: moderationPolicyName
+    moderationService: moderationService
+    overallTimeoutSeconds: overallTimeoutSeconds
+    persistenceMode: persistenceMode
+    rateLimitIpRequests: rateLimitIpRequests
+    rateLimitIpWindowSeconds: rateLimitIpWindowSeconds
+    rateLimitUserRequests: rateLimitUserRequests
+    rateLimitUserWindowSeconds: rateLimitUserWindowSeconds
     serviceName: serviceName
     tags: tags
+    trustedProxyHops: trustedProxyHops
+    upstreamBaseBackoffSeconds: upstreamBaseBackoffSeconds
+    upstreamMaxRetries: upstreamMaxRetries
+    upstreamTimeoutSeconds: upstreamTimeoutSeconds
   }
 }
 

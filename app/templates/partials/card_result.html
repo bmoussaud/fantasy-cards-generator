@@ -1,0 +1,20 @@
+<div class="card-result">
+    <input id="generate-idempotency-key" type="hidden" name="idempotency_key" value="{{ next_idempotency_key }}" hx-swap-oob="true" />
+    <h2>{{ card.name }}</h2>
+    <p><strong>Status:</strong> {{ card.status }}</p>
+    <p><strong>Type:</strong> {{ card.cardType }} · <strong>Rarity:</strong> {{ card.rarity }}</p>
+    <p><strong>Mana:</strong> {{ card.manaCost }} · <strong>Attack:</strong> {{ card.attack }} · <strong>Health:</strong> {{ card.health }}</p>
+    <p>{{ card.rulesText }}</p>
+    <p><em>{{ card.flavorText }}</em></p>
+    {% if card.imageUrl %}
+        <img src="{{ card.imageUrl }}" alt="Generated artwork for {{ card.name }}" width="256" height="256" />
+    {% else %}
+        <p>Artwork is not ready yet. You can safely retry artwork generation.</p>
+        <form hx-post="/ui/cards/{{ card.cardId }}/artwork/retry" hx-target="#generation-result" hx-swap="innerHTML" hx-indicator="#retry-pending-{{ card.cardId }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+            <input type="hidden" name="idempotency_key" value="{{ retry_idempotency_key }}" />
+            <button type="submit">Retry artwork</button>
+            <p id="retry-pending-{{ card.cardId }}" class="htmx-indicator">Retrying artwork…</p>
+        </form>
+    {% endif %}
+</div>

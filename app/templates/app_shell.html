@@ -1,11 +1,16 @@
 {% extends "layout.html" %}
 
 {% block content %}
-    <h1>Authenticated app shell</h1>
-    <p>This baseline layout is reserved for signed-in users.</p>
-    <ul>
-        <li><strong>Subject:</strong> {{ user.sub }}</li>
-        <li><strong>Name:</strong> {{ user.name or "Not provided" }}</li>
-        <li><strong>Email:</strong> {{ user.email or "Not provided" }}</li>
-    </ul>
+    <h1>Generate a fantasy card</h1>
+    <p>Signed in as <strong>{{ user.name or user.email or user.sub }}</strong>.</p>
+    <p>Email: {{ user.email or "Not provided" }}</p>
+    <form hx-post="/ui/cards/generate" hx-target="#generation-result" hx-swap="innerHTML" hx-indicator="#generation-pending">
+        <label for="prompt">Card prompt</label>
+        <textarea id="prompt" name="prompt" rows="5" maxlength="400" required placeholder="Describe the fantasy card you want to create."></textarea>
+        <input id="generate-idempotency-key" type="hidden" name="idempotency_key" value="{{ generate_idempotency_key }}" />
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+        <button type="submit">Generate card</button>
+        <p id="generation-pending" class="htmx-indicator">Generating your card…</p>
+    </form>
+    <section id="generation-result" aria-live="polite"></section>
 {% endblock %}

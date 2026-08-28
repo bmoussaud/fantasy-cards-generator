@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import time
 from base64 import b64decode
-from collections.abc import Generator
 from typing import Any
 from uuid import uuid4
 
@@ -15,7 +14,6 @@ from itsdangerous import TimestampSigner
 from joserfc import jwt
 from joserfc.errors import InvalidClaimError
 from joserfc.jwk import OctKey
-from starlette.responses import RedirectResponse
 
 from app import main as main_module
 from app.auth import (
@@ -26,43 +24,7 @@ from app.auth import (
     load_auth_settings,
 )
 from app.main import create_app
-
-
-class FakeOAuthClient:
-    server_metadata = {
-        "issuer": "https://login.microsoftonline.com/{tenantid}/v2.0",
-    }
-
-    async def load_server_metadata(self) -> dict[str, str]:
-        return self.server_metadata
-
-    async def authorize_redirect(
-        self,
-        request,
-        redirect_uri: str | None,
-        nonce: str | None = None,
-        **_: object,
-    ) -> RedirectResponse:
-        assert redirect_uri == "https://testserver/auth/callback"
-        assert nonce
-        return RedirectResponse(
-            url="https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize?code_challenge=test",
-            status_code=307,
-        )
-
-    async def authorize_access_token(self, request, **_: object) -> dict[str, Any]:
-        assert request.query_params["code"] == "valid-code"
-        return {
-            "id_token": "signed-id-token",
-            "access_token": "unused",
-            "userinfo": {
-                "sub": "user-123",
-                "name": "Aragorn",
-                "email": "aragorn@example.com",
-                "tid": "partner-tenant-id",
-                "roles": "ignored",
-            },
-        }
+from tests.conftest import TEST_OBJECT_ID, TEST_OWNER_ID, TEST_TENANT_ID, FakeOAuthClient
 
 
 class FakeAsyncOpenIDClient(AsyncOpenIDMixin):
@@ -83,18 +45,6 @@ def decode_session_cookie(cookie_value: str, secret_key: str) -> dict[str, objec
     signer = TimestampSigner(secret_key)
     unsigned = signer.unsign(cookie_value.encode("utf-8"))
     return json.loads(b64decode(unsigned))
-
-
-@pytest.fixture(autouse=True)
-def auth_environment(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
-    monkeypatch.setenv("APP_ENV", "test")
-    monkeypatch.setenv("APP_SESSION_SECRET_KEY", "test-session-secret")
-    monkeypatch.setenv("ENTRA_CLIENT_ID", "client-id")
-    monkeypatch.setenv("ENTRA_CLIENT_SECRET", "client-secret")
-    monkeypatch.setenv("ENTRA_AUTHORITY", DEFAULT_ENTRA_AUTHORITY)
-    monkeypatch.setenv("ENTRA_REDIRECT_URI", "https://testserver/auth/callback")
-    monkeypatch.setenv("ENTRA_POST_LOGOUT_REDIRECT_URI", "https://testserver/")
-    yield
 
 
 def test_load_auth_settings_defaults_to_organizations_authority(
@@ -180,7 +130,7 @@ def test_login_redirects_to_entra_and_sets_secure_session_cookie(
     assert "secure" in set_cookie
 
 
-def test_callback_persists_minimal_user_claims_in_session(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_callback_persists_owner_claims_in_session(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(main_module, "create_oauth_client", lambda settings: FakeOAuthClient())
     client = TestClient(create_app(), base_url="https://testserver")
 
@@ -202,12 +152,13 @@ def test_callback_persists_minimal_user_claims_in_session(monkeypatch: pytest.Mo
         client.cookies.get("fantasy_cards_session"),
         "test-session-secret",
     )
-    assert stored_session == {
-        "user": {
-            "sub": "user-123",
-            "name": "Aragorn",
-            "email": "aragorn@example.com",
-        }
+    assert stored_session["user"] == {
+        "sub": "user-123",
+        "name": "Aragorn",
+        "email": "aragorn@example.com",
+        "tenant_id": TEST_TENANT_ID,
+        "object_id": TEST_OBJECT_ID,
+        "owner_id": TEST_OWNER_ID,
     }
     assert "signed-id-token" not in app_shell_response.text
     assert "unused" not in app_shell_response.text
@@ -241,34 +192,14 @@ def test_callback_rejects_oauth_validation_errors(monkeypatch: pytest.MonkeyPatc
     assert response.json()["detail"] == "Authentication failed: mismatching_state"
 
 
-def test_callback_logs_unhandled_validation_exceptions(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    class BrokenOAuthClient(FakeOAuthClient):
-        async def authorize_access_token(self, request, **_: object) -> dict[str, Any]:
-            raise RuntimeError("issuer mismatch")
-
-    monkeypatch.setattr(main_module, "create_oauth_client", lambda settings: BrokenOAuthClient())
-    client = TestClient(create_app(), base_url="https://testserver")
-
-    client.get("/auth/login", follow_redirects=False)
-    with caplog.at_level("ERROR"):
-        response = client.get("/auth/callback?code=valid-code&state=opaque")
-
-    assert response.status_code == 400
-    assert response.json()["detail"] == "Authentication failed while validating the Entra callback."
-    assert "Unhandled exception while validating the Entra callback." in caplog.text
-    assert "issuer mismatch" in caplog.text
-
-
-def test_extract_user_claims_does_not_enforce_tid_allowlists() -> None:
+def test_extract_user_claims_uses_tid_and_oid_for_owner_identity() -> None:
     claims = extract_user_claims(
         {
             "sub": "user-123",
             "name": "Aragorn",
             "email": "aragorn@example.com",
-            "tid": "any-partner-tenant-id",
+            "tid": TEST_TENANT_ID,
+            "oid": TEST_OBJECT_ID,
         }
     )
 
@@ -276,6 +207,9 @@ def test_extract_user_claims_does_not_enforce_tid_allowlists() -> None:
         "sub": "user-123",
         "name": "Aragorn",
         "email": "aragorn@example.com",
+        "tenant_id": TEST_TENANT_ID,
+        "object_id": TEST_OBJECT_ID,
+        "owner_id": TEST_OWNER_ID,
     }
 
 

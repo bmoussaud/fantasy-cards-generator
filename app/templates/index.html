@@ -5,9 +5,9 @@
     <p>FastAPI + Jinja2 + HTMX scaffold is running.</p>
     {% if user %}
         <p>You are signed in as <strong>{{ user.name or user.email or user.sub }}</strong>.</p>
-        <p><a href="/app">Open the authenticated app shell</a>.</p>
+        <p><a href="/app">Open the card generator</a>.</p>
     {% elif auth_configured %}
-        <p>Sign in with Microsoft Entra External ID to access the authenticated app shell baseline.</p>
+        <p>Sign in with Microsoft Entra External ID to generate cards.</p>
         <p><a href="/auth/login">Sign in</a></p>
     {% else %}
         <p>Authentication is not configured yet. Follow <code>docs/auth-setup.md</code> to enable sign-in.</p>

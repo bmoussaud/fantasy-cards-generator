@@ -38,8 +38,18 @@ registration details.
 ## Run tests
 
 ```bash
-uv run pytest
+uv run pytest -q
 ```
+
+## Card generation configuration
+
+The single synchronous card-generation flow supports two local modes:
+
+- `AI_MODE=mock` + `PERSISTENCE_MODE=memory` for deterministic development/tests
+- `AI_MODE=live` + `PERSISTENCE_MODE=azure` for Azure AI Foundry + Cosmos DB + Blob Storage
+
+See `docs/card-generation-api.md` for the API contract, moderation policy, and
+runtime settings.
 
 ## Azure deployment
 
