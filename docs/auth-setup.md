@@ -37,7 +37,7 @@ ENTRA_SCOPES=openid profile email
   `https://localhost:8000/...`. Plain HTTP is fine only for anonymous pages
   that do not exercise sign-in.
 
-## Deployed environments: Key Vault-backed wiring
+## Deployed environments: Key Vault + Container Apps secret wiring
 
 `.env` is intentionally **not** shipped in the container image (it stays
 gitignored and is for local development only). Deployed Container Apps get
@@ -46,14 +46,14 @@ their runtime configuration entirely from `infra/main.bicep` /
 
 | Variable | Source in deployed environments |
 |---|---|
-| `APP_SESSION_SECRET_KEY` | Key Vault secret `app-session-secret-key`, mounted as a Container Apps `secretRef` (`keyVaultUrl` + the existing ACR-pull managed identity) |
-| `ENTRA_CLIENT_SECRET` | Key Vault secret `entra-client-secret`, mounted the same way |
+| `APP_SESSION_SECRET_KEY` | Stored in Key Vault as `app-session-secret-key`, then mirrored into the Container App's own secret set as `app-session-secret-key` |
+| `ENTRA_CLIENT_SECRET` | Stored in Key Vault as `entra-client-secret`, then mirrored into the Container App's own secret set as `entra-client-secret` |
 | `ENTRA_CLIENT_ID` | Plain env var, sourced from the Entra app-registration Bicep module output |
 | `ENTRA_REDIRECT_URI` | Plain env var, auto-derived from the deployed Container Apps hostname (`deployedAuthRedirectUri` output) — never set manually |
 | `ENTRA_POST_LOGOUT_REDIRECT_URI` | Plain env var, auto-derived the same way |
 | `ENTRA_AUTHORITY`, `ENTRA_SCOPES` | Not injected; the app's code defaults are used in every environment |
 
-To populate the two Key Vault-backed values before `azd provision`:
+To populate the two deployment-time secret values before `azd provision`:
 
 ```bash
 azd env set APP_SESSION_SECRET_KEY "$(openssl rand -base64 48)"
@@ -65,10 +65,9 @@ azd env set APP_SESSION_SECRET_KEY "$(openssl rand -base64 48)"
 
 Both values flow into Bicep via `infra/main.parameters.json`
 (`appSessionSecretKeyValue` / `entraClientSecretValue`) as `@secure()`
-parameters, so they are never written into the Container App's own JSON
-configuration in plaintext — only the Key Vault secret URIs are, and the
-Container App resolves the actual values at runtime using its managed
-identity's `Key Vault Secrets User` role assignment on the Key Vault.
+parameters. The deployment writes them to Key Vault and also into Azure
+Container Apps' secret store so the app does not depend on the platform's
+Key Vault `secretRef` resolution path during revision provisioning.
 
 If `APP_SESSION_SECRET_KEY` or `ENTRA_CLIENT_SECRET` are unset when
 `azd provision` runs, the corresponding Key Vault secret (and therefore the

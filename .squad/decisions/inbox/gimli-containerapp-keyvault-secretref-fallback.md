@@ -1,0 +1,4 @@
+### 2026-08-28: Stop dev deploys from depending on Container Apps Key Vault secretRefs
+**By:** Gimli
+**What:** Verified that `fcg-dev-acr-pull` was the identity attached to `fcg-dev-app`, the Key Vault was in RBAC mode, and the identity had `Key Vault Secrets User` on the vault scope. Despite that, both ARM deployment and direct `az containerapp secret set ... keyvaultref:` calls still failed to resolve `app-session-secret-key` and `entra-client-secret`, so the Container App now consumes those two values as regular Container Apps secrets while Key Vault remains the durable store of record.
+**Why:** The live failure was in Azure Container Apps' Key Vault secretRef resolution path, not in the repository's principal wiring. Mirroring the same secure inputs into Container Apps removes the broken runtime dependency and made `azd up --environment dev --no-prompt` succeed again.
