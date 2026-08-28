@@ -702,3 +702,13 @@ Breaking changes use `!` after the type/scope or a `BREAKING CHANGE:` footer.
 This applies to all squad members and to `@copilot` PRs.
 
 Standing team-wide convention: every agent enforces it on their own commits; Gandalf and reviewers check it during code review.
+
+## 2026-08-28 — PR title convention: must match Conventional Commits
+
+**Decision:** Every pull request title must itself follow the **Conventional Commits** format used for commit messages: `<type>[optional scope]: <description>` (see the "Commit message convention" entry above for types and examples).
+
+**Rationale:** PR titles are what show up in release notes, squash-merge commit messages, and the repo's history at a glance. Keeping the PR title in the same format as commit messages avoids a squash-merge silently producing a non-conventional commit on `main`, and keeps the whole history consistent regardless of whether a PR is squash-merged, rebased, or merge-committed.
+
+**Applies to:** all squad members and `@copilot` PRs.
+
+**Status:** CONFIRMED 2026-08-28 (per Benoit Moussaud)
