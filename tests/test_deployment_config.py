@@ -42,15 +42,19 @@ def test_container_apps_wire_key_vault_backed_auth_env_vars() -> None:
     container_apps_bicep = (REPO_ROOT / "infra" / "modules" / "container-apps.bicep").read_text()
     security_bicep = (REPO_ROOT / "infra" / "modules" / "security.bicep").read_text()
     main_bicep = (REPO_ROOT / "infra" / "main.bicep").read_text()
+    main_parameters = (REPO_ROOT / "infra" / "main.parameters.json").read_text()
 
-    # APP_SESSION_SECRET_KEY and ENTRA_CLIENT_SECRET must be Key Vault-backed
-    # secretRefs (keyVaultUrl + identity), not plain env vars or ACA-native secrets.
-    assert "keyVaultUrl: appSessionSecretKeySecretUri" in container_apps_bicep
-    assert "keyVaultUrl: entraClientSecretSecretUri" in container_apps_bicep
+    # APP_SESSION_SECRET_KEY and ENTRA_CLIENT_SECRET are mirrored into ACA-native
+    # secrets, while still flowing through secure azd/Bicep inputs upstream.
     assert "name: 'APP_SESSION_SECRET_KEY'" in container_apps_bicep
+    assert "value: appSessionSecretKeyValue" in container_apps_bicep
     assert "secretRef: 'app-session-secret-key'" in container_apps_bicep
     assert "name: 'ENTRA_CLIENT_SECRET'" in container_apps_bicep
+    assert "value: entraClientSecretValue" in container_apps_bicep
     assert "secretRef: 'entra-client-secret'" in container_apps_bicep
+    assert "keyVaultUrl:" not in container_apps_bicep
+    assert "appSessionSecretKeySecretUri" not in container_apps_bicep
+    assert "entraClientSecretSecretUri" not in container_apps_bicep
 
     # ENTRA_CLIENT_ID is a plain env var, not a secretRef.
     assert "name: 'ENTRA_CLIENT_ID'" in container_apps_bicep
@@ -65,11 +69,18 @@ def test_container_apps_wire_key_vault_backed_auth_env_vars() -> None:
     assert "ENTRA_AUTHORITY" not in container_apps_bicep
     assert "ENTRA_SCOPES" not in container_apps_bicep
 
-    # Key Vault must expose secrets and grant the Container App's identity access.
+    # Upstream inputs stay secure: azd passes env-backed values into secure Bicep
+    # params instead of hardcoding plaintext into the template.
+    assert "@secure()" in main_bicep
+    assert "param appSessionSecretKeyValue string = ''" in main_bicep
+    assert "param entraClientSecretValue string = ''" in main_bicep
+    assert '"value": "${APP_SESSION_SECRET_KEY=}"' in main_parameters
+    assert '"value": "${ENTRA_CLIENT_SECRET=}"' in main_parameters
+
+    # Key Vault still stores the provisioned secrets.
     assert "Microsoft.KeyVault/vaults/secrets" in security_bicep
     assert "'app-session-secret-key'" in security_bicep
     assert "'entra-client-secret'" in security_bicep
-    assert "roleDefinitions', keyVaultSecretsUserRoleDefinitionId" in security_bicep
 
     # The deployed redirect URI must be derived from the Container Apps
     # environment domain, not depend on the container app's own output
