@@ -10,13 +10,6 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.responses import RedirectResponse
 
-from app import main as main_module
-from app.main import create_app
-
-TEST_TENANT_ID = str(uuid4())
-TEST_OBJECT_ID = str(uuid4())
-TEST_OWNER_ID = f"{TEST_TENANT_ID}:{TEST_OBJECT_ID}"
-
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("APP_SESSION_SECRET_KEY", "test-session-secret")
 os.environ.setdefault("ENTRA_CLIENT_ID", "client-id")
@@ -36,6 +29,15 @@ os.environ.setdefault("UPSTREAM_BASE_BACKOFF_SECONDS", "0.01")
 os.environ.setdefault("UPSTREAM_TIMEOUT_SECONDS", "0.2")
 os.environ.setdefault("OVERALL_TIMEOUT_SECONDS", "0.6")
 os.environ.setdefault("AUDIT_RETENTION_DAYS", "30")
+
+# The application settings are read when `app.main` is imported, so the test
+# environment must be populated before importing it.
+from app import main as main_module  # noqa: E402
+from app.main import create_app  # noqa: E402
+
+TEST_TENANT_ID = str(uuid4())
+TEST_OBJECT_ID = str(uuid4())
+TEST_OWNER_ID = f"{TEST_TENANT_ID}:{TEST_OBJECT_ID}"
 
 
 class FakeOAuthClient:

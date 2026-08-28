@@ -576,10 +576,7 @@ def test_concurrent_duplicate_replays_rate_limit_rejection_instead_of_timing_out
                 raise ProblemDetails(
                     status_code=429,
                     title="Too Many Requests",
-                    detail=(
-                        f"Rate limit exceeded for {error_suffix}. Retry after "
-                        "60 seconds."
-                    ),
+                    detail=(f"Rate limit exceeded for {error_suffix}. Retry after " "60 seconds."),
                     type="/problems/rate-limit",
                     error_code="rate_limit_exceeded",
                     headers={"Retry-After": "60"},
@@ -669,10 +666,7 @@ def test_shared_repository_topology_preserves_audit_for_duplicate_rate_limit_rep
                 raise ProblemDetails(
                     status_code=429,
                     title="Too Many Requests",
-                    detail=(
-                        f"Rate limit exceeded for {error_suffix}. Retry after "
-                        "60 seconds."
-                    ),
+                    detail=(f"Rate limit exceeded for {error_suffix}. Retry after " "60 seconds."),
                     type="/problems/rate-limit",
                     error_code="rate_limit_exceeded",
                     headers={"Retry-After": "60"},
