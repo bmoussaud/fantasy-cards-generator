@@ -112,7 +112,7 @@ param rateLimitIpRequests int = 12
 @description('Per-IP rate-limit window in seconds.')
 param rateLimitIpWindowSeconds int = 60
 
-@description('Trusted reverse-proxy hops for request IP extraction. Keep 0 for direct app access; use 1 behind Azure Container Apps ingress so only ACA''s rightmost appended X-Forwarded-For hop is trusted.')
+@description('Trusted reverse-proxy hops for request IP extraction. Keep 0 for direct app access; use 1 behind Azure Container Apps ingress so only the ACA rightmost appended X-Forwarded-For hop is trusted.')
 param trustedProxyHops int = 1
 
 @description('Maximum retries for retryable upstream dependencies.')
@@ -226,7 +226,7 @@ module containerApps './modules/container-apps.bicep' = {
     appSessionSecretKeyValue: appSessionSecretKeyValue
     auditRetentionDays: auditRetentionDays
     blobContainerName: cardAssetsContainerName
-    blobEndpoint: 'https://${storageAccountName}.blob.core.windows.net/'
+    blobEndpoint: 'https://${storageAccountName}.blob.${environment().suffixes.storage}/'
     containerAppName: containerAppName
     containerAppsEnvironmentResourceId: containerAppsEnvironment.outputs.containerAppsEnvironmentResourceId
     containerImage: empty(containerImage) ? '${registry.outputs.registryLoginServer}/fantasy-cards-generator:latest' : containerImage

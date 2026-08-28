@@ -69,7 +69,7 @@ def test_generation_runtime_env_vars_are_wired_from_bicep_outputs() -> None:
     assert "foundryTextDeployment: aiFoundryTextDeploymentName" in main_bicep
     assert "foundryImageDeployment: aiFoundryImageDeploymentName" in main_bicep
     assert "cosmosEndpoint: 'https://${cosmosAccountName}.documents.azure.com:443/'" in main_bicep
-    assert "blobEndpoint: 'https://${storageAccountName}.blob.core.windows.net/'" in main_bicep
+    assert "blobEndpoint: 'https://${storageAccountName}.blob.${environment().suffixes.storage}/'" in main_bicep
     assert "trustedProxyHops: trustedProxyHops" in main_bicep
 
 
