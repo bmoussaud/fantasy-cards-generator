@@ -339,9 +339,13 @@ class CsrfProtector:
         session_token = request.session.get(self.SESSION_KEY)
         header_token = request.headers.get(self.HEADER_NAME)
         candidate = submitted_token or header_token
-        if not isinstance(session_token, str) or not candidate or not hmac.compare_digest(
-            session_token,
-            candidate,
+        if (
+            not isinstance(session_token, str)
+            or not candidate
+            or not hmac.compare_digest(
+                session_token,
+                candidate,
+            )
         ):
             raise ProblemDetails(
                 status_code=403,
@@ -1856,10 +1860,7 @@ class CardGenerationService:
                     if refreshed is not None:
                         return self._as_response(refreshed)
                 if audit.status == "audit_failed":
-                    if (
-                        audit.failure_status_code is not None
-                        and audit.failure_status_code >= 400
-                    ):
+                    if audit.failure_status_code is not None and audit.failure_status_code >= 400:
                         raise self._problem_from_audit(audit)
                     refreshed = await self.services.card_repository.get(owner_id, card_id)
                     return self._as_response(refreshed or fallback_record)
@@ -2038,9 +2039,7 @@ def create_services(settings: AppSettings) -> AppServices:
         asset_store = InMemoryAssetStore()
 
     ai_client = (
-        MockAIClient(settings)
-        if settings.ai_mode == "mock"
-        else AzureFoundryAIClient(settings)
+        MockAIClient(settings) if settings.ai_mode == "mock" else AzureFoundryAIClient(settings)
     )
     return AppServices(
         settings=settings,

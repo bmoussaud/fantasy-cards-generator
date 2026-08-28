@@ -45,6 +45,7 @@ from app.settings import SettingsError, load_app_settings
 load_dotenv()
 logger = logging.getLogger(__name__)
 
+
 def create_app(services: AppServices | None = None) -> FastAPI:
     auth_settings = load_auth_settings()
     app_settings = load_app_settings()

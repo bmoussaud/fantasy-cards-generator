@@ -37,6 +37,8 @@ resource databaseAccount 'Microsoft.DocumentDB/databaseAccounts@2024-05-15' = {
     disableLocalAuth: true
     enableAutomaticFailover: false
     enableMultipleWriteLocations: false
+    ipRules: []
+    isVirtualNetworkFilterEnabled: false
     locations: [
       {
         failoverPriority: 0
@@ -44,7 +46,10 @@ resource databaseAccount 'Microsoft.DocumentDB/databaseAccounts@2024-05-15' = {
         locationName: location
       }
     ]
+    networkAclBypass: 'None'
+    networkAclBypassResourceIds: []
     publicNetworkAccess: 'Enabled'
+    virtualNetworkRules: []
   }
 }
 
