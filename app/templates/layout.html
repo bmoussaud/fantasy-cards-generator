@@ -5,6 +5,16 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>{{ page_title or "Fantasy Cards Generator" }}</title>
     <script src="https://unpkg.com/htmx.org@2.0.6"></script>
+    <style>
+        body { font-family: sans-serif; margin: 2rem; }
+        nav { display: flex; gap: 1rem; margin-bottom: 2rem; }
+        form { display: grid; gap: 0.75rem; max-width: 48rem; }
+        textarea { width: 100%; }
+        .card-result, .error-panel { border: 1px solid #ccc; padding: 1rem; margin-top: 1rem; border-radius: 0.5rem; }
+        .error-panel { border-color: #b91c1c; background: #fef2f2; }
+        .htmx-indicator { display: none; }
+        .htmx-request .htmx-indicator, .htmx-request.htmx-indicator { display: block; }
+    </style>
 </head>
 <body>
     <header>

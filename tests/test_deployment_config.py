@@ -38,6 +38,39 @@ def test_bicep_exposes_azd_container_outputs_without_helloworld_image() -> None:
     assert "registries:" in container_apps_bicep
 
 
+def test_generation_runtime_env_vars_are_wired_from_bicep_outputs() -> None:
+    container_apps_bicep = (REPO_ROOT / "infra" / "modules" / "container-apps.bicep").read_text()
+    main_bicep = (REPO_ROOT / "infra" / "main.bicep").read_text()
+
+    assert "name: 'AI_MODE'" in container_apps_bicep
+    assert "name: 'PERSISTENCE_MODE'" in container_apps_bicep
+    assert "name: 'FOUNDRY_ENDPOINT'" in container_apps_bicep
+    assert "name: 'FOUNDRY_TEXT_DEPLOYMENT'" in container_apps_bicep
+    assert "name: 'FOUNDRY_IMAGE_DEPLOYMENT'" in container_apps_bicep
+    assert "name: 'COSMOS_ENDPOINT'" in container_apps_bicep
+    assert "name: 'COSMOS_DATABASE_NAME'" in container_apps_bicep
+    assert "name: 'COSMOS_CONTAINER_NAME'" in container_apps_bicep
+    assert "name: 'BLOB_ENDPOINT'" in container_apps_bicep
+    assert "name: 'BLOB_CONTAINER_NAME'" in container_apps_bicep
+    assert "name: 'MODERATION_SERVICE'" in container_apps_bicep
+    assert "name: 'MODERATION_POLICY_NAME'" in container_apps_bicep
+    assert "name: 'RATE_LIMIT_USER_REQUESTS'" in container_apps_bicep
+    assert "name: 'RATE_LIMIT_IP_REQUESTS'" in container_apps_bicep
+    assert "name: 'UPSTREAM_TIMEOUT_SECONDS'" in container_apps_bicep
+    assert "name: 'OVERALL_TIMEOUT_SECONDS'" in container_apps_bicep
+    assert "name: 'AUDIT_RETENTION_DAYS'" in container_apps_bicep
+    assert "name: 'IMAGE_SIZE'" in container_apps_bicep
+
+    assert (
+        "foundryEndpoint: 'https://${aiFoundryAccountName}.cognitiveservices.azure.com/'"
+        in main_bicep
+    )
+    assert "foundryTextDeployment: aiFoundryTextDeploymentName" in main_bicep
+    assert "foundryImageDeployment: aiFoundryImageDeploymentName" in main_bicep
+    assert "cosmosEndpoint: 'https://${cosmosAccountName}.documents.azure.com:443/'" in main_bicep
+    assert "blobEndpoint: 'https://${storageAccountName}.blob.core.windows.net/'" in main_bicep
+
+
 def test_container_apps_wire_key_vault_backed_auth_env_vars() -> None:
     container_apps_bicep = (REPO_ROOT / "infra" / "modules" / "container-apps.bicep").read_text()
     security_bicep = (REPO_ROOT / "infra" / "modules" / "security.bicep").read_text()
@@ -87,3 +120,9 @@ def test_container_apps_wire_key_vault_backed_auth_env_vars() -> None:
     # (which would create a circular module dependency).
     assert "deployedAuthRedirectUri" in main_bicep
     assert "containerAppsEnvironmentDefaultDomain" in main_bicep
+
+
+def test_cosmos_container_enables_item_level_ttl() -> None:
+    cosmos_bicep = (REPO_ROOT / "infra" / "modules" / "cosmos-db.bicep").read_text()
+
+    assert "defaultTtl: -1" in cosmos_bicep

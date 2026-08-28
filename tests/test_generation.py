@@ -1,0 +1,465 @@
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+from fastapi.testclient import TestClient
+
+from app.generation import (
+    AppServices,
+    AuthenticatedOwner,
+    CardGenerationService,
+    InMemoryAssetStore,
+    InMemoryAuditRepository,
+    InMemoryCardRepository,
+    MockAIClient,
+    StoredCard,
+    create_services,
+)
+from app.main import create_app
+from app.settings import load_app_settings
+from tests.conftest import TEST_OWNER_ID, extract_hidden_value, make_authenticated_client
+
+
+def test_app_shell_renders_generation_form(authenticated_client: TestClient) -> None:
+    response = authenticated_client.get("/app")
+
+    assert response.status_code == 200
+    assert 'hx-post="/ui/cards/generate"' in response.text
+    assert 'name="csrf_token"' in response.text
+    assert 'name="idempotency_key"' in response.text
+
+
+def test_api_requires_authentication() -> None:
+    client = TestClient(create_app(), base_url="https://testserver")
+
+    response = client.post(
+        "/api/v1/cards/generate",
+        json={"prompt": "create a safe fantasy knight"},
+    )
+
+    assert response.status_code == 401
+    assert response.headers["content-type"].startswith("application/problem+json")
+    assert response.json()["errorCode"] == "unauthorized"
+
+
+def test_api_rejects_missing_csrf(authenticated_client: TestClient) -> None:
+    response = authenticated_client.post(
+        "/api/v1/cards/generate",
+        json={"prompt": "create a safe fantasy knight", "idempotencyKey": "idem-auth-a"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["errorCode"] == "csrf_failed"
+
+
+def test_generate_card_success_persists_card_and_private_asset(
+    authenticated_client: TestClient,
+) -> None:
+    csrf_token = extract_hidden_value(authenticated_client.get("/app").text, "csrf_token")
+
+    response = authenticated_client.post(
+        "/api/v1/cards/generate",
+        json={
+            "prompt": "create a safe fantasy knight with a moonlit shield",
+            "idempotencyKey": "idem-success",
+            "csrfToken": csrf_token,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "completed"
+    assert payload["imageUrl"].startswith("/cards/")
+    assert payload["requestId"] == response.headers["x-request-id"]
+
+    image_response = authenticated_client.get(payload["imageUrl"])
+    assert image_response.status_code == 200
+    assert image_response.headers["content-type"].startswith("image/png")
+    assert image_response.content.startswith(b"\x89PNG")
+
+    services = authenticated_client.app.state.services
+    card = services.card_repository._records.get((payload["ownerId"], payload["cardId"]))
+    assert card is not None
+    assert card.status == "completed"
+    assert card.prompt == "create a safe fantasy knight with a moonlit shield"
+    assert card.blob_name is not None
+    assert "sas" not in str(card.to_document()).lower()
+
+
+def test_rate_limits_apply_per_user_and_ip(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RATE_LIMIT_USER_REQUESTS", "1")
+    monkeypatch.setenv("RATE_LIMIT_IP_REQUESTS", "1")
+    client = make_authenticated_client(monkeypatch)
+    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
+
+    first = client.post(
+        "/api/v1/cards/generate",
+        json={
+            "prompt": "create a safe fantasy knight with a silver banner",
+            "idempotencyKey": "idem-limit-1",
+            "csrfToken": csrf_token,
+        },
+    )
+    second = client.post(
+        "/api/v1/cards/generate",
+        json={
+            "prompt": "create a safe fantasy druid with a crystal branch",
+            "idempotencyKey": "idem-limit-2",
+            "csrfToken": csrf_token,
+        },
+        headers={"x-forwarded-for": "203.0.113.10"},
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 429
+    assert second.headers["retry-after"] == "60"
+
+
+def test_pre_moderation_rejection_records_sanitized_audit(
+    authenticated_client: TestClient,
+) -> None:
+    csrf_token = extract_hidden_value(authenticated_client.get("/app").text, "csrf_token")
+    prompt = "create a fantasy hero in the style of a living artist"
+
+    response = authenticated_client.post(
+        "/api/v1/cards/generate",
+        json={
+            "prompt": prompt,
+            "idempotencyKey": "idem-pre-block",
+            "csrfToken": csrf_token,
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["errorCode"] == "prompt_rejected"
+
+    services = authenticated_client.app.state.services
+    assert prompt not in response.text
+    assert len(services.audit_repository._records) == 1
+    audit = next(iter(services.audit_repository._records.values()))
+    assert audit is not None
+    assert audit.prompt is None
+    assert audit.ttl_seconds == 30 * 24 * 60 * 60
+    assert audit.error_code == "living-artist-imitation"
+    assert services.card_repository._records == {}
+
+
+def test_invalid_model_output_is_rejected_and_not_persisted(
+    authenticated_client: TestClient,
+) -> None:
+    csrf_token = extract_hidden_value(authenticated_client.get("/app").text, "csrf_token")
+
+    response = authenticated_client.post(
+        "/api/v1/cards/generate",
+        json={
+            "prompt": "create a safe fantasy knight [[mock:text-invalid-extra]]",
+            "idempotencyKey": "idem-invalid-extra",
+            "csrfToken": csrf_token,
+        },
+    )
+
+    assert response.status_code == 502
+    assert response.json()["errorCode"] == "invalid_model_output"
+
+
+def test_model_bounds_violation_is_rejected(authenticated_client: TestClient) -> None:
+    csrf_token = extract_hidden_value(authenticated_client.get("/app").text, "csrf_token")
+
+    response = authenticated_client.post(
+        "/api/v1/cards/generate",
+        json={
+            "prompt": "create a safe fantasy knight [[mock:text-invalid-bounds]]",
+            "idempotencyKey": "idem-invalid-bounds",
+            "csrfToken": csrf_token,
+        },
+    )
+
+    assert response.status_code == 502
+    assert response.json()["errorCode"] == "invalid_model_output"
+
+
+def test_retryable_text_upstream_failure_is_retried_successfully(
+    authenticated_client: TestClient,
+) -> None:
+    csrf_token = extract_hidden_value(authenticated_client.get("/app").text, "csrf_token")
+
+    response = authenticated_client.post(
+        "/api/v1/cards/generate",
+        json={
+            "prompt": "create a safe fantasy ranger [[mock:text-429-once]]",
+            "idempotencyKey": "idem-text-retry",
+            "csrfToken": csrf_token,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "completed"
+
+
+def test_non_retryable_text_upstream_failure_returns_bad_gateway(
+    authenticated_client: TestClient,
+) -> None:
+    csrf_token = extract_hidden_value(authenticated_client.get("/app").text, "csrf_token")
+
+    response = authenticated_client.post(
+        "/api/v1/cards/generate",
+        json={
+            "prompt": "create a safe fantasy ranger [[mock:text-500]]",
+            "idempotencyKey": "idem-text-500",
+            "csrfToken": csrf_token,
+        },
+    )
+
+    assert response.status_code == 502
+    assert response.json()["errorCode"] == "upstream_failure"
+
+
+def test_upstream_timeout_returns_gateway_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("UPSTREAM_TIMEOUT_SECONDS", "0.1")
+    monkeypatch.setenv("OVERALL_TIMEOUT_SECONDS", "0.5")
+    monkeypatch.setenv("UPSTREAM_MAX_RETRIES", "0")
+    client = make_authenticated_client(monkeypatch)
+    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
+
+    response = client.post(
+        "/api/v1/cards/generate",
+        json={
+            "prompt": "create a safe fantasy ranger [[mock:text-timeout]]",
+            "idempotencyKey": "idem-timeout",
+            "csrfToken": csrf_token,
+        },
+    )
+
+    assert response.status_code == 504
+    assert response.json()["errorCode"] == "upstream_timeout"
+
+
+def test_idempotent_replay_returns_same_completed_card(authenticated_client: TestClient) -> None:
+    csrf_token = extract_hidden_value(authenticated_client.get("/app").text, "csrf_token")
+    payload = {
+        "prompt": "create a safe fantasy knight with a radiant crown",
+        "idempotencyKey": "idem-replay",
+        "csrfToken": csrf_token,
+    }
+
+    first = authenticated_client.post("/api/v1/cards/generate", json=payload)
+    second = authenticated_client.post("/api/v1/cards/generate", json=payload)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["cardId"] == second.json()["cardId"]
+    assert first.json()["imageUrl"] == second.json()["imageUrl"]
+
+
+def test_idempotency_key_conflict_rejects_different_prompt(
+    authenticated_client: TestClient,
+) -> None:
+    csrf_token = extract_hidden_value(authenticated_client.get("/app").text, "csrf_token")
+    idem_key = "idem-conflict"
+    first = authenticated_client.post(
+        "/api/v1/cards/generate",
+        json={
+            "prompt": "create a safe fantasy knight with a radiant crown",
+            "idempotencyKey": idem_key,
+            "csrfToken": csrf_token,
+        },
+    )
+    second = authenticated_client.post(
+        "/api/v1/cards/generate",
+        json={
+            "prompt": "create a safe fantasy druid with a radiant crown",
+            "idempotencyKey": idem_key,
+            "csrfToken": csrf_token,
+        },
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 409
+    assert second.json()["errorCode"] == "idempotency_conflict"
+
+
+def test_image_failure_returns_partial_card_and_retry_action(
+    authenticated_client: TestClient,
+) -> None:
+    csrf_token = extract_hidden_value(authenticated_client.get("/app").text, "csrf_token")
+
+    response = authenticated_client.post(
+        "/api/v1/cards/generate",
+        json={
+            "prompt": "create a safe fantasy knight [[mock:image-500]]",
+            "idempotencyKey": "idem-image-failure",
+            "csrfToken": csrf_token,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "awaiting_artwork_retry"
+    assert payload["imageUrl"] is None
+    assert payload["actions"][0]["type"] == "retry_artwork"
+
+
+def test_retry_artwork_completes_partial_card(authenticated_client: TestClient) -> None:
+    csrf_token = extract_hidden_value(authenticated_client.get("/app").text, "csrf_token")
+    initial = authenticated_client.post(
+        "/api/v1/cards/generate",
+        json={
+            "prompt": "create a safe fantasy knight [[mock:image-500]]",
+            "idempotencyKey": "idem-art-retry-start",
+            "csrfToken": csrf_token,
+        },
+    )
+    assert initial.status_code == 200
+    assert initial.json()["status"] == "awaiting_artwork_retry"
+
+    services = authenticated_client.app.state.services
+    record = services.card_repository._records.get(
+        (initial.json()["ownerId"], initial.json()["cardId"])
+    )
+    assert record is not None
+    record.derived_art_prompt = record.derived_art_prompt.replace("[[mock:image-500]]", "")
+    asyncio.run(services.card_repository.save(record))
+
+    retry = authenticated_client.post(
+        f"/api/v1/cards/{initial.json()['cardId']}/artwork/retry",
+        json={"idempotencyKey": "idem-art-retry-finish", "csrfToken": csrf_token},
+    )
+
+    assert retry.status_code == 200
+    assert retry.json()["status"] == "completed"
+    assert retry.json()["imageUrl"]
+
+
+def test_htmx_flow_renders_error_panel(authenticated_client: TestClient) -> None:
+    csrf_token = extract_hidden_value(authenticated_client.get("/app").text, "csrf_token")
+
+    response = authenticated_client.post(
+        "/ui/cards/generate",
+        data={
+            "prompt": "create a fantasy hero in the style of a living artist",
+            "idempotency_key": "idem-ui-block",
+            "csrf_token": csrf_token,
+        },
+        headers={"content-type": "application/x-www-form-urlencoded"},
+    )
+
+    assert response.status_code == 422
+    assert "error-panel" in response.text
+    assert "Prompt Rejected" in response.text
+
+
+def test_persistence_cleanup_deletes_orphaned_blob(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FailingCardRepository(InMemoryCardRepository):
+        def __init__(self) -> None:
+            super().__init__()
+            self.fail_completed_save = True
+
+        async def save(self, record: StoredCard) -> StoredCard:
+            if record.status == "completed" and self.fail_completed_save:
+                raise RuntimeError("cosmos unavailable")
+            return await super().save(record)
+
+    class TrackingAssetStore(InMemoryAssetStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.deleted: list[str] = []
+
+        async def delete(self, blob_name: str) -> None:
+            self.deleted.append(blob_name)
+            await super().delete(blob_name)
+
+    settings = load_app_settings()
+    defaults = create_services(settings)
+    services = AppServices(
+        settings=settings,
+        card_repository=FailingCardRepository(),
+        audit_repository=InMemoryAuditRepository(),
+        asset_store=TrackingAssetStore(),
+        ai_client=MockAIClient(settings),
+        moderation_service=defaults.moderation_service,
+        rate_limiter=defaults.rate_limiter,
+        csrf_protector=defaults.csrf_protector,
+    )
+    client = TestClient(create_app(services=services), base_url="https://testserver")
+    from app import main as main_module
+    from tests.conftest import FakeOAuthClient
+
+    monkeypatch.setattr(main_module, "create_oauth_client", lambda settings: FakeOAuthClient())
+    client.get("/auth/login", follow_redirects=False)
+    client.get("/auth/callback?code=valid-code&state=opaque", follow_redirects=False)
+    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
+
+    response = client.post(
+        "/api/v1/cards/generate",
+        json={
+            "prompt": "create a safe fantasy guardian with emerald armor",
+            "idempotencyKey": "idem-persist-fail",
+            "csrfToken": csrf_token,
+        },
+    )
+
+    assert response.status_code == 503
+    assert response.json()["errorCode"] == "persistence_failure"
+    assert services.asset_store.deleted
+    assert services.card_repository._records == {}
+
+
+def test_concurrent_duplicates_do_not_duplicate_model_calls() -> None:
+    class SlowMockAIClient(MockAIClient):
+        def __init__(self, settings) -> None:
+            super().__init__(settings)
+            self.text_calls = 0
+
+        async def generate_card(self, prompt: str, *, request_id: str):
+            self.text_calls += 1
+            await asyncio.sleep(0.05)
+            return await super().generate_card(prompt, request_id=request_id)
+
+    async def run_concurrency() -> tuple[list[dict[str, str]], int]:
+        settings = load_app_settings()
+        ai_client = SlowMockAIClient(settings)
+        defaults = create_services(settings)
+        services = AppServices(
+            settings=settings,
+            card_repository=InMemoryCardRepository(),
+            audit_repository=InMemoryAuditRepository(),
+            asset_store=InMemoryAssetStore(),
+            ai_client=ai_client,
+            moderation_service=defaults.moderation_service,
+            rate_limiter=defaults.rate_limiter,
+            csrf_protector=defaults.csrf_protector,
+        )
+        service = CardGenerationService(services)
+        owner = AuthenticatedOwner(
+            owner_id=TEST_OWNER_ID,
+            tenant_id=None,
+            object_id=None,
+            subject="sub",
+            display_name="Aragorn",
+            email="aragorn@example.com",
+        )
+        results = await asyncio.gather(
+            service.generate_card(
+                owner=owner,
+                prompt="create a safe fantasy knight with a moonlit shield",
+                idempotency_key="idem-concurrent",
+                request_id="req-1",
+                client_ip="127.0.0.1",
+            ),
+            service.generate_card(
+                owner=owner,
+                prompt="create a safe fantasy knight with a moonlit shield",
+                idempotency_key="idem-concurrent",
+                request_id="req-2",
+                client_ip="127.0.0.1",
+            ),
+        )
+        return [result.model_dump() for result in results], ai_client.text_calls
+
+    results, text_calls = asyncio.run(run_concurrency())
+
+    assert results[0]["cardId"] == results[1]["cardId"]
+    assert text_calls == 1

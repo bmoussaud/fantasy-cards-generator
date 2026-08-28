@@ -9,6 +9,8 @@ from uuid import UUID
 from authlib.integrations.starlette_client import OAuth, StarletteOAuth2App
 from fastapi import HTTPException, Request, status
 
+from app.generation import AuthenticatedOwner
+
 AUTH_SESSION_KEY = "user"
 AUTH_NONCE_SESSION_KEY = "auth_nonce"
 DEFAULT_ENTRA_AUTHORITY = "https://login.microsoftonline.com/organizations/v2.0"
@@ -19,6 +21,9 @@ class AuthenticatedUser(TypedDict):
     sub: str
     name: str | None
     email: str | None
+    tenant_id: str | None
+    object_id: str | None
+    owner_id: str
 
 
 @dataclass(frozen=True)
@@ -181,14 +186,31 @@ def validate_issuer_claim(
 
 def get_session_user(request: Request) -> AuthenticatedUser | None:
     raw_user = request.session.get(AUTH_SESSION_KEY)
-    if not isinstance(raw_user, dict) or "sub" not in raw_user:
+    if not isinstance(raw_user, dict) or "sub" not in raw_user or "owner_id" not in raw_user:
         return None
 
     return {
         "sub": str(raw_user["sub"]),
         "name": _optional_string(raw_user.get("name")),
         "email": _optional_string(raw_user.get("email")),
+        "tenant_id": _optional_string(raw_user.get("tenant_id")),
+        "object_id": _optional_string(raw_user.get("object_id")),
+        "owner_id": str(raw_user["owner_id"]),
     }
+
+
+def get_authenticated_owner(request: Request) -> AuthenticatedOwner | None:
+    user = get_session_user(request)
+    if user is None:
+        return None
+    return AuthenticatedOwner(
+        owner_id=user["owner_id"],
+        tenant_id=user["tenant_id"],
+        object_id=user["object_id"],
+        subject=user["sub"],
+        display_name=user["name"],
+        email=user["email"],
+    )
 
 
 def require_authenticated_user(request: Request) -> AuthenticatedUser:
@@ -197,6 +219,17 @@ def require_authenticated_user(request: Request) -> AuthenticatedUser:
         raise HTTPException(
             status_code=status.HTTP_307_TEMPORARY_REDIRECT,
             headers={"Location": "/auth/login"},
+            detail="Authentication required.",
+        )
+    return user
+
+
+def require_api_user(request: Request) -> AuthenticatedUser:
+    user = get_session_user(request)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            headers={"WWW-Authenticate": "Session"},
             detail="Authentication required.",
         )
     return user
@@ -218,10 +251,17 @@ def extract_user_claims(claims: dict[str, Any]) -> AuthenticatedUser:
         if isinstance(emails, list) and emails:
             email = _optional_string(emails[0])
 
+    tenant_id = _canonical_tenant_id(claims.get("tid"))
+    object_id = _canonical_tenant_id(claims.get("oid"))
+    owner_id = _derive_owner_id(subject=str(subject), tenant_id=tenant_id, object_id=object_id)
+
     return {
         "sub": str(subject),
         "name": _optional_string(claims.get("name")) or email,
         "email": email,
+        "tenant_id": tenant_id,
+        "object_id": object_id,
+        "owner_id": owner_id,
     }
 
 
@@ -230,6 +270,14 @@ def build_logout_redirect_target(settings: AuthSettings) -> str:
         query = urlencode({"post_logout_redirect_uri": settings.post_logout_redirect_uri})
         return f"{settings.logout_url}?{query}"
     return "/"
+
+
+def _derive_owner_id(*, subject: str, tenant_id: str | None, object_id: str | None) -> str:
+    if tenant_id and object_id:
+        return f"{tenant_id}:{object_id}"
+    if tenant_id:
+        return f"{tenant_id}:sub:{subject}"
+    return f"sub:{subject}"
 
 
 def _optional_string(value: Any) -> str | None:

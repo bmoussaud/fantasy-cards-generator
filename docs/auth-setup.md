@@ -6,9 +6,10 @@ Microsoft Entra ID. Sign-in is intentionally configured for
 multi-tenant `/organizations` endpoint. Personal Microsoft accounts are not in
 scope for this flow.
 
-The FastAPI app stores only minimal authenticated user claims (`sub`, `name`,
-`email`) in a signed session cookie and does not persist Entra tokens in the
-browser session.
+The FastAPI app stores only the minimal authenticated user claims needed for
+session display and stable ownership derivation (`sub`, `name`, `email`,
+`tenant_id`, `object_id`, `owner_id`) in a signed session cookie and does not
+persist Entra tokens in the browser session.
 
 ## Required environment variables
 
@@ -195,6 +196,9 @@ Only these user claims are stored in the cookie session:
 - `sub`
 - `name`
 - `email`
+- `tenant_id`
+- `object_id`
+- `owner_id`
 
 Access tokens, refresh tokens, raw ID tokens, and tenant IDs are not persisted
 in the session cookie.

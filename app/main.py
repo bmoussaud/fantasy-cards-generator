@@ -1,11 +1,17 @@
+from __future__ import annotations
+
 import logging
 import secrets
 from pathlib import Path
+from urllib.parse import parse_qs
+from uuid import uuid4
 
 from authlib.integrations.base_client.errors import OAuthError
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, Request, status
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi.exceptions import HTTPException as FastAPIHTTPException
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -18,20 +24,36 @@ from app.auth import (
     create_oauth_client,
     ensure_auth_configured,
     extract_user_claims,
+    get_authenticated_owner,
     get_session_user,
     load_auth_settings,
+    require_api_user,
     require_authenticated_user,
 )
+from app.generation import (
+    AppServices,
+    ArtworkRetryBody,
+    CardGenerateBody,
+    CardGenerationService,
+    CardResponseModel,
+    client_ip_from_request,
+    create_services,
+)
+from app.problems import ProblemDetails
+from app.settings import SettingsError, load_app_settings
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 
-
-def create_app() -> FastAPI:
+def create_app(services: AppServices | None = None) -> FastAPI:
     auth_settings = load_auth_settings()
+    app_settings = load_app_settings()
+    app_services = services or create_services(app_settings)
+    card_service = CardGenerationService(app_services)
     templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
     app = FastAPI(title="Fantasy Cards Generator")
+    app.state.services = app_services
     app.add_middleware(
         SessionMiddleware,
         secret_key=auth_settings.session_secret_key,
@@ -40,13 +62,87 @@ def create_app() -> FastAPI:
         https_only=True,
     )
 
+    @app.middleware("http")
+    async def add_request_context(request: Request, call_next):
+        request.state.request_id = request.headers.get("x-request-id") or uuid4().hex
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request.state.request_id
+        return response
+
     def template_context(request: Request, **context: object) -> dict[str, object]:
+        csrf_token = app_services.csrf_protector.issue(request)
         return {
             "request": request,
             "user": get_session_user(request),
             "auth_configured": auth_settings.is_configured,
+            "csrf_token": csrf_token,
+            "generate_idempotency_key": uuid4().hex,
             **context,
         }
+
+    @app.exception_handler(ProblemDetails)
+    async def handle_problem_details(request: Request, exc: ProblemDetails):
+        if request.url.path.startswith("/ui/"):
+            response = templates.TemplateResponse(
+                request,
+                "partials/generation_error.html",
+                template_context(
+                    request,
+                    error_title=exc.title,
+                    error_detail=exc.detail,
+                    next_idempotency_key=uuid4().hex,
+                ),
+                status_code=exc.status_code,
+            )
+            for key, value in exc.headers.items():
+                response.headers[key] = value
+            return response
+        return JSONResponse(
+            exc.as_dict(request),
+            status_code=exc.status_code,
+            headers={"Content-Type": "application/problem+json", **exc.headers},
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def handle_validation_error(request: Request, exc: RequestValidationError):
+        problem = ProblemDetails(
+            status_code=422,
+            title="Unprocessable Entity",
+            detail="The request body or form payload was invalid.",
+            type="/problems/validation-error",
+            error_code="validation_error",
+            extra={"errors": exc.errors()},
+        )
+        return await handle_problem_details(request, problem)
+
+    @app.exception_handler(FastAPIHTTPException)
+    async def handle_http_exception(request: Request, exc: FastAPIHTTPException):
+        if request.url.path.startswith("/api/v1/"):
+            problem = ProblemDetails(
+                status_code=exc.status_code,
+                title="Unauthorized" if exc.status_code == 401 else "HTTP Error",
+                detail=str(exc.detail),
+                type="/problems/http-exception",
+                error_code="unauthorized" if exc.status_code == 401 else "http_error",
+                headers=exc.headers or {},
+            )
+            return await handle_problem_details(request, problem)
+        return JSONResponse(
+            {"detail": exc.detail},
+            status_code=exc.status_code,
+            headers=exc.headers or {},
+        )
+
+    @app.exception_handler(SettingsError)
+    async def handle_settings_error(request: Request, exc: SettingsError):
+        problem = ProblemDetails(
+            status_code=503,
+            title="Service Unavailable",
+            detail=str(exc),
+            type="/problems/configuration-error",
+            error_code="configuration_error",
+        )
+        return await handle_problem_details(request, problem)
 
     @app.get("/", response_class=HTMLResponse)
     async def home(request: Request) -> HTMLResponse:
@@ -64,7 +160,7 @@ def create_app() -> FastAPI:
         return templates.TemplateResponse(
             request,
             "app_shell.html",
-            template_context(request, page_title="App Shell", user=user),
+            template_context(request, page_title="Generate a card", user=user),
         )
 
     @app.get("/auth/login")
@@ -142,7 +238,148 @@ def create_app() -> FastAPI:
             template_context(request, message="HTMX is wired."),
         )
 
+    @app.post("/api/v1/cards/generate", response_model=CardResponseModel)
+    async def api_generate_card(
+        request: Request,
+        body: CardGenerateBody,
+        _: AuthenticatedUser = Depends(require_api_user),
+    ) -> CardResponseModel:
+        app_services.csrf_protector.validate(request, body.csrfToken)
+        owner = get_authenticated_owner(request)
+        if owner is None:
+            raise ProblemDetails(
+                status_code=401,
+                title="Unauthorized",
+                detail="Authentication required.",
+                type="/problems/unauthorized",
+                error_code="unauthorized",
+                headers={"WWW-Authenticate": "Session"},
+            )
+        return await card_service.generate_card(
+            owner=owner,
+            prompt=body.prompt,
+            idempotency_key=body.idempotencyKey or uuid4().hex,
+            request_id=request.state.request_id,
+            client_ip=client_ip_from_request(request),
+        )
+
+    @app.post("/api/v1/cards/{card_id}/artwork/retry", response_model=CardResponseModel)
+    async def api_retry_artwork(
+        card_id: str,
+        request: Request,
+        body: ArtworkRetryBody,
+        _: AuthenticatedUser = Depends(require_api_user),
+    ) -> CardResponseModel:
+        app_services.csrf_protector.validate(request, body.csrfToken)
+        owner = get_authenticated_owner(request)
+        if owner is None:
+            raise ProblemDetails(
+                status_code=401,
+                title="Unauthorized",
+                detail="Authentication required.",
+                type="/problems/unauthorized",
+                error_code="unauthorized",
+                headers={"WWW-Authenticate": "Session"},
+            )
+        return await card_service.retry_artwork(
+            owner=owner,
+            card_id=card_id,
+            idempotency_key=body.idempotencyKey or uuid4().hex,
+            request_id=request.state.request_id,
+            client_ip=client_ip_from_request(request),
+        )
+
+    @app.post("/ui/cards/generate", response_class=HTMLResponse)
+    async def ui_generate_card(
+        request: Request,
+    ) -> HTMLResponse:
+        form = await _parse_form_payload(request)
+        owner = get_authenticated_owner(request)
+        if owner is None:
+            raise ProblemDetails(
+                status_code=401,
+                title="Unauthorized",
+                detail="Authentication required.",
+                type="/problems/unauthorized",
+                error_code="unauthorized",
+            )
+        app_services.csrf_protector.validate(request, form.get("csrf_token"))
+        result = await card_service.generate_card(
+            owner=owner,
+            prompt=form.get("prompt", ""),
+            idempotency_key=form.get("idempotency_key") or uuid4().hex,
+            request_id=request.state.request_id,
+            client_ip=client_ip_from_request(request),
+        )
+        return templates.TemplateResponse(
+            request,
+            "partials/card_result.html",
+            template_context(
+                request,
+                card=result,
+                next_idempotency_key=uuid4().hex,
+                retry_idempotency_key=uuid4().hex,
+            ),
+        )
+
+    @app.post("/ui/cards/{card_id}/artwork/retry", response_class=HTMLResponse)
+    async def ui_retry_artwork(
+        card_id: str,
+        request: Request,
+    ) -> HTMLResponse:
+        form = await _parse_form_payload(request)
+        owner = get_authenticated_owner(request)
+        if owner is None:
+            raise ProblemDetails(
+                status_code=401,
+                title="Unauthorized",
+                detail="Authentication required.",
+                type="/problems/unauthorized",
+                error_code="unauthorized",
+            )
+        app_services.csrf_protector.validate(request, form.get("csrf_token"))
+        result = await card_service.retry_artwork(
+            owner=owner,
+            card_id=card_id,
+            idempotency_key=form.get("idempotency_key") or uuid4().hex,
+            request_id=request.state.request_id,
+            client_ip=client_ip_from_request(request),
+        )
+        return templates.TemplateResponse(
+            request,
+            "partials/card_result.html",
+            template_context(
+                request,
+                card=result,
+                next_idempotency_key=uuid4().hex,
+                retry_idempotency_key=uuid4().hex,
+            ),
+        )
+
+    @app.get("/cards/{card_id}/image")
+    async def card_image(
+        card_id: str,
+        request: Request,
+    ) -> Response:
+        owner = get_authenticated_owner(request)
+        if owner is None:
+            raise ProblemDetails(
+                status_code=401,
+                title="Unauthorized",
+                detail="Authentication required.",
+                type="/problems/unauthorized",
+                error_code="unauthorized",
+            )
+        payload, content_type = await card_service.fetch_image(owner, card_id)
+        return StreamingResponse(iter([payload]), media_type=content_type)
+
     return app
+
+
+async def _parse_form_payload(request: Request) -> dict[str, str]:
+    body = await request.body()
+    parsed = parse_qs(body.decode("utf-8"), keep_blank_values=True)
+    return {key: values[-1] for key, values in parsed.items()}
 
 
 app = create_app()

@@ -63,6 +63,7 @@ resource sqlContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/contai
   name: containerName
   properties: {
     resource: {
+      defaultTtl: -1
       id: containerName
       partitionKey: {
         kind: 'Hash'
