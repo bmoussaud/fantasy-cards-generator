@@ -75,11 +75,6 @@ If `APP_SESSION_SECRET_KEY` or `ENTRA_CLIENT_SECRET` are unset when
 corresponding Container App env var) is simply not created — the app then
 fails closed at startup exactly as it does locally when `.env` is incomplete.
 
-
-  is marked `Secure`, and the default Entra redirect URIs use
-  `https://localhost:8000/...`. Plain HTTP is fine only for anonymous pages
-  that do not exercise sign-in.
-
 ## Register the application in Microsoft Entra ID
 
 The primary, best-understood fallback path is still the manual portal flow
