@@ -13,7 +13,7 @@ param containerImage string
 @description('Azure Container Registry login server used by the web app image.')
 param acrLoginServer string
 
-@description('Managed identity resource ID used by Container Apps to pull from the registry and to read Key Vault-backed secrets.')
+@description('Managed identity resource ID used by Container Apps to pull from the registry.')
 param acrPullIdentityResourceId string
 
 @description('Service name as defined in azure.yaml.')
@@ -26,11 +26,13 @@ param appInsightsConnectionString string
 @description('Key Vault URI injected in the web app environment.')
 param keyVaultUri string
 
-@description('Key Vault secret URI for the session cookie signing key (APP_SESSION_SECRET_KEY). Empty when the secret has not been provisioned.')
-param appSessionSecretKeySecretUri string = ''
+@secure()
+@description('Session cookie signing secret injected into the Container App. Empty skips creating the secret.')
+param appSessionSecretKeyValue string = ''
 
-@description('Key Vault secret URI for the Microsoft Entra ID client secret (ENTRA_CLIENT_SECRET). Empty when Entra app registration is disabled or the secret has not been provisioned.')
-param entraClientSecretSecretUri string = ''
+@secure()
+@description('Microsoft Entra ID client secret injected into the Container App. Empty skips creating the secret.')
+param entraClientSecretValue string = ''
 
 @description('Microsoft Entra ID application (client) ID injected as ENTRA_CLIENT_ID. Empty when Entra app registration is disabled.')
 param entraClientId string = ''
@@ -51,21 +53,19 @@ var containerAppSecrets = concat(
       value: appInsightsConnectionString
     }
   ],
-  !empty(appSessionSecretKeySecretUri)
+  !empty(appSessionSecretKeyValue)
     ? [
         {
           name: 'app-session-secret-key'
-          keyVaultUrl: appSessionSecretKeySecretUri
-          identity: acrPullIdentityResourceId
+          value: appSessionSecretKeyValue
         }
       ]
     : [],
-  !empty(entraClientSecretSecretUri)
+  !empty(entraClientSecretValue)
     ? [
         {
           name: 'entra-client-secret'
-          keyVaultUrl: entraClientSecretSecretUri
-          identity: acrPullIdentityResourceId
+          value: entraClientSecretValue
         }
       ]
     : []
@@ -82,7 +82,7 @@ var containerAppEnv = concat(
       value: keyVaultUri
     }
   ],
-  !empty(appSessionSecretKeySecretUri)
+  !empty(appSessionSecretKeyValue)
     ? [
         {
           name: 'APP_SESSION_SECRET_KEY'
@@ -98,7 +98,7 @@ var containerAppEnv = concat(
         }
       ]
     : [],
-  !empty(entraClientSecretSecretUri)
+  !empty(entraClientSecretValue)
     ? [
         {
           name: 'ENTRA_CLIENT_SECRET'

@@ -36,11 +36,11 @@ param entraRedirectPath string = '/auth/callback'
 param entraPostLogoutRedirectPath string = '/'
 
 @secure()
-@description('Session cookie signing secret stored in Key Vault and wired into the Container App as a secretRef (APP_SESSION_SECRET_KEY). Set via `azd env set APP_SESSION_SECRET_KEY <value>` before provisioning.')
+@description('Session cookie signing secret stored in Key Vault and mirrored into the Container App secret set (APP_SESSION_SECRET_KEY). Set via `azd env set APP_SESSION_SECRET_KEY <value>` before provisioning.')
 param appSessionSecretKeyValue string = ''
 
 @secure()
-@description('Microsoft Entra ID client secret stored in Key Vault and wired into the Container App as a secretRef (ENTRA_CLIENT_SECRET). Populated automatically by hooks/gen_client_secret.sh when deployEntraAppRegistration=true.')
+@description('Microsoft Entra ID client secret stored in Key Vault and mirrored into the Container App secret set (ENTRA_CLIENT_SECRET). Populated automatically by hooks/gen_client_secret.sh when deployEntraAppRegistration=true.')
 param entraClientSecretValue string = ''
 
 @description('Cosmos DB SQL database name for application data.')
@@ -177,12 +177,12 @@ module containerApps './modules/container-apps.bicep' = {
     acrLoginServer: registry.outputs.registryLoginServer
     acrPullIdentityResourceId: registry.outputs.acrPullIdentityResourceId
     appInsightsConnectionString: monitoring.outputs.appInsightsConnectionString
-    appSessionSecretKeySecretUri: security.outputs.appSessionSecretKeySecretUri
+    appSessionSecretKeyValue: appSessionSecretKeyValue
     containerAppName: containerAppName
     containerAppsEnvironmentResourceId: containerAppsEnvironment.outputs.containerAppsEnvironmentResourceId
     containerImage: empty(containerImage) ? '${registry.outputs.registryLoginServer}/fantasy-cards-generator:latest' : containerImage
     entraClientId: entraClientId
-    entraClientSecretSecretUri: security.outputs.entraClientSecretSecretUri
+    entraClientSecretValue: entraClientSecretValue
     entraPostLogoutRedirectUri: deployEntraAppRegistration ? deployedPostLogoutRedirectUri : ''
     entraRedirectUri: deployEntraAppRegistration ? deployedAuthRedirectUri : ''
     keyVaultUri: security.outputs.keyVaultUri
