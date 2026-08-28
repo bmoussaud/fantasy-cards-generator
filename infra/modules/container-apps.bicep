@@ -17,7 +17,7 @@ param acrLoginServer string
 param acrPullIdentityResourceId string
 
 @description('Service name as defined in azure.yaml.')
-param serviceName string = 'web'
+param serviceName string = 'web-nat'
 
 @secure()
 @description('Application Insights connection string used by the app foundation.')
