@@ -24,6 +24,26 @@ logger = logging.getLogger(__name__)
 PNG_1X1_BASE64 = (
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO6r2w0AAAAASUVORK5CYII="
 )
+CARD_DOCUMENT_ID_PREFIX = "card:"
+AUDIT_DOCUMENT_ID_PREFIX = "audit:"
+
+
+def _card_document_id(card_id: str) -> str:
+    return f"{CARD_DOCUMENT_ID_PREFIX}{card_id}"
+
+
+def _audit_document_id(card_id: str) -> str:
+    return f"{AUDIT_DOCUMENT_ID_PREFIX}{card_id}"
+
+
+def _logical_card_id(document_id: str, stored_card_id: Any) -> str:
+    if isinstance(stored_card_id, str) and stored_card_id:
+        return stored_card_id
+    if document_id.startswith(CARD_DOCUMENT_ID_PREFIX):
+        return document_id.removeprefix(CARD_DOCUMENT_ID_PREFIX)
+    if document_id.startswith(AUDIT_DOCUMENT_ID_PREFIX):
+        return document_id.removeprefix(AUDIT_DOCUMENT_ID_PREFIX)
+    return document_id
 
 
 class UpstreamServiceError(RuntimeError):
@@ -175,6 +195,7 @@ class StoredCard:
     def to_document(self) -> dict[str, Any]:
         return {
             "id": self.id,
+            "cardId": self.id,
             "documentType": self.document_type,
             "userId": self.owner_id,
             "schemaVersion": 1,
@@ -217,8 +238,9 @@ class StoredCard:
     @classmethod
     def from_document(cls, document: dict[str, Any]) -> "StoredCard":
         blob = document.get("blob") or {}
+        document_id = str(document["id"])
         return cls(
-            id=str(document["id"]),
+            id=_logical_card_id(document_id, document.get("cardId")),
             document_type=str(document.get("documentType", "card")),
             owner_id=str(document["userId"]),
             request_id=str(document.get("requestId", "")),
@@ -530,6 +552,90 @@ class InMemoryAuditRepository(AbstractAuditRepository):
             self._records.pop((owner_id, card_id), None)
 
 
+class InMemorySharedCardAuditRepository(AbstractCardRepository, AbstractAuditRepository):
+    def __init__(self) -> None:
+        self._records: dict[tuple[str, str], StoredCard] = {}
+        self._lock = asyncio.Lock()
+
+    async def reserve_document(
+        self,
+        *,
+        owner_id: str,
+        card_id: str,
+        request_hash: str,
+        idempotency_key: str,
+        request_id: str,
+    ) -> tuple[StoredCard | None, bool]:
+        async with self._lock:
+            key = (owner_id, _card_document_id(card_id))
+            existing = self._records.get(key)
+            if existing is not None:
+                return existing, False
+            placeholder = StoredCard(
+                id=card_id,
+                document_type="card",
+                owner_id=owner_id,
+                request_id=request_id,
+                idempotency_key=idempotency_key,
+                request_hash=request_hash,
+                status="processing",
+            )
+            self._records[key] = placeholder
+            return placeholder, True
+
+    async def save(self, record: StoredCard) -> StoredCard:
+        async with self._lock:
+            record.updated_at = now_iso()
+            self._records[(record.owner_id, _card_document_id(record.id))] = record
+            return record
+
+    async def get(self, owner_id: str, card_id: str) -> StoredCard | None:
+        async with self._lock:
+            return self._records.get((owner_id, _card_document_id(card_id)))
+
+    async def delete(self, owner_id: str, card_id: str) -> None:
+        async with self._lock:
+            self._records.pop((owner_id, _card_document_id(card_id)), None)
+
+    async def reserve_audit(
+        self,
+        *,
+        owner_id: str,
+        card_id: str,
+        request_hash: str,
+        idempotency_key: str,
+        request_id: str,
+    ) -> tuple[StoredCard | None, bool]:
+        async with self._lock:
+            key = (owner_id, _audit_document_id(card_id))
+            existing = self._records.get(key)
+            if existing is not None:
+                return existing, False
+            placeholder = StoredCard(
+                id=card_id,
+                document_type="generation-audit",
+                owner_id=owner_id,
+                request_id=request_id,
+                idempotency_key=idempotency_key,
+                request_hash=request_hash,
+                status="audit_processing",
+            )
+            self._records[key] = placeholder
+            return placeholder, True
+
+    async def save_audit(self, record: StoredCard) -> None:
+        async with self._lock:
+            self._records[(record.owner_id, _audit_document_id(record.id))] = record
+
+    async def get_audit(self, owner_id: str, card_id: str) -> StoredCard | None:
+        async with self._lock:
+            return self._records.get((owner_id, _audit_document_id(card_id)))
+
+    async def delete_audit(self, owner_id: str, card_id: str) -> None:
+        async with self._lock:
+            self._records.pop((owner_id, _audit_document_id(card_id)), None)
+
+
 class InMemoryAssetStore(AbstractAssetStore):
     def __init__(self) -> None:
         self._assets: dict[str, tuple[bytes, str]] = {}
@@ -575,6 +681,81 @@ class AzureCosmosCardRepository(AbstractCardRepository, AbstractAuditRepository)
             self._container = database.get_container_client(self._container_name)
         return self._container
 
+    def _record_document(self, record: StoredCard, *, document_id: str) -> dict[str, Any]:
+        document = record.to_document()
+        document["id"] = document_id
+        return document
+
+    async def _read_raw_document(self, owner_id: str, document_id: str) -> dict[str, Any] | None:
+        from azure.cosmos.exceptions import CosmosResourceNotFoundError
+
+        container = await self._get_container()
+        try:
+            return await container.read_item(document_id, partition_key=owner_id)
+        except CosmosResourceNotFoundError:
+            return None
+
+    def _match_document_type(
+        self,
+        document: dict[str, Any] | None,
+        *,
+        expected_document_type: str,
+    ) -> StoredCard | None:
+        if document is None:
+            return None
+        if str(document.get("documentType", "card")) != expected_document_type:
+            return None
+        return StoredCard.from_document(document)
+
+    async def _get_typed_record(
+        self,
+        owner_id: str,
+        logical_card_id: str,
+        *,
+        document_id: str,
+        expected_document_type: str,
+    ) -> StoredCard | None:
+        record = self._match_document_type(
+            await self._read_raw_document(owner_id, document_id),
+            expected_document_type=expected_document_type,
+        )
+        if record is not None:
+            return record
+        if document_id == logical_card_id:
+            return None
+        return self._match_document_type(
+            await self._read_raw_document(owner_id, logical_card_id),
+            expected_document_type=expected_document_type,
+        )
+
+    async def _delete_typed_record(
+        self,
+        owner_id: str,
+        logical_card_id: str,
+        *,
+        document_id: str,
+        expected_document_type: str,
+    ) -> None:
+        from azure.cosmos.exceptions import CosmosResourceNotFoundError
+
+        container = await self._get_container()
+        try:
+            await container.delete_item(document_id, partition_key=owner_id)
+            return
+        except CosmosResourceNotFoundError:
+            pass
+
+        if document_id == logical_card_id:
+            return
+
+        legacy = await self._read_raw_document(owner_id, logical_card_id)
+        if legacy is None or str(legacy.get("documentType", "card")) != expected_document_type:
+            return
+        try:
+            await container.delete_item(logical_card_id, partition_key=owner_id)
+        except CosmosResourceNotFoundError:
+            return
+
     async def reserve_document(
         self,
         *,
@@ -585,6 +766,10 @@ class AzureCosmosCardRepository(AbstractCardRepository, AbstractAuditRepository)
         request_id: str,
     ) -> tuple[StoredCard | None, bool]:
         from azure.cosmos.exceptions import CosmosResourceExistsError
+
+        existing = await self.get(owner_id, card_id)
+        if existing is not None:
+            return existing, False
 
         record = StoredCard(
             id=card_id,
@@ -597,7 +782,9 @@ class AzureCosmosCardRepository(AbstractCardRepository, AbstractAuditRepository)
         )
         container = await self._get_container()
         try:
-            await container.create_item(record.to_document())
+            await container.create_item(
+                self._record_document(record, document_id=_card_document_id(card_id))
+            )
             return record, True
         except CosmosResourceExistsError:
             existing = await self.get(owner_id, card_id)
@@ -606,34 +793,40 @@ class AzureCosmosCardRepository(AbstractCardRepository, AbstractAuditRepository)
     async def save(self, record: StoredCard) -> StoredCard:
         container = await self._get_container()
         record.updated_at = now_iso()
-        await container.upsert_item(record.to_document())
+        await container.upsert_item(
+            self._record_document(record, document_id=_card_document_id(record.id))
+        )
         return record
 
     async def get(self, owner_id: str, card_id: str) -> StoredCard | None:
-        from azure.cosmos.exceptions import CosmosResourceNotFoundError
-
-        container = await self._get_container()
-        try:
-            document = await container.read_item(card_id, partition_key=owner_id)
-        except CosmosResourceNotFoundError:
-            return None
-        return StoredCard.from_document(document)
+        return await self._get_typed_record(
+            owner_id,
+            card_id,
+            document_id=_card_document_id(card_id),
+            expected_document_type="card",
+        )
 
     async def delete(self, owner_id: str, card_id: str) -> None:
-        from azure.cosmos.exceptions import CosmosResourceNotFoundError
-
-        container = await self._get_container()
-        try:
-            await container.delete_item(card_id, partition_key=owner_id)
-        except CosmosResourceNotFoundError:
-            return
+        await self._delete_typed_record(
+            owner_id,
+            card_id,
+            document_id=_card_document_id(card_id),
+            expected_document_type="card",
+        )
 
     async def save_audit(self, record: StoredCard) -> None:
         container = await self._get_container()
-        await container.upsert_item(record.to_document())
+        await container.upsert_item(
+            self._record_document(record, document_id=_audit_document_id(record.id))
+        )
 
     async def get_audit(self, owner_id: str, card_id: str) -> StoredCard | None:
-        return await self.get(owner_id, card_id)
+        return await self._get_typed_record(
+            owner_id,
+            card_id,
+            document_id=_audit_document_id(card_id),
+            expected_document_type="generation-audit",
+        )
 
     async def reserve_audit(
         self,
@@ -646,6 +839,10 @@ class AzureCosmosCardRepository(AbstractCardRepository, AbstractAuditRepository)
     ) -> tuple[StoredCard | None, bool]:
         from azure.cosmos.exceptions import CosmosResourceExistsError
 
+        existing = await self.get_audit(owner_id, card_id)
+        if existing is not None:
+            return existing, False
+
         record = StoredCard(
             id=card_id,
             document_type="generation-audit",
@@ -657,14 +854,21 @@ class AzureCosmosCardRepository(AbstractCardRepository, AbstractAuditRepository)
         )
         container = await self._get_container()
         try:
-            await container.create_item(record.to_document())
+            await container.create_item(
+                self._record_document(record, document_id=_audit_document_id(card_id))
+            )
             return record, True
         except CosmosResourceExistsError:
             existing = await self.get_audit(owner_id, card_id)
             return existing, False
 
     async def delete_audit(self, owner_id: str, card_id: str) -> None:
-        await self.delete(owner_id, card_id)
+        await self._delete_typed_record(
+            owner_id,
+            card_id,
+            document_id=_audit_document_id(card_id),
+            expected_document_type="generation-audit",
+        )
 
 
 class AzureBlobAssetStore(AbstractAssetStore):
