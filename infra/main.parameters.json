@@ -11,6 +11,9 @@
     "deployEntraAppRegistration": {
       "value": "${deployEntraAppRegistration}"
     },
+    "legacyCosmosIpRule": {
+      "value": "${LEGACY_COSMOS_IP_RULE=}"
+    },
     "appSessionSecretKeyValue": {
       "value": "${APP_SESSION_SECRET_KEY=}"
     },

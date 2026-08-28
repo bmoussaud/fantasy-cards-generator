@@ -135,10 +135,32 @@ def test_cosmos_container_enables_item_level_ttl() -> None:
 
 def test_cosmos_account_explicitly_keeps_public_network_access_for_mvp() -> None:
     cosmos_bicep = (REPO_ROOT / "infra" / "modules" / "cosmos-db.bicep").read_text()
+    main_bicep = (REPO_ROOT / "infra" / "main.bicep").read_text()
+    main_parameters = (REPO_ROOT / "infra" / "main.parameters.json").read_text()
+    network_bicep = (REPO_ROOT / "infra" / "modules" / "network.bicep").read_text()
+    container_apps_environment_bicep = (
+        REPO_ROOT / "infra" / "modules" / "container-apps-environment.bicep"
+    ).read_text()
 
-    assert "ipRules: []" in cosmos_bicep
+    assert "param natGatewayPublicIpAddress string" in cosmos_bicep
+    assert "ipAddressOrRange: natGatewayPublicIpAddress" in cosmos_bicep
+    assert "ipRules: cosmosIpRules" in cosmos_bicep
+    assert "natGatewayPublicIpAddress: network.outputs.natGatewayPublicIpAddress" in main_bicep
+    assert "legacyIpRule: legacyCosmosIpRule" in main_bicep
+    assert '"value": "${LEGACY_COSMOS_IP_RULE=}"' in main_parameters
     assert "isVirtualNetworkFilterEnabled: false" in cosmos_bicep
     assert "networkAclBypass: 'None'" in cosmos_bicep
     assert "networkAclBypassResourceIds: []" in cosmos_bicep
     assert "publicNetworkAccess: 'Enabled'" in cosmos_bicep
     assert "virtualNetworkRules: []" in cosmos_bicep
+    assert "20.10.253.231" not in cosmos_bicep
+    assert "20.10.253.231" not in main_bicep
+    assert "20.10.253.231" not in main_parameters
+    assert "Microsoft.Network/natGateways@" in network_bicep
+    assert "publicIPAllocationMethod: 'Static'" in network_bicep
+    assert "serviceName: 'Microsoft.App/environments'" in network_bicep
+    assert "param infrastructureSubnetId string" in container_apps_environment_bicep
+    assert "infrastructureSubnetId: infrastructureSubnetId" in (
+        container_apps_environment_bicep
+    )
+    assert "workloadProfiles:" in container_apps_environment_bicep

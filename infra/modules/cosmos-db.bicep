@@ -13,10 +13,30 @@ param containerName string
 @description('Managed identity principal ID for the Container App that needs Cosmos DB data-plane access.')
 param containerAppPrincipalId string
 
+@description('Static public IP address exposed by the NAT Gateway for Container Apps egress.')
+param natGatewayPublicIpAddress string
+
+@description('Optional legacy IPv4 rule to retain during cutover or rollback.')
+param legacyIpRule string = ''
+
 @description('Optional tags shared by Cosmos DB resources.')
 param tags object = {}
 
 var cosmosDataContributorRoleDefinitionId = '00000000-0000-0000-0000-000000000002'
+var cosmosIpRules = empty(trim(legacyIpRule))
+  ? [
+      {
+        ipAddressOrRange: natGatewayPublicIpAddress
+      }
+    ]
+  : [
+      {
+        ipAddressOrRange: natGatewayPublicIpAddress
+      }
+      {
+        ipAddressOrRange: trim(legacyIpRule)
+      }
+    ]
 
 resource databaseAccount 'Microsoft.DocumentDB/databaseAccounts@2024-05-15' = {
   name: accountName
@@ -37,7 +57,7 @@ resource databaseAccount 'Microsoft.DocumentDB/databaseAccounts@2024-05-15' = {
     disableLocalAuth: true
     enableAutomaticFailover: false
     enableMultipleWriteLocations: false
-    ipRules: []
+    ipRules: cosmosIpRules
     isVirtualNetworkFilterEnabled: false
     locations: [
       {
@@ -98,3 +118,4 @@ output cosmosAccountResourceId string = databaseAccount.id
 output cosmosAccountEndpoint string = databaseAccount.properties.documentEndpoint
 output cosmosDatabaseName string = databaseName
 output cosmosContainerName string = containerName
+output cosmosIpRules array = cosmosIpRules
