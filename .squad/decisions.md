@@ -1,6 +1,135 @@
+
+
 # Squad Decisions
 
 ## Active Decisions
+
+# 2026-08-28 — Wire azd env into Entra app-registration toggle
+
+## Decision
+
+- Added `deployEntraAppRegistration` to `infra/main.parameters.json` so `azd env set deployEntraAppRegistration true` actually reaches `infra/main.bicep` during `azd provision`.
+
+## Why
+
+- The Bicep parameter existed, but azd was only passing `AZURE_ENV_NAME` and `AZURE_LOCATION`, so forced reprovision still deployed with `deployEntraAppRegistration=false` and left the Entra outputs empty.
+
+# 2026-08-28 — Use a slug for Graph app-registration uniqueName
+
+## Decision
+
+- Split the Entra app-registration Graph payload into a human display name and a separate slugged `uniqueName`, using `fantasy-cards-generator-{environment}` for the unique value.
+
+## Why
+
+- Microsoft Graph rejected the previous `uniqueName` because it reused the display name (`Fantasy Cards Generator (DEV)`), and that value is not valid for the Graph `uniqueName` field.
+
+# 2026-08-28 — Stop dev deploys from depending on Container Apps Key Vault secretRefs
+
+## Decision
+
+- Verified that `fcg-dev-acr-pull` was the identity attached to `fcg-dev-app`, the Key Vault was in RBAC mode, and the identity had `Key Vault Secrets User` on the vault scope.
+- Confirmed that both ARM deployment and direct `az containerapp secret set ... keyvaultref:` calls still failed to resolve `app-session-secret-key` and `entra-client-secret`.
+- Updated the Container App contract so it now consumes those two values as regular Container Apps secrets while Key Vault remains the durable store of record.
+
+## Why
+
+- The live failure was in Azure Container Apps' Key Vault secretRef resolution path, not in the repository's principal wiring.
+- Mirroring the same secure inputs into Container Apps removes the broken runtime dependency and made `azd up --environment dev --no-prompt` succeed again.
+
+# 2026-08-28 — Secret-safe postprovision hooks
+
+## Decision
+
+- Hook scripts that mint or persist secrets must not enable shell tracing and must avoid destructive credential resets on reprovision.
+- Use non-tracing shell options and append/additive secret creation paths instead.
+
+## Why
+
+- Postprovision hooks run in automation where stdout/stderr can be captured, so traced commands can leak live secrets.
+- Re-runnable infra automation also must not revoke working credentials implicitly during routine reprovisioning.
+
+# 2026-08-28 — Regenerating APP_SESSION_SECRET_KEY did not fix dev Key Vault secretRef failure
+
+## Decision
+
+- Re-seeded the `dev` azd environment's `APP_SESSION_SECRET_KEY` with a fresh base64 value and re-ran `azd up --environment dev --no-prompt`.
+- The deployment failed again on `fcg-dev-app` with the same `ContainerAppOperationError`: Container Apps could not fetch Key Vault secrets `app-session-secret-key` and `entra-client-secret` using the user-assigned managed identity `fcg-dev-acr-pull`.
+
+## Why
+
+- This rules out the session secret's value format as the blocker.
+- The failure is still in secret reference resolution, so the next investigation should focus on Key Vault RBAC propagation timing versus a Bicep/ARM role-assignment or scope bug affecting the Container App secret fetch path.
+
+# 2026-08-28 — Dev azd up blocked by Container Apps Key Vault secretRef resolution
+
+## Decision
+
+- While deploying `main` after PR #32 to the `dev` azd environment, `APP_SESSION_SECRET_KEY` was missing from azd env and had to be seeded before provisioning.
+- The subsequent `azd up --environment dev --no-prompt` failed with `ContainerAppOperationError`: the `fcg-dev-app` revision could not fetch Key Vault secrets `app-session-secret-key` and `entra-client-secret` using the `fcg-dev-acr-pull` user-assigned managed identity.
+
+## Why
+
+- This is an operational blocker for future dev deployments using the new Key Vault-backed `secretRef` wiring.
+- Post-failure inspection confirmed the Key Vault RBAC assignment (`Key Vault Secrets User`) exists for that identity and the secret ARM resources exist, so the actionable fact for the team is the exact deployment failure mode and the required pre-seeding of `APP_SESSION_SECRET_KEY` in azd env.
+
+# 2026-08-28 — Dev azd deployment succeeded with app-registration toggle still disabled
+
+## Decision
+
+- Ran a non-interactive `azd up --environment dev --no-prompt` from `main` successfully against the existing `dev` environment.
+- The deployment converged and the app endpoint responded, but `deployEntraAppRegistration` was not enabled in the active azd environment, so the Graph-backed Entra app-registration module did not run and `ENTRA_CLIENT_ID` remained empty in azd outputs.
+
+## Why
+
+- This tells the team the merged PR #29 code is deployable through the current azd workflow, while also making clear that exercising the new Entra IaC path still requires an explicit parameter/configuration choice rather than happening automatically on the existing `dev` environment.
+
+# 2026-08-28 — Deployed merged PR #33 follow-up to dev with ACA-native secret mirroring
+
+## Decision
+
+- Updated local `main` and ran `azd up --environment dev --no-prompt` successfully.
+- Post-deploy checks show revision `fcg-dev-app--azd-1787905916` is `active: true`, `state: Running`, `health: Healthy`.
+- `/healthz` returned HTTP 200 and `/auth/login` returned HTTP 302 to Microsoft Entra instead of a 404/500.
+
+## Why
+
+- PR #33 exists to replace the broken Container Apps Key Vault `secretRef` path with ACA-native secret mirroring.
+- The team needs a recorded operational confirmation that the merged change now deploys cleanly on `dev` and that the live app is healthy at both the health probe and auth entrypoint.
+
+# 2026-08-28 — ACA secret mirroring is an acceptable tactical workaround, not the target design
+
+## Decision
+
+- For PR #33, treating Azure Container Apps native secrets as the runtime copy of `APP_SESSION_SECRET_KEY` and `ENTRA_CLIENT_SECRET` is acceptable to restore deployability.
+- Tests should reflect the new contract, and the team should treat Key Vault secretRefs as a deferred platform follow-up rather than as fixed.
+
+## Why
+
+- The values still enter Bicep as secure parameters and are not committed to git, but the app now stores a second copy in ACA and no longer benefits from direct Key Vault reference rotation at runtime.
+- The design solves the broken deployment path, not the Azure platform limitation itself, so the team should document that distinction clearly.
+
+# 2026-08-27T08:23:16Z — Close issue #18 as duplicate of #19
+
+## Decision
+
+- Closed GitHub issue #18 as a duplicate of #19 after static verification that PR #20 fixed the underlying Foundry managed-identity bug.
+
+## Why
+
+- Issue #18 and #19 describe the same `azd up` failure (`BadRequest: Unsupported configuration. To create projects, you must enable a managed identity on your resource.`).
+- Current `infra/modules/ai-foundry.bicep` shows `identity: { type: 'SystemAssigned' }` on both the parent `foundryAccount` and child `aiFoundryProject`, matching the fix merged in PR #20.
+- Live Azure verification was not possible in this environment because no authenticated `az`/`azd` access was available.
+
+# 2026-08-27 — Created issue #21 for real ACA application image
+
+## Decision
+
+- Opened GitHub issue #21 ("Build and deploy the real app container to Azure Container Apps") to track adding a production app Dockerfile, registry publishing, and azd/ACA deployment wiring so Container Apps stops running the placeholder hello-world image.
+
+## Why
+
+- The deployed infra succeeds today, but `infra/main.bicep` still defaults `containerImage` to `mcr.microsoft.com/azuredocs/containerapps-helloworld:latest`, and the repo currently lacks a production image build/push path.
 
 # 2026-08-27T14:53:05Z — Issue #28 adds optional Graph-based Bicep provisioning for the Entra app registration
 
