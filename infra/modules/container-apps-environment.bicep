@@ -11,6 +11,9 @@ param logAnalyticsWorkspaceCustomerId string
 @description('Log Analytics workspace shared key for Container Apps logging.')
 param logAnalyticsWorkspaceSharedKey string
 
+@description('Delegated subnet resource ID used for workload-profile Container Apps VNet integration.')
+param infrastructureSubnetId string
+
 @description('Optional tags shared by Container Apps resources.')
 param tags object = {}
 
@@ -26,6 +29,16 @@ resource containerAppsEnvironment 'Microsoft.App/managedEnvironments@2024-03-01'
         sharedKey: logAnalyticsWorkspaceSharedKey
       }
     }
+    vnetConfiguration: {
+      infrastructureSubnetId: infrastructureSubnetId
+      internal: false
+    }
+    workloadProfiles: [
+      {
+        name: 'Consumption'
+        workloadProfileType: 'Consumption'
+      }
+    ]
     zoneRedundant: false
   }
 }

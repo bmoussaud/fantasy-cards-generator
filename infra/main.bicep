@@ -35,6 +35,9 @@ param entraRedirectPath string = '/auth/callback'
 @description('Path appended to the deployed Container Apps URL to form the production OIDC post-logout redirect URI.')
 param entraPostLogoutRedirectPath string = '/'
 
+@description('Legacy Cosmos firewall IP rule to retain temporarily during parallel cutover. Clear this after the NAT-backed environment passes smoke tests.')
+param legacyCosmosIpRule string = ''
+
 @secure()
 @description('Session cookie signing secret stored in Key Vault and mirrored into the Container App secret set (APP_SESSION_SECRET_KEY). Set via `azd env set APP_SESSION_SECRET_KEY <value>` before provisioning.')
 param appSessionSecretKeyValue string = ''
@@ -144,8 +147,8 @@ var keyVaultBase = replace(
   ''
 )
 var keyVaultName = toLower(take(keyVaultBase, 24))
-var containerAppsEnvironmentName = take('${resourceToken}-cae', 32)
-var containerAppName = take('${resourceToken}-app', 32)
+var containerAppsEnvironmentName = take('${resourceToken}-cae-nat', 32)
+var containerAppName = take('${resourceToken}-app-nat', 32)
 var cosmosAccountName = toLower(take('${resourceToken}-cosmos-${uniqueToken}', 44))
 var storageAccountBase = replace('st${namePrefix}${environmentName}${uniqueToken}', '-', '')
 var storageAccountName = toLower(take(storageAccountBase, 24))
@@ -153,6 +156,10 @@ var aiFoundryAccountBase = replace('ai${namePrefix}${environmentName}${uniqueTok
 var aiFoundryAccountName = toLower(take(aiFoundryAccountBase, 24))
 var registryName = toLower(take('${namePrefix}${environmentName}${uniqueToken}acr', 50))
 var acrPullIdentityName = take('${resourceToken}-acr-pull', 128)
+var virtualNetworkName = take('${resourceToken}-vnet', 64)
+var containerAppsSubnetName = 'aca-infra'
+var natGatewayName = take('${resourceToken}-nat', 64)
+var natGatewayPublicIpName = take('${resourceToken}-nat-pip', 64)
 
 module monitoring './modules/monitoring.bicep' = {
   name: 'monitoring'
@@ -186,10 +193,23 @@ module security './modules/security.bicep' = {
   }
 }
 
+module network './modules/network.bicep' = {
+  name: 'network'
+  params: {
+    containerAppsSubnetName: containerAppsSubnetName
+    location: location
+    natGatewayName: natGatewayName
+    natGatewayPublicIpName: natGatewayPublicIpName
+    tags: tags
+    virtualNetworkName: virtualNetworkName
+  }
+}
+
 module containerAppsEnvironment './modules/container-apps-environment.bicep' = {
   name: 'container-apps-environment'
   params: {
     containerAppsEnvironmentName: containerAppsEnvironmentName
+    infrastructureSubnetId: network.outputs.containerAppsSubnetResourceId
     location: location
     logAnalyticsWorkspaceCustomerId: monitoring.outputs.logAnalyticsWorkspaceCustomerId
     logAnalyticsWorkspaceSharedKey: monitoring.outputs.logAnalyticsWorkspaceSharedKey
@@ -268,7 +288,9 @@ module cosmosDb './modules/cosmos-db.bicep' = {
     containerAppPrincipalId: containerApps.outputs.containerAppPrincipalId
     containerName: cosmosContainerName
     databaseName: cosmosDatabaseName
+    legacyIpRule: legacyCosmosIpRule
     location: location
+    natGatewayPublicIpAddress: network.outputs.natGatewayPublicIpAddress
     tags: tags
   }
 }
@@ -328,14 +350,20 @@ output cosmosAccountName string = cosmosDb.outputs.cosmosAccountName
 output cosmosAccountResourceId string = cosmosDb.outputs.cosmosAccountResourceId
 output cosmosContainerName string = cosmosDb.outputs.cosmosContainerName
 output cosmosDatabaseName string = cosmosDb.outputs.cosmosDatabaseName
+output cosmosIpRules array = cosmosDb.outputs.cosmosIpRules
 output keyVaultName string = security.outputs.keyVaultName
 output keyVaultUri string = security.outputs.keyVaultUri
 output logAnalyticsWorkspaceName string = monitoring.outputs.logAnalyticsWorkspaceName
 output logAnalyticsWorkspaceResourceId string = monitoring.outputs.logAnalyticsWorkspaceResourceId
+output natGatewayName string = network.outputs.natGatewayName
+output natGatewayPublicIpAddress string = network.outputs.natGatewayPublicIpAddress
+output natGatewayPublicIpName string = network.outputs.natGatewayPublicIpName
 output storageAccountName string = storage.outputs.storageAccountName
 output storageAccountResourceId string = storage.outputs.storageAccountResourceId
 output storageBlobEndpoint string = storage.outputs.storageBlobEndpoint
 output storageContainerName string = storage.outputs.storageContainerName
+output virtualNetworkName string = network.outputs.virtualNetworkName
+output containerAppsSubnetName string = network.outputs.containerAppsSubnetName
 output entraClientId string = entraClientId
 output entraAppObjectId string = deployEntraAppRegistration ? appRegistration!.outputs.appObjectId : ''
 output entraServicePrincipalId string = deployEntraAppRegistration ? appRegistration!.outputs.servicePrincipalId : ''

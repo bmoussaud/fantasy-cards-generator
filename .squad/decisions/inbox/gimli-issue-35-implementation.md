@@ -1,0 +1,4 @@
+### 2026-08-28T14:44:19.626+00:00: Issue #35 NAT Gateway egress implementation
+**By:** Gimli
+**What:** Added a VNet/delegated ACA subnet, NAT Gateway + static public IP, a workload-profile Container Apps environment wired to that subnet, and Cosmos firewall rules sourced from the NAT public IP. Also switched the azd-targeted app/environment names to parallel `*-nat` resources, added a temporary `LEGACY_COSMOS_IP_RULE` cutover input, and documented rollout/rollback plus Entra redirect verification.
+**Why:** ACA VNet mode is effectively create-time, so the safest dev rollout is a parallel NAT-backed environment while keeping the old path available until live smoke tests pass. The NAT output removes the fragile manually copied ACA outbound-IP dependency in source control, but the final validation/removal of the legacy `20.10.253.231` rule still requires a real Azure deploy and authenticated Cosmos smoke test.

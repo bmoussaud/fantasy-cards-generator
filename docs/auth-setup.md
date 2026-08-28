@@ -122,6 +122,9 @@ To use it:
 3. Optionally override `entraAppRegistrationName`,
    `entraAppRegistrationDescription`, `entraLocalRedirectUri`, or
    `entraRedirectPath`.
+   When the Container Apps environment is replaced in parallel (for example the
+   NAT-backed `*-cae-nat` rollout), the deployed redirect URI changes with the
+   new default domain.
 4. Read the deployment outputs for `entraClientId`, `entraAppObjectId`,
    `entraServicePrincipalId`, and `ENTRA_CLIENT_ID`.
 5. If you use `azd provision`, the `postprovision` hook automatically runs
@@ -131,6 +134,12 @@ To use it:
    `ENTRA_CLIENT_SECRET`.
 6. If `deployEntraAppRegistration=false`, the hook detects that
    `ENTRA_CLIENT_ID` is absent and exits without error.
+
+If you are **not** using the Bicep-managed app registration, treat the
+replacement Container Apps hostname as a manual follow-up: after the first live
+deploy, update the registered web redirect URI to the new
+`https://<container-app-domain>/auth/callback` value and verify sign-in against
+that exact host.
 
 > `ENTRA_CLIENT_SECRET` still is not created **declaratively** by the Bicep
 > module itself because Microsoft Graph rejects declarative
