@@ -18,7 +18,7 @@ def test_azd_service_wires_container_app_and_acr() -> None:
     azure_yaml = (REPO_ROOT / "azure.yaml").read_text()
 
     assert "services:" in azure_yaml
-    assert "web:" in azure_yaml
+    assert "web-nat:" in azure_yaml
     assert "host: containerapp" in azure_yaml
     assert "registry: ${AZURE_CONTAINER_REGISTRY_ENDPOINT}" in azure_yaml
     assert "resources:" in azure_yaml
@@ -34,6 +34,8 @@ def test_bicep_exposes_azd_container_outputs_without_helloworld_image() -> None:
     assert "modules/container-registry.bicep" in main_bicep
     assert "output AZURE_CONTAINER_REGISTRY_ENDPOINT" in main_bicep
     assert "output AZURE_CONTAINER_APP_NAME" in main_bicep
+    assert "param serviceName string = 'web-nat'" in main_bicep
+    assert "param serviceName string = 'web-nat'" in container_apps_bicep
     assert "targetPort: 8000" in container_apps_bicep
     assert "registries:" in container_apps_bicep
 

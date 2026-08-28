@@ -14,8 +14,8 @@ param tags object = {}
 @description('Optional container image URI override. By default azd deploy updates the app with the image it builds and pushes to the provisioned registry.')
 param containerImage string = ''
 
-@description('Service name as defined in azure.yaml.')
-param serviceName string = 'web'
+@description('Service name as defined in azure.yaml. During the NAT cutover this stays distinct from the legacy app so azd deploy targets the new Container App unambiguously.')
+param serviceName string = 'web-nat'
 
 @description('Set to true to provision the Microsoft Entra ID app registration via the Graph Bicep extension.')
 param deployEntraAppRegistration bool = false
