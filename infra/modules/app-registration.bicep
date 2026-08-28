@@ -3,6 +3,9 @@ extension graphBeta
 @description('Unique app registration name and display name.')
 param appName string
 
+@description('Tenant-unique slug used for the Entra app registration uniqueName.')
+param appUniqueName string
+
 @description('Short description for the Entra ID app registration.')
 param appDescription string = 'Microsoft Entra ID app registration for the fantasy-cards-generator web application.'
 
@@ -13,7 +16,7 @@ param redirectUris array
 param tenantId string = tenant().tenantId
 
 resource application 'Microsoft.Graph/applications@beta' = {
-  uniqueName: appName
+  uniqueName: appUniqueName
   description: appDescription
   displayName: appName
   signInAudience: 'AzureADMultipleOrgs'

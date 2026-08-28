@@ -79,6 +79,8 @@ To use it:
 1. Ensure the root `bicepconfig.json` is present so the `graphBeta` extension
    alias resolves to the Microsoft Graph Bicep extension.
 2. Set `deployEntraAppRegistration=true` when deploying `infra/main.bicep`.
+   With `azd`, run `azd env set deployEntraAppRegistration true` before
+   `azd provision` so the toggle flows through `infra/main.parameters.json`.
 3. Optionally override `entraAppRegistrationName`,
    `entraAppRegistrationDescription`, `entraLocalRedirectUri`, or
    `entraRedirectPath`.

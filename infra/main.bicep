@@ -150,6 +150,7 @@ module appRegistration './modules/app-registration.bicep' = if (deployEntraAppRe
   params: {
     appDescription: entraAppRegistrationDescription
     appName: entraAppRegistrationName
+    appUniqueName: take('fantasy-cards-generator-${environmentName}', 64)
     redirectUris: [
       entraLocalRedirectUri
       '${containerApps.outputs.containerAppUrl}${entraRedirectPath}'
