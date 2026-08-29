@@ -193,7 +193,7 @@ class StoredCard:
     ttl_seconds: int | None = None
 
     def to_document(self) -> dict[str, Any]:
-        return {
+        document = {
             "id": self.id,
             "cardId": self.id,
             "documentType": self.document_type,
@@ -232,8 +232,10 @@ class StoredCard:
             "failureType": self.failure_type,
             "failureHeaders": self.failure_headers,
             "retryable": self.retryable,
-            "ttl": self.ttl_seconds,
         }
+        if self.ttl_seconds is not None:
+            document["ttl"] = self.ttl_seconds
+        return document
 
     @classmethod
     def from_document(cls, document: dict[str, Any]) -> "StoredCard":
@@ -513,9 +515,10 @@ class InMemoryCardRepository(AbstractCardRepository):
 
 
 class InMemoryAuditRepository(AbstractAuditRepository):
-    def __init__(self) -> None:
+    def __init__(self, *, audit_ttl_seconds: int = 30 * 24 * 60 * 60) -> None:
         self._records: dict[tuple[str, str], StoredCard] = {}
         self._lock = asyncio.Lock()
+        self._audit_ttl_seconds = audit_ttl_seconds
 
     async def reserve_audit(
         self,
@@ -539,6 +542,7 @@ class InMemoryAuditRepository(AbstractAuditRepository):
                 idempotency_key=idempotency_key,
                 request_hash=request_hash,
                 status="audit_processing",
+                ttl_seconds=self._audit_ttl_seconds,
             )
             self._records[key] = placeholder
             return placeholder, True
@@ -557,9 +561,10 @@ class InMemoryAuditRepository(AbstractAuditRepository):
 
 
 class InMemorySharedCardAuditRepository(AbstractCardRepository, AbstractAuditRepository):
-    def __init__(self) -> None:
+    def __init__(self, *, audit_ttl_seconds: int = 30 * 24 * 60 * 60) -> None:
         self._records: dict[tuple[str, str], StoredCard] = {}
         self._lock = asyncio.Lock()
+        self._audit_ttl_seconds = audit_ttl_seconds
 
     async def reserve_document(
         self,
@@ -623,6 +628,7 @@ class InMemorySharedCardAuditRepository(AbstractCardRepository, AbstractAuditRep
                 idempotency_key=idempotency_key,
                 request_hash=request_hash,
                 status="audit_processing",
+                ttl_seconds=self._audit_ttl_seconds,
             )
             self._records[key] = placeholder
             return placeholder, True
@@ -677,6 +683,7 @@ class AzureCosmosCardRepository(AbstractCardRepository, AbstractAuditRepository)
         )
         self._database_name = settings.cosmos_database_name or "appdb"
         self._container_name = settings.cosmos_container_name or "cards"
+        self._audit_ttl_seconds = settings.audit_retention_days * 24 * 60 * 60
         self._container = None
 
     async def _get_container(self):
@@ -855,6 +862,7 @@ class AzureCosmosCardRepository(AbstractCardRepository, AbstractAuditRepository)
             idempotency_key=idempotency_key,
             request_hash=request_hash,
             status="audit_processing",
+            ttl_seconds=self._audit_ttl_seconds,
         )
         container = await self._get_container()
         try:
@@ -2035,7 +2043,9 @@ def create_services(settings: AppSettings) -> AppServices:
         asset_store = AzureBlobAssetStore(settings)
     else:
         card_repository = InMemoryCardRepository()
-        audit_repository = InMemoryAuditRepository()
+        audit_repository = InMemoryAuditRepository(
+            audit_ttl_seconds=settings.audit_retention_days * 24 * 60 * 60
+        )
         asset_store = InMemoryAssetStore()
 
     ai_client = (

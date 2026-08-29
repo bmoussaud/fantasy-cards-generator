@@ -95,6 +95,60 @@ def test_generate_card_success_persists_card_and_private_asset(
     assert "sas" not in str(card.to_document()).lower()
 
 
+def test_card_document_omits_ttl_when_no_item_expiry_is_intended() -> None:
+    card = StoredCard(
+        id="card-123",
+        document_type="card",
+        owner_id=TEST_OWNER_ID,
+        request_id="req-card-ttl",
+        idempotency_key="idem-card-ttl",
+        request_hash="hash-card-ttl",
+        status="processing",
+    )
+
+    document = card.to_document()
+
+    assert "ttl" not in document
+
+
+def test_audit_document_serializes_positive_ttl() -> None:
+    ttl_seconds = 30 * 24 * 60 * 60
+    audit = StoredCard(
+        id="card-123",
+        document_type="generation-audit",
+        owner_id=TEST_OWNER_ID,
+        request_id="req-audit-ttl",
+        idempotency_key="idem-audit-ttl",
+        request_hash="hash-audit-ttl",
+        status="audit_processing",
+        ttl_seconds=ttl_seconds,
+    )
+
+    document = audit.to_document()
+
+    assert document["ttl"] == ttl_seconds
+
+
+def test_audit_reservation_uses_retention_ttl() -> None:
+    ttl_seconds = 30 * 24 * 60 * 60
+    repository = InMemoryAuditRepository(audit_ttl_seconds=ttl_seconds)
+
+    reserved, created = asyncio.run(
+        repository.reserve_audit(
+            owner_id=TEST_OWNER_ID,
+            card_id="card-123",
+            request_hash="hash-audit-reservation",
+            idempotency_key="idem-audit-reservation",
+            request_id="req-audit-reservation",
+        )
+    )
+
+    assert created is True
+    assert reserved is not None
+    assert reserved.ttl_seconds == ttl_seconds
+    assert reserved.to_document()["ttl"] == ttl_seconds
+
+
 def test_live_mode_foundry_client_sends_real_bearer_token(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
