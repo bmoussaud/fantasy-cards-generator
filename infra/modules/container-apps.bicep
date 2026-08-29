@@ -100,14 +100,20 @@ param trustedProxyHops int = 1
 @description('Maximum upstream retries injected as UPSTREAM_MAX_RETRIES.')
 param upstreamMaxRetries int = 2
 
+@description('Maximum image retries injected as IMAGE_MAX_RETRIES.')
+param imageMaxRetries int = 0
+
 @description('Base backoff seconds injected as UPSTREAM_BASE_BACKOFF_SECONDS.')
 param upstreamBaseBackoffSeconds string = '0.15'
 
-@description('Per-upstream timeout injected as UPSTREAM_TIMEOUT_SECONDS.')
-param upstreamTimeoutSeconds string = '8'
+@description('Text generation timeout injected as TEXT_TIMEOUT_SECONDS.')
+param textTimeoutSeconds string = '20'
+
+@description('Image generation timeout injected as IMAGE_TIMEOUT_SECONDS.')
+param imageTimeoutSeconds string = '150'
 
 @description('Overall request timeout injected as OVERALL_TIMEOUT_SECONDS.')
-param overallTimeoutSeconds string = '18'
+param overallTimeoutSeconds string = '225'
 
 @description('Sanitized audit retention in days injected as AUDIT_RETENTION_DAYS.')
 param auditRetentionDays int = 30
@@ -226,12 +232,20 @@ var containerAppEnv = concat(
       value: string(upstreamMaxRetries)
     }
     {
+      name: 'IMAGE_MAX_RETRIES'
+      value: string(imageMaxRetries)
+    }
+    {
       name: 'UPSTREAM_BASE_BACKOFF_SECONDS'
       value: upstreamBaseBackoffSeconds
     }
     {
-      name: 'UPSTREAM_TIMEOUT_SECONDS'
-      value: upstreamTimeoutSeconds
+      name: 'TEXT_TIMEOUT_SECONDS'
+      value: textTimeoutSeconds
+    }
+    {
+      name: 'IMAGE_TIMEOUT_SECONDS'
+      value: imageTimeoutSeconds
     }
     {
       name: 'OVERALL_TIMEOUT_SECONDS'

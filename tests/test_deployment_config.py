@@ -59,7 +59,9 @@ def test_generation_runtime_env_vars_are_wired_from_bicep_outputs() -> None:
     assert "name: 'RATE_LIMIT_USER_REQUESTS'" in container_apps_bicep
     assert "name: 'RATE_LIMIT_IP_REQUESTS'" in container_apps_bicep
     assert "name: 'TRUSTED_PROXY_HOPS'" in container_apps_bicep
-    assert "name: 'UPSTREAM_TIMEOUT_SECONDS'" in container_apps_bicep
+    assert "name: 'TEXT_TIMEOUT_SECONDS'" in container_apps_bicep
+    assert "name: 'IMAGE_TIMEOUT_SECONDS'" in container_apps_bicep
+    assert "name: 'IMAGE_MAX_RETRIES'" in container_apps_bicep
     assert "name: 'OVERALL_TIMEOUT_SECONDS'" in container_apps_bicep
     assert "name: 'AUDIT_RETENTION_DAYS'" in container_apps_bicep
     assert "name: 'IMAGE_SIZE'" in container_apps_bicep

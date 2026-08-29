@@ -121,14 +121,20 @@ param trustedProxyHops int = 1
 @description('Maximum retries for retryable upstream dependencies.')
 param upstreamMaxRetries int = 2
 
+@description('Maximum image retries. Keep zero because an image request may complete after the client times out.')
+param imageMaxRetries int = 0
+
 @description('Base backoff in seconds between retry attempts.')
 param upstreamBaseBackoffSeconds string = '0.15'
 
-@description('Per-upstream timeout in seconds.')
-param upstreamTimeoutSeconds string = '8'
+@description('Text generation timeout in seconds.')
+param textTimeoutSeconds string = '20'
+
+@description('Image generation timeout in seconds.')
+param imageTimeoutSeconds string = '150'
 
 @description('Overall request timeout in seconds.')
-param overallTimeoutSeconds string = '18'
+param overallTimeoutSeconds string = '225'
 
 @description('Sanitized audit retention in days.')
 param auditRetentionDays int = 30
@@ -261,6 +267,8 @@ module containerApps './modules/container-apps.bicep' = {
     foundryEndpoint: 'https://${aiFoundryAccountName}.cognitiveservices.azure.com/'
     foundryImageDeployment: aiFoundryImageDeploymentName
     foundryTextDeployment: aiFoundryTextDeploymentName
+    imageMaxRetries: imageMaxRetries
+    imageTimeoutSeconds: imageTimeoutSeconds
     imageSize: imageSize
     keyVaultUri: security.outputs.keyVaultUri
     location: location
@@ -277,7 +285,7 @@ module containerApps './modules/container-apps.bicep' = {
     trustedProxyHops: trustedProxyHops
     upstreamBaseBackoffSeconds: upstreamBaseBackoffSeconds
     upstreamMaxRetries: upstreamMaxRetries
-    upstreamTimeoutSeconds: upstreamTimeoutSeconds
+    textTimeoutSeconds: textTimeoutSeconds
   }
 }
 

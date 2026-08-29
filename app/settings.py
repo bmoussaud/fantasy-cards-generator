@@ -17,8 +17,10 @@ class RateLimitSettings:
 @dataclass(frozen=True)
 class RetrySettings:
     max_retries: int
+    image_max_retries: int
     base_backoff_seconds: float
-    upstream_timeout_seconds: float
+    text_timeout_seconds: float
+    image_timeout_seconds: float
     overall_timeout_seconds: float
 
 
@@ -90,19 +92,27 @@ def load_app_settings() -> AppSettings:
         trusted_proxy_hops=_int_env("TRUSTED_PROXY_HOPS", default=0, minimum=0),
         retry=RetrySettings(
             max_retries=_int_env("UPSTREAM_MAX_RETRIES", default=2, minimum=0),
+            image_max_retries=_int_env("IMAGE_MAX_RETRIES", default=0, minimum=0),
             base_backoff_seconds=_float_env(
                 "UPSTREAM_BASE_BACKOFF_SECONDS",
                 default=0.15,
                 minimum=0.01,
             ),
-            upstream_timeout_seconds=_float_env(
-                "UPSTREAM_TIMEOUT_SECONDS",
-                default=8.0,
+            text_timeout_seconds=_float_env_with_legacy_fallback(
+                "TEXT_TIMEOUT_SECONDS",
+                legacy_name="UPSTREAM_TIMEOUT_SECONDS",
+                default=20.0,
+                minimum=0.1,
+            ),
+            image_timeout_seconds=_float_env_with_legacy_fallback(
+                "IMAGE_TIMEOUT_SECONDS",
+                legacy_name="UPSTREAM_TIMEOUT_SECONDS",
+                default=150.0,
                 minimum=0.1,
             ),
             overall_timeout_seconds=_float_env(
                 "OVERALL_TIMEOUT_SECONDS",
-                default=18.0,
+                default=225.0,
                 minimum=0.5,
             ),
         ),
@@ -150,9 +160,9 @@ def _validate_app_settings(settings: AppSettings) -> None:
             "FOUNDRY_IMAGE_DEPLOYMENT must be set when AI_MODE=live.",
         )
 
-    if settings.retry.overall_timeout_seconds <= settings.retry.upstream_timeout_seconds:
+    if settings.retry.overall_timeout_seconds <= settings.retry.text_timeout_seconds:
         raise SettingsError(
-            "OVERALL_TIMEOUT_SECONDS must be greater than UPSTREAM_TIMEOUT_SECONDS."
+            "OVERALL_TIMEOUT_SECONDS must be greater than TEXT_TIMEOUT_SECONDS."
         )
 
 
@@ -183,6 +193,22 @@ def _int_env(name: str, *, default: int, minimum: int) -> int:
 
 def _float_env(name: str, *, default: float, minimum: float) -> float:
     raw_value = _optional_env(name)
+    value = default if raw_value is None else float(raw_value)
+    if value < minimum:
+        raise SettingsError(f"{name} must be >= {minimum}.")
+    return value
+
+
+def _float_env_with_legacy_fallback(
+    name: str,
+    *,
+    legacy_name: str,
+    default: float,
+    minimum: float,
+) -> float:
+    raw_value = _optional_env(name)
+    if raw_value is None:
+        raw_value = _optional_env(legacy_name)
     value = default if raw_value is None else float(raw_value)
     if value < minimum:
         raise SettingsError(f"{name} must be >= {minimum}.")

@@ -19,7 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from app.problems import ProblemDetails
 from app.settings import AppSettings, RateLimitSettings
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("uvicorn.error")
 
 PNG_1X1_BASE64 = (
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO6r2w0AAAAASUVORK5CYII="
@@ -301,6 +301,15 @@ class AIImageResult:
     image: ImageResult
     metadata: ModelMetadata
     usage: UsageAudit
+
+
+@dataclass(slots=True)
+class GenerationProgress:
+    stage: str = "reserved"
+    validated_payload: GeneratedCardModel | None = None
+    derived_art_prompt: str | None = None
+    moderation: list[ModerationDecision] = field(default_factory=list)
+    text_result: AITextResult | None = None
 
 
 class RateLimiter:
@@ -953,7 +962,7 @@ class MockAIClient:
                 retryable=False,
             )
         if "text-timeout" in flags:
-            await asyncio.sleep(self.settings.retry.upstream_timeout_seconds + 0.2)
+            await asyncio.sleep(self.settings.retry.text_timeout_seconds + 0.2)
         normalized = strip_mock_flags(prompt)
         payload: dict[str, Any] = {
             "schemaVersion": 1,
@@ -1021,7 +1030,7 @@ class MockAIClient:
                 retryable=False,
             )
         if "image-timeout" in flags:
-            await asyncio.sleep(self.settings.retry.upstream_timeout_seconds + 0.2)
+            await asyncio.sleep(self.settings.retry.image_timeout_seconds + 0.2)
         labels: set[str] = set()
         if "post-image-block" in flags:
             labels.add("post-image-block")
@@ -1169,7 +1178,7 @@ class AzureFoundryAIClient:
         }
         async with httpx.AsyncClient(
             base_url=self.settings.foundry_endpoint,
-            timeout=self.settings.retry.upstream_timeout_seconds,
+            timeout=None,
         ) as client:
             response = await client.post(
                 f"{path}?api-version={api_version}",
@@ -1305,7 +1314,14 @@ class CardGenerationService:
             raise
 
         try:
-            return await asyncio.wait_for(
+            progress = GenerationProgress()
+            started = time.perf_counter()
+            logger.info(
+                "generation-start request_id=%s overall_budget_seconds=%s",
+                request_id,
+                self.services.settings.retry.overall_timeout_seconds,
+            )
+            result = await asyncio.wait_for(
                 self._run_generation(
                     owner=owner,
                     card_id=card_id,
@@ -1313,10 +1329,53 @@ class CardGenerationService:
                     request_hash=request_hash,
                     idempotency_key=idempotency_key,
                     request_id=request_id,
+                    progress=progress,
                 ),
                 timeout=self.services.settings.retry.overall_timeout_seconds,
             )
+            logger.info(
+                "generation-complete request_id=%s status=%s duration_ms=%s",
+                request_id,
+                result.status,
+                int((time.perf_counter() - started) * 1000),
+            )
+            return result
         except asyncio.TimeoutError as exc:
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            logger.warning(
+                (
+                    "generation-timeout request_id=%s stage=%s duration_ms=%s "
+                    "overall_budget_seconds=%s"
+                ),
+                request_id,
+                progress.stage,
+                elapsed_ms,
+                self.services.settings.retry.overall_timeout_seconds,
+            )
+            if (
+                progress.stage == "foundry-image"
+                and progress.validated_payload is not None
+                and progress.derived_art_prompt is not None
+                and progress.text_result is not None
+            ):
+                partial = await self._persist_partial(
+                    owner=owner,
+                    card_id=card_id,
+                    request_id=request_id,
+                    idempotency_key=idempotency_key,
+                    request_hash=request_hash,
+                    prompt=normalized_prompt,
+                    validated_payload=progress.validated_payload,
+                    derived_art_prompt=progress.derived_art_prompt,
+                    moderation=progress.moderation,
+                    text_result=progress.text_result,
+                )
+                logger.info(
+                    "generation-partial request_id=%s reason=overall-timeout stage=%s",
+                    request_id,
+                    progress.stage,
+                )
+                return self._as_response(partial)
             problem = ProblemDetails(
                 status_code=504,
                 title="Gateway Timeout",
@@ -1413,13 +1472,19 @@ class CardGenerationService:
                 problem=exc,
             )
             raise
-        except asyncio.TimeoutError as exc:
+        except asyncio.TimeoutError:
             problem = ProblemDetails(
-                status_code=504,
-                title="Gateway Timeout",
-                detail="The artwork retry exceeded the overall timeout.",
-                type="/problems/upstream-timeout",
-                error_code="upstream_timeout",
+                status_code=200,
+                title="Artwork Pending",
+                detail="Artwork generation timed out and can be retried.",
+                type="/problems/artwork-pending",
+                error_code="artwork_retry_available",
+            )
+            logger.warning(
+                "generation-timeout request_id=%s stage=foundry-image-retry "
+                "overall_budget_seconds=%s",
+                request_id,
+                self.services.settings.retry.overall_timeout_seconds,
             )
             await self._save_audit_failure(
                 owner.owner_id,
@@ -1430,7 +1495,7 @@ class CardGenerationService:
                 problem.error_code,
                 problem=problem,
             )
-            raise problem from exc
+            return self._as_response(record)
 
     async def fetch_image(self, owner: AuthenticatedOwner, card_id: str) -> tuple[bytes, str]:
         record = await self.services.card_repository.get(owner.owner_id, card_id)
@@ -1462,8 +1527,10 @@ class CardGenerationService:
         request_hash: str,
         idempotency_key: str,
         request_id: str,
+        progress: GenerationProgress,
     ) -> CardResponseModel:
         moderation: list[ModerationDecision] = []
+        progress.stage = "pre-moderation"
         pre_decision = await self.services.moderation_service.moderate_text(
             prompt,
             stage="pre_prompt",
@@ -1489,6 +1556,7 @@ class CardGenerationService:
             )
             raise problem
 
+        progress.stage = "foundry-text"
         try:
             text_result = await self._retry_upstream(
                 lambda: self.services.ai_client.generate_card(prompt, request_id=request_id),
@@ -1529,6 +1597,7 @@ class CardGenerationService:
             )
             raise problem from exc
 
+        progress.stage = "post-text-moderation"
         post_text = await self.services.moderation_service.moderate_text(
             " ".join(
                 [
@@ -1562,6 +1631,7 @@ class CardGenerationService:
             raise problem
 
         derived_art_prompt = derive_art_prompt(validated_payload)
+        progress.stage = "art-prompt-moderation"
         post_art_prompt = await self.services.moderation_service.moderate_text(
             derived_art_prompt,
             stage="post_art_prompt",
@@ -1587,6 +1657,11 @@ class CardGenerationService:
             )
             raise problem
 
+        progress.validated_payload = validated_payload
+        progress.derived_art_prompt = derived_art_prompt
+        progress.moderation = moderation
+        progress.text_result = text_result
+        progress.stage = "foundry-image"
         try:
             image_result = await self._retry_upstream(
                 lambda: self.services.ai_client.generate_image(
@@ -1611,6 +1686,7 @@ class CardGenerationService:
             )
             return self._as_response(partial)
 
+        progress.stage = "post-image-moderation"
         post_image = await self.services.moderation_service.moderate_image(image_result.image)
         moderation.append(post_image)
         if not post_image.allowed:
@@ -1636,6 +1712,7 @@ class CardGenerationService:
             )
             return self._as_response(partial)
 
+        progress.stage = "persistence"
         completed = await self._persist_completed(
             owner=owner,
             card_id=card_id,
@@ -1984,12 +2061,23 @@ class CardGenerationService:
         service_name: str,
         request_id: str,
     ) -> Any:
-        for attempt in range(self.services.settings.retry.max_retries + 1):
+        timeout_seconds, max_retries = self._upstream_policy(service_name)
+        for attempt in range(max_retries + 1):
             try:
                 started = time.perf_counter()
+                logger.info(
+                    (
+                        "dependency-start request_id=%s service=%s attempt=%s "
+                        "timeout_seconds=%s"
+                    ),
+                    request_id,
+                    service_name,
+                    attempt + 1,
+                    timeout_seconds,
+                )
                 result = await asyncio.wait_for(
                     operation(),
-                    timeout=self.services.settings.retry.upstream_timeout_seconds,
+                    timeout=timeout_seconds,
                 )
                 duration_ms = int((time.perf_counter() - started) * 1000)
                 logger.info(
@@ -2002,12 +2090,17 @@ class CardGenerationService:
                 return result
             except asyncio.TimeoutError as exc:
                 logger.warning(
-                    "dependency-timeout request_id=%s service=%s attempt=%s",
+                    (
+                        "dependency-timeout request_id=%s service=%s attempt=%s "
+                        "duration_ms=%s timeout_seconds=%s"
+                    ),
                     request_id,
                     service_name,
                     attempt + 1,
+                    int((time.perf_counter() - started) * 1000),
+                    timeout_seconds,
                 )
-                if attempt >= self.services.settings.retry.max_retries:
+                if attempt >= max_retries:
                     if service_name == "foundry-image":
                         raise ProblemDetails(
                             status_code=200,
@@ -2037,7 +2130,7 @@ class CardGenerationService:
                     exc.error_code,
                     exc.diagnostic_message,
                 )
-                if not exc.retryable or attempt >= self.services.settings.retry.max_retries:
+                if not exc.retryable or attempt >= max_retries:
                     if exc.service == "foundry-image":
                         raise ProblemDetails(
                             status_code=200,
@@ -2055,6 +2148,12 @@ class CardGenerationService:
                     ) from exc
             await asyncio.sleep(self.services.settings.retry.base_backoff_seconds * (2**attempt))
         raise AssertionError("unreachable")
+
+    def _upstream_policy(self, service_name: str) -> tuple[float, int]:
+        retry = self.services.settings.retry
+        if service_name == "foundry-image":
+            return retry.image_timeout_seconds, retry.image_max_retries
+        return retry.text_timeout_seconds, retry.max_retries
 
     async def _enforce_rate_limits(self, owner_id: str, client_ip: str) -> None:
         await self.services.rate_limiter.enforce(

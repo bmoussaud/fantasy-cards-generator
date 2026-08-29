@@ -437,7 +437,8 @@ def test_non_retryable_text_upstream_failure_returns_bad_gateway(
 def test_upstream_timeout_returns_gateway_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("UPSTREAM_TIMEOUT_SECONDS", "0.1")
+    monkeypatch.setenv("TEXT_TIMEOUT_SECONDS", "0.1")
+    monkeypatch.setenv("IMAGE_TIMEOUT_SECONDS", "0.2")
     monkeypatch.setenv("OVERALL_TIMEOUT_SECONDS", "0.5")
     monkeypatch.setenv("UPSTREAM_MAX_RETRIES", "0")
     client = make_authenticated_client(monkeypatch)
@@ -519,6 +520,31 @@ def test_image_failure_returns_partial_card_and_retry_action(
     assert payload["status"] == "awaiting_artwork_retry"
     assert payload["imageUrl"] is None
     assert payload["actions"][0]["type"] == "retry_artwork"
+
+
+def test_ui_overall_timeout_during_image_returns_partial_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TEXT_TIMEOUT_SECONDS", "0.2")
+    monkeypatch.setenv("IMAGE_TIMEOUT_SECONDS", "0.8")
+    monkeypatch.setenv("OVERALL_TIMEOUT_SECONDS", "0.5")
+    monkeypatch.setenv("IMAGE_MAX_RETRIES", "0")
+    client = make_authenticated_client(monkeypatch)
+    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
+
+    response = client.post(
+        "/ui/cards/generate",
+        data={
+            "prompt": "create a safe fantasy knight [[mock:image-timeout]]",
+            "idempotency_key": "idem-ui-image-timeout",
+            "csrf_token": csrf_token,
+        },
+        headers={"content-type": "application/x-www-form-urlencoded"},
+    )
+
+    assert response.status_code == 200
+    assert "Artwork is not ready yet" in response.text
+    assert "Retry artwork" in response.text
 
 
 def test_retry_artwork_completes_partial_card(authenticated_client: TestClient) -> None:
@@ -644,7 +670,8 @@ def test_concurrent_duplicates_do_not_duplicate_model_calls(
             self.image_calls += 1
             return await super().generate_image(art_prompt, request_id=request_id)
 
-    monkeypatch.setenv("UPSTREAM_TIMEOUT_SECONDS", "0.8")
+    monkeypatch.setenv("TEXT_TIMEOUT_SECONDS", "0.8")
+    monkeypatch.setenv("IMAGE_TIMEOUT_SECONDS", "0.8")
     monkeypatch.setenv("OVERALL_TIMEOUT_SECONDS", "1.6")
 
     async def run_concurrency() -> tuple[list[dict[str, str]], int, int]:
@@ -904,7 +931,8 @@ def test_concurrent_artwork_retries_do_not_duplicate_image_calls(
             await asyncio.sleep(0.45)
             return await super().generate_image(art_prompt, request_id=request_id)
 
-    monkeypatch.setenv("UPSTREAM_TIMEOUT_SECONDS", "0.8")
+    monkeypatch.setenv("TEXT_TIMEOUT_SECONDS", "0.8")
+    monkeypatch.setenv("IMAGE_TIMEOUT_SECONDS", "0.8")
     monkeypatch.setenv("OVERALL_TIMEOUT_SECONDS", "1.6")
 
     async def run_concurrency() -> tuple[list[dict[str, str]], int, int]:
