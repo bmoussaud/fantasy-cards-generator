@@ -54,17 +54,21 @@ class UpstreamServiceError(RuntimeError):
         *,
         status_code: int | None = None,
         retryable: bool = False,
+        error_code: str | None = None,
+        diagnostic_message: str | None = None,
     ) -> None:
         super().__init__(message)
         self.service = service
         self.status_code = status_code
         self.retryable = retryable
+        self.error_code = error_code
+        self.diagnostic_message = diagnostic_message
 
 
 class GeneratedCardModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    schemaVersion: Literal[1] = 1
+    schemaVersion: Literal[1]
     name: str = Field(min_length=3, max_length=80)
     cardType: Literal["hero", "creature", "artifact", "spell"]
     rarity: Literal["common", "uncommon", "rare", "legendary"]
@@ -1064,7 +1068,6 @@ class AzureFoundryAIClient:
                 },
                 {"role": "user", "content": prompt},
             ],
-            "temperature": 0.2,
             "response_format": {
                 "type": "json_schema",
                 "json_schema": {
@@ -1173,15 +1176,68 @@ class AzureFoundryAIClient:
                 headers=headers,
                 json=payload,
             )
-        if response.status_code in {429, 500, 502, 503, 504}:
+        if response.is_error:
+            error_code, diagnostic_message = _azure_error_diagnostic(response, payload)
             raise UpstreamServiceError(
                 service_name,
-                f"{service_name} request failed.",
+                (
+                    f"{service_name} request failed with Azure error "
+                    f"{error_code}: {diagnostic_message}"
+                ),
                 status_code=response.status_code,
                 retryable=response.status_code == 429 or response.status_code >= 500,
+                error_code=error_code,
+                diagnostic_message=diagnostic_message,
             )
-        response.raise_for_status()
         return response.json()
+
+
+def _azure_error_diagnostic(
+    response: httpx.Response,
+    request_payload: dict[str, Any],
+) -> tuple[str, str]:
+    error_code = "unknown_error"
+    diagnostic_message = "No Azure error message was returned."
+    try:
+        payload = response.json()
+    except ValueError:
+        return error_code, diagnostic_message
+    if not isinstance(payload, dict):
+        return error_code, diagnostic_message
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        return error_code, diagnostic_message
+    if isinstance(error.get("code"), str) and error["code"].strip():
+        error_code = _sanitize_diagnostic(error["code"], limit=100)
+    if isinstance(error.get("message"), str) and error["message"].strip():
+        diagnostic_message = _sanitize_diagnostic(
+            _redact_request_content(error["message"], request_payload),
+            limit=500,
+        )
+    return error_code, diagnostic_message
+
+
+def _sanitize_diagnostic(value: str, *, limit: int) -> str:
+    return " ".join(value.split())[:limit]
+
+
+def _redact_request_content(message: str, payload: dict[str, Any]) -> str:
+    sensitive_values: list[str] = []
+    prompt = payload.get("prompt")
+    if isinstance(prompt, str):
+        sensitive_values.append(prompt)
+    input_value = payload.get("input")
+    if isinstance(input_value, str):
+        sensitive_values.append(input_value)
+    messages = payload.get("messages")
+    if isinstance(messages, list):
+        for item in messages:
+            if isinstance(item, dict) and isinstance(item.get("content"), str):
+                sensitive_values.append(item["content"])
+    for value in sensitive_values:
+        if len(value) >= 8:
+            message = message.replace(value, "<redacted>")
+    return message
 
 
 @dataclass(slots=True)
@@ -1969,12 +2025,17 @@ class CardGenerationService:
                     ) from exc
             except UpstreamServiceError as exc:
                 logger.warning(
-                    "dependency-failure request_id=%s service=%s attempt=%s status=%s retryable=%s",
+                    (
+                        "dependency-failure request_id=%s service=%s attempt=%s status=%s "
+                        "retryable=%s azure_code=%s azure_message=%s"
+                    ),
                     request_id,
                     exc.service,
                     attempt + 1,
                     exc.status_code,
                     exc.retryable,
+                    exc.error_code,
+                    exc.diagnostic_message,
                 )
                 if not exc.retryable or attempt >= self.services.settings.retry.max_retries:
                     if exc.service == "foundry-image":

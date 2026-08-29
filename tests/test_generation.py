@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 import httpx
@@ -20,6 +21,7 @@ from app.generation import (
     InMemorySharedCardAuditRepository,
     MockAIClient,
     StoredCard,
+    UpstreamServiceError,
     client_ip_from_request,
     create_services,
 )
@@ -158,11 +160,13 @@ def test_live_mode_foundry_client_sends_real_bearer_token(
     monkeypatch.setenv("FOUNDRY_TEXT_DEPLOYMENT", "gpt-5-5")
     monkeypatch.setenv("FOUNDRY_IMAGE_DEPLOYMENT", "gpt-image-2")
 
-    captured: dict[str, str] = {}
+    captured: dict[str, object] = {}
     real_async_client = httpx.AsyncClient
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["authorization"] = request.headers["Authorization"]
+        captured["url"] = str(request.url)
+        captured["payload"] = json.loads(request.content)
         return httpx.Response(
             200,
             json={
@@ -202,7 +206,87 @@ def test_live_mode_foundry_client_sends_real_bearer_token(
     )
 
     assert captured["authorization"] == "Bearer live-access-token"
+    assert captured["url"] == (
+        "https://foundry.example/openai/deployments/gpt-5-5/chat/completions"
+        "?api-version=2025-03-01-preview"
+    )
+    payload = captured["payload"]
+    assert isinstance(payload, dict)
+    assert "temperature" not in payload
+    response_format = payload["response_format"]
+    schema = response_format["json_schema"]["schema"]
+    assert response_format["type"] == "json_schema"
+    assert response_format["json_schema"]["strict"] is True
+    assert set(schema["required"]) == set(schema["properties"])
+    assert "schemaVersion" in schema["required"]
     assert result.metadata.mode == "live"
+
+
+def test_foundry_400_raises_sanitized_azure_diagnostic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AI_MODE", "live")
+    monkeypatch.setenv("PERSISTENCE_MODE", "memory")
+    monkeypatch.setenv("FOUNDRY_ENDPOINT", "https://foundry.example")
+    monkeypatch.setenv("FOUNDRY_TEXT_DEPLOYMENT", "gpt-5-5")
+    monkeypatch.setenv("FOUNDRY_IMAGE_DEPLOYMENT", "gpt-image-2")
+
+    sensitive_prompt = "private prompt that must not be logged"
+    sensitive_output = "private output that must not be logged"
+    real_async_client = httpx.AsyncClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={
+                "error": {
+                    "code": "unsupported_value",
+                    "message": (
+                        "Unsupported value: 'temperature' does not support 0.2 "
+                        "with this model.\nOnly the default (1) value is supported. "
+                        f"Rejected prompt: {sensitive_prompt}"
+                    ),
+                    "param": "temperature",
+                    "type": "invalid_request_error",
+                },
+                "prompt": sensitive_prompt,
+                "output": sensitive_output,
+                "access_token": "sensitive-token",
+            },
+            request=request,
+        )
+
+    def build_client(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_async_client(*args, **kwargs)
+
+    monkeypatch.setattr(generation_module.httpx, "AsyncClient", build_client)
+    client = AzureFoundryAIClient(load_app_settings())
+    client._credential = SimpleNamespace(  # type: ignore[attr-defined]
+        get_token=lambda *_args, **_kwargs: SimpleNamespace(token="live-access-token")
+    )
+
+    with pytest.raises(UpstreamServiceError) as raised:
+        asyncio.run(
+            client._post(
+                "/openai/deployments/gpt-5-5/chat/completions",
+                {"prompt": sensitive_prompt},
+                api_version="2025-03-01-preview",
+                service_name="foundry-text",
+            )
+        )
+
+    error = raised.value
+    assert error.status_code == 400
+    assert error.retryable is False
+    assert error.error_code == "unsupported_value"
+    assert error.diagnostic_message == (
+        "Unsupported value: 'temperature' does not support 0.2 with this model. "
+        "Only the default (1) value is supported. Rejected prompt: <redacted>"
+    )
+    assert sensitive_prompt not in str(error)
+    assert sensitive_output not in str(error)
+    assert "sensitive-token" not in str(error)
 
 
 def test_rate_limits_ignore_untrusted_forwarded_for(monkeypatch: pytest.MonkeyPatch) -> None:
