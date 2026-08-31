@@ -252,6 +252,7 @@ class StoredCard:
     failure_headers: dict[str, str] = field(default_factory=dict)
     retryable: bool = False
     ttl_seconds: int | None = None
+    image_quality: Literal["low", "medium", "high"] | None = None
 
     def to_document(self) -> dict[str, Any]:
         document = {
@@ -296,6 +297,8 @@ class StoredCard:
         }
         if self.ttl_seconds is not None:
             document["ttl"] = self.ttl_seconds
+        if self.image_quality is not None:
+            document["imageQuality"] = self.image_quality
         return document
 
     @classmethod
@@ -335,6 +338,7 @@ class StoredCard:
             failure_headers=dict(document.get("failureHeaders") or {}),
             retryable=bool(document.get("retryable", False)),
             ttl_seconds=document.get("ttl"),
+            image_quality=document.get("imageQuality"),
         )
 
 
@@ -1082,7 +1086,13 @@ class MockAIClient:
             usage=usage,
         )
 
-    async def generate_image(self, art_prompt: str, *, request_id: str) -> AIImageResult:
+    async def generate_image(
+        self,
+        art_prompt: str,
+        *,
+        request_id: str,
+        image_quality: Literal["low", "medium", "high"] | None = None,
+    ) -> AIImageResult:
         flags = parse_mock_flags(art_prompt)
         self._attempts[f"image:{request_id}"] += 1
         attempt = self._attempts[f"image:{request_id}"]
@@ -1195,13 +1205,23 @@ class AzureFoundryAIClient:
             usage=usage,
         )
 
-    async def generate_image(self, art_prompt: str, *, request_id: str) -> AIImageResult:
+    async def generate_image(
+        self,
+        art_prompt: str,
+        *,
+        request_id: str,
+        image_quality: Literal["low", "medium", "high"] | None = None,
+    ) -> AIImageResult:
+        quality = image_quality if image_quality is not None else self.settings.image_quality
+        if quality not in {"low", "medium", "high"}:
+            raise ValueError(f"image_quality must be low, medium, or high; got {quality!r}")
         started_at = time.perf_counter()
         response = await self._post(
             f"/openai/deployments/{self.settings.foundry_image_deployment}/images/generations",
             {
                 "prompt": art_prompt,
                 "size": self.settings.image_size,
+                "quality": quality,
             },
             api_version="2025-04-01-preview",
             service_name="foundry-image",
@@ -1345,7 +1365,11 @@ class CardGenerationService:
         idempotency_key: str,
         request_id: str,
         client_ip: str,
+        image_quality: Literal["low", "medium", "high"] | None = None,
     ) -> CardResponseModel:
+        resolved_quality: Literal["low", "medium", "high"] = (
+            image_quality if image_quality is not None else self.services.settings.image_quality
+        )
         normalized_prompt = normalize_prompt(prompt)
         request_hash = digest_text(normalized_prompt)
         card_id = deterministic_card_id(owner.owner_id, idempotency_key)
@@ -1396,6 +1420,7 @@ class CardGenerationService:
                     idempotency_key=idempotency_key,
                     request_id=request_id,
                     progress=progress,
+                    image_quality=resolved_quality,
                 ),
                 timeout=self.services.settings.retry.overall_timeout_seconds,
             )
@@ -1418,6 +1443,7 @@ class CardGenerationService:
                     derived_art_prompt=progress.derived_art_prompt,
                     moderation=progress.moderation,
                     text_result=progress.text_result,
+                    image_quality=resolved_quality,
                     partial_reason="image_timeout",
                 )
                 return self._as_response(partial)
@@ -1589,6 +1615,7 @@ class CardGenerationService:
         idempotency_key: str,
         request_id: str,
         progress: GenerationProgress,
+        image_quality: Literal["low", "medium", "high"],
     ) -> CardResponseModel:
         moderation: list[ModerationDecision] = []
         progress.stage = "pre-moderation"
@@ -1726,9 +1753,10 @@ class CardGenerationService:
         progress.stage = "foundry-image"
         try:
             image_result = await self._retry_upstream(
-                lambda: self.services.ai_client.generate_image(
+                lambda q=image_quality: self.services.ai_client.generate_image(
                     derived_art_prompt,
                     request_id=request_id,
+                    image_quality=q,
                 ),
                 service_name="foundry-image",
                 request_id=request_id,
@@ -1747,6 +1775,7 @@ class CardGenerationService:
                 moderation=moderation,
                 text_result=text_result,
                 partial_reason="image_failure",
+                image_quality=image_quality,
             )
             return self._as_response(partial)
 
@@ -1766,6 +1795,7 @@ class CardGenerationService:
                 moderation=moderation,
                 text_result=text_result,
                 partial_reason="moderation_rejection",
+                image_quality=image_quality,
             )
             await self._save_audit_failure(
                 owner.owner_id,
@@ -1810,10 +1840,15 @@ class CardGenerationService:
                 type="/problems/retry-conflict",
                 error_code="retry_conflict",
             )
+        retry_quality: Literal["low", "medium", "high"] = (
+            record.image_quality
+            if record.image_quality is not None
+            else self.services.settings.image_quality
+        )
         try:
             image_result = await self._retry_upstream(
-                lambda: self.services.ai_client.generate_image(
-                    record.derived_art_prompt or "", request_id=request_id
+                lambda q=retry_quality: self.services.ai_client.generate_image(
+                    record.derived_art_prompt or "", request_id=request_id, image_quality=q
                 ),
                 service_name="foundry-image",
                 request_id=request_id,
@@ -1895,6 +1930,7 @@ class CardGenerationService:
         derived_art_prompt: str,
         moderation: list[ModerationDecision],
         text_result: AITextResult,
+        image_quality: Literal["low", "medium", "high"],
         partial_reason: str,
     ) -> StoredCard:
         record = StoredCard(
@@ -1913,6 +1949,7 @@ class CardGenerationService:
             text_model=text_result.metadata.model_dump(),
             image_model=None,
             usage={"text": text_result.usage.model_dump()},
+            image_quality=image_quality,
         )
         with telemetry_span(
             "fcg.persistence",

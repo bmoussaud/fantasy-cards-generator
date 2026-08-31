@@ -152,6 +152,9 @@ param auditRetentionDays int = 30
 @description('Requested image size for artwork generation.')
 param imageSize string = '1024x1024'
 
+@description('Requested image quality for artwork generation. Valid values are "low", "medium", and "high".')
+param imageQuality string = 'medium'
+
 @minValue(30)
 @maxValue(730)
 @description('Per-environment Log Analytics retention in days.')
@@ -341,6 +344,7 @@ module containerApps './modules/container-apps.bicep' = {
     imageMaxRetries: imageMaxRetries
     imageTimeoutSeconds: imageTimeoutSeconds
     imageSize: imageSize
+    imageQuality: imageQuality
     keyVaultUri: security.outputs.keyVaultUri
     location: location
     moderationPolicyName: moderationPolicyName

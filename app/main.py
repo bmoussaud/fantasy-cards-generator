@@ -373,6 +373,8 @@ def create_app(services: AppServices | None = None) -> FastAPI:
                 error_code="unauthorized",
             )
         app_services.csrf_protector.validate(request, form.get("csrf_token"))
+        raw_quality = form.get("quality", "low")
+        image_quality = raw_quality if raw_quality in {"low", "medium", "high"} else "low"
         result = await card_service.generate_card(
             owner=owner,
             prompt=form.get("prompt", ""),
@@ -382,6 +384,7 @@ def create_app(services: AppServices | None = None) -> FastAPI:
                 request,
                 trusted_proxy_hops=app_services.settings.trusted_proxy_hops,
             ),
+            image_quality=image_quality,
         )
         return templates.TemplateResponse(
             request,

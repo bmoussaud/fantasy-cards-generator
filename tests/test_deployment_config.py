@@ -78,6 +78,7 @@ def test_generation_runtime_env_vars_are_wired_from_bicep_outputs() -> None:
     assert "name: 'OVERALL_TIMEOUT_SECONDS'" in container_apps_bicep
     assert "name: 'AUDIT_RETENTION_DAYS'" in container_apps_bicep
     assert "name: 'IMAGE_SIZE'" in container_apps_bicep
+    assert "name: 'IMAGE_QUALITY'" in container_apps_bicep
 
     assert (
         "foundryEndpoint: 'https://${aiFoundryAccountName}.cognitiveservices.azure.com/'"

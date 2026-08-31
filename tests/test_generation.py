@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from types import SimpleNamespace
+from typing import Literal
 
 import httpx
 import pytest
@@ -27,7 +28,7 @@ from app.generation import (
 )
 from app.main import create_app
 from app.problems import ProblemDetails
-from app.settings import load_app_settings
+from app.settings import SettingsError, load_app_settings
 from tests.conftest import TEST_OWNER_ID, extract_hidden_value, make_authenticated_client
 
 
@@ -923,9 +924,17 @@ def test_concurrent_duplicates_do_not_duplicate_model_calls(
             await asyncio.sleep(0.45)
             return await super().generate_card(prompt, request_id=request_id)
 
-        async def generate_image(self, art_prompt: str, *, request_id: str):
+        async def generate_image(
+            self,
+            art_prompt: str,
+            *,
+            request_id: str,
+            image_quality: Literal["low", "medium", "high"] | None = None,
+        ):
             self.image_calls += 1
-            return await super().generate_image(art_prompt, request_id=request_id)
+            return await super().generate_image(
+                art_prompt, request_id=request_id, image_quality=image_quality
+            )
 
     monkeypatch.setenv("TEXT_TIMEOUT_SECONDS", "0.8")
     monkeypatch.setenv("IMAGE_TIMEOUT_SECONDS", "0.8")
@@ -1180,13 +1189,21 @@ def test_concurrent_artwork_retries_do_not_duplicate_image_calls(
             self.initial_image_calls = 0
             self.retry_image_calls = 0
 
-        async def generate_image(self, art_prompt: str, *, request_id: str):
+        async def generate_image(
+            self,
+            art_prompt: str,
+            *,
+            request_id: str,
+            image_quality: Literal["low", "medium", "high"] | None = None,
+        ):
             if "[[mock:image-500]]" in art_prompt:
                 self.initial_image_calls += 1
             else:
                 self.retry_image_calls += 1
             await asyncio.sleep(0.45)
-            return await super().generate_image(art_prompt, request_id=request_id)
+            return await super().generate_image(
+                art_prompt, request_id=request_id, image_quality=image_quality
+            )
 
     monkeypatch.setenv("TEXT_TIMEOUT_SECONDS", "0.8")
     monkeypatch.setenv("IMAGE_TIMEOUT_SECONDS", "0.8")
@@ -1256,3 +1273,379 @@ def test_concurrent_artwork_retries_do_not_duplicate_image_calls(
     assert results[1]["status"] == "completed"
     assert initial_image_calls == 1
     assert retry_image_calls == 1
+
+
+# ---------------------------------------------------------------------------
+# Image quality — settings contract
+# ---------------------------------------------------------------------------
+
+
+def test_image_quality_defaults_to_low(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("IMAGE_QUALITY", raising=False)
+
+    settings = load_app_settings()
+
+    assert settings.image_quality == "low"
+
+
+@pytest.mark.parametrize("quality", ["low", "medium", "high"])
+def test_image_quality_accepts_valid_values(
+    monkeypatch: pytest.MonkeyPatch, quality: str
+) -> None:
+    monkeypatch.setenv("IMAGE_QUALITY", quality)
+
+    settings = load_app_settings()
+
+    assert settings.image_quality == quality
+
+
+@pytest.mark.parametrize("bad_value", ["hd", "ultra", "standard", "Low", "HIGH"])
+def test_image_quality_rejects_invalid_value(
+    monkeypatch: pytest.MonkeyPatch, bad_value: str
+) -> None:
+    monkeypatch.setenv("IMAGE_QUALITY", bad_value)
+
+    with pytest.raises(SettingsError, match="IMAGE_QUALITY must be one of"):
+        load_app_settings()
+
+
+# ---------------------------------------------------------------------------
+# Image quality — generation payload contract
+# ---------------------------------------------------------------------------
+
+
+def test_foundry_image_request_payload_includes_quality(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AI_MODE", "live")
+    monkeypatch.setenv("PERSISTENCE_MODE", "memory")
+    monkeypatch.setenv("FOUNDRY_ENDPOINT", "https://foundry.example")
+    monkeypatch.setenv("FOUNDRY_TEXT_DEPLOYMENT", "gpt-5-5")
+    monkeypatch.setenv("FOUNDRY_IMAGE_DEPLOYMENT", "gpt-image-2")
+    monkeypatch.setenv("IMAGE_QUALITY", "medium")
+
+    captured: dict[str, object] = {}
+    real_async_client = httpx.AsyncClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "b64_json": (
+                            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk"
+                            "YPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+                        ),
+                        "revised_prompt": "A radiant knight.",
+                    }
+                ]
+            },
+        )
+
+    def build_client(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_async_client(*args, **kwargs)
+
+    monkeypatch.setattr(generation_module.httpx, "AsyncClient", build_client)
+    client = AzureFoundryAIClient(load_app_settings())
+    client._credential = SimpleNamespace(  # type: ignore[attr-defined]
+        get_token=lambda *_args, **_kwargs: SimpleNamespace(token="live-access-token")
+    )
+
+    asyncio.run(
+        client.generate_image(
+            "A radiant knight raising a silver shield.",
+            request_id="req-quality",
+        )
+    )
+
+    payload = captured["payload"]
+    assert isinstance(payload, dict)
+    assert payload.get("quality") == "medium", (
+        "Image generation payload must include 'quality' matching IMAGE_QUALITY setting"
+    )
+
+
+def test_foundry_image_request_payload_quality_matches_low_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AI_MODE", "live")
+    monkeypatch.setenv("PERSISTENCE_MODE", "memory")
+    monkeypatch.setenv("FOUNDRY_ENDPOINT", "https://foundry.example")
+    monkeypatch.setenv("FOUNDRY_TEXT_DEPLOYMENT", "gpt-5-5")
+    monkeypatch.setenv("FOUNDRY_IMAGE_DEPLOYMENT", "gpt-image-2")
+    monkeypatch.delenv("IMAGE_QUALITY", raising=False)
+
+    captured: dict[str, object] = {}
+    real_async_client = httpx.AsyncClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "b64_json": (
+                            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk"
+                            "YPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+                        ),
+                        "revised_prompt": "A radiant knight.",
+                    }
+                ]
+            },
+        )
+
+    def build_client(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_async_client(*args, **kwargs)
+
+    monkeypatch.setattr(generation_module.httpx, "AsyncClient", build_client)
+    client = AzureFoundryAIClient(load_app_settings())
+    client._credential = SimpleNamespace(  # type: ignore[attr-defined]
+        get_token=lambda *_args, **_kwargs: SimpleNamespace(token="live-access-token")
+    )
+
+    asyncio.run(
+        client.generate_image(
+            "A shining knight in silver armor.",
+            request_id="req-quality-default",
+        )
+    )
+
+    payload = captured["payload"]
+    assert isinstance(payload, dict)
+    assert payload.get("quality") == "low", (
+        "Image generation payload must default to quality='low' when IMAGE_QUALITY is unset"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Image quality — retry contract
+# ---------------------------------------------------------------------------
+
+
+def test_partial_card_persists_selected_image_quality(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When image generation fails the partial StoredCard must carry the original quality."""
+    monkeypatch.setenv("IMAGE_QUALITY", "low")
+
+    async def run() -> StoredCard | None:
+        settings = load_app_settings()
+        defaults = create_services(settings)
+        repo = InMemoryCardRepository()
+        services = AppServices(
+            settings=settings,
+            card_repository=repo,
+            audit_repository=InMemoryAuditRepository(),
+            asset_store=InMemoryAssetStore(),
+            ai_client=MockAIClient(settings),
+            moderation_service=defaults.moderation_service,
+            rate_limiter=defaults.rate_limiter,
+            csrf_protector=defaults.csrf_protector,
+        )
+        service = CardGenerationService(services)
+        owner = AuthenticatedOwner(
+            owner_id=TEST_OWNER_ID,
+            tenant_id=None,
+            object_id=None,
+            subject="sub",
+            display_name="Samwise",
+            email="samwise@example.com",
+        )
+        response = await service.generate_card(
+            owner=owner,
+            prompt="create a safe fantasy knight [[mock:image-500]]",
+            idempotency_key="idem-quality-persist",
+            request_id="req-quality-persist",
+            client_ip="127.0.0.1",
+            image_quality="high",
+        )
+        return await repo.get(owner.owner_id, response.cardId)
+
+    record = asyncio.run(run())
+    assert record is not None
+    assert record.status == "awaiting_artwork_retry"
+    assert record.image_quality == "high", (
+        "Partial card must persist the image_quality used during the initial generation"
+    )
+
+
+def test_retry_artwork_uses_original_image_quality(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Artwork retry must forward the quality originally chosen, not the current app default."""
+    monkeypatch.setenv("IMAGE_QUALITY", "low")  # app default is low; original was high
+
+    class TrackingAIClient(MockAIClient):
+        def __init__(self, settings) -> None:
+            super().__init__(settings)
+            self.retry_quality: list[str | None] = []
+
+        async def generate_image(
+            self,
+            art_prompt: str,
+            *,
+            request_id: str,
+            image_quality: Literal["low", "medium", "high"] | None = None,
+        ) -> object:
+            if "[[mock:image-500]]" not in art_prompt:
+                self.retry_quality.append(image_quality)
+            return await super().generate_image(
+                art_prompt, request_id=request_id, image_quality=image_quality
+            )
+
+    async def run() -> list[str | None]:
+        settings = load_app_settings()
+        defaults = create_services(settings)
+        ai_client = TrackingAIClient(settings)
+        repo = InMemoryCardRepository()
+        services = AppServices(
+            settings=settings,
+            card_repository=repo,
+            audit_repository=InMemoryAuditRepository(),
+            asset_store=InMemoryAssetStore(),
+            ai_client=ai_client,
+            moderation_service=defaults.moderation_service,
+            rate_limiter=defaults.rate_limiter,
+            csrf_protector=defaults.csrf_protector,
+        )
+        service = CardGenerationService(services)
+        owner = AuthenticatedOwner(
+            owner_id=TEST_OWNER_ID,
+            tenant_id=None,
+            object_id=None,
+            subject="sub",
+            display_name="Samwise",
+            email="samwise@example.com",
+        )
+        partial = await service.generate_card(
+            owner=owner,
+            prompt="create a safe fantasy knight [[mock:image-500]]",
+            idempotency_key="idem-retry-quality",
+            request_id="req-retry-quality",
+            client_ip="127.0.0.1",
+            image_quality="high",
+        )
+        record = await repo.get(owner.owner_id, partial.cardId)
+        assert record is not None
+        record.derived_art_prompt = (record.derived_art_prompt or "").replace(
+            "[[mock:image-500]]", ""
+        )
+        await repo.save(record)
+
+        await service.retry_artwork(
+            owner=owner,
+            card_id=partial.cardId,
+            idempotency_key="idem-retry-quality-finish",
+            request_id="req-retry-quality-finish",
+            client_ip="127.0.0.1",
+        )
+        return ai_client.retry_quality
+
+    retry_qualities = asyncio.run(run())
+    assert retry_qualities == ["high"], (
+        "Artwork retry must use the quality from the original generation ('high'), "
+        "not the current app default ('low')"
+    )
+
+
+def test_retry_artwork_legacy_record_without_quality_falls_back_to_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A legacy stored card without imageQuality must fall back to settings.image_quality."""
+    monkeypatch.setenv("IMAGE_QUALITY", "medium")
+
+    class TrackingAIClient(MockAIClient):
+        def __init__(self, settings) -> None:
+            super().__init__(settings)
+            self.retry_quality: list[str | None] = []
+
+        async def generate_image(
+            self,
+            art_prompt: str,
+            *,
+            request_id: str,
+            image_quality: Literal["low", "medium", "high"] | None = None,
+        ) -> object:
+            self.retry_quality.append(image_quality)
+            return await super().generate_image(
+                art_prompt, request_id=request_id, image_quality=image_quality
+            )
+
+    async def run() -> tuple[list[str | None], str | None]:
+        settings = load_app_settings()
+        defaults = create_services(settings)
+        ai_client = TrackingAIClient(settings)
+        repo = InMemoryCardRepository()
+
+        # Generate a normal partial card so we have a valid validatedPayload and derivedArtPrompt.
+        seed_services = AppServices(
+            settings=settings,
+            card_repository=repo,
+            audit_repository=InMemoryAuditRepository(),
+            asset_store=InMemoryAssetStore(),
+            ai_client=MockAIClient(settings),
+            moderation_service=defaults.moderation_service,
+            rate_limiter=defaults.rate_limiter,
+            csrf_protector=defaults.csrf_protector,
+        )
+        seed_service = CardGenerationService(seed_services)
+        owner = AuthenticatedOwner(
+            owner_id=TEST_OWNER_ID,
+            tenant_id=None,
+            object_id=None,
+            subject="sub",
+            display_name="Samwise",
+            email="samwise@example.com",
+        )
+        partial = await seed_service.generate_card(
+            owner=owner,
+            prompt="create a safe fantasy knight [[mock:image-500]]",
+            idempotency_key="idem-legacy-seed",
+            request_id="req-legacy-seed",
+            client_ip="127.0.0.1",
+            image_quality="high",
+        )
+
+        # Simulate a legacy record by clearing image_quality from the stored document.
+        record = await repo.get(owner.owner_id, partial.cardId)
+        assert record is not None
+        legacy_doc = record.to_document()
+        legacy_doc.pop("imageQuality", None)
+        legacy_record = StoredCard.from_document(legacy_doc)
+        legacy_record.derived_art_prompt = (legacy_record.derived_art_prompt or "").replace(
+            "[[mock:image-500]]", ""
+        )
+        await repo.save(legacy_record)
+
+        # Now retry using the tracking client.
+        retry_services = AppServices(
+            settings=settings,
+            card_repository=repo,
+            audit_repository=InMemoryAuditRepository(),
+            asset_store=InMemoryAssetStore(),
+            ai_client=ai_client,
+            moderation_service=defaults.moderation_service,
+            rate_limiter=defaults.rate_limiter,
+            csrf_protector=defaults.csrf_protector,
+        )
+        retry_service = CardGenerationService(retry_services)
+        await retry_service.retry_artwork(
+            owner=owner,
+            card_id=partial.cardId,
+            idempotency_key="idem-legacy-retry",
+            request_id="req-legacy-retry",
+            client_ip="127.0.0.1",
+        )
+        return ai_client.retry_quality, legacy_record.image_quality
+
+    retry_qualities, legacy_quality = asyncio.run(run())
+    assert legacy_quality is None, "Legacy record round-trip must have image_quality=None"
+    assert retry_qualities == ["medium"], (
+        "Legacy records without imageQuality must fall back to settings.image_quality ('medium')"
+    )

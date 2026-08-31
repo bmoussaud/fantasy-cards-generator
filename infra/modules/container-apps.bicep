@@ -141,6 +141,9 @@ param auditRetentionDays int = 30
 @description('Requested image size injected as IMAGE_SIZE.')
 param imageSize string = '1024x1024'
 
+@description('Image generation quality level injected as IMAGE_QUALITY (low, medium, high).')
+param imageQuality string = 'low'
+
 @description('Optional tags shared by Container Apps resources.')
 param tags object = {}
 
@@ -306,6 +309,10 @@ var containerAppEnv = concat(
     {
       name: 'IMAGE_SIZE'
       value: imageSize
+    }
+    {
+      name: 'IMAGE_QUALITY'
+      value: imageQuality
     }
     {
       name: 'KEY_VAULT_URI'

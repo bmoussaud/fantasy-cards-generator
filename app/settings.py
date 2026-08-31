@@ -7,6 +7,7 @@ from typing import Literal
 AI_MODE_VALUES = {"mock", "live"}
 PERSISTENCE_MODE_VALUES = {"memory", "azure"}
 TELEMETRY_ENV_VALUES = {"development", "production", "test"}
+IMAGE_QUALITY_VALUES = {"low", "medium", "high"}
 
 
 @dataclass(frozen=True)
@@ -59,6 +60,7 @@ class AppSettings:
     retry: RetrySettings
     audit_retention_days: int
     image_size: str
+    image_quality: Literal["low", "medium", "high"]
 
 
 class SettingsError(RuntimeError):
@@ -95,6 +97,10 @@ def load_app_settings() -> AppSettings:
     persistence_mode = _string_env("PERSISTENCE_MODE", default=default_persistence_mode)
     if persistence_mode not in PERSISTENCE_MODE_VALUES:
         raise SettingsError("PERSISTENCE_MODE must be one of: azure, memory.")
+
+    image_quality_raw = _string_env("IMAGE_QUALITY", default="low")
+    if image_quality_raw not in IMAGE_QUALITY_VALUES:
+        raise SettingsError("IMAGE_QUALITY must be one of: low, medium, high.")
 
     settings = AppSettings(
         app_env=app_env,
@@ -151,6 +157,7 @@ def load_app_settings() -> AppSettings:
         ),
         audit_retention_days=_int_env("AUDIT_RETENTION_DAYS", default=30, minimum=1),
         image_size=_string_env("IMAGE_SIZE", default="1024x1536"),
+        image_quality=image_quality_raw,  # type: ignore[arg-type]
     )
     _validate_app_settings(settings)
     return settings
