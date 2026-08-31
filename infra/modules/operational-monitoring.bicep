@@ -54,7 +54,7 @@ param availabilityFailureThreshold int = 2
 param requestFailurePercentThreshold int = 5
 
 @minValue(1)
-param requestTrafficFloor int = 20
+param requestTrafficFloor int = 5
 
 @minValue(1)
 param requestP95LatencyMsThreshold int = 10000
@@ -86,7 +86,7 @@ resource actionGroup 'Microsoft.Insights/actionGroups@2023-01-01' = {
   location: 'global'
   tags: tags
   properties: {
-    enabled: true
+    enabled: hasAlertRouting
     groupShortName: take('fcg${environmentName}', 12)
     emailReceivers: actionGroupEmailReceivers
     webhookReceivers: actionGroupWebhookReceivers
@@ -175,7 +175,7 @@ var workbookData = {
         query: '''
 AppRequests
 | where AppRoleName == '{Service}'
-| summarize Requests=count(), Failures=countif(Success == false), p50=percentile(DurationMs, 50), p95=percentile(DurationMs, 95), p99=percentile(DurationMs, 99) by bin(TimeGenerated, 5m)
+| summarize Requests=count(), Failures=countif(Success == false), p50=percentile(DurationMs, 50), p95=percentile(DurationMs, 95), p99=percentile(DurationMs, 99) by bin(TimeGenerated, 1h)
 | order by TimeGenerated asc
 '''
         size: 0
@@ -193,7 +193,7 @@ AppRequests
         query: '''
 AppDependencies
 | where AppRoleName == '{Service}'
-| summarize Calls=count(), Failures=countif(Success == false), Throttles=countif(ResultCode == "429"), p50=percentile(DurationMs, 50), p95=percentile(DurationMs, 95), p99=percentile(DurationMs, 99) by DependencyType, bin(TimeGenerated, 5m)
+| summarize Calls=count(), Failures=countif(Success == false), Throttles=countif(ResultCode == "429"), p50=percentile(DurationMs, 50), p95=percentile(DurationMs, 95), p99=percentile(DurationMs, 99) by DependencyType, bin(TimeGenerated, 1h)
 | order by TimeGenerated desc
 '''
         size: 0
@@ -238,7 +238,7 @@ AppMetrics
     Name == "fcg.persistence.operations", strcat("store=", tostring(Properties["fcg.store"]), ";operation=", tostring(Properties["fcg.persistence_operation"]), ";outcome=", tostring(Properties["fcg.outcome"])),
     Name == "fcg.ai.tokens", strcat("operation=", tostring(Properties["fcg.operation"]), ";token_type=", tostring(Properties["fcg.token_type"])),
     "aggregate")
-| summarize Value=sum(Sum) by Name, Dimension, bin(TimeGenerated, 5m)
+| summarize Value=sum(Sum) by Name, Dimension, bin(TimeGenerated, 1h)
 | order by TimeGenerated desc
 '''
         size: 0

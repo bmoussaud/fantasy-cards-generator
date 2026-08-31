@@ -190,7 +190,7 @@ param monitoringAvailabilityFailureThreshold int = 2
 param monitoringRequestFailurePercentThreshold int = 5
 
 @minValue(1)
-param monitoringRequestTrafficFloor int = 20
+param monitoringRequestTrafficFloor int = 5
 
 @minValue(1)
 param monitoringRequestP95LatencyMsThreshold int = 10000

@@ -47,8 +47,9 @@ uv run uvicorn app.entrypoint:app --reload
 
 ## Alert routing
 
-The initial rollout is dashboard-only. Alert rules deploy disabled, the Action Group
-exists, and both receiver arrays are empty. Alerts become active only when
+The initial rollout is dashboard-only. Alert rules deploy disabled; the Action Group
+exists but is disabled because both receiver arrays are empty. Adding an approved
+receiver enables the Action Group, while alert rules become active only when
 `MONITORING_ALERTS_ENABLED=true` **and** at least one receiver array is non-empty.
 No recipient is invented. Configure receiver arrays as JSON before a separately
 approved alert activation:
@@ -69,8 +70,8 @@ These conservative defaults are parameters in Bicep:
 | Signal | Window | Default trigger |
 |---|---:|---|
 | `/healthz` availability | 15 min | 2 failed checks |
-| Request failures/5xx | 15 min | 5% with at least 20 requests |
-| Request latency | 15 min | p95 at least 10 seconds with at least 20 requests |
+| Request failures/5xx | 15 min | 5% with at least 5 requests |
+| Request latency | 15 min | p95 at least 10 seconds with at least 5 requests |
 | Dependency failure/throttle/timeout | 15 min | 5 events |
 | Exceptions | 15 min | 5 events |
 | Generation failure/partial/persistence failure | 15 min | 3 outcomes |
@@ -118,7 +119,7 @@ AppRequests
     p50=percentile(DurationMs, 50),
     p95=percentile(DurationMs, 95),
     p99=percentile(DurationMs, 99)
-  by bin(TimeGenerated, 5m)
+  by bin(TimeGenerated, 1h)
 ```
 
 Dependency health:
@@ -130,7 +131,7 @@ AppDependencies
     Failures=countif(Success == false),
     Throttles=countif(ResultCode == "429"),
     p95=percentile(DurationMs, 95)
-  by DependencyType, bin(TimeGenerated, 5m)
+  by DependencyType, bin(TimeGenerated, 1h)
 ```
 
 ACA restarts and unhealthy revisions:
@@ -169,28 +170,22 @@ Metrics remain unsampled so rare operational outcomes can still be counted. Revi
 ingestion after deployment and lower sampling only through an approved configuration
 change.
 
-The existing deployment guidance uses **East US 2**. On 2026-08-31, the Azure Retail
-Prices API listed Analytics Logs ingestion there at **€2.425/GB** after the first
-5 GB/month tier. At the 0.25 GB/day cap, a 30-day month is at most 7.5 GB:
-
-- gross list estimate before any allowance: `7.5 × €2.425 = €18.19` per environment;
-- if the first 5 GB/month allowance applies: `2.5 × €2.425 = €6.06` per environment;
-- two fully utilized isolated environments: €36.38 gross, or €12.13 with that
-  allowance.
-
-Source: [Azure Retail Prices API, Log Analytics in East US
-2](https://prices.azure.com/api/retail/prices?currencyCode=%27EUR%27&$filter=serviceName%20eq%20%27Log%20Analytics%27%20and%20armRegionName%20eq%20%27eastus2%27).
-Recheck the official rate and allowance eligibility if the deployed region or billing
-offer differs:
+At deployment time, retrieve the current Analytics Logs ingestion rate in **EUR** for
+the actual Azure region and billing offer from the
+[Azure Retail Prices API](https://prices.azure.com/api/retail/prices) or Azure Pricing
+Calculator. Do not copy a historical or assumed unit price into configuration. At the
+0.25 GB/day cap, the maximum nominal monthly volume for a 30-day month is 7.5 GB per
+environment. Estimate each isolated environment with:
 
 ```text
-expected billable GB/day × current regional Azure Monitor Logs ingestion rate × billing days
+min(expected billable GB/day, 0.25) × current regional EUR/GB rate × billing days
 ```
 
-Add any retention charges beyond the included retention period. Do not use this
-document as a price quote. Review `Usage` after deployment; the workspace daily cap
-is a cost guardrail, not an instantaneous cutoff, and ingestion can slightly exceed
-it before enforcement.
+Subtract only allowances confirmed for the deployed billing offer, then add any
+retention charges beyond the included retention period. Record the source URL, region,
+currency, meter, and retrieval date with the deployment evidence. Review `Usage`
+after deployment; the workspace daily cap is a cost guardrail, not an instantaneous
+cutoff, and ingestion can slightly exceed it before enforcement.
 
 ## Deployment verification and rollback
 

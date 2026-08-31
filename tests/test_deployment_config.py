@@ -268,13 +268,14 @@ def test_operational_monitoring_resources_and_alert_routing_are_iac_managed() ->
     assert "actionGroups:" in operational
     assert "actionGroup.id" in operational
     assert "alertsEnabled = enableAlerts && hasAlertRouting" in operational
+    assert "enabled: hasAlertRouting" in operational
     assert "actionGroupEmailReceivers array = []" in operational
     assert "actionGroupWebhookReceivers array = []" in operational
     assert 'Name == "fcg.generation.requests"' in operational
     assert 'Name == "fcg.persistence.operations"' in operational
     assert 'Properties["deployment.environment.name"]' not in operational
     assert "param telemetryEnvironmentName" not in operational
-    assert "by Name, Dimension, bin(TimeGenerated, 5m)" in operational
+    assert "by Name, Dimension, bin(TimeGenerated, 1h)" in operational
     for dimension in (
         'Properties["fcg.outcome"]',
         'Properties["fcg.moderation_reason"]',
@@ -318,6 +319,9 @@ def test_operational_monitoring_resources_and_alert_routing_are_iac_managed() ->
     assert "MONITORING_DAILY_QUOTA_GB=0.25" in main_parameters
     assert "TELEMETRY_SAMPLING_RATIO=1.0" in main_parameters
     assert "MONITORING_ALERTS_ENABLED=false" in main_parameters
+    assert "MONITORING_REQUEST_TRAFFIC_FLOOR=5" in main_parameters
+    assert "param monitoringRequestTrafficFloor int = 5" in main_bicep
+    assert "param requestTrafficFloor int = 5" in operational
     assert "MONITORING_EMAIL_RECEIVERS=[]" in main_parameters
     assert "MONITORING_WEBHOOK_RECEIVERS=[]" in main_parameters
 

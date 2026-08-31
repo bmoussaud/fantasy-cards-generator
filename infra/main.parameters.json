@@ -57,7 +57,7 @@
       "value": "${MONITORING_REQUEST_FAILURE_PERCENT_THRESHOLD=5}"
     },
     "monitoringRequestTrafficFloor": {
-      "value": "${MONITORING_REQUEST_TRAFFIC_FLOOR=20}"
+      "value": "${MONITORING_REQUEST_TRAFFIC_FLOOR=5}"
     },
     "monitoringRequestP95LatencyMsThreshold": {
       "value": "${MONITORING_REQUEST_P95_LATENCY_MS_THRESHOLD=10000}"

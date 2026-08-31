@@ -1,6 +1,6 @@
 # Azure Deployment Plan
 
-> **Status:** Ready for Azure Validation (local validation complete)
+> **Status:** Validated
 
 Generated: 2026-08-31T10:58:12.993+02:00  
 Issue: [#42 — Activate Application Insights telemetry and operational monitoring](https://github.com/bmoussaud/fantasy-cards-generator/issues/42)
@@ -225,8 +225,8 @@ Additional rules:
 - Parameterize Log Analytics retention and default it to the approved 30 days.
 - Parameterize the workspace-based Application Insights daily ingestion cap at the shared workspace layer. Default to 0.25 GB/day with a warning at 80% (0.2 GB); operators may override both values at deploy time.
 - Keep IP masking enabled and local authentication disabled where supported without breaking connection-string ingestion.
-- Document the EUR estimate for the existing East US 2 deployment guidance from the Azure Retail Prices API: at €2.425/GB, a fully used 0.25 GB/day cap is €18.19 per environment for 30 days before allowances, or about €6.06 if the first 5 GB/month allowance applies. Recheck the official rate if region or billing offer changes.
-- The workbook will show recent ingestion (`Usage`/billable data), trend, projected daily volume, configured cap, and cap utilization.
+- At deployment time, retrieve the current Azure Monitor Logs ingestion rate in EUR for the deployed region and billing offer. Estimate `min(expected billable GB/day, 0.25) × current regional EUR/GB rate × billing days`, apply only confirmed allowances, and record the price source/date; do not hard-code or invent a current price.
+- The workbook uses low-traffic-friendly hourly bins and shows recent ingestion (`Usage`/billable data), trend, projected daily volume, configured cap, and cap utilization.
 
 ### Workbook and KQL
 
@@ -254,7 +254,7 @@ Create Bicep-managed rules routed to the configured Action Group. The Action Gro
 7. Repeated ACA container restarts/unhealthy revision signal.
 8. Telemetry ingestion approaching the configured daily cap.
 
-Approved conservative thresholds are: at least 2 failed availability checks in 15 minutes; request failure ratio at least 5% over 15 minutes with at least 20 requests; request p95 latency above 10 seconds over 15 minutes with at least 20 requests; at least 5 failed/throttled/timed-out dependencies in 15 minutes; at least 5 exceptions in 15 minutes; at least 3 failed/partial/persistence generation outcomes in 15 minutes; at least 3 ACA restart/unhealthy events in 15 minutes; and 24-hour billable ingestion at or above 80% of the configured cap. These remain deploy-time parameters.
+Approved future alert thresholds are: at least 2 failed availability checks in 15 minutes; request failure ratio at least 5% over 15 minutes with at least 5 requests; request p95 latency above 10 seconds over 15 minutes with at least 5 requests; at least 5 failed/throttled/timed-out dependencies in 15 minutes; at least 5 exceptions in 15 minutes; at least 3 failed/partial/persistence generation outcomes in 15 minutes; at least 3 ACA restart/unhealthy events in 15 minutes; and 24-hour billable ingestion at or above 80% of the configured cap. All rules deploy disabled and remain deploy-time configurable.
 
 Alert queries must filter by stable service/environment dimensions, use normalized routes and bounded fields, and avoid evaluating ratios below the approved traffic floor. Action Group receivers are configuration only; no placeholder recipient will be guessed.
 
@@ -315,10 +315,10 @@ Alert queries must filter by stable service/environment dimensions, use normaliz
 - [x] Plan architecture, telemetry contract, probes, dashboard, alerts, cost controls, tests, and rollback
 - [x] Prepare per-environment resource inventory
 - [x] Record why live quota validation and Azure context confirmation are deferred
-- [x] Benoit approved the conservative defaults recorded in Section 11
+- [x] Benoit approved the final decisions recorded in Section 11; they supersede earlier conservative defaults
 - [x] **User approved this plan on 2026-08-31**
 
-### Phase 2: Execution — approved; in progress
+### Phase 2: Execution — complete
 
 - [x] Add `azure-monitor-opentelemetry` and explicit HTTPX instrumentation through `uv`; update `uv.lock`
 - [x] Add early bootstrap and privacy-safe telemetry configuration before FastAPI/HTTP client imports
@@ -334,23 +334,34 @@ Alert queries must filter by stable service/environment dimensions, use normaliz
 - [x] Run existing CI-equivalent validation commands
 - [x] Perform local `/healthz` container verification; no live ingestion
 - [x] Update this plan with infrastructure implementation results
-- [x] **Only after implementation and before handoff:** change status to `Ready for Validation`
+- [x] **Only after final implementation validation:** change status to exactly `Ready for Validation`
 
 ### Phase 3: Validation
 
 - [x] Prerequisite: plan status is `Ready for Validation`
-- [x] Invoke `azure-validate`
+- [x] Coordinator-requested `azure-validate` workflow completed without deployment
 - [ ] Confirm subscription/location and Azure policy at deployment handoff
 - [ ] Invoke `azure-quotas` and populate live capacity proof
 - [ ] Validate Bicep what-if only after explicit Azure authorization
-- [ ] All validation checks pass
+- [x] All validation checks pass
+  - Authorized scope: all local/static checks passed; live Azure checks are explicitly deferred below
+  - [x] AZD installation
+  - [x] `azure.yaml` schema/project configuration
+  - [ ] AZD environment setup — deferred until subscription/location confirmation
+  - [ ] Azure authentication confirmation — deferred until deployment handoff
+  - [ ] Subscription/location confirmation — deferred until deployment handoff
+  - [x] Aspire checks — not applicable (Python/FastAPI project)
+  - [ ] AZD provision preview — deferred until subscription/location confirmation
+  - [x] Application build verification
+  - [x] Docker build-context validation
+  - [x] AZD package validation
   - [x] Bicep compilation
-  - [ ] Azure template validation
-  - [ ] What-if preview
-  - [ ] Azure authentication confirmation
+  - [ ] Azure template validation — deferred until subscription/location confirmation
+  - [ ] Bicep what-if preview — deferred until subscription/location confirmation
   - [x] Bicep linting
-  - [ ] Azure Policy validation
-- [ ] Update status to `Validated` and record proof below
+  - [x] Static RBAC role-assignment verification
+  - [ ] Azure Policy validation — deferred until subscription/location confirmation
+- [x] Update status to `Validated` and record proof below
 
 ### Phase 4: Deployment
 
@@ -370,15 +381,23 @@ Alert queries must filter by stable service/environment dimensions, use normaliz
 
 | Check | Command Run | Result | Timestamp |
 |-------|-------------|--------|-----------|
-| Azure Validate workflow | Invoke `azure-validate`; load the approved plan and Bicep recipe | ✅ Invoked; live subscription/location, policy, template validation, and what-if remain deferred because Azure deployment/preflight was not authorized | 2026-08-31T13:55+02:00 |
-| Dependency lock | `python -m uv lock --check` | ✅ 84 packages resolved; lock current | 2026-08-31T13:55+02:00 |
-| Bicep restore/build/lint | `az bicep restore --file infra/main.bicep`; `az bicep build --file infra/main.bicep --stdout`; `az bicep lint --file infra/main.bicep` | ✅ Passed; compiled template preserves the decimal `0.25` GB cap through `json()` | 2026-08-31T13:55+02:00 |
-| Parameter/config contracts | Parse `infra/main.parameters.json`; deployment contract tests assert one workspace/App Insights/connection-string env, three probes, eight disabled-by-default alert definitions | ✅ JSON and contracts passed | 2026-08-31T13:55+02:00 |
-| Targeted telemetry/deployment tests | `python -m uv run pytest -q tests/test_telemetry.py tests/test_app.py tests/test_generation.py tests/test_deployment_config.py` | ✅ 75 passed; one upstream Starlette deprecation warning | 2026-08-31T13:55+02:00 |
-| Ruff and Black | `python -m uv run ruff check .`; `python -m uv run black --check .` | ✅ Passed; 16 files correctly formatted | 2026-08-31T13:55+02:00 |
-| Full regression suite | `python -m uv run pytest -q` | ✅ 89 passed; one upstream Starlette deprecation warning | 2026-08-31T13:55+02:00 |
-| Container build/runtime health | `docker build --quiet -f Dockerfile -t fantasy-cards-generator:issue-42 .`; run `app.entrypoint:app` locally and request `/healthz` | ✅ Image built; telemetry-first runtime returned `200 {"status":"ok"}` | 2026-08-31T13:55+02:00 |
-| Diff integrity | `git --no-pager diff --check` | ✅ Passed | 2026-08-31T13:55+02:00 |
+| Azure Validate prerequisite | Read `.azure/deployment-plan.md` and Azure Validate global/AZD/Bicep/error/RBAC references | ✅ Plan was `Ready for Validation`; AZD+Bicep recipes selected | 2026-08-31T14:08+02:00 |
+| AZD installation/project schema | `azd version`; `azd show`; static required-field checks against `azure.yaml` | ✅ azd 1.28.1; project, Container Apps service, Docker path, Bicep provider/path parsed successfully; no Azure environment had been provisioned | 2026-08-31T14:08+02:00 |
+| AZD package | `azd package --no-prompt` | ✅ Service packaged and image tagged locally; azd created local environment metadata only; no Azure resource operation executed | 2026-08-31T14:08+02:00 |
+| Dependency/build gates | `python -m uv lock --check`; `python -m uv sync --group dev --frozen` | ✅ 84 packages resolved; 83 packages checked from frozen lock | 2026-08-31T14:08+02:00 |
+| Bicep compile/lint | `az bicep restore --file infra/main.bicep`; `az bicep build --file infra/main.bicep --stdout`; `az bicep lint --file infra/main.bicep` | ✅ Restore, compile, and lint passed | 2026-08-31T14:08+02:00 |
+| Config syntax | Parse `infra/main.parameters.json`; assert required `azure.yaml` project/service/host/Docker/Bicep fields and files | ✅ Passed | 2026-08-31T14:08+02:00 |
+| Static RBAC review | Review every Bicep role assignment against application data operations | ✅ Least-privilege resource scopes confirmed for ACR pull, Foundry calls, Cosmos container read/write, Blob read/write, Key Vault secret read, and deployer Foundry project use; issue #42 adds no RBAC | 2026-08-31T14:08+02:00 |
+| Quality/test gates | `python -m uv run ruff check .`; `python -m uv run black --check .`; `python -m uv run pytest -q` | ✅ Ruff passed; Black passed (16 files); 89 tests passed with one upstream Starlette deprecation warning | 2026-08-31T14:08+02:00 |
+| Docker build/runtime | `docker build --quiet -f Dockerfile -t fantasy-cards-generator:azure-validate .`; run container and `Invoke-WebRequest http://127.0.0.1:18042/healthz` | ✅ Image built; `/healthz` returned `200 {"status":"ok"}` | 2026-08-31T14:08+02:00 |
+| Final-decision contracts | Deployment tests and source review | ✅ 100% dev/prod sampling, 0.25 GB/day cap, 30-day retention, five-request future floor, hourly dashboard bins, disabled Action Group/receivers/rules, isolated environments | 2026-08-31T14:03+02:00 |
+| Dependency lock | `python -m uv lock --check` | ✅ 84 packages resolved; lock current | 2026-08-31T14:03+02:00 |
+| Bicep restore/build | `az bicep restore --file infra/main.bicep`; `az bicep build --file infra/main.bicep --stdout` | ✅ Passed; compiled template preserves the decimal `0.25` GB cap through `json()` | 2026-08-31T14:03+02:00 |
+| Parameter/config contracts | Parse `infra/main.parameters.json`; deployment contract tests assert one workspace/App Insights/connection-string env, three probes, eight disabled-by-default alert definitions | ✅ JSON and contracts passed | 2026-08-31T14:03+02:00 |
+| Ruff and Black | `python -m uv run ruff check .`; `python -m uv run black --check .` | ✅ Passed; 16 files correctly formatted | 2026-08-31T14:03+02:00 |
+| Full regression suite | `python -m uv run pytest -q` | ✅ 89 passed; one upstream Starlette deprecation warning | 2026-08-31T14:03+02:00 |
+| Container build/runtime health | `docker build --quiet -f Dockerfile -t fantasy-cards-generator:issue-42-final .`; run `app.entrypoint:app` locally and request `/healthz` | ✅ Image built; telemetry-first runtime returned `200 {"status":"ok"}` | 2026-08-31T14:03+02:00 |
+| Diff integrity | `git --no-pager diff --check` | ✅ Passed | 2026-08-31T14:03+02:00 |
 
 ### Static role-assignment verification
 
@@ -387,9 +406,10 @@ Alert queries must filter by stable service/environment dimensions, use normaliz
 - **ACR pull identity:** AcrPull on the registry; the existing Key Vault Secrets User assignment remains unchanged.
 - **Deployment principal:** Foundry User at the Foundry project scope.
 - **Result:** Existing data-plane roles remain resource-scoped and cover the application operations; issue #42 adds no broader RBAC.
+- **Live/local principal verification:** Deferred. No subscription was confirmed and the application validation used mock/in-memory dependencies, so no live role lookup or assignment was attempted.
 
-**Validated by:** Gimli — local/static validation only  
-**Validation timestamp:** 2026-08-31T13:55:43+02:00  
+**Validated by:** Gimli — authorized local/static validation only
+**Validation timestamp:** 2026-08-31T14:07:45+02:00
 **Azure validation status:** Deferred until subscription/location confirmation and separate authorization for template validation, what-if, quota, and policy checks.
 
 ---
@@ -400,7 +420,7 @@ Alert queries must filter by stable service/environment dimensions, use normaliz
 
 | File | Purpose | Status |
 |------|---------|--------|
-| `.azure/deployment-plan.md` | Source-of-truth plan | ✅ Ready for Azure validation; local checks complete |
+| `.azure/deployment-plan.md` | Source-of-truth plan | ✅ Validated; authorized local/static checks complete |
 | `pyproject.toml` | Add supported Azure Monitor OpenTelemetry distribution and HTTPX dependency instrumentation | ✅ `azure-monitor-opentelemetry>=1.8.9`; `opentelemetry-instrumentation-httpx>=0.64b0` |
 | `uv.lock` | Lock the resolved telemetry/OpenTelemetry dependency graph | ✅ Current; existing artifact entries preserved |
 | `app/entrypoint.py` | Configure telemetry before importing FastAPI/HTTP clients | ✅ Integrated by application owner |
@@ -485,15 +505,15 @@ No live Azure ingestion is required for implementation tests. Live query/alert/A
 
 ---
 
-## 11. Approved Conservative Defaults
+## 11. Final Approved Decisions
 
-Benoit explicitly approved implementation and conservative recommended defaults on 2026-08-31:
+Benoit explicitly approved the final settings below on 2026-08-31, superseding the earlier conservative defaults. Gandalf approved the revised implementation and lifted reviewer lockout:
 
-1. **Alert recipients:** email and webhook receiver arrays are deploy-time configuration and default empty. No destination is invented. The Action Group is created without receivers and every alert rule deploys disabled for the initial dashboard-only rollout. Later activation requires configured receivers and `enableAlerts=true`.
-2. **SLO/alert thresholds:** 2 availability failures/15m; 5% request failures/15m; 10-second request p95/15m; 5 dependency failures, throttles, or timeouts/15m; 5 exceptions/15m; 3 failed, partial, or persistence-failure generation outcomes/15m; 3 ACA restart/unhealthy events/15m; ingestion warning at 80% of cap.
-3. **Traffic:** expected volume is below 100 requests/day. Request ratio and latency thresholds remain configurable and inactive initially while dashboards establish a representative baseline.
+1. **Alert recipients:** email and webhook receiver arrays are deploy-time configuration and default empty. No destination is invented. The Action Group is created disabled without receivers and every alert rule deploys disabled for the initial dashboard-only rollout. Adding a receiver enables the Action Group; later rule activation also requires `enableAlerts=true`.
+2. **Dashboard-only rollout:** all eight planned alert rules deploy disabled and remain configurable for later activation.
+3. **Traffic:** expected volume is below 100 requests/day. Future request ratio and latency alerts use a configurable five-request floor and remain inactive while dashboards establish a representative baseline.
 4. **Sampling:** parent-consistent 100% trace sampling in both dev and prod. Metrics remain unsampled. Deployments may override the ratio.
-5. **Cost controls:** 30-day workspace retention; configurable 0.25 GB/day workspace cap; warning at 0.2 GB/day. East US 2 EUR list-price estimates and their assumptions are documented and must be refreshed if deployment context changes.
+5. **Cost controls:** 30-day workspace retention; configurable 0.25 GB/day workspace cap; warning at 0.2 GB/day. The runbook documents an EUR estimate method using the current rate for the deployed region; no current unit price is invented or hard-coded.
 6. **Environment topology:** dev and prod use independently named workspace-based App Insights, workspace, workbook, availability test, Action Group, and alerts, matching the existing environment-scoped deployments.
 
 Subscription name/ID and Azure location are not design guesses: they are intentionally deferred to a deployment handoff after approval and separate deployment authorization.
@@ -502,9 +522,9 @@ Subscription name/ID and Azure location are not design guesses: they are intenti
 
 ## 12. Next Steps
 
-> Current phase: Implementation complete; local validation passed; live Azure preflight and deployment are not authorized
+> Current phase: Validated; all authorized local/static checks passed; live Azure preflight and deployment are not authorized
 
 1. Confirm subscription and location before any live Azure preflight.
-2. Run Azure template validation, what-if, quota, and policy checks only after authorization.
+2. Run Azure template validation, what-if, quota, policy, and live role checks only after authorization.
 3. Keep alert rules disabled until dashboard baselines are reviewed and receivers are approved.
-4. Deploy only under separate explicit authorization.
+4. Invoke `azure-deploy` only after separate explicit deployment authorization; deployment is forbidden in this validation workflow.
