@@ -6,6 +6,7 @@ from typing import Literal
 
 AI_MODE_VALUES = {"mock", "live"}
 PERSISTENCE_MODE_VALUES = {"memory", "azure"}
+TELEMETRY_ENV_VALUES = {"development", "production", "test"}
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,18 @@ class RetrySettings:
     text_timeout_seconds: float
     image_timeout_seconds: float
     overall_timeout_seconds: float
+
+
+@dataclass(frozen=True)
+class TelemetrySettings:
+    enabled: bool
+    connection_string: str | None
+    sampling_ratio: float
+    service_name: str
+    environment: str
+    service_version: str | None
+    container_revision: str | None
+    container_replica: str | None
 
 
 @dataclass(frozen=True)
@@ -50,6 +63,26 @@ class AppSettings:
 
 class SettingsError(RuntimeError):
     pass
+
+
+def load_telemetry_settings() -> TelemetrySettings:
+    environment = _telemetry_environment(
+        _optional_env("TELEMETRY_ENVIRONMENT") or _string_env("APP_ENV", default="development")
+    )
+    service_name = _optional_env("TELEMETRY_SERVICE_NAME") or _string_env(
+        "OTEL_SERVICE_NAME",
+        default="fantasy-cards-generator",
+    )
+    return TelemetrySettings(
+        enabled=_bool_env("TELEMETRY_ENABLED", default=False),
+        connection_string=_optional_env("APPLICATIONINSIGHTS_CONNECTION_STRING"),
+        sampling_ratio=_ratio_env("TELEMETRY_SAMPLING_RATIO", default=1.0),
+        service_name=_bounded_identifier(service_name, name="TELEMETRY_SERVICE_NAME"),
+        environment=environment,
+        service_version=_optional_bounded_identifier("APP_VERSION"),
+        container_revision=_optional_bounded_identifier("CONTAINER_APP_REVISION"),
+        container_replica=_optional_bounded_identifier("CONTAINER_APP_REPLICA_NAME"),
+    )
 
 
 def load_app_settings() -> AppSettings:
@@ -194,6 +227,51 @@ def _float_env(name: str, *, default: float, minimum: float) -> float:
     value = default if raw_value is None else float(raw_value)
     if value < minimum:
         raise SettingsError(f"{name} must be >= {minimum}.")
+    return value
+
+
+def _bool_env(name: str, *, default: bool) -> bool:
+    raw_value = _optional_env(name)
+    if raw_value is None:
+        return default
+    normalized = raw_value.lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise SettingsError(f"{name} must be a boolean value.")
+
+
+def _ratio_env(name: str, *, default: float) -> float:
+    value = _float_env(name, default=default, minimum=0.0)
+    if value <= 0.0 or value > 1.0:
+        raise SettingsError(f"{name} must be > 0 and <= 1.")
+    return value
+
+
+def _telemetry_environment(value: str) -> str:
+    normalized = value.strip().lower()
+    aliases = {"dev": "development", "prod": "production", "testing": "test"}
+    normalized = aliases.get(normalized, normalized)
+    if normalized not in TELEMETRY_ENV_VALUES:
+        return "other"
+    return normalized
+
+
+def _optional_bounded_identifier(name: str) -> str | None:
+    value = _optional_env(name)
+    if value is None:
+        return None
+    return _bounded_identifier(value, name=name)
+
+
+def _bounded_identifier(value: str, *, name: str) -> str:
+    if not 1 <= len(value) <= 64 or not all(
+        character.isascii() and (character.isalnum() or character in "._-") for character in value
+    ):
+        raise SettingsError(
+            f"{name} must be 1-64 ASCII letters, digits, dots, underscores, or hyphens."
+        )
     return value
 
 

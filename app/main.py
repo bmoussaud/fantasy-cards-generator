@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 import secrets
 from pathlib import Path
 from urllib.parse import parse_qs
@@ -41,9 +40,15 @@ from app.generation import (
 )
 from app.problems import ProblemDetails
 from app.settings import SettingsError, load_app_settings
+from app.telemetry import (
+    enrich_request_span,
+    normalize_error_code,
+    normalize_route,
+    safe_log,
+    valid_request_id,
+)
 
 load_dotenv()
-logger = logging.getLogger(__name__)
 
 
 def create_app(services: AppServices | None = None) -> FastAPI:
@@ -65,8 +70,50 @@ def create_app(services: AppServices | None = None) -> FastAPI:
 
     @app.middleware("http")
     async def add_request_context(request: Request, call_next):
-        request.state.request_id = request.headers.get("x-request-id") or uuid4().hex
-        response = await call_next(request)
+        supplied_request_id = request.headers.get("x-request-id")
+        request.state.request_id = (
+            supplied_request_id if valid_request_id(supplied_request_id) else uuid4().hex
+        )
+        try:
+            response = await call_next(request)
+        except Exception:
+            route = normalize_route(getattr(request.scope.get("route"), "path", None))
+            enrich_request_span(
+                request_id=request.state.request_id,
+                route=route,
+                status_code=500,
+            )
+            safe_log(
+                "request.failed",
+                request_id=request.state.request_id,
+                attributes={
+                    "http.route": route,
+                    "http.response.status_code": 500,
+                    "fcg.error_code": "internal_error",
+                    "fcg.outcome": "failed",
+                },
+            )
+            raise
+        route = normalize_route(getattr(request.scope.get("route"), "path", None))
+        enrich_request_span(
+            request_id=request.state.request_id,
+            route=route,
+            status_code=response.status_code,
+        )
+        safe_log(
+            "request.completed",
+            request_id=request.state.request_id,
+            attributes={
+                "http.route": route,
+                "http.response.status_code": response.status_code,
+                "fcg.outcome": "completed" if response.status_code < 400 else "failed",
+                "fcg.error_code": (
+                    "none"
+                    if response.status_code < 400
+                    else getattr(request.state, "error_code", "internal_error")
+                ),
+            },
+        )
         response.headers["X-Request-ID"] = request.state.request_id
         return response
 
@@ -83,6 +130,7 @@ def create_app(services: AppServices | None = None) -> FastAPI:
 
     @app.exception_handler(ProblemDetails)
     async def handle_problem_details(request: Request, exc: ProblemDetails):
+        request.state.error_code = normalize_error_code(exc.error_code)
         if request.url.path.startswith("/ui/"):
             response = templates.TemplateResponse(
                 request,
@@ -128,6 +176,7 @@ def create_app(services: AppServices | None = None) -> FastAPI:
                 headers=exc.headers or {},
             )
             return await handle_problem_details(request, problem)
+        request.state.error_code = "unauthorized" if exc.status_code == 401 else "internal_error"
         return JSONResponse(
             {"detail": exc.detail},
             status_code=exc.status_code,
@@ -210,7 +259,14 @@ def create_app(services: AppServices | None = None) -> FastAPI:
             ) from exc
         except Exception as exc:
             request.session.pop(AUTH_SESSION_KEY, None)
-            logger.exception("Unhandled exception while validating the Entra callback.")
+            safe_log(
+                "auth.callback_failed",
+                request_id=request.state.request_id,
+                attributes={
+                    "fcg.outcome": "failed",
+                    "fcg.error_code": normalize_error_code(type(exc).__name__),
+                },
+            )
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Authentication failed while validating the Entra callback.",

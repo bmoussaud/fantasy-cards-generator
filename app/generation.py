@@ -4,7 +4,6 @@ import asyncio
 import base64
 import hashlib
 import hmac
-import logging
 import time
 from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable
@@ -18,8 +17,19 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.problems import ProblemDetails
 from app.settings import AppSettings, RateLimitSettings
-
-logger = logging.getLogger("uvicorn.error")
+from app.telemetry import (
+    add_event,
+    instrument_generation,
+    normalize_error_code,
+    record_dependency_attempt,
+    record_moderation,
+    record_partial,
+    record_persistence,
+    record_retry,
+    record_token_usage,
+    safe_persistence_log,
+    telemetry_span,
+)
 
 PNG_1X1_BASE64 = (
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO6r2w0AAAAASUVORK5CYII="
@@ -50,15 +60,28 @@ def _log_persistence_exception(
     stage: str,
     exc: Exception,
 ) -> None:
-    exception_type, status_code, error_code = _exception_diagnostic(exc)
-    logger.error(
-        "%s request_id=%s stage=%s exception_type=%s azure_status=%s azure_error_code=%s",
-        event,
-        request_id,
-        stage,
-        exception_type,
-        status_code,
-        error_code,
+    _, status_code, error_code = _exception_diagnostic(exc)
+    safe_persistence_log(
+        event=event,
+        request_id=request_id,
+        stage=stage,
+        status_code=status_code,
+        azure_error_code=error_code,
+    )
+    operation = "save_failure"
+    if stage in {"compensation-delete", "cosmos-delete"}:
+        operation = "compensate"
+    store = "audit" if stage == "audit-write" else "card"
+    if stage in {"blob-upload", "compensation-delete"}:
+        store = "blob"
+    elif stage in {"cosmos-write", "cosmos-delete"}:
+        store = "cosmos"
+    record_persistence(
+        store=store,
+        operation=operation,
+        outcome="failed",
+        request_id=request_id,
+        error_code=error_code or "persistence_failure",
     )
 
 
@@ -424,39 +447,54 @@ class HeuristicModerationService:
         lowered = text.lower()
         for pattern, reason_code in self._blocked_text_patterns:
             if pattern in lowered:
-                return ModerationDecision(
+                decision = ModerationDecision(
                     stage=stage,  # type: ignore[arg-type]
                     allowed=False,
                     reasonCode=reason_code,
                     details=f"Policy {self.policy_name} blocked the request at {stage}.",
                 )
-        return ModerationDecision(
+                self._record_decision(decision)
+                return decision
+        decision = ModerationDecision(
             stage=stage,  # type: ignore[arg-type]
             allowed=True,
             reasonCode="allowed",
             details=f"Policy {self.policy_name} allowed the request.",
         )
+        self._record_decision(decision)
+        return decision
 
     async def moderate_image(self, image: ImageResult) -> ModerationDecision:
         if "post-image-block" in image.labels:
-            return ModerationDecision(
+            decision = ModerationDecision(
                 stage="post_image",
                 allowed=False,
                 reasonCode="unsafe-generated-image",
                 details=f"Policy {self.policy_name} rejected the generated image.",
             )
-        if image.content_type != "image/png" or not image.content.startswith(b"\x89PNG"):
-            return ModerationDecision(
+        elif image.content_type != "image/png" or not image.content.startswith(b"\x89PNG"):
+            decision = ModerationDecision(
                 stage="post_image",
                 allowed=False,
                 reasonCode="invalid-image-payload",
                 details=f"Policy {self.policy_name} rejected the generated image payload.",
             )
-        return ModerationDecision(
-            stage="post_image",
-            allowed=True,
-            reasonCode="allowed",
-            details=f"Policy {self.policy_name} allowed the generated image.",
+        else:
+            decision = ModerationDecision(
+                stage="post_image",
+                allowed=True,
+                reasonCode="allowed",
+                details=f"Policy {self.policy_name} allowed the generated image.",
+            )
+        self._record_decision(decision)
+        return decision
+
+    def _record_decision(self, decision: ModerationDecision) -> None:
+        record_moderation(
+            stage=decision.stage,
+            allowed=decision.allowed,
+            reason=decision.reasonCode,
+            policy=self.policy_name,
         )
 
 
@@ -968,7 +1006,6 @@ class AzureBlobAssetStore(AbstractAssetStore):
         try:
             await blob.delete_blob(delete_snapshots="include")
         except Exception:
-            logger.warning("blob-cleanup-failed blob=%s", blob_name)
             raise
 
 
@@ -1299,6 +1336,7 @@ class CardGenerationService:
     def __init__(self, services: AppServices) -> None:
         self.services = services
 
+    @instrument_generation("generate")
     async def generate_card(
         self,
         *,
@@ -1349,12 +1387,6 @@ class CardGenerationService:
 
         try:
             progress = GenerationProgress()
-            started = time.perf_counter()
-            logger.info(
-                "generation-start request_id=%s overall_budget_seconds=%s",
-                request_id,
-                self.services.settings.retry.overall_timeout_seconds,
-            )
             result = await asyncio.wait_for(
                 self._run_generation(
                     owner=owner,
@@ -1367,25 +1399,8 @@ class CardGenerationService:
                 ),
                 timeout=self.services.settings.retry.overall_timeout_seconds,
             )
-            logger.info(
-                "generation-complete request_id=%s status=%s duration_ms=%s",
-                request_id,
-                result.status,
-                int((time.perf_counter() - started) * 1000),
-            )
             return result
         except asyncio.TimeoutError as exc:
-            elapsed_ms = int((time.perf_counter() - started) * 1000)
-            logger.warning(
-                (
-                    "generation-timeout request_id=%s stage=%s duration_ms=%s "
-                    "overall_budget_seconds=%s"
-                ),
-                request_id,
-                progress.stage,
-                elapsed_ms,
-                self.services.settings.retry.overall_timeout_seconds,
-            )
             if (
                 progress.stage == "foundry-image"
                 and progress.validated_payload is not None
@@ -1403,11 +1418,7 @@ class CardGenerationService:
                     derived_art_prompt=progress.derived_art_prompt,
                     moderation=progress.moderation,
                     text_result=progress.text_result,
-                )
-                logger.info(
-                    "generation-partial request_id=%s reason=overall-timeout stage=%s",
-                    request_id,
-                    progress.stage,
+                    partial_reason="image_timeout",
                 )
                 return self._as_response(partial)
             problem = ProblemDetails(
@@ -1429,6 +1440,7 @@ class CardGenerationService:
             )
             raise problem from exc
 
+    @instrument_generation("artwork_retry")
     async def retry_artwork(
         self,
         *,
@@ -1514,12 +1526,6 @@ class CardGenerationService:
                 type="/problems/artwork-pending",
                 error_code="artwork_retry_available",
             )
-            logger.warning(
-                "generation-timeout request_id=%s stage=foundry-image-retry "
-                "overall_budget_seconds=%s",
-                request_id,
-                self.services.settings.retry.overall_timeout_seconds,
-            )
             await self._save_audit_failure(
                 owner.owner_id,
                 retry_card_id,
@@ -1542,8 +1548,29 @@ class CardGenerationService:
                 error_code="image_not_found",
             )
         try:
-            return await self.services.asset_store.download(record.blob_name)
+            with telemetry_span(
+                "fcg.persistence",
+                attributes={
+                    "fcg.store": "blob",
+                    "fcg.persistence_operation": "download",
+                },
+            ):
+                result = await self.services.asset_store.download(record.blob_name)
+            record_persistence(
+                store="blob",
+                operation="download",
+                outcome="completed",
+                request_id=None,
+            )
+            return result
         except FileNotFoundError as exc:
+            record_persistence(
+                store="blob",
+                operation="download",
+                outcome="failed",
+                request_id=None,
+                error_code="image_not_found",
+            )
             raise ProblemDetails(
                 status_code=404,
                 title="Not Found",
@@ -1597,6 +1624,7 @@ class CardGenerationService:
                 service_name="foundry-text",
                 request_id=request_id,
             )
+            record_token_usage("text", text_result.usage)
         except ProblemDetails as exc:
             await self.services.card_repository.delete(owner.owner_id, card_id)
             await self._save_audit_failure(
@@ -1705,6 +1733,7 @@ class CardGenerationService:
                 service_name="foundry-image",
                 request_id=request_id,
             )
+            record_token_usage("image", image_result.usage)
         except ProblemDetails:
             partial = await self._persist_partial(
                 owner=owner,
@@ -1717,6 +1746,7 @@ class CardGenerationService:
                 derived_art_prompt=derived_art_prompt,
                 moderation=moderation,
                 text_result=text_result,
+                partial_reason="image_failure",
             )
             return self._as_response(partial)
 
@@ -1735,6 +1765,7 @@ class CardGenerationService:
                 derived_art_prompt=derived_art_prompt,
                 moderation=moderation,
                 text_result=text_result,
+                partial_reason="moderation_rejection",
             )
             await self._save_audit_failure(
                 owner.owner_id,
@@ -1787,6 +1818,7 @@ class CardGenerationService:
                 service_name="foundry-image",
                 request_id=request_id,
             )
+            record_token_usage("image", image_result.usage)
         except ProblemDetails as exc:
             await self._save_audit_failure(
                 record.owner_id,
@@ -1863,6 +1895,7 @@ class CardGenerationService:
         derived_art_prompt: str,
         moderation: list[ModerationDecision],
         text_result: AITextResult,
+        partial_reason: str,
     ) -> StoredCard:
         record = StoredCard(
             id=card_id,
@@ -1881,7 +1914,33 @@ class CardGenerationService:
             image_model=None,
             usage={"text": text_result.usage.model_dump()},
         )
-        return await self.services.card_repository.save(record)
+        with telemetry_span(
+            "fcg.persistence",
+            request_id=request_id,
+            attributes={
+                "fcg.store": "card",
+                "fcg.persistence_operation": "save_partial",
+            },
+        ):
+            try:
+                saved = await self.services.card_repository.save(record)
+            except Exception as exc:
+                record_persistence(
+                    store="card",
+                    operation="save_partial",
+                    outcome="failed",
+                    request_id=request_id,
+                    error_code=normalize_error_code(type(exc).__name__),
+                )
+                raise
+            record_partial(partial_reason)
+            record_persistence(
+                store="card",
+                operation="save_partial",
+                outcome="completed",
+                request_id=request_id,
+            )
+            return saved
 
     async def _persist_completed(
         self,
@@ -1903,11 +1962,25 @@ class CardGenerationService:
         blob_metadata: dict[str, Any] | None = None
         persistence_stage = "blob-upload"
         try:
-            blob_metadata = await self.services.asset_store.upload(
-                blob_name,
-                image_result.image.content,
-                image_result.image.content_type,
-            )
+            with telemetry_span(
+                "fcg.persistence",
+                request_id=request_id,
+                attributes={
+                    "fcg.store": "blob",
+                    "fcg.persistence_operation": "upload",
+                },
+            ):
+                blob_metadata = await self.services.asset_store.upload(
+                    blob_name,
+                    image_result.image.content,
+                    image_result.image.content_type,
+                )
+                record_persistence(
+                    store="blob",
+                    operation="upload",
+                    outcome="completed",
+                    request_id=request_id,
+                )
             blob_uploaded = True
             persistence_stage = "cosmos-write"
             record = StoredCard(
@@ -1937,7 +2010,22 @@ class CardGenerationService:
                 },
                 completed_at=now_iso(),
             )
-            return await self.services.card_repository.save(record)
+            with telemetry_span(
+                "fcg.persistence",
+                request_id=request_id,
+                attributes={
+                    "fcg.store": "card",
+                    "fcg.persistence_operation": "save_completed",
+                },
+            ):
+                saved = await self.services.card_repository.save(record)
+                record_persistence(
+                    store="card",
+                    operation="save_completed",
+                    outcome="completed",
+                    request_id=request_id,
+                )
+                return saved
         except Exception as exc:
             _log_persistence_exception(
                 event="persistence-failed",
@@ -1948,9 +2036,26 @@ class CardGenerationService:
             if blob_uploaded and blob_metadata is not None:
                 try:
                     await self.services.asset_store.delete(blob_name)
-                    logger.warning(
-                        "compensation-succeeded request_id=%s stage=compensation-delete",
-                        request_id,
+                    record_persistence(
+                        store="blob",
+                        operation="compensate",
+                        outcome="completed",
+                        request_id=request_id,
+                    )
+                    safe_persistence_log(
+                        event="compensation-succeeded",
+                        request_id=request_id,
+                        stage="compensation-delete",
+                        status_code=None,
+                        azure_error_code=None,
+                    )
+                    add_event(
+                        "compensation.completed",
+                        {
+                            "fcg.store": "blob",
+                            "fcg.persistence_operation": "compensate",
+                            "fcg.outcome": "completed",
+                        },
                     )
                 except Exception as cleanup_exc:
                     _log_persistence_exception(
@@ -2005,25 +2110,50 @@ class CardGenerationService:
         *,
         problem: ProblemDetails | None = None,
     ) -> None:
-        await self.services.audit_repository.save_audit(
-            StoredCard(
-                id=card_id,
-                document_type="generation-audit",
-                owner_id=owner_id,
+        with telemetry_span(
+            "fcg.persistence",
+            request_id=request_id,
+            attributes={
+                "fcg.store": "audit",
+                "fcg.persistence_operation": "save_failure",
+            },
+        ):
+            try:
+                await self.services.audit_repository.save_audit(
+                    StoredCard(
+                        id=card_id,
+                        document_type="generation-audit",
+                        owner_id=owner_id,
+                        request_id=request_id,
+                        idempotency_key=idempotency_key,
+                        request_hash=request_hash,
+                        status="audit_failed",
+                        error_code=error_code,
+                        failure_status_code=problem.status_code if problem is not None else None,
+                        failure_error_code=problem.error_code if problem is not None else None,
+                        failure_title=problem.title if problem is not None else None,
+                        failure_detail=problem.detail if problem is not None else None,
+                        failure_type=problem.type if problem is not None else None,
+                        failure_headers=dict(problem.headers) if problem is not None else {},
+                        ttl_seconds=self.services.settings.audit_retention_days * 24 * 60 * 60,
+                    )
+                )
+            except Exception as exc:
+                record_persistence(
+                    store="audit",
+                    operation="save_failure",
+                    outcome="failed",
+                    request_id=request_id,
+                    error_code=normalize_error_code(type(exc).__name__),
+                )
+                raise
+            record_persistence(
+                store="audit",
+                operation="save_failure",
+                outcome="completed",
                 request_id=request_id,
-                idempotency_key=idempotency_key,
-                request_hash=request_hash,
-                status="audit_failed",
                 error_code=error_code,
-                failure_status_code=problem.status_code if problem is not None else None,
-                failure_error_code=problem.error_code if problem is not None else None,
-                failure_title=problem.title if problem is not None else None,
-                failure_detail=problem.detail if problem is not None else None,
-                failure_type=problem.type if problem is not None else None,
-                failure_headers=dict(problem.headers) if problem is not None else {},
-                ttl_seconds=self.services.settings.audit_retention_days * 24 * 60 * 60,
             )
-        )
 
     async def _replay_existing_or_wait(self, owner_id: str, card_id: str) -> CardResponseModel:
         deadline = time.monotonic() + self.services.settings.retry.overall_timeout_seconds + 0.5
@@ -2124,86 +2254,91 @@ class CardGenerationService:
     ) -> Any:
         timeout_seconds, max_retries = self._upstream_policy(service_name)
         for attempt in range(max_retries + 1):
-            try:
-                started = time.perf_counter()
-                logger.info(
-                    "dependency-start request_id=%s service=%s attempt=%s timeout_seconds=%s",
-                    request_id,
-                    service_name,
-                    attempt + 1,
-                    timeout_seconds,
+            started = time.perf_counter()
+            with telemetry_span(
+                "fcg.dependency",
+                request_id=request_id,
+                attributes={"fcg.dependency": service_name},
+            ):
+                attempt_name = (
+                    ("first", "retry_1", "retry_2")[attempt] if attempt <= 2 else "retry_many"
                 )
-                result = await asyncio.wait_for(
-                    operation(),
-                    timeout=timeout_seconds,
+                add_event(
+                    "dependency.started",
+                    {
+                        "fcg.dependency": service_name,
+                        "fcg.attempt": attempt_name,
+                    },
                 )
-                duration_ms = int((time.perf_counter() - started) * 1000)
-                logger.info(
-                    "dependency-success request_id=%s service=%s attempt=%s duration_ms=%s",
-                    request_id,
-                    service_name,
-                    attempt + 1,
-                    duration_ms,
-                )
-                return result
-            except asyncio.TimeoutError as exc:
-                logger.warning(
-                    (
-                        "dependency-timeout request_id=%s service=%s attempt=%s "
-                        "duration_ms=%s timeout_seconds=%s"
-                    ),
-                    request_id,
-                    service_name,
-                    attempt + 1,
-                    int((time.perf_counter() - started) * 1000),
-                    timeout_seconds,
-                )
-                if attempt >= max_retries:
-                    if service_name == "foundry-image":
-                        raise ProblemDetails(
-                            status_code=200,
-                            title="Artwork Pending",
-                            detail="Artwork generation timed out after text generation.",
-                            type="/problems/artwork-pending",
-                            error_code="artwork_retry_available",
-                        ) from exc
-                    raise ProblemDetails(
-                        status_code=504,
-                        title="Gateway Timeout",
-                        detail="An upstream dependency timed out.",
-                        type="/problems/upstream-timeout",
+                try:
+                    result = await asyncio.wait_for(operation(), timeout=timeout_seconds)
+                except asyncio.TimeoutError as exc:
+                    record_dependency_attempt(
+                        dependency=service_name,
+                        attempt=attempt + 1,
+                        outcome="timed_out",
+                        duration_ms=(time.perf_counter() - started) * 1000,
+                        request_id=request_id,
                         error_code="upstream_timeout",
-                    ) from exc
-            except UpstreamServiceError as exc:
-                logger.warning(
-                    (
-                        "dependency-failure request_id=%s service=%s attempt=%s status=%s "
-                        "retryable=%s azure_code=%s azure_message=%s"
-                    ),
-                    request_id,
-                    exc.service,
-                    attempt + 1,
-                    exc.status_code,
-                    exc.retryable,
-                    exc.error_code,
-                    exc.diagnostic_message,
-                )
-                if not exc.retryable or attempt >= max_retries:
-                    if exc.service == "foundry-image":
+                        retryable=attempt < max_retries,
+                    )
+                    if attempt >= max_retries:
+                        if service_name == "foundry-image":
+                            raise ProblemDetails(
+                                status_code=200,
+                                title="Artwork Pending",
+                                detail="Artwork generation timed out after text generation.",
+                                type="/problems/artwork-pending",
+                                error_code="artwork_retry_available",
+                            ) from exc
                         raise ProblemDetails(
-                            status_code=200,
-                            title="Artwork Pending",
-                            detail="Artwork generation failed after text generation.",
-                            type="/problems/artwork-pending",
-                            error_code="artwork_retry_available",
+                            status_code=504,
+                            title="Gateway Timeout",
+                            detail="An upstream dependency timed out.",
+                            type="/problems/upstream-timeout",
+                            error_code="upstream_timeout",
                         ) from exc
-                    raise ProblemDetails(
-                        status_code=502,
-                        title="Bad Gateway",
-                        detail="An upstream dependency returned a non-retryable error.",
-                        type="/problems/upstream-failure",
-                        error_code="upstream_failure",
-                    ) from exc
+                except UpstreamServiceError as exc:
+                    outcome = "throttled" if exc.status_code == 429 else "failed"
+                    record_dependency_attempt(
+                        dependency=exc.service,
+                        attempt=attempt + 1,
+                        outcome=outcome,
+                        duration_ms=(time.perf_counter() - started) * 1000,
+                        request_id=request_id,
+                        error_code=exc.error_code or "dependency_error",
+                        retryable=exc.retryable,
+                    )
+                    if not exc.retryable or attempt >= max_retries:
+                        if exc.service == "foundry-image":
+                            raise ProblemDetails(
+                                status_code=200,
+                                title="Artwork Pending",
+                                detail="Artwork generation failed after text generation.",
+                                type="/problems/artwork-pending",
+                                error_code="artwork_retry_available",
+                            ) from exc
+                        raise ProblemDetails(
+                            status_code=502,
+                            title="Bad Gateway",
+                            detail="An upstream dependency returned a non-retryable error.",
+                            type="/problems/upstream-failure",
+                            error_code="upstream_failure",
+                        ) from exc
+                else:
+                    record_dependency_attempt(
+                        dependency=service_name,
+                        attempt=attempt + 1,
+                        outcome="completed",
+                        duration_ms=(time.perf_counter() - started) * 1000,
+                        request_id=request_id,
+                    )
+                    return result
+            record_retry(
+                dependency=service_name,
+                attempt=attempt + 2,
+                request_id=request_id,
+            )
             await asyncio.sleep(self.services.settings.retry.base_backoff_seconds * (2**attempt))
         raise AssertionError("unreachable")
 

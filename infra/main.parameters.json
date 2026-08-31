@@ -25,6 +25,54 @@
     },
     "entraClientSecretValue": {
       "value": "${ENTRA_CLIENT_SECRET=}"
+    },
+    "monitoringRetentionInDays": {
+      "value": "${MONITORING_RETENTION_DAYS=30}"
+    },
+    "monitoringDailyQuotaGb": {
+      "value": "${MONITORING_DAILY_QUOTA_GB=0.25}"
+    },
+    "telemetrySamplingRatio": {
+      "value": "${TELEMETRY_SAMPLING_RATIO=1.0}"
+    },
+    "monitoringAlertsEnabled": {
+      "value": "${MONITORING_ALERTS_ENABLED=false}"
+    },
+    "monitoringEmailReceivers": {
+      "value": "${MONITORING_EMAIL_RECEIVERS=[]}"
+    },
+    "monitoringWebhookReceivers": {
+      "value": "${MONITORING_WEBHOOK_RECEIVERS=[]}"
+    },
+    "monitoringAvailabilityLocations": {
+      "value": "${MONITORING_AVAILABILITY_LOCATIONS=[\"emea-nl-ams-azr\",\"us-va-ash-azr\"]}"
+    },
+    "monitoringIngestionWarningPercent": {
+      "value": "${MONITORING_INGESTION_WARNING_PERCENT=80}"
+    },
+    "monitoringAvailabilityFailureThreshold": {
+      "value": "${MONITORING_AVAILABILITY_FAILURE_THRESHOLD=2}"
+    },
+    "monitoringRequestFailurePercentThreshold": {
+      "value": "${MONITORING_REQUEST_FAILURE_PERCENT_THRESHOLD=5}"
+    },
+    "monitoringRequestTrafficFloor": {
+      "value": "${MONITORING_REQUEST_TRAFFIC_FLOOR=20}"
+    },
+    "monitoringRequestP95LatencyMsThreshold": {
+      "value": "${MONITORING_REQUEST_P95_LATENCY_MS_THRESHOLD=10000}"
+    },
+    "monitoringDependencyFailureThreshold": {
+      "value": "${MONITORING_DEPENDENCY_FAILURE_THRESHOLD=5}"
+    },
+    "monitoringExceptionThreshold": {
+      "value": "${MONITORING_EXCEPTION_THRESHOLD=5}"
+    },
+    "monitoringGenerationAdverseOutcomeThreshold": {
+      "value": "${MONITORING_GENERATION_ADVERSE_OUTCOME_THRESHOLD=3}"
+    },
+    "monitoringContainerRestartThreshold": {
+      "value": "${MONITORING_CONTAINER_RESTART_THRESHOLD=3}"
     }
   }
 }

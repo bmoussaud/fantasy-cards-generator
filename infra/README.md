@@ -1,5 +1,33 @@
 # Infrastructure deployment notes
 
+## Monitoring configuration
+
+Each `dev`/`prod` deployment owns an isolated Log Analytics workspace,
+workspace-based Application Insights component, workbook, availability test, Action
+Group, and eight alert rules. The default workspace retention is 30 days, its daily
+cap is 0.25 GB, and parent-consistent trace sampling is 100%.
+
+The initial rollout is dashboard-only: receiver arrays are empty and
+`MONITORING_ALERTS_ENABLED=false`, so all eight rules deploy disabled. After the
+dashboard has been calibrated for traffic below 100 requests/day, an operator can
+configure approved receivers and explicitly enable the rules.
+
+```powershell
+azd env set MONITORING_RETENTION_DAYS 30
+azd env set MONITORING_DAILY_QUOTA_GB 0.25
+azd env set MONITORING_INGESTION_WARNING_PERCENT 80
+azd env set TELEMETRY_SAMPLING_RATIO 1.0
+azd env set MONITORING_ALERTS_ENABLED false
+azd env set MONITORING_EMAIL_RECEIVERS '[]'
+azd env set MONITORING_WEBHOOK_RECEIVERS '[]'
+```
+
+See [`../docs/operational-monitoring.md`](../docs/operational-monitoring.md) for
+receiver object schemas, thresholds, supported workspace table names, KQL, privacy
+rules, cost estimation, deployment verification, and rollback. No monitoring
+resources are deployed by repository changes alone; deployment remains a separate,
+explicitly authorized `azd` operation.
+
 ## Dev/MVP NAT Gateway baseline for Cosmos egress
 
 Issue [#35](https://github.com/bmoussaud/fantasy-cards-generator/issues/35)

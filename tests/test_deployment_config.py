@@ -9,7 +9,7 @@ def test_dockerfile_serves_fastapi_on_port_8000() -> None:
     assert "FROM python:3.12-slim" in dockerfile
     assert "USER appuser" in dockerfile
     assert "EXPOSE 8000" in dockerfile
-    assert '"uvicorn", "app.main:app"' in dockerfile
+    assert '"uvicorn", "app.entrypoint:app"' in dockerfile
     assert '"--host", "0.0.0.0"' in dockerfile
     assert '"--port", "8000"' in dockerfile
 
@@ -216,3 +216,121 @@ def test_blob_storage_uses_private_endpoint_for_container_app_access() -> None:
         main_bicep
     )
     assert "virtualNetworkResourceId: network.outputs.virtualNetworkResourceId" in main_bicep
+
+
+def test_telemetry_reuses_single_workspace_app_insights_and_secret_wiring() -> None:
+    bicep_files = {
+        path.relative_to(REPO_ROOT).as_posix(): path.read_text()
+        for path in (REPO_ROOT / "infra").rglob("*.bicep")
+    }
+    all_bicep = "\n".join(bicep_files.values())
+    monitoring = bicep_files["infra/modules/monitoring.bicep"]
+    container_apps = bicep_files["infra/modules/container-apps.bicep"]
+    main_bicep = bicep_files["infra/main.bicep"]
+
+    assert all_bicep.count("Microsoft.OperationalInsights/workspaces@") == 1
+    assert all_bicep.count("Microsoft.Insights/components@") == 1
+    assert "WorkspaceResourceId: logAnalyticsWorkspace.id" in monitoring
+    assert "DisableIpMasking: false" in monitoring
+    assert "retentionInDays: retentionInDays" in monitoring
+    assert "dailyQuotaGb: json(dailyQuotaGb)" in monitoring
+
+    assert container_apps.count("name: 'applicationinsights-connection-string'") == 1
+    assert container_apps.count("name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'") == 1
+    assert "secretRef: 'applicationinsights-connection-string'" in container_apps
+    assert "appInsightsResourceId: monitoring.outputs.appInsightsResourceId" in main_bicep
+    assert (
+        "logAnalyticsWorkspaceResourceId: monitoring.outputs.logAnalyticsWorkspaceResourceId"
+        in main_bicep
+    )
+
+
+def test_container_app_has_all_three_dependency_free_health_probes() -> None:
+    container_apps = (REPO_ROOT / "infra" / "modules" / "container-apps.bicep").read_text()
+
+    assert container_apps.count("path: '/healthz'") == 3
+    assert container_apps.count("port: 8000") >= 3
+    for probe_type in ("Startup", "Liveness", "Readiness"):
+        assert f"type: '{probe_type}'" in container_apps
+    assert "activeRevisionsMode: 'Single'" in container_apps
+
+
+def test_operational_monitoring_resources_and_alert_routing_are_iac_managed() -> None:
+    operational = (REPO_ROOT / "infra" / "modules" / "operational-monitoring.bicep").read_text()
+    main_bicep = (REPO_ROOT / "infra" / "main.bicep").read_text()
+    main_parameters = (REPO_ROOT / "infra" / "main.parameters.json").read_text()
+
+    assert "Microsoft.Insights/workbooks@" in operational
+    assert "Microsoft.Insights/webtests@" in operational
+    assert "RequestUrl: '${containerAppUrl}/healthz'" in operational
+    assert "Microsoft.Insights/actionGroups@" in operational
+    assert "Microsoft.Insights/scheduledQueryRules@" in operational
+    assert "actionGroups:" in operational
+    assert "actionGroup.id" in operational
+    assert "alertsEnabled = enableAlerts && hasAlertRouting" in operational
+    assert "actionGroupEmailReceivers array = []" in operational
+    assert "actionGroupWebhookReceivers array = []" in operational
+    assert 'Name == "fcg.generation.requests"' in operational
+    assert 'Name == "fcg.persistence.operations"' in operational
+    assert 'Properties["deployment.environment.name"]' not in operational
+    assert "param telemetryEnvironmentName" not in operational
+    assert "by Name, Dimension, bin(TimeGenerated, 5m)" in operational
+    for dimension in (
+        'Properties["fcg.outcome"]',
+        'Properties["fcg.moderation_reason"]',
+        'Properties["fcg.attempt"]',
+        'Properties["fcg.persistence_operation"]',
+        'Properties["fcg.token_type"]',
+    ):
+        assert dimension in operational
+    assert "fcg.generation.failures" not in operational
+    assert "fcg.persistence.failures" not in operational
+
+    for alert_name in (
+        "availability",
+        "request-failures",
+        "request-latency",
+        "dependency-failures",
+        "exceptions",
+        "generation-adverse",
+        "container-restarts",
+        "ingestion-cap",
+    ):
+        assert f"name: '{alert_name}'" in operational
+
+    for panel_title in (
+        "Requests: volume, failures, and latency percentiles",
+        "Dependencies: success and latency",
+        "Exceptions and bounded application errors",
+        "Generation, moderation, retries, persistence, and token aggregates",
+        "ACA revision, restart, and platform errors",
+        "Billable ingestion and daily-cap utilization",
+    ):
+        assert panel_title in operational
+
+    assert "module operationalMonitoring './modules/operational-monitoring.bicep'" in main_bicep
+    assert (
+        "telemetryEnvironmentName = environmentName == 'prod' ? 'production' : 'development'"
+        in main_bicep
+    )
+    assert "telemetryEnvironmentName: telemetryEnvironmentName" in main_bicep
+    assert "MONITORING_RETENTION_DAYS=30" in main_parameters
+    assert "MONITORING_DAILY_QUOTA_GB=0.25" in main_parameters
+    assert "TELEMETRY_SAMPLING_RATIO=1.0" in main_parameters
+    assert "MONITORING_ALERTS_ENABLED=false" in main_parameters
+    assert "MONITORING_EMAIL_RECEIVERS=[]" in main_parameters
+    assert "MONITORING_WEBHOOK_RECEIVERS=[]" in main_parameters
+
+    container_apps = (REPO_ROOT / "infra" / "modules" / "container-apps.bicep").read_text()
+    assert "value: 'parentbased_trace_id_ratio'" in container_apps
+    assert "parentbased_traceidratio" not in container_apps
+    assert "service.namespace=" not in container_apps
+
+
+def test_production_container_starts_through_telemetry_first_entrypoint() -> None:
+    dockerfile = (REPO_ROOT / "Dockerfile").read_text()
+    pyproject = (REPO_ROOT / "pyproject.toml").read_text()
+
+    assert '"uvicorn", "app.entrypoint:app"' in dockerfile
+    assert "azure-monitor-opentelemetry" in pyproject
+    assert "opentelemetry-instrumentation-httpx" in pyproject

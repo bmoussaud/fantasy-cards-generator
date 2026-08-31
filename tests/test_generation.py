@@ -416,6 +416,119 @@ def test_retryable_text_upstream_failure_is_retried_successfully(
     assert response.json()["status"] == "completed"
 
 
+def test_generation_paths_emit_dependency_moderation_partial_persistence_and_tokens(
+    authenticated_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dependencies: list[dict[str, object]] = []
+    retries: list[dict[str, object]] = []
+    partials: list[str] = []
+    moderation: list[dict[str, object]] = []
+    persistence: list[dict[str, object]] = []
+    tokens: list[tuple[str, object]] = []
+
+    monkeypatch.setattr(
+        generation_module,
+        "record_dependency_attempt",
+        lambda **attributes: dependencies.append(attributes),
+    )
+    monkeypatch.setattr(
+        generation_module,
+        "record_retry",
+        lambda **attributes: retries.append(attributes),
+    )
+    monkeypatch.setattr(generation_module, "record_partial", partials.append)
+    monkeypatch.setattr(
+        generation_module,
+        "record_moderation",
+        lambda **attributes: moderation.append(attributes),
+    )
+    monkeypatch.setattr(
+        generation_module,
+        "record_persistence",
+        lambda **attributes: persistence.append(attributes),
+    )
+    monkeypatch.setattr(
+        generation_module,
+        "record_token_usage",
+        lambda operation, usage: tokens.append((operation, usage)),
+    )
+    csrf_token = extract_hidden_value(authenticated_client.get("/app").text, "csrf_token")
+
+    successful = authenticated_client.post(
+        "/api/v1/cards/generate",
+        json={
+            "prompt": "create a safe fantasy ranger [[mock:text-429-once]]",
+            "idempotencyKey": "idem-telemetry-retry",
+            "csrfToken": csrf_token,
+        },
+    )
+    partial = authenticated_client.post(
+        "/api/v1/cards/generate",
+        json={
+            "prompt": "create a safe fantasy ranger [[mock:image-500]]",
+            "idempotencyKey": "idem-telemetry-partial",
+            "csrfToken": csrf_token,
+        },
+    )
+
+    assert successful.status_code == 200
+    assert partial.status_code == 200
+    assert partial.json()["status"] == "awaiting_artwork_retry"
+    assert any(
+        item["dependency"] == "foundry-text" and item["outcome"] == "throttled"
+        for item in dependencies
+    )
+    assert any(item["dependency"] == "foundry-text" for item in retries)
+    assert any(
+        item["dependency"] == "foundry-image" and item["outcome"] == "failed"
+        for item in dependencies
+    )
+    assert "image_failure" in partials
+    assert any(item["allowed"] is True for item in moderation)
+    assert any(
+        item["store"] == "card"
+        and item["operation"] == "save_partial"
+        and item["outcome"] == "completed"
+        for item in persistence
+    )
+    assert {operation for operation, _ in tokens} == {"text", "image"}
+
+
+def test_text_timeout_emits_bounded_dependency_timeout_signal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TEXT_TIMEOUT_SECONDS", "0.1")
+    monkeypatch.setenv("IMAGE_TIMEOUT_SECONDS", "0.2")
+    monkeypatch.setenv("OVERALL_TIMEOUT_SECONDS", "0.5")
+    monkeypatch.setenv("UPSTREAM_MAX_RETRIES", "0")
+    dependencies: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        generation_module,
+        "record_dependency_attempt",
+        lambda **attributes: dependencies.append(attributes),
+    )
+    client = make_authenticated_client(monkeypatch)
+    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
+
+    response = client.post(
+        "/api/v1/cards/generate",
+        json={
+            "prompt": "create a safe fantasy ranger [[mock:text-timeout]]",
+            "idempotencyKey": "idem-telemetry-timeout",
+            "csrfToken": csrf_token,
+        },
+    )
+
+    assert response.status_code == 504
+    assert any(
+        item["dependency"] == "foundry-text"
+        and item["outcome"] == "timed_out"
+        and item["error_code"] == "upstream_timeout"
+        for item in dependencies
+    )
+
+
 def test_non_retryable_text_upstream_failure_returns_bad_gateway(
     authenticated_client: TestClient,
 ) -> None:
@@ -859,7 +972,7 @@ def test_concurrent_duplicate_replays_rate_limit_rejection_instead_of_timing_out
                 raise ProblemDetails(
                     status_code=429,
                     title="Too Many Requests",
-                    detail=(f"Rate limit exceeded for {error_suffix}. Retry after " "60 seconds."),
+                    detail=(f"Rate limit exceeded for {error_suffix}. Retry after 60 seconds."),
                     type="/problems/rate-limit",
                     error_code="rate_limit_exceeded",
                     headers={"Retry-After": "60"},
@@ -949,7 +1062,7 @@ def test_shared_repository_topology_preserves_audit_for_duplicate_rate_limit_rep
                 raise ProblemDetails(
                     status_code=429,
                     title="Too Many Requests",
-                    detail=(f"Rate limit exceeded for {error_suffix}. Retry after " "60 seconds."),
+                    detail=(f"Rate limit exceeded for {error_suffix}. Retry after 60 seconds."),
                     type="/problems/rate-limit",
                     error_code="rate_limit_exceeded",
                     headers={"Retry-After": "60"},
