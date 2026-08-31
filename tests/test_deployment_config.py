@@ -1,6 +1,23 @@
+import json
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _bicep_block(source: str, declaration: str) -> str:
+    declaration_start = source.index(declaration)
+    block_start = source.index("{", declaration_start)
+    depth = 0
+
+    for index in range(block_start, len(source)):
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[declaration_start : index + 1]
+
+    raise AssertionError(f"Unclosed Bicep block: {declaration}")
 
 
 def test_dockerfile_serves_fastapi_on_port_8000() -> None:
@@ -96,13 +113,20 @@ def test_generation_runtime_env_vars_are_wired_from_bicep_outputs() -> None:
 
 def test_deployer_gets_foundry_user_at_project_scope() -> None:
     main_bicep = (REPO_ROOT / "infra" / "main.bicep").read_text()
-    main_parameters = (REPO_ROOT / "infra" / "main.parameters.json").read_text()
+    main_parameters = json.loads((REPO_ROOT / "infra" / "main.parameters.json").read_text())
     foundry_bicep = (REPO_ROOT / "infra" / "modules" / "ai-foundry.bicep").read_text()
+    foundry_module = _bicep_block(main_bicep, "module aiFoundry './modules/ai-foundry.bicep'")
+    deployer_assignment = _bicep_block(foundry_bicep, "resource deployerFoundryUserRoleAssignment")
+    runtime_assignment = _bicep_block(foundry_bicep, "resource cognitiveServicesUserRoleAssignment")
 
-    assert '"value": "${AZURE_PRINCIPAL_ID}"' in main_parameters
-    assert '"value": "${AZURE_PRINCIPAL_TYPE}"' in main_parameters
-    assert "deployerPrincipalId: deployerPrincipalId" in main_bicep
-    assert "deployerPrincipalType: deployerPrincipalType" in main_bicep
+    assert main_bicep.count("deployer().objectId") == 1
+    assert "param deployerPrincipalId" not in main_bicep
+    assert "deployerPrincipalId" not in main_parameters["parameters"]
+    assert (
+        main_parameters["parameters"]["deployerPrincipalType"]["value"] == "${AZURE_PRINCIPAL_TYPE}"
+    )
+    assert "deployerPrincipalId: deployerPrincipalId" in foundry_module
+    assert "deployerPrincipalType: deployerPrincipalType" in foundry_module
 
     assert "var foundryUserRoleDefinitionId = '53ca6127-db72-4b80-b1b0-d745d6d5456d'" in (
         foundry_bicep
@@ -111,18 +135,94 @@ def test_deployer_gets_foundry_user_at_project_scope() -> None:
         "resource deployerFoundryUserRoleAssignment "
         "'Microsoft.Authorization/roleAssignments@2022-04-01'" in foundry_bicep
     )
-    assert "scope: aiFoundryProject" in foundry_bicep
-    assert "principalId: deployerPrincipalId" in foundry_bicep
-    assert "principalType: deployerPrincipalType" in foundry_bicep
+    assert "scope: aiFoundryProject" in deployer_assignment
+    assert "principalId: deployerPrincipalId" in deployer_assignment
+    assert "principalType: deployerPrincipalType" in deployer_assignment
+    assert (
+        "guid(aiFoundryProject.id, deployerPrincipalId, foundryUserRoleDefinitionId)"
+        in deployer_assignment
+    )
     assert (
         "roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', "
-        "foundryUserRoleDefinitionId)" in foundry_bicep
+        "foundryUserRoleDefinitionId)" in deployer_assignment
     )
 
     # Runtime access remains a separate assignment for the Container App identity.
-    assert "scope: foundryAccount" in foundry_bicep
-    assert "principalId: containerAppPrincipalId" in foundry_bicep
-    assert "cognitiveServicesUserRoleDefinitionId" in foundry_bicep
+    assert "scope: foundryAccount" in runtime_assignment
+    assert "principalId: containerAppPrincipalId" in runtime_assignment
+    assert "cognitiveServicesUserRoleDefinitionId" in runtime_assignment
+
+
+def test_deployer_gets_cosmos_data_reader_at_account_root() -> None:
+    main_bicep = (REPO_ROOT / "infra" / "main.bicep").read_text()
+    cosmos_bicep = (REPO_ROOT / "infra" / "modules" / "cosmos-db.bicep").read_text()
+    cosmos_module = _bicep_block(main_bicep, "module cosmosDb './modules/cosmos-db.bicep'")
+    deployer_assignment = _bicep_block(
+        cosmos_bicep, "resource deployerCosmosDataReaderRoleAssignment"
+    )
+    runtime_assignment = _bicep_block(cosmos_bicep, "resource sqlRoleAssignment")
+
+    assert "deployerPrincipalId: deployerPrincipalId" in cosmos_module
+    assert (
+        "var cosmosDataReaderRoleDefinitionId = '00000000-0000-0000-0000-000000000001'"
+        in cosmos_bicep
+    )
+    assert (
+        "'Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments@2024-05-15'"
+        in deployer_assignment
+    )
+    assert "principalId: deployerPrincipalId" in deployer_assignment
+    assert "scope: databaseAccount.id" in deployer_assignment
+    assert "principalType:" not in deployer_assignment
+    assert (
+        "guid(databaseAccount.id, deployerPrincipalId, cosmosDataReaderRoleDefinitionId)"
+        in deployer_assignment
+    )
+    assert (
+        "'${databaseAccount.id}/sqlRoleDefinitions/${cosmosDataReaderRoleDefinitionId}'"
+        in deployer_assignment
+    )
+
+    assert "principalId: containerAppPrincipalId" in runtime_assignment
+    assert "cosmosDataContributorRoleDefinitionId" in runtime_assignment
+    assert "scope: '${databaseAccount.id}/dbs/${databaseName}/colls/${containerName}'" in (
+        runtime_assignment
+    )
+
+
+def test_deployer_gets_blob_data_reader_at_storage_account_scope() -> None:
+    main_bicep = (REPO_ROOT / "infra" / "main.bicep").read_text()
+    storage_bicep = (REPO_ROOT / "infra" / "modules" / "storage.bicep").read_text()
+    storage_module = _bicep_block(main_bicep, "module storage './modules/storage.bicep'")
+    deployer_assignment = _bicep_block(
+        storage_bicep, "resource deployerStorageBlobDataReaderRoleAssignment"
+    )
+    runtime_assignment = _bicep_block(
+        storage_bicep, "resource storageBlobDataContributorRoleAssignment"
+    )
+
+    assert "deployerPrincipalId: deployerPrincipalId" in storage_module
+    assert "deployerPrincipalType: deployerPrincipalType" in storage_module
+    assert (
+        "var storageBlobDataReaderRoleDefinitionId = "
+        "'2a2b9908-6ea1-4ae2-8e65-a410df84e7d1'" in storage_bicep
+    )
+    assert "'Microsoft.Authorization/roleAssignments@2022-04-01'" in deployer_assignment
+    assert "scope: storageAccount" in deployer_assignment
+    assert "principalId: deployerPrincipalId" in deployer_assignment
+    assert "principalType: deployerPrincipalType" in deployer_assignment
+    assert (
+        "guid(storageAccount.id, deployerPrincipalId, storageBlobDataReaderRoleDefinitionId)"
+        in deployer_assignment
+    )
+    assert (
+        "subscriptionResourceId('Microsoft.Authorization/roleDefinitions', "
+        "storageBlobDataReaderRoleDefinitionId)" in deployer_assignment
+    )
+
+    assert "principalId: containerAppPrincipalId" in runtime_assignment
+    assert "principalType: 'ServicePrincipal'" in runtime_assignment
+    assert "storageBlobDataContributorRoleDefinitionId" in runtime_assignment
 
 
 def test_container_apps_wire_key_vault_backed_auth_env_vars() -> None:

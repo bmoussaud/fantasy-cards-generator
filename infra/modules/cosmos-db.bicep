@@ -13,6 +13,9 @@ param containerName string
 @description('Managed identity principal ID for the Container App that needs Cosmos DB data-plane access.')
 param containerAppPrincipalId string
 
+@description('Microsoft Entra object ID of the deployment caller that needs read-only Cosmos DB data-plane access.')
+param deployerPrincipalId string
+
 @description('Static public IP address exposed by the NAT Gateway for Container Apps egress.')
 param natGatewayPublicIpAddress string
 
@@ -22,6 +25,7 @@ param legacyIpRule string = ''
 @description('Optional tags shared by Cosmos DB resources.')
 param tags object = {}
 
+var cosmosDataReaderRoleDefinitionId = '00000000-0000-0000-0000-000000000001'
 var cosmosDataContributorRoleDefinitionId = '00000000-0000-0000-0000-000000000002'
 var cosmosIpRules = empty(trim(legacyIpRule))
   ? [
@@ -111,6 +115,16 @@ resource sqlRoleAssignment 'Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignm
   dependsOn: [
     sqlContainer
   ]
+}
+
+resource deployerCosmosDataReaderRoleAssignment 'Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments@2024-05-15' = {
+  parent: databaseAccount
+  name: guid(databaseAccount.id, deployerPrincipalId, cosmosDataReaderRoleDefinitionId)
+  properties: {
+    principalId: deployerPrincipalId
+    roleDefinitionId: '${databaseAccount.id}/sqlRoleDefinitions/${cosmosDataReaderRoleDefinitionId}'
+    scope: databaseAccount.id
+  }
 }
 
 output cosmosAccountName string = databaseAccount.name
