@@ -168,3 +168,22 @@ def test_cosmos_account_explicitly_keeps_public_network_access_for_mvp() -> None
         container_apps_environment_bicep
     )
     assert "workloadProfiles:" in container_apps_environment_bicep
+
+
+def test_blob_storage_uses_private_endpoint_for_container_app_access() -> None:
+    storage_bicep = (REPO_ROOT / "infra" / "modules" / "storage.bicep").read_text()
+    network_bicep = (REPO_ROOT / "infra" / "modules" / "network.bicep").read_text()
+    main_bicep = (REPO_ROOT / "infra" / "main.bicep").read_text()
+
+    assert "publicNetworkAccess: 'Disabled'" in storage_bicep
+    assert "defaultAction: 'Deny'" in storage_bicep
+    assert "Microsoft.Network/privateEndpoints@" in storage_bicep
+    assert "privatelink.blob.${environment().suffixes.storage}" in storage_bicep
+    assert "Microsoft.Network/privateDnsZones@" in storage_bicep
+    assert "Microsoft.Network/privateDnsZones/virtualNetworkLinks@" in storage_bicep
+    assert "Microsoft.Network/privateEndpoints/privateDnsZoneGroups@" in storage_bicep
+    assert "privateEndpointNetworkPolicies: 'Disabled'" in network_bicep
+    assert "privateEndpointSubnetResourceId: network.outputs.privateEndpointSubnetResourceId" in (
+        main_bicep
+    )
+    assert "virtualNetworkResourceId: network.outputs.virtualNetworkResourceId" in main_bicep

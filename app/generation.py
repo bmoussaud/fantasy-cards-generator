@@ -28,6 +28,40 @@ CARD_DOCUMENT_ID_PREFIX = "card:"
 AUDIT_DOCUMENT_ID_PREFIX = "audit:"
 
 
+def _exception_diagnostic(exc: Exception) -> tuple[str, int | None, str | None]:
+    status_code = getattr(exc, "status_code", None)
+    error_code = getattr(exc, "error_code", None)
+    response = getattr(exc, "response", None)
+    if error_code is None and response is not None:
+        headers = getattr(response, "headers", None)
+        if headers is not None:
+            error_code = headers.get("x-ms-error-code")
+    return (
+        type(exc).__name__,
+        status_code if isinstance(status_code, int) else None,
+        str(error_code) if error_code else None,
+    )
+
+
+def _log_persistence_exception(
+    *,
+    event: str,
+    request_id: str,
+    stage: str,
+    exc: Exception,
+) -> None:
+    exception_type, status_code, error_code = _exception_diagnostic(exc)
+    logger.error(
+        "%s request_id=%s stage=%s exception_type=%s azure_status=%s azure_error_code=%s",
+        event,
+        request_id,
+        stage,
+        exception_type,
+        status_code,
+        error_code,
+    )
+
+
 def _card_document_id(card_id: str) -> str:
     return f"{CARD_DOCUMENT_ID_PREFIX}{card_id}"
 
@@ -1867,6 +1901,7 @@ class CardGenerationService:
         blob_name = build_blob_name(owner.owner_id, card_id)
         blob_uploaded = False
         blob_metadata: dict[str, Any] | None = None
+        persistence_stage = "blob-upload"
         try:
             blob_metadata = await self.services.asset_store.upload(
                 blob_name,
@@ -1874,6 +1909,7 @@ class CardGenerationService:
                 image_result.image.content_type,
             )
             blob_uploaded = True
+            persistence_stage = "cosmos-write"
             record = StoredCard(
                 id=card_id,
                 document_type="card",
@@ -1903,35 +1939,60 @@ class CardGenerationService:
             )
             return await self.services.card_repository.save(record)
         except Exception as exc:
+            _log_persistence_exception(
+                event="persistence-failed",
+                request_id=request_id,
+                stage=persistence_stage,
+                exc=exc,
+            )
             if blob_uploaded and blob_metadata is not None:
                 try:
                     await self.services.asset_store.delete(blob_name)
-                    logger.warning("cleanup-succeeded request_id=%s blob=%s", request_id, blob_name)
-                except Exception:
-                    logger.exception("cleanup-failed request_id=%s blob=%s", request_id, blob_name)
-            await self.services.card_repository.delete(owner.owner_id, card_id)
-            await self._save_audit_failure(
-                owner.owner_id,
-                card_id,
-                request_id,
-                idempotency_key,
-                request_hash,
-                "persistence_failure",
-                problem=ProblemDetails(
-                    status_code=503,
-                    title="Service Unavailable",
-                    detail="The generated card could not be persisted safely.",
-                    type="/problems/persistence-failure",
-                    error_code="persistence_failure",
-                ),
-            )
-            raise ProblemDetails(
+                    logger.warning(
+                        "compensation-succeeded request_id=%s stage=compensation-delete",
+                        request_id,
+                    )
+                except Exception as cleanup_exc:
+                    _log_persistence_exception(
+                        event="compensation-failed",
+                        request_id=request_id,
+                        stage="compensation-delete",
+                        exc=cleanup_exc,
+                    )
+            try:
+                await self.services.card_repository.delete(owner.owner_id, card_id)
+            except Exception as cleanup_exc:
+                _log_persistence_exception(
+                    event="compensation-failed",
+                    request_id=request_id,
+                    stage="cosmos-delete",
+                    exc=cleanup_exc,
+                )
+            problem = ProblemDetails(
                 status_code=503,
                 title="Service Unavailable",
                 detail="The generated card could not be persisted safely.",
                 type="/problems/persistence-failure",
                 error_code="persistence_failure",
-            ) from exc
+            )
+            try:
+                await self._save_audit_failure(
+                    owner.owner_id,
+                    card_id,
+                    request_id,
+                    idempotency_key,
+                    request_hash,
+                    "persistence_failure",
+                    problem=problem,
+                )
+            except Exception as audit_exc:
+                _log_persistence_exception(
+                    event="persistence-failed",
+                    request_id=request_id,
+                    stage="audit-write",
+                    exc=audit_exc,
+                )
+            raise problem from exc
 
     async def _save_audit_failure(
         self,

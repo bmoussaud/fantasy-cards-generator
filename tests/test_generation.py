@@ -596,7 +596,10 @@ def test_htmx_flow_renders_error_panel(authenticated_client: TestClient) -> None
     assert "Prompt Rejected" in response.text
 
 
-def test_persistence_cleanup_deletes_orphaned_blob(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_persistence_cleanup_deletes_orphaned_blob(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     class FailingCardRepository(InMemoryCardRepository):
         def __init__(self) -> None:
             super().__init__()
@@ -650,6 +653,121 @@ def test_persistence_cleanup_deletes_orphaned_blob(monkeypatch: pytest.MonkeyPat
     assert response.json()["errorCode"] == "persistence_failure"
     assert services.asset_store.deleted
     assert services.card_repository._records == {}
+    assert "stage=cosmos-write" in caplog.text
+    assert "stage=compensation-delete" in caplog.text
+
+
+def test_blob_upload_failure_logs_safe_azure_diagnostic(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class BlobAuthorizationError(RuntimeError):
+        status_code = 403
+        error_code = "AuthorizationFailure"
+
+    class FailingAssetStore(InMemoryAssetStore):
+        async def upload(
+            self,
+            blob_name: str,
+            payload: bytes,
+            content_type: str,
+        ) -> dict[str, object]:
+            raise BlobAuthorizationError("sensitive SAS URL and image bytes")
+
+    settings = load_app_settings()
+    defaults = create_services(settings)
+    services = AppServices(
+        settings=settings,
+        card_repository=InMemoryCardRepository(),
+        audit_repository=InMemoryAuditRepository(),
+        asset_store=FailingAssetStore(),
+        ai_client=MockAIClient(settings),
+        moderation_service=defaults.moderation_service,
+        rate_limiter=defaults.rate_limiter,
+        csrf_protector=defaults.csrf_protector,
+    )
+    client = TestClient(create_app(services=services), base_url="https://testserver")
+    from app import main as main_module
+    from tests.conftest import FakeOAuthClient
+
+    monkeypatch.setattr(main_module, "create_oauth_client", lambda settings: FakeOAuthClient())
+    client.get("/auth/login", follow_redirects=False)
+    client.get("/auth/callback?code=valid-code&state=opaque", follow_redirects=False)
+    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
+
+    response = client.post(
+        "/api/v1/cards/generate",
+        json={
+            "prompt": "create a safe fantasy guardian with a golden shield",
+            "idempotencyKey": "idem-blob-auth-fail",
+            "csrfToken": csrf_token,
+        },
+    )
+
+    assert response.status_code == 503
+    assert services.card_repository._records == {}
+    assert "stage=blob-upload" in caplog.text
+    assert "azure_status=403" in caplog.text
+    assert "azure_error_code=AuthorizationFailure" in caplog.text
+    assert "sensitive SAS URL" not in caplog.text
+
+
+def test_failed_blob_compensation_does_not_mask_persistence_problem(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class FailingCardRepository(InMemoryCardRepository):
+        async def save(self, record: StoredCard) -> StoredCard:
+            if record.status == "completed":
+                raise RuntimeError("cosmos unavailable")
+            return await super().save(record)
+
+    class CleanupAuthorizationError(RuntimeError):
+        status_code = 403
+        error_code = "AuthorizationFailure"
+
+    class FailingCleanupAssetStore(InMemoryAssetStore):
+        async def delete(self, blob_name: str) -> None:
+            raise CleanupAuthorizationError("sensitive cleanup detail")
+
+    settings = load_app_settings()
+    defaults = create_services(settings)
+    services = AppServices(
+        settings=settings,
+        card_repository=FailingCardRepository(),
+        audit_repository=InMemoryAuditRepository(),
+        asset_store=FailingCleanupAssetStore(),
+        ai_client=MockAIClient(settings),
+        moderation_service=defaults.moderation_service,
+        rate_limiter=defaults.rate_limiter,
+        csrf_protector=defaults.csrf_protector,
+    )
+    client = TestClient(create_app(services=services), base_url="https://testserver")
+    from app import main as main_module
+    from tests.conftest import FakeOAuthClient
+
+    monkeypatch.setattr(main_module, "create_oauth_client", lambda settings: FakeOAuthClient())
+    client.get("/auth/login", follow_redirects=False)
+    client.get("/auth/callback?code=valid-code&state=opaque", follow_redirects=False)
+    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
+
+    response = client.post(
+        "/api/v1/cards/generate",
+        json={
+            "prompt": "create a safe fantasy guardian with a sapphire spear",
+            "idempotencyKey": "idem-cleanup-fail",
+            "csrfToken": csrf_token,
+        },
+    )
+
+    assert response.status_code == 503
+    assert response.json()["errorCode"] == "persistence_failure"
+    assert services.card_repository._records == {}
+    assert "event" not in response.text
+    assert "compensation-failed" in caplog.text
+    assert "stage=compensation-delete" in caplog.text
+    assert "azure_status=403" in caplog.text
+    assert "sensitive cleanup detail" not in caplog.text
 
 
 def test_concurrent_duplicates_do_not_duplicate_model_calls(

@@ -164,6 +164,7 @@ var registryName = toLower(take('${namePrefix}${environmentName}${uniqueToken}ac
 var acrPullIdentityName = take('${resourceToken}-acr-pull', 128)
 var virtualNetworkName = take('${resourceToken}-vnet', 64)
 var containerAppsSubnetName = 'aca-infra'
+var privateEndpointSubnetName = 'private-endpoints'
 var natGatewayName = take('${resourceToken}-nat', 64)
 var natGatewayPublicIpName = take('${resourceToken}-nat-pip', 64)
 
@@ -203,6 +204,7 @@ module network './modules/network.bicep' = {
   name: 'network'
   params: {
     containerAppsSubnetName: containerAppsSubnetName
+    privateEndpointSubnetName: privateEndpointSubnetName
     location: location
     natGatewayName: natGatewayName
     natGatewayPublicIpName: natGatewayPublicIpName
@@ -309,8 +311,10 @@ module storage './modules/storage.bicep' = {
     containerAppPrincipalId: containerApps.outputs.containerAppPrincipalId
     containerName: cardAssetsContainerName
     location: location
+    privateEndpointSubnetResourceId: network.outputs.privateEndpointSubnetResourceId
     storageAccountName: storageAccountName
     tags: tags
+    virtualNetworkResourceId: network.outputs.virtualNetworkResourceId
   }
 }
 
@@ -372,6 +376,7 @@ output storageBlobEndpoint string = storage.outputs.storageBlobEndpoint
 output storageContainerName string = storage.outputs.storageContainerName
 output virtualNetworkName string = network.outputs.virtualNetworkName
 output containerAppsSubnetName string = network.outputs.containerAppsSubnetName
+output privateEndpointSubnetName string = network.outputs.privateEndpointSubnetName
 output entraClientId string = entraClientId
 output entraAppObjectId string = deployEntraAppRegistration ? appRegistration!.outputs.appObjectId : ''
 output entraServicePrincipalId string = deployEntraAppRegistration ? appRegistration!.outputs.servicePrincipalId : ''

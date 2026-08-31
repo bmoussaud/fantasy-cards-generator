@@ -13,6 +13,12 @@ param containerAppsSubnetName string
 @description('Address prefix for the Container Apps infrastructure subnet.')
 param containerAppsSubnetAddressPrefix string = '10.42.0.0/23'
 
+@description('Dedicated subnet name for private endpoints consumed by Container Apps.')
+param privateEndpointSubnetName string = 'private-endpoints'
+
+@description('Address prefix for the private endpoint subnet.')
+param privateEndpointSubnetAddressPrefix string = '10.42.2.0/24'
+
 @description('NAT Gateway name.')
 param natGatewayName string
 
@@ -80,6 +86,13 @@ resource virtualNetwork 'Microsoft.Network/virtualNetworks@2024-05-01' = {
           }
         }
       }
+      {
+        name: privateEndpointSubnetName
+        properties: {
+          addressPrefix: privateEndpointSubnetAddressPrefix
+          privateEndpointNetworkPolicies: 'Disabled'
+        }
+      }
     ]
   }
 }
@@ -89,10 +102,17 @@ resource containerAppsSubnet 'Microsoft.Network/virtualNetworks/subnets@2024-05-
   name: containerAppsSubnetName
 }
 
+resource privateEndpointSubnet 'Microsoft.Network/virtualNetworks/subnets@2024-05-01' existing = {
+  parent: virtualNetwork
+  name: privateEndpointSubnetName
+}
+
 output virtualNetworkName string = virtualNetwork.name
 output virtualNetworkResourceId string = virtualNetwork.id
 output containerAppsSubnetName string = containerAppsSubnet.name
 output containerAppsSubnetResourceId string = containerAppsSubnet.id
+output privateEndpointSubnetName string = privateEndpointSubnet.name
+output privateEndpointSubnetResourceId string = privateEndpointSubnet.id
 output natGatewayName string = natGateway.name
 output natGatewayResourceId string = natGateway.id
 output natGatewayPublicIpName string = natGatewayPublicIp.name
