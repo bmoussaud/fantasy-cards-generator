@@ -117,7 +117,7 @@ def load_app_settings() -> AppSettings:
             ),
         ),
         audit_retention_days=_int_env("AUDIT_RETENTION_DAYS", default=30, minimum=1),
-        image_size=_string_env("IMAGE_SIZE", default="1024x1024"),
+        image_size=_string_env("IMAGE_SIZE", default="1024x1536"),
     )
     _validate_app_settings(settings)
     return settings
