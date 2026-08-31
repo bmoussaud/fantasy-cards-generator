@@ -161,9 +161,7 @@ def _validate_app_settings(settings: AppSettings) -> None:
         )
 
     if settings.retry.overall_timeout_seconds <= settings.retry.text_timeout_seconds:
-        raise SettingsError(
-            "OVERALL_TIMEOUT_SECONDS must be greater than TEXT_TIMEOUT_SECONDS."
-        )
+        raise SettingsError("OVERALL_TIMEOUT_SECONDS must be greater than TEXT_TIMEOUT_SECONDS.")
 
 
 def _optional_env(name: str) -> str | None:

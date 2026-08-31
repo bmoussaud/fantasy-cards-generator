@@ -29,6 +29,19 @@ azd env set LEGACY_COSMOS_IP_RULE 20.10.253.231
 azd up
 ```
 
+`azd` supplies `AZURE_PRINCIPAL_ID` and `AZURE_PRINCIPAL_TYPE` from the
+currently signed-in Microsoft Entra principal. Provisioning passes those
+values to Bicep and assigns that principal the built-in **Foundry User** role
+(formerly **Azure AI User**) at the deployed Foundry project scope. The
+principal object ID is configuration, not a credential; do not copy it into
+source or replace it with a hard-coded value.
+
+The project-scoped assignment is intentionally separate from the existing
+account-scoped **Cognitive Services User** assignment used by the Container
+App managed identity. A direct Bicep deployment that bypasses `azd` must pass
+the deployer's Entra object ID and principal type explicitly as
+`deployerPrincipalId` and `deployerPrincipalType`.
+
 Why the extra env var:
 
 - `natGatewayPublicIpAddress` is provisioned by IaC and always lands in Cosmos
@@ -75,6 +88,9 @@ After a live deploy, verify:
    persists successfully to Cosmos from the NAT-backed environment.
 6. Once verified, remove the temporary legacy rule by clearing
    `LEGACY_COSMOS_IP_RULE`.
+7. In the Foundry project's **Access control (IAM)**, verify the signed-in
+   deployer has **Foundry User** at the project scope, then open the project
+   using Microsoft Entra authentication.
 
 The key live-network assertion — ACA outbound traffic actually using the NAT
 public IP — requires an Azure deployment and cannot be proven from source alone.

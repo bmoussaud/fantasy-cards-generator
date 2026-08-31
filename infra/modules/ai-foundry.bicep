@@ -16,6 +16,16 @@ param projectDisplayName string
 @description('Managed identity principal ID for the Container App that needs Azure AI Foundry access.')
 param containerAppPrincipalId string
 
+@description('Microsoft Entra object ID of the principal running the deployment.')
+param deployerPrincipalId string
+
+@allowed([
+  'ServicePrincipal'
+  'User'
+])
+@description('Microsoft Entra principal type running the deployment.')
+param deployerPrincipalType string
+
 @description('Deployment name for the text model used by the backend.')
 param textDeploymentName string
 
@@ -50,6 +60,8 @@ param imageDeploymentCapacity int = 1
 param tags object = {}
 
 var cognitiveServicesUserRoleDefinitionId = 'a97b65f3-24c7-4388-baec-2e87135dc908'
+// Foundry User (formerly Azure AI User): https://aka.ms/azure-built-in-roles
+var foundryUserRoleDefinitionId = '53ca6127-db72-4b80-b1b0-d745d6d5456d'
 
 resource foundryAccount 'Microsoft.CognitiveServices/accounts@2025-06-01' = {
   name: accountName
@@ -129,6 +141,16 @@ resource cognitiveServicesUserRoleAssignment 'Microsoft.Authorization/roleAssign
     principalId: containerAppPrincipalId
     principalType: 'ServicePrincipal'
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', cognitiveServicesUserRoleDefinitionId)
+  }
+}
+
+resource deployerFoundryUserRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: aiFoundryProject
+  name: guid(aiFoundryProject.id, deployerPrincipalId, foundryUserRoleDefinitionId)
+  properties: {
+    principalId: deployerPrincipalId
+    principalType: deployerPrincipalType
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', foundryUserRoleDefinitionId)
   }
 }
 

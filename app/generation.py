@@ -2127,10 +2127,7 @@ class CardGenerationService:
             try:
                 started = time.perf_counter()
                 logger.info(
-                    (
-                        "dependency-start request_id=%s service=%s attempt=%s "
-                        "timeout_seconds=%s"
-                    ),
+                    "dependency-start request_id=%s service=%s attempt=%s timeout_seconds=%s",
                     request_id,
                     service_name,
                     attempt + 1,
