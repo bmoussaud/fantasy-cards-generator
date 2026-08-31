@@ -10,6 +10,16 @@ param containerName string
 @description('Managed identity principal ID for the Container App that needs Blob Storage data-plane access.')
 param containerAppPrincipalId string
 
+@description('Microsoft Entra object ID of the deployment caller that needs read-only Blob data-plane access.')
+param deployerPrincipalId string
+
+@allowed([
+  'ServicePrincipal'
+  'User'
+])
+@description('Microsoft Entra principal type of the deployment caller.')
+param deployerPrincipalType string
+
 @description('Subnet resource ID used for the Blob Storage private endpoint.')
 param privateEndpointSubnetResourceId string
 
@@ -19,6 +29,7 @@ param virtualNetworkResourceId string
 @description('Optional tags shared by storage resources.')
 param tags object = {}
 
+var storageBlobDataReaderRoleDefinitionId = '2a2b9908-6ea1-4ae2-8e65-a410df84e7d1'
 var storageBlobDataContributorRoleDefinitionId = 'ba92f5b4-2d11-453d-a403-e96b0029c9fe'
 var blobPrivateDnsZoneName = 'privatelink.blob.${environment().suffixes.storage}'
 var privateEndpointName = take('${storageAccountName}-blob-pe', 80)
@@ -129,6 +140,16 @@ resource storageBlobDataContributorRoleAssignment 'Microsoft.Authorization/roleA
     principalId: containerAppPrincipalId
     principalType: 'ServicePrincipal'
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', storageBlobDataContributorRoleDefinitionId)
+  }
+}
+
+resource deployerStorageBlobDataReaderRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: storageAccount
+  name: guid(storageAccount.id, deployerPrincipalId, storageBlobDataReaderRoleDefinitionId)
+  properties: {
+    principalId: deployerPrincipalId
+    principalType: deployerPrincipalType
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', storageBlobDataReaderRoleDefinitionId)
   }
 }
 

@@ -8,9 +8,6 @@
     "location": {
       "value": "${AZURE_LOCATION}"
     },
-    "deployerPrincipalId": {
-      "value": "${AZURE_PRINCIPAL_ID}"
-    },
     "deployerPrincipalType": {
       "value": "${AZURE_PRINCIPAL_TYPE}"
     },

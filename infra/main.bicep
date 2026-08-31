@@ -61,14 +61,11 @@ param aiFoundryProjectName string = 'fantasy-cards'
 @description('Azure AI Foundry project display name for the current environment.')
 param aiFoundryProjectDisplayName string = 'Fantasy Cards'
 
-@description('Microsoft Entra object ID of the principal running the deployment. Supplied by azd through AZURE_PRINCIPAL_ID.')
-param deployerPrincipalId string
-
 @allowed([
   'ServicePrincipal'
   'User'
 ])
-@description('Microsoft Entra principal type running the deployment. Supplied by azd through AZURE_PRINCIPAL_TYPE.')
+@description('Microsoft Entra principal type running the deployment. Supplied by azd through AZURE_PRINCIPAL_TYPE for ARM role assignments.')
 param deployerPrincipalType string
 
 @description('Azure AI Foundry deployment name for the text model.')
@@ -153,6 +150,7 @@ param auditRetentionDays int = 30
 param imageSize string = '1024x1024'
 
 var namePrefix = 'fcg'
+var deployerPrincipalId = deployer().objectId
 var resourceToken = toLower('${namePrefix}-${environmentName}')
 var uniqueToken = uniqueString(subscription().id, resourceGroup().id)
 var logAnalyticsName = take('${resourceToken}-law', 63)
@@ -308,6 +306,7 @@ module cosmosDb './modules/cosmos-db.bicep' = {
     containerAppPrincipalId: containerApps.outputs.containerAppPrincipalId
     containerName: cosmosContainerName
     databaseName: cosmosDatabaseName
+    deployerPrincipalId: deployerPrincipalId
     legacyIpRule: legacyCosmosIpRule
     location: location
     natGatewayPublicIpAddress: network.outputs.natGatewayPublicIpAddress
@@ -320,6 +319,8 @@ module storage './modules/storage.bicep' = {
   params: {
     containerAppPrincipalId: containerApps.outputs.containerAppPrincipalId
     containerName: cardAssetsContainerName
+    deployerPrincipalId: deployerPrincipalId
+    deployerPrincipalType: deployerPrincipalType
     location: location
     privateEndpointSubnetResourceId: network.outputs.privateEndpointSubnetResourceId
     storageAccountName: storageAccountName

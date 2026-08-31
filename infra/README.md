@@ -29,18 +29,47 @@ azd env set LEGACY_COSMOS_IP_RULE 20.10.253.231
 azd up
 ```
 
-`azd` supplies `AZURE_PRINCIPAL_ID` and `AZURE_PRINCIPAL_TYPE` from the
-currently signed-in Microsoft Entra principal. Provisioning passes those
-values to Bicep and assigns that principal the built-in **Foundry User** role
-(formerly **Azure AI User**) at the deployed Foundry project scope. The
-principal object ID is configuration, not a credential; do not copy it into
-source or replace it with a hard-coded value.
+Root `infra/main.bicep` resolves `deployer().objectId` once from the ARM
+deployment context and passes that Microsoft Entra object ID to the data and
+Foundry modules. Do not replace it with a hard-coded object ID or application
+client ID.
 
-The project-scoped assignment is intentionally separate from the existing
-account-scoped **Cognitive Services User** assignment used by the Container
-App managed identity. A direct Bicep deployment that bypasses `azd` must pass
-the deployer's Entra object ID and principal type explicitly as
-`deployerPrincipalId` and `deployerPrincipalType`.
+`deployer()` does not expose the caller's principal type. `azd` therefore still
+supplies `AZURE_PRINCIPAL_TYPE`, which must match the caller (`User` for an
+interactive deployment or `ServicePrincipal` for the supported federated CI
+case). A direct Bicep deployment that bypasses `azd` must provide
+`deployerPrincipalType` explicitly.
+
+Provisioning grants the deployment caller only:
+
+- Cosmos DB Built-in **Data Reader** at the Cosmos account root, using Cosmos
+  native data-plane RBAC. Account-root scope is required for `readMetadata`,
+  database discovery, and container discovery.
+- **Storage Blob Data Reader** at Storage Account scope, allowing Blob
+  container enumeration and blob list/read operations.
+- **Foundry User** (formerly **Azure AI User**) at the Foundry project scope.
+
+These read-only deployer grants are intentionally separate from the existing
+Container App managed identity grants: Cosmos DB Built-in **Data Contributor**,
+**Storage Blob Data Contributor**, and account-scoped **Cognitive Services
+User**. The deployer cannot create, replace, upload, overwrite, or delete
+Cosmos items or blobs through the reader roles.
+
+The deploying identity must already be allowed to create assignments:
+
+- `Microsoft.Authorization/roleAssignments/write` for the Storage and Foundry
+  ARM role assignments.
+- `Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments/write` for the
+  Cosmos native role assignment.
+
+`deployer()` identifies the caller; it does not grant these control-plane
+permissions. Azure RBAC and Cosmos native RBAC can also take several minutes
+to propagate, so post-provision access checks should retry.
+
+RBAC does not bypass network controls. Blob reads still require a
+VNet-connected environment with working private DNS because Storage keeps
+`publicNetworkAccess: Disabled` and its private endpoint. Cosmos reads must
+originate from the configured NAT or temporary legacy firewall path.
 
 Why the extra env var:
 
@@ -91,6 +120,12 @@ After a live deploy, verify:
 7. In the Foundry project's **Access control (IAM)**, verify the signed-in
    deployer has **Foundry User** at the project scope, then open the project
    using Microsoft Entra authentication.
+8. After allowing for RBAC propagation, verify the deployer has Cosmos DB
+   Built-in **Data Reader** at account-root scope and can discover/query the
+   database from a firewall-allowed network path.
+9. From a VNet-connected host with private DNS, use Microsoft Entra
+   authentication to enumerate Blob containers and list/read a blob. Confirm
+   upload and delete operations remain unavailable to the deployer.
 
 The key live-network assertion — ACA outbound traffic actually using the NAT
 public IP — requires an Azure deployment and cannot be proven from source alone.
