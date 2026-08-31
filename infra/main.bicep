@@ -152,8 +152,64 @@ param auditRetentionDays int = 30
 @description('Requested image size for artwork generation.')
 param imageSize string = '1024x1024'
 
+@minValue(30)
+@maxValue(730)
+@description('Per-environment Log Analytics retention in days.')
+param monitoringRetentionInDays int = 30
+
+@description('Per-environment Log Analytics daily ingestion cap in GB, represented as a decimal string for ARM/Bicep compatibility.')
+param monitoringDailyQuotaGb string = '0.25'
+
+@description('Parent-consistent OpenTelemetry trace sampling ratio.')
+param telemetrySamplingRatio string = '1.0'
+
+@description('Master alert switch. Disabled by default for the initial dashboard-only rollout.')
+param monitoringAlertsEnabled bool = false
+
+@description('Action Group email receiver array. Empty by default.')
+param monitoringEmailReceivers array = []
+
+@description('Action Group webhook receiver array. Empty by default.')
+param monitoringWebhookReceivers array = []
+
+@description('Availability test locations.')
+param monitoringAvailabilityLocations array = [
+  'emea-nl-ams-azr'
+  'us-va-ash-azr'
+]
+
+@minValue(1)
+@maxValue(100)
+param monitoringIngestionWarningPercent int = 80
+
+@minValue(1)
+param monitoringAvailabilityFailureThreshold int = 2
+
+@minValue(1)
+@maxValue(100)
+param monitoringRequestFailurePercentThreshold int = 5
+
+@minValue(1)
+param monitoringRequestTrafficFloor int = 5
+
+@minValue(1)
+param monitoringRequestP95LatencyMsThreshold int = 10000
+
+@minValue(1)
+param monitoringDependencyFailureThreshold int = 5
+
+@minValue(1)
+param monitoringExceptionThreshold int = 5
+
+@minValue(1)
+param monitoringGenerationAdverseOutcomeThreshold int = 3
+
+@minValue(1)
+param monitoringContainerRestartThreshold int = 3
+
 var namePrefix = 'fcg'
 var resourceToken = toLower('${namePrefix}-${environmentName}')
+var telemetryEnvironmentName = environmentName == 'prod' ? 'production' : 'development'
 var uniqueToken = uniqueString(subscription().id, resourceGroup().id)
 var logAnalyticsName = take('${resourceToken}-law', 63)
 var appInsightsName = take('${resourceToken}-appi', 63)
@@ -184,6 +240,8 @@ module monitoring './modules/monitoring.bicep' = {
     location: location
     logAnalyticsWorkspaceName: logAnalyticsName
     appInsightsName: appInsightsName
+    dailyQuotaGb: monitoringDailyQuotaGb
+    retentionInDays: monitoringRetentionInDays
     tags: tags
   }
 }
@@ -271,6 +329,7 @@ module containerApps './modules/container-apps.bicep' = {
     cosmosContainerName: cosmosContainerName
     cosmosDatabaseName: cosmosDatabaseName
     cosmosEndpoint: 'https://${cosmosAccountName}.documents.azure.com:443/'
+    deploymentEnvironment: environmentName
     entraClientId: entraClientId
     entraClientSecretValue: entraClientSecretValue
     entraPostLogoutRedirectUri: deployEntraAppRegistration ? deployedPostLogoutRedirectUri : ''
@@ -294,10 +353,41 @@ module containerApps './modules/container-apps.bicep' = {
     rateLimitUserWindowSeconds: rateLimitUserWindowSeconds
     serviceName: serviceName
     tags: tags
+    telemetryEnvironmentName: telemetryEnvironmentName
+    telemetrySamplingRatio: telemetrySamplingRatio
+    telemetryServiceName: 'fantasy-cards-generator'
     trustedProxyHops: trustedProxyHops
     upstreamBaseBackoffSeconds: upstreamBaseBackoffSeconds
     upstreamMaxRetries: upstreamMaxRetries
     textTimeoutSeconds: textTimeoutSeconds
+  }
+}
+
+module operationalMonitoring './modules/operational-monitoring.bicep' = {
+  name: 'operational-monitoring'
+  params: {
+    actionGroupEmailReceivers: monitoringEmailReceivers
+    actionGroupWebhookReceivers: monitoringWebhookReceivers
+    appInsightsResourceId: monitoring.outputs.appInsightsResourceId
+    availabilityFailureThreshold: monitoringAvailabilityFailureThreshold
+    availabilityTestLocations: monitoringAvailabilityLocations
+    containerAppName: containerApps.outputs.containerAppName
+    containerAppUrl: containerApps.outputs.containerAppUrl
+    containerRestartThreshold: monitoringContainerRestartThreshold
+    dailyQuotaGb: monitoringDailyQuotaGb
+    dependencyFailureThreshold: monitoringDependencyFailureThreshold
+    enableAlerts: monitoringAlertsEnabled
+    environmentName: environmentName
+    exceptionThreshold: monitoringExceptionThreshold
+    generationAdverseOutcomeThreshold: monitoringGenerationAdverseOutcomeThreshold
+    ingestionWarningPercent: monitoringIngestionWarningPercent
+    location: location
+    logAnalyticsWorkspaceResourceId: monitoring.outputs.logAnalyticsWorkspaceResourceId
+    requestFailurePercentThreshold: monitoringRequestFailurePercentThreshold
+    requestP95LatencyMsThreshold: monitoringRequestP95LatencyMsThreshold
+    requestTrafficFloor: monitoringRequestTrafficFloor
+    serviceName: 'fantasy-cards-generator'
+    tags: tags
   }
 }
 
@@ -354,6 +444,10 @@ module aiFoundry './modules/ai-foundry.bicep' = {
 }
 
 output applicationInsightsName string = monitoring.outputs.appInsightsName
+output monitoringActionGroupName string = operationalMonitoring.outputs.actionGroupName
+output monitoringAlertsEnabled bool = operationalMonitoring.outputs.alertsEnabled
+output monitoringAvailabilityTestName string = operationalMonitoring.outputs.availabilityTestName
+output monitoringWorkbookName string = operationalMonitoring.outputs.workbookName
 output aiFoundryAccountEndpoint string = aiFoundry.outputs.aiFoundryAccountEndpoint
 output aiFoundryAccountName string = aiFoundry.outputs.aiFoundryAccountName
 output aiFoundryAccountResourceId string = aiFoundry.outputs.aiFoundryAccountResourceId

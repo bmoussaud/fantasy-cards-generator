@@ -19,6 +19,26 @@ param acrPullIdentityResourceId string
 @description('Service name as defined in azure.yaml.')
 param serviceName string = 'web-nat'
 
+@description('Stable OpenTelemetry service name and Application Insights cloud role.')
+param telemetryServiceName string = 'fantasy-cards-generator'
+
+@allowed([
+  'dev'
+  'prod'
+])
+@description('Stable deployment environment dimension.')
+param deploymentEnvironment string
+
+@allowed([
+  'development'
+  'production'
+])
+@description('Normalized OpenTelemetry environment dimension.')
+param telemetryEnvironmentName string
+
+@description('Parent-consistent trace sampling ratio passed to OpenTelemetry.')
+param telemetrySamplingRatio string = '1.0'
+
 @secure()
 @description('Application Insights connection string used by the app foundation.')
 param appInsightsConnectionString string
@@ -154,6 +174,34 @@ var containerAppEnv = concat(
     {
       name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
       secretRef: 'applicationinsights-connection-string'
+    }
+    {
+      name: 'TELEMETRY_ENABLED'
+      value: 'true'
+    }
+    {
+      name: 'APP_ENV'
+      value: deploymentEnvironment
+    }
+    {
+      name: 'TELEMETRY_SAMPLING_RATIO'
+      value: telemetrySamplingRatio
+    }
+    {
+      name: 'OTEL_SERVICE_NAME'
+      value: telemetryServiceName
+    }
+    {
+      name: 'OTEL_RESOURCE_ATTRIBUTES'
+      value: 'deployment.environment.name=${telemetryEnvironmentName},cloud.platform=azure_container_apps'
+    }
+    {
+      name: 'OTEL_TRACES_SAMPLER'
+      value: 'parentbased_trace_id_ratio'
+    }
+    {
+      name: 'OTEL_TRACES_SAMPLER_ARG'
+      value: telemetrySamplingRatio
     }
     {
       name: 'AI_MODE'
@@ -346,6 +394,47 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             memory: '1Gi'
           }
           env: containerAppEnv
+          probes: [
+            {
+              type: 'Startup'
+              httpGet: {
+                path: '/healthz'
+                port: 8000
+                scheme: 'HTTP'
+              }
+              initialDelaySeconds: 0
+              periodSeconds: 5
+              timeoutSeconds: 3
+              failureThreshold: 30
+              successThreshold: 1
+            }
+            {
+              type: 'Liveness'
+              httpGet: {
+                path: '/healthz'
+                port: 8000
+                scheme: 'HTTP'
+              }
+              initialDelaySeconds: 10
+              periodSeconds: 30
+              timeoutSeconds: 3
+              failureThreshold: 3
+              successThreshold: 1
+            }
+            {
+              type: 'Readiness'
+              httpGet: {
+                path: '/healthz'
+                port: 8000
+                scheme: 'HTTP'
+              }
+              initialDelaySeconds: 5
+              periodSeconds: 10
+              timeoutSeconds: 3
+              failureThreshold: 3
+              successThreshold: 1
+            }
+          ]
         }
       ]
       scale: {

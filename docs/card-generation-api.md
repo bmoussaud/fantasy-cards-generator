@@ -9,6 +9,19 @@ Programmatic card-generation endpoints live under `/api/v1`:
 
 HTMX/UI routes live under `/ui/...` and are intentionally UI-coupled.
 
+## Correlation
+
+Clients may send `X-Request-ID` using 1–64 ASCII letters, digits, dots,
+underscores, colons, or hyphens, beginning with a letter or digit. Invalid
+values are replaced, and the accepted/generated value is returned in the
+response header and body.
+
+W3C `traceparent` remains the distributed trace identity. `X-Request-ID` is a
+diagnostic attribute only: it is not used as a trace ID, metric dimension, or
+outbound third-party header. Telemetry uses normalized routes and never records
+prompts, generated content, identities, card/blob IDs, request bodies, query
+values, credentials, cookies, authorization headers, emails, or client IPs.
+
 ## Authentication, ownership, and CSRF
 
 - Authentication is required for all generation and asset-delivery operations.

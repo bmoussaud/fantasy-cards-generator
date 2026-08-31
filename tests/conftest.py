@@ -31,6 +31,9 @@ os.environ.setdefault("TEXT_TIMEOUT_SECONDS", "0.2")
 os.environ.setdefault("IMAGE_TIMEOUT_SECONDS", "0.2")
 os.environ.setdefault("OVERALL_TIMEOUT_SECONDS", "0.6")
 os.environ.setdefault("AUDIT_RETENTION_DAYS", "30")
+os.environ.setdefault("TELEMETRY_ENABLED", "false")
+os.environ.setdefault("APPLICATIONINSIGHTS_CONNECTION_STRING", "")
+os.environ.setdefault("OTEL_SDK_DISABLED", "true")
 
 # The application settings are read when `app.main` is imported, so the test
 # environment must be populated before importing it.
@@ -103,6 +106,9 @@ def base_environment(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, N
     monkeypatch.setenv("IMAGE_TIMEOUT_SECONDS", "0.2")
     monkeypatch.setenv("OVERALL_TIMEOUT_SECONDS", "0.6")
     monkeypatch.setenv("AUDIT_RETENTION_DAYS", "30")
+    monkeypatch.setenv("TELEMETRY_ENABLED", "false")
+    monkeypatch.setenv("APPLICATIONINSIGHTS_CONNECTION_STRING", "")
+    monkeypatch.setenv("OTEL_SDK_DISABLED", "true")
     yield
 
 

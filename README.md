@@ -19,7 +19,7 @@
 ## Run the app
 
 ```bash
-uv run uvicorn app.main:app --reload
+uv run uvicorn app.entrypoint:app --reload
 ```
 
 Open http://127.0.0.1:8000.
@@ -81,6 +81,11 @@ azd provision
 See `infra/README.md` for the NAT cutover, rollback, operational checks, and
 the manual Entra redirect verification required when the replacement Container
 Apps domain changes.
+
+Application telemetry is disabled locally by default and enabled in Azure through
+the existing Application Insights connection-string secret. Monitoring resources,
+safe defaults, alert routing, privacy exclusions, KQL, cost controls, and rollback
+are documented in [`docs/operational-monitoring.md`](docs/operational-monitoring.md).
 
 The default Foundry deployment aliases remain `gpt-5-5` and `gpt-image-2` for
 application compatibility. In `eastus2`, they target `gpt-5.5`
