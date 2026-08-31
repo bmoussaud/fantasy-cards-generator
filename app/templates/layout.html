@@ -3,34 +3,38 @@
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#0c0a13" />
     <title>{{ page_title or "Fantasy Cards Generator" }}</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='css/app.css') }}" />
     <script src="https://unpkg.com/htmx.org@2.0.6"></script>
-    <style>
-        body { font-family: sans-serif; margin: 2rem; }
-        nav { display: flex; gap: 1rem; margin-bottom: 2rem; }
-        form { display: grid; gap: 0.75rem; max-width: 48rem; }
-        textarea { width: 100%; }
-        .card-result, .error-panel { border: 1px solid #ccc; padding: 1rem; margin-top: 1rem; border-radius: 0.5rem; }
-        .error-panel { border-color: #b91c1c; background: #fef2f2; }
-        .htmx-indicator { display: none; }
-        .htmx-request .htmx-indicator, .htmx-request.htmx-indicator { display: block; }
-    </style>
 </head>
 <body>
-    <header>
-        <nav>
-            <a href="/">Home</a>
-            {% if user %}
-                <span>Signed in as {{ user.name or user.email or user.sub }}</span>
-                <a href="/app">App shell</a>
-                <a href="/auth/logout">Logout</a>
-            {% elif auth_configured %}
-                <a href="/auth/login">Sign in</a>
-            {% endif %}
+    {% import "partials/icons.html" as icons %}
+    <header class="site-header">
+        <nav class="site-nav" aria-label="Primary">
+            <a class="brand" href="/">
+                {{ icons.brand_mark() }}
+                <span class="brand__name">Fantasy Cards Generator</span>
+            </a>
+            <ul class="site-nav__links">
+                <li><a class="site-nav__link" href="/">Home</a></li>
+                {% if user %}
+                    <li><a class="site-nav__link" href="/app">Generator</a></li>
+                    <li class="site-nav__user">Signed in as <strong>{{ user.name or user.email or user.sub }}</strong></li>
+                    <li><a class="site-nav__link btn btn-ghost" href="/auth/logout">Sign out</a></li>
+                {% elif auth_configured %}
+                    <li><a class="site-nav__link btn btn-secondary" href="/auth/login">Sign in</a></li>
+                {% endif %}
+            </ul>
         </nav>
     </header>
-    <main>
+    <main class="page-container">
         {% block content %}{% endblock %}
     </main>
+    <footer class="site-footer">
+        <p>Forged in a living grimoire &middot; original cards, original art.</p>
+    </footer>
+    <script src="{{ url_for('static', path='js/app.js') }}" defer></script>
 </body>
 </html>

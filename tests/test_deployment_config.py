@@ -14,6 +14,19 @@ def test_dockerfile_serves_fastapi_on_port_8000() -> None:
     assert '"--port", "8000"' in dockerfile
 
 
+def test_dockerfile_packages_static_design_system_assets() -> None:
+    dockerfile = (REPO_ROOT / "Dockerfile").read_text()
+
+    # The Dockerfile copies the whole `app` package as a single layer, so the
+    # mounted static asset tree (app/static/**) ships with the container
+    # without needing a dedicated COPY line.
+    assert "COPY app ./app" in dockerfile
+
+    static_dir = REPO_ROOT / "app" / "static"
+    assert (static_dir / "css" / "app.css").is_file()
+    assert (static_dir / "js" / "app.js").is_file()
+
+
 def test_azd_service_wires_container_app_and_acr() -> None:
     azure_yaml = (REPO_ROOT / "azure.yaml").read_text()
 

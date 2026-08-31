@@ -1,17 +1,40 @@
 {% extends "layout.html" %}
 
 {% block content %}
-    <h1>Fantasy Cards Generator</h1>
-    <p>FastAPI + Jinja2 + HTMX scaffold is running.</p>
-    {% if user %}
-        <p>You are signed in as <strong>{{ user.name or user.email or user.sub }}</strong>.</p>
-        <p><a href="/app">Open the card generator</a>.</p>
-    {% elif auth_configured %}
-        <p>Sign in with Microsoft Entra External ID to generate cards.</p>
-        <p><a href="/auth/login">Sign in</a></p>
-    {% else %}
-        <p>Authentication is not configured yet. Follow <code>docs/auth-setup.md</code> to enable sign-in.</p>
-    {% endif %}
-    <button hx-get="/partials/ping" hx-target="#status" hx-swap="innerHTML">Check HTMX wiring</button>
-    <div id="status"></div>
+    <section class="hero">
+        <span class="hero__eyebrow">Fantasy card workshop</span>
+        <h1>Forge a fantasy card in one breath.</h1>
+        <p>
+            Describe a hero, creature, artifact, or spell and the workshop composes a
+            complete, playable-looking card &mdash; artwork, rules text, and rarity
+            included &mdash; in moments.
+        </p>
+        {% if user %}
+            <p>Welcome back, <strong>{{ user.name or user.email or user.sub }}</strong>.</p>
+            <div class="hero__actions">
+                <a class="btn btn-primary" href="/app">Open the generator</a>
+            </div>
+        {% elif auth_configured %}
+            <div class="hero__actions">
+                <a class="btn btn-primary" href="/auth/login">Sign in</a>
+            </div>
+            <p>Sign in with Microsoft Entra External ID to generate cards.</p>
+        {% else %}
+            <p>Authentication is not configured yet. Follow <code>docs/auth-setup.md</code> to enable sign-in.</p>
+        {% endif %}
+    </section>
+    <ul class="feature-list">
+        <li>
+            <strong>Composed card faces</strong>
+            Name, mana, type, rarity, stats, rules and flavor text rendered as a single artifact.
+        </li>
+        <li>
+            <strong>Type &amp; rarity aware</strong>
+            Heroes, creatures, artifacts, and spells each get a distinct treatment across all four rarities.
+        </li>
+        <li>
+            <strong>Resilient artwork</strong>
+            If artwork isn&rsquo;t ready yet, retry it in place without losing your card.
+        </li>
+    </ul>
 {% endblock %}
