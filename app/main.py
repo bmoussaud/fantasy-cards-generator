@@ -12,6 +12,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.exceptions import HTTPException as FastAPIHTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -55,6 +56,11 @@ def create_app(services: AppServices | None = None) -> FastAPI:
 
     app = FastAPI(title="Fantasy Cards Generator")
     app.state.services = app_services
+    app.mount(
+        "/static",
+        StaticFiles(directory=str(Path(__file__).parent / "static")),
+        name="static",
+    )
     app.add_middleware(
         SessionMiddleware,
         secret_key=auth_settings.session_secret_key,

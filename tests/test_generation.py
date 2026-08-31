@@ -522,6 +522,32 @@ def test_image_failure_returns_partial_card_and_retry_action(
     assert payload["actions"][0]["type"] == "retry_artwork"
 
 
+def test_ui_generate_renders_composed_card_face_with_type_and_rarity_labels(
+    authenticated_client: TestClient,
+) -> None:
+    csrf_token = extract_hidden_value(authenticated_client.get("/app").text, "csrf_token")
+
+    response = authenticated_client.post(
+        "/ui/cards/generate",
+        data={
+            "prompt": "create a safe fantasy knight with a radiant crown",
+            "idempotency_key": "idem-ui-card-face",
+            "csrf_token": csrf_token,
+        },
+        headers={"content-type": "application/x-www-form-urlencoded"},
+    )
+
+    assert response.status_code == 200
+    body = response.text
+    assert 'class="card-face"' in body
+    assert "data-rarity=" in body
+    assert "data-type=" in body
+    # Rarity/type meaning is conveyed by a visible text label, not color alone.
+    assert any(label in body for label in ("Common", "Uncommon", "Rare", "Legendary"))
+    assert any(label in body for label in ("Hero", "Creature", "Artifact", "Spell"))
+    assert 'hx-swap-oob="true"' in body
+
+
 def test_ui_overall_timeout_during_image_returns_partial_card(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

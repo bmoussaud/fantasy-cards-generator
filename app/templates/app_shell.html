@@ -2,15 +2,50 @@
 
 {% block content %}
     <h1>Generate a fantasy card</h1>
-    <p>Signed in as <strong>{{ user.name or user.email or user.sub }}</strong>.</p>
-    <p>Email: {{ user.email or "Not provided" }}</p>
-    <form hx-post="/ui/cards/generate" hx-target="#generation-result" hx-swap="innerHTML" hx-indicator="#generation-pending">
-        <label for="prompt">Card prompt</label>
-        <textarea id="prompt" name="prompt" rows="5" maxlength="400" required placeholder="Describe the fantasy card you want to create."></textarea>
-        <input id="generate-idempotency-key" type="hidden" name="idempotency_key" value="{{ generate_idempotency_key }}" />
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-        <button type="submit">Generate card</button>
-        <p id="generation-pending" class="htmx-indicator">Generating your card…</p>
-    </form>
-    <section id="generation-result" aria-live="polite"></section>
+    <p class="site-nav__user">
+        Signed in as <strong>{{ user.name or user.email or user.sub }}</strong>
+        &middot; {{ user.email or "Email not provided" }}
+    </p>
+    <div class="generator-layout">
+        <section class="panel" aria-labelledby="generator-form-heading">
+            <h2 id="generator-form-heading">Describe your card</h2>
+            <form
+                hx-post="/ui/cards/generate"
+                hx-target="#generation-result"
+                hx-swap="innerHTML"
+                hx-indicator="#generation-pending"
+            >
+                <div class="field">
+                    <label class="field__label" for="prompt">Card prompt</label>
+                    <p class="field__hint" id="prompt-hint">
+                        Describe the hero, creature, artifact, or spell you want &mdash; up to 400 characters.
+                    </p>
+                    <textarea
+                        class="field__control"
+                        id="prompt"
+                        name="prompt"
+                        rows="6"
+                        maxlength="400"
+                        required
+                        aria-describedby="prompt-hint"
+                        placeholder="A stormcalling druid who commands lightning-forged wolves."
+                    ></textarea>
+                </div>
+                <input id="generate-idempotency-key" type="hidden" name="idempotency_key" value="{{ generate_idempotency_key }}" />
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+                <button class="btn btn-primary" type="submit">Generate card</button>
+                <p id="generation-pending" class="htmx-indicator loading-state" role="status">
+                    <span class="spinner" aria-hidden="true"></span>
+                    Weaving your card&hellip; this can take up to a minute.
+                </p>
+            </form>
+        </section>
+        <section id="generation-result" aria-live="polite">
+            <div class="empty-state">
+                <svg class="empty-state__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M12 2.5l7 3v5.2c0 4.6-3 8.6-7 10.8-4-2.2-7-6.2-7-10.8V5.5z" stroke-linejoin="round"/></svg>
+                <h3>No card yet</h3>
+                <p>Your generated card will appear here once you describe it.</p>
+            </div>
+        </section>
+    </div>
 {% endblock %}

@@ -1,0 +1,34 @@
+{# Small, original inline-SVG icon set used for card type and rarity badges. #}
+{# Icons are simple geometric marks (no third-party or franchise artwork) so #}
+{# meaning is always paired with a visible text label, never conveyed by #}
+{# icon/color alone. #}
+
+{% macro type_icon(card_type) -%}
+{%- if card_type == "hero" -%}
+<svg class="badge__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 2.5l7 3v5.2c0 4.6-3 8.6-7 10.8-4-2.2-7-6.2-7-10.8V5.5z" stroke-linejoin="round"/></svg>
+{%- elif card_type == "creature" -%}
+<svg class="badge__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 18c2-5 4-8 8-8s6 3 8 8" stroke-linecap="round"/><circle cx="8" cy="7" r="1.6"/><circle cx="16" cy="7" r="1.6"/></svg>
+{%- elif card_type == "artifact" -%}
+<svg class="badge__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 2.5l6 5-2.4 12.4H8.4L6 7.5z" stroke-linejoin="round"/><path d="M6 7.5h12" /></svg>
+{%- elif card_type == "spell" -%}
+<svg class="badge__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.6 2.6M15.4 15.4L18 18M18 6l-2.6 2.6M8.6 15.4L6 18" stroke-linecap="round"/></svg>
+{%- else -%}
+<svg class="badge__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="8"/></svg>
+{%- endif -%}
+{%- endmacro %}
+
+{% macro rarity_icon(rarity) -%}
+{%- if rarity == "uncommon" -%}
+<svg class="badge__icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 3l9 9-9 9-9-9z"/></svg>
+{%- elif rarity == "rare" -%}
+<svg class="badge__icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2.5l2.6 6.3 6.8.6-5.2 4.5 1.6 6.7L12 17l-5.8 3.6 1.6-6.7-5.2-4.5 6.8-.6z"/></svg>
+{%- elif rarity == "legendary" -%}
+<svg class="badge__icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M3 8l4 3 5-6 5 6 4-3-1.6 10H4.6z"/></svg>
+{%- else -%}
+<svg class="badge__icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="12" cy="12" r="6"/></svg>
+{%- endif -%}
+{%- endmacro %}
+
+{% macro brand_mark() -%}
+<svg class="brand__mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M12 2.5l7 3v5.2c0 4.6-3 8.6-7 10.8-4-2.2-7-6.2-7-10.8V5.5z" stroke-linejoin="round"/><path d="M9 12l2 2 4-4.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+{%- endmacro %}
