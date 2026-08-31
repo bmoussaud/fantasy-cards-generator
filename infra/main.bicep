@@ -61,6 +61,16 @@ param aiFoundryProjectName string = 'fantasy-cards'
 @description('Azure AI Foundry project display name for the current environment.')
 param aiFoundryProjectDisplayName string = 'Fantasy Cards'
 
+@description('Microsoft Entra object ID of the principal running the deployment. Supplied by azd through AZURE_PRINCIPAL_ID.')
+param deployerPrincipalId string
+
+@allowed([
+  'ServicePrincipal'
+  'User'
+])
+@description('Microsoft Entra principal type running the deployment. Supplied by azd through AZURE_PRINCIPAL_TYPE.')
+param deployerPrincipalType string
+
 @description('Azure AI Foundry deployment name for the text model.')
 param aiFoundryTextDeploymentName string = 'gpt-5-5'
 
@@ -324,6 +334,8 @@ module aiFoundry './modules/ai-foundry.bicep' = {
     accountName: aiFoundryAccountName
     containerAppPrincipalId: containerApps.outputs.containerAppPrincipalId
     customSubDomainName: aiFoundryAccountName
+    deployerPrincipalId: deployerPrincipalId
+    deployerPrincipalType: deployerPrincipalType
     imageDeploymentCapacity: aiFoundryImageDeploymentCapacity
     imageDeploymentName: aiFoundryImageDeploymentName
     imageDeploymentSkuName: aiFoundryImageDeploymentSkuName

@@ -80,6 +80,37 @@ def test_generation_runtime_env_vars_are_wired_from_bicep_outputs() -> None:
     assert "trustedProxyHops: trustedProxyHops" in main_bicep
 
 
+def test_deployer_gets_foundry_user_at_project_scope() -> None:
+    main_bicep = (REPO_ROOT / "infra" / "main.bicep").read_text()
+    main_parameters = (REPO_ROOT / "infra" / "main.parameters.json").read_text()
+    foundry_bicep = (REPO_ROOT / "infra" / "modules" / "ai-foundry.bicep").read_text()
+
+    assert '"value": "${AZURE_PRINCIPAL_ID}"' in main_parameters
+    assert '"value": "${AZURE_PRINCIPAL_TYPE}"' in main_parameters
+    assert "deployerPrincipalId: deployerPrincipalId" in main_bicep
+    assert "deployerPrincipalType: deployerPrincipalType" in main_bicep
+
+    assert "var foundryUserRoleDefinitionId = '53ca6127-db72-4b80-b1b0-d745d6d5456d'" in (
+        foundry_bicep
+    )
+    assert (
+        "resource deployerFoundryUserRoleAssignment "
+        "'Microsoft.Authorization/roleAssignments@2022-04-01'" in foundry_bicep
+    )
+    assert "scope: aiFoundryProject" in foundry_bicep
+    assert "principalId: deployerPrincipalId" in foundry_bicep
+    assert "principalType: deployerPrincipalType" in foundry_bicep
+    assert (
+        "roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', "
+        "foundryUserRoleDefinitionId)" in foundry_bicep
+    )
+
+    # Runtime access remains a separate assignment for the Container App identity.
+    assert "scope: foundryAccount" in foundry_bicep
+    assert "principalId: containerAppPrincipalId" in foundry_bicep
+    assert "cognitiveServicesUserRoleDefinitionId" in foundry_bicep
+
+
 def test_container_apps_wire_key_vault_backed_auth_env_vars() -> None:
     container_apps_bicep = (REPO_ROOT / "infra" / "modules" / "container-apps.bicep").read_text()
     security_bicep = (REPO_ROOT / "infra" / "modules" / "security.bicep").read_text()
@@ -164,9 +195,7 @@ def test_cosmos_account_explicitly_keeps_public_network_access_for_mvp() -> None
     assert "publicIPAllocationMethod: 'Static'" in network_bicep
     assert "serviceName: 'Microsoft.App/environments'" in network_bicep
     assert "param infrastructureSubnetId string" in container_apps_environment_bicep
-    assert "infrastructureSubnetId: infrastructureSubnetId" in (
-        container_apps_environment_bicep
-    )
+    assert "infrastructureSubnetId: infrastructureSubnetId" in (container_apps_environment_bicep)
     assert "workloadProfiles:" in container_apps_environment_bicep
 
 
