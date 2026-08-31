@@ -6,7 +6,7 @@
     <meta name="color-scheme" content="dark" />
     <meta name="theme-color" content="#0c0a13" />
     <title>{{ page_title or "Fantasy Cards Generator" }}</title>
-    <link rel="stylesheet" href="{{ url_for('static', path='css/app.css') }}" />
+    <link rel="stylesheet" href="/static/css/app.css" />
     <script src="https://unpkg.com/htmx.org@2.0.6"></script>
 </head>
 <body>
@@ -35,6 +35,6 @@
     <footer class="site-footer">
         <p>Forged in a living grimoire &middot; original cards, original art.</p>
     </footer>
-    <script src="{{ url_for('static', path='js/app.js') }}" defer></script>
+    <script src="/static/js/app.js" defer></script>
 </body>
 </html>
