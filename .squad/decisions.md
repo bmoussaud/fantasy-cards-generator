@@ -712,3 +712,8 @@ Standing team-wide convention: every agent enforces it on their own commits; Gan
 **Applies to:** all squad members and `@copilot` PRs.
 
 **Status:** CONFIRMED 2026-08-28 (per Benoit Moussaud)
+
+### 2026-08-31: Redeployed web-nat after mixed-content fix merge
+**By:** Gimli
+**What:** Pulled `main` to merge commit `e62765ce18605676dec785c9f5084fa7ad40d712`, confirmed `azd` 1.32.0 was authenticated against the `dev` environment targeting `fcg-dev-app-nat`, then ran `azd deploy web-nat --no-prompt`. Azure Container Apps reported success, and `az containerapp show` now reports image `fcgdev5a7waraj5zp5iacr.azurecr.io/fantasy-cards-generator/web-nat-dev:azd-deploy-1788176739` with latest revision `fcg-dev-app-nat--azd-1788176748`.
+**Why:** The merged PR #46 changed the app shell to use root-relative static asset paths. Post-deploy verification showed the live home page now references `/static/css/app.css` and `/static/js/app.js` with no `http://.../static/...` URLs, and direct HTTPS requests to both assets returned `200 OK`.
