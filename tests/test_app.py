@@ -19,6 +19,8 @@ def test_home_renders_hero_and_preserves_auth_copy() -> None:
     assert "Sign in with Microsoft Entra External ID to generate cards." in response.text
     assert "Check HTMX wiring" not in response.text
     assert 'hx-get="/partials/ping"' not in response.text
+    assert 'href="/static/css/app.css"' in response.text
+    assert 'src="/static/js/app.js"' in response.text
 
 
 def test_ping_partial_still_serves_htmx_check() -> None:
