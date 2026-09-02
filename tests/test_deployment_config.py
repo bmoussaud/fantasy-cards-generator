@@ -68,7 +68,8 @@ def test_bicep_exposes_azd_container_outputs_without_helloworld_image() -> None:
     # When present in main.bicep it must be guarded by an empty() conditional.
     if helloworld_image in main_bicep:
         assert f"empty(containerImage) ? '{helloworld_image}" in main_bicep, (
-            "helloworld image must only appear as the conditional fallback when containerImage is empty"
+            "helloworld image must only appear as the conditional fallback "
+            "when containerImage is empty"
         )
     assert "modules/container-registry.bicep" in main_bicep
     assert "output AZURE_CONTAINER_REGISTRY_ENDPOINT" in main_bicep
@@ -199,7 +200,7 @@ def test_deployer_gets_cosmos_data_reader_at_account_root() -> None:
     )
 
 
-def test_deployer_gets_blob_data_reader_at_storage_account_scope_and_runtime_is_container_scoped() -> None:
+def test_deployer_blob_reader_at_account_scope_runtime_container_scoped() -> None:
     main_bicep = (REPO_ROOT / "infra" / "main.bicep").read_text()
     storage_bicep = (REPO_ROOT / "infra" / "modules" / "storage.bicep").read_text()
     storage_module = _bicep_block(main_bicep, "module storage './modules/storage.bicep'")
@@ -277,12 +278,8 @@ def test_healthz_dependency_probe_rbac_and_timeouts_are_iac_managed() -> None:
 
     # Healthz probe tuning stays non-secret: no secure params, secret refs,
     # account keys, or connection strings were introduced for these settings.
-    assert "@secure()\n@description('Bounded Cosmos metadata probe timeout for /healthz" not in (
-        main_bicep
-    )
-    assert "@secure()\n@description('Bounded Blob container-properties probe timeout for /healthz" not in (
-        main_bicep
-    )
+    assert "@secure()\n@description('Bounded Cosmos metadata probe timeout" not in main_bicep
+    assert "@secure()\n@description('Bounded Blob container-properties probe" not in main_bicep
     assert "secretRef: 'healthz-cosmos-timeout-ms'" not in container_apps_bicep
     assert "secretRef: 'healthz-blob-timeout-ms'" not in container_apps_bicep
     assert "HEALTHZ_COSMOS_TIMEOUT_MS_CONNECTION_STRING" not in container_apps_bicep
@@ -389,7 +386,9 @@ def test_cosmos_private_endpoint_bypasses_pna_disabled_governance_policy() -> No
       instruction).
     """
     cosmos_bicep = (REPO_ROOT / "infra" / "modules" / "cosmos-db.bicep").read_text()
-    cosmos_pe_bicep = (REPO_ROOT / "infra" / "modules" / "cosmos-private-endpoint.bicep").read_text()
+    cosmos_pe_bicep = (
+        REPO_ROOT / "infra" / "modules" / "cosmos-private-endpoint.bicep"
+    ).read_text()
     main_bicep = (REPO_ROOT / "infra" / "main.bicep").read_text()
     main_parameters = (REPO_ROOT / "infra" / "main.parameters.json").read_text()
     network_bicep = (REPO_ROOT / "infra" / "modules" / "network.bicep").read_text()
@@ -409,7 +408,9 @@ def test_cosmos_private_endpoint_bypasses_pna_disabled_governance_policy() -> No
     # PE module wired into main.bicep with correct params
     assert "modules/cosmos-private-endpoint.bicep" in main_bicep
     assert "cosmosAccountResourceId: cosmosDb.outputs.cosmosAccountResourceId" in main_bicep
-    assert "privateEndpointSubnetResourceId: network.outputs.privateEndpointSubnetResourceId" in main_bicep
+    assert "privateEndpointSubnetResourceId: network.outputs.privateEndpointSubnetResourceId" in (
+        main_bicep
+    )
     assert "virtualNetworkResourceId: network.outputs.virtualNetworkResourceId" in main_bicep
 
     # Cosmos account: governance-policy-enforced PNA: Disabled, no VNet filter
