@@ -722,3 +722,55 @@ Standing team-wide convention: every agent enforces it on their own commits; Gan
 **By:** Gimli
 **What:** Issue #48, https://github.com/bmoussaud/fantasy-cards-generator/issues/48, requires resolving `deployer().objectId` once in root `infra/main.bicep` and passing it to the Cosmos, Storage, and Foundry modules. Remove the obsolete `AZURE_PRINCIPAL_ID` / `deployerPrincipalId` wiring, but retain `AZURE_PRINCIPAL_TYPE` / `deployerPrincipalType` for Storage and Foundry ARM role assignments. Cosmos native SQL role assignments receive only the resolved principal ID because they do not accept `principalType`.
 **Why:** Official Bicep documentation confirms that `deployer()` identifies the user, service principal, or managed identity that initiated deployment and exposes `objectId`, but not principal type. Explicit ARM role-assignment principal types avoid intermittent service-principal or managed-identity errors, while root resolution avoids relying on undocumented nested-module identity behavior and preserves least privilege for interactive and federated CI deployments.
+
+### 2026-09-01T15:29:35.056+00:00: Use public placeholder image for initial Container App provision
+**By:** Gimli
+**What:** Changed `infra/main.bicep` line 331: when `containerImage` param is empty, use `mcr.microsoft.com/azuredocs/containerapps-helloworld:latest` as the fallback instead of `${registry.outputs.registryLoginServer}/fantasy-cards-generator:latest`.
+**Why:** On a fresh environment (or after a resource-token change like `namePrefix fcg→fcag`), the private ACR is brand new and empty. Pointing the Container App at `latest` in that empty registry causes `MANIFEST_UNKNOWN` during `azd provision`, which blocks the entire `azd deploy` step that would have pushed the real image. The public placeholder is guaranteed to exist, so ARM can create the Container App successfully; `azd deploy` then pushes the real image and updates the running revision in the same `azd up` invocation.
+**Evidence:** Deployment `dev-1788270781` in `rg-fcag-dev` (sub `b8ff3e15`):
+- All infra resources succeeded (VNet, LAW, ACR `fcagdevqhg3qc4rlbt4gacr`, App Insights, Key Vault, Container Apps Environment).
+- The ACR was brand new (zero repositories) due to the `namePrefix` change.
+- `fcag-dev-app-nat` Container App ARM deployment failed with: `ContainerAppOperationError / MANIFEST_UNKNOWN: manifest tagged by "latest" is not found`.
+- `az containerapp revision list` returned `[]` — no revision was ever active.
+
+### 2026-09-01T15:47:49.275+00:00: ARM Function Operand Ordering for Type Safety
+**By:** Gandalf
+**What:** When using ARM mathematical functions (`mul()`, `div()`, etc.) in Bicep, lead with the Integer operand, not a Float or computed decimal. Document the constraint in comments if the parameter type is a numeric string (e.g., `dailyQuotaGb`). Rely on operand reordering (maintaining mathematical identity) to satisfy the type contract.
+**Why:** ARM's `mul()` has stricter type requirements than Bicep's compile-time type system reveals. Reordering operands is a safe, one-line fix that doesn't change the result or logic, and early operand-ordering discipline prevents runtime ARM template validation failures during `azd up`.
+**Example (Before — fails ARM validation):**
+```bicep
+var ingestionWarningGb = json(dailyQuotaGb) * ingestionWarningPercent / json('100.0')
+```
+Reason: `json(dailyQuotaGb)` evaluates to a Float (e.g., `0.25`); `mul()` rejects Float as first operand.
+
+**Example (After — passes ARM validation):**
+```bicep
+var ingestionWarningGb = ingestionWarningPercent * json(dailyQuotaGb) / json('100.0')
+```
+Reason: `ingestionWarningPercent` is `int = 80`; `mul()` accepts Integer as first operand. Result is unchanged.
+
+**Applicability:** All Bicep modules in `infra/modules/` and all new compute-variable patterns in future Bicep code.
+
+### 2026-09-01T16:05:44.296+00:00: Correction — ARM `mul()` Float Rejection is Operand-Order Agnostic
+**By:** Gandalf (user-approved correction)
+**Corrects:** Prior decision 2026-09-01T15:47:49.275+00:00
+**What:** The operand-reordering guidance was invalid. ARM's `mul()` function rejects Float operands regardless of position (first or second). Do not reorder operands as a workaround. Instead: (1) avoid ARM float multiplication entirely; (2) compute numeric thresholds in KQL (inside Application Insights queries) using standard floating-point arithmetic; (3) require `azd provision --preview` for all ARM expression changes in future Bicep work.
+**Why:** ARM's type system is stricter than Bicep's compile-time checks reveal; the failure is a runtime ARM Template validation constraint, not a Bicep syntax error. Moving computation from ARM to KQL (where floating-point is standard) eliminates the type mismatch entirely. `azd provision --preview` is the only validation layer that catches ARM runtime validation failures before `azd up` blocks on a failed deployment. Local Bicep build/lint validation does not detect these constraints.
+**Applicability:** Supersedes operand-reordering guidance. All Bicep modules in `infra/modules/` must not use operand reordering as a workaround. All future ARM expression changes require `azd provision --preview` validation. Application Insights KQL queries are the preferred host for floating-point threshold arithmetic.
+
+### 2026-09-01T17:19:00.962+00:00: Preprovision hook ensures APP_SESSION_SECRET_KEY presence
+**By:** Gimli
+**What:** Added `hooks/ensure_session_secret.sh` — an idempotent `preprovision` hook that checks if `APP_SESSION_SECRET_KEY` is set in the azd environment. If absent, generates a cryptographically secure 32-byte hex value via `python3 secrets.token_hex(32)`, stores it via `azd env set` (stdout suppressed, no tracing), and unsets the bash variable. Wired as the first preprovision step in `azure.yaml` so it runs before every `azd up` / `azd provision`. Added three tests in `tests/test_deployment_config.py` covering hook safety, azure.yaml wiring, and Bicep double-gate verification (both ACA native secret and env secretRef gated by same non-empty condition).
+**Why:** Root cause: `APP_SESSION_SECRET_KEY` was absent from azd env. `infra/main.parameters.json` uses empty-string default (`${APP_SESSION_SECRET_KEY=}`), so missing value silently passed `""` to Bicep. `infra/modules/container-apps.bicep` gates both the ACA secret and env secretRef on `!empty(appSessionSecretKeyValue)` — correct logic, but when azd env var is unset, the gate condition strips both on the next `azd up`. Symptoms: Container App crash-loop with `RuntimeError: APP_SESSION_SECRET_KEY must be set`. Solution: Preprovision hook ensures the secret is never absent from azd env before ARM provisioning begins.
+**Evidence:** Post-remediation — Container App revision Running/Healthy. `GET /healthz` returned HTTP 200. Secret value never printed or logged. Key Vault sync deferred to next `azd provision` (deployer principal handles it via Bicep).
+**Applicability & Rules:** (1) Never omit `APP_SESSION_SECRET_KEY` from azd env before provisioning; preprovision hook prevents this unless `--skip-hooks` is used. (2) Both ACA secret and env secretRef must be gated by the same condition; splitting the logic risks ARM deployment failure or app crash. (3) Secret-safe hook conventions apply: no `set -x`, additive paths, suppress stdout for `azd env set`.
+
+### 2026-09-02T13:00:00.000+00:00: Cosmos Private Endpoint — End-to-end smoke test COMPLETE
+**By:** Scribe (user confirmation recorded)
+**Requested by:** Benoit Moussaud
+**User confirmation:** "azd up ok l'application peut generer des cartes" (azd up ok the application can generate cards)
+**What:** Benoit confirmed full `azd up` deployment succeeded and authenticated card generation via `POST /ui/cards/generate` succeeded and persisted to Cosmos DB. This validates the complete Azure Container Apps → Private Endpoint → Cosmos DB data-plane path end-to-end.
+**Why:** Prior decision `gandalf-cosmos-private-endpoint-deployed.md` required user smoke test (MSAL authentication + card generation) to confirm the Private Endpoint networking path was fully operational. TTY-less deployment validation could only verify ACA health (`/healthz` probe) and PE infrastructure, but not the data-plane Cosmos connectivity. User test confirms the missing link: data-plane queries through the Private Endpoint succeed.
+**Result:** Cosmos Private Endpoint deployment is fully validated. `ipRules` configuration (52.179.213.219) may now be safely removed in a future cleanup pass; it remains inert while `publicNetworkAccess: Disabled`, and PE path is now the proven production path.
+**Evidence:** User-confirmed: (1) `azd up` succeeded; (2) application authenticated; (3) card generation completed without 500 errors or Cosmos connectivity failures.
+**Applicability:** Clears the blocker on finalizing the Cosmos connectivity migration. Future squad work can depend on the Private Endpoint path being fully validated and production-ready.

@@ -15,6 +15,12 @@ infra:
   provider: bicep
   path: infra
 hooks:
+  preprovision:
+    # Ensures APP_SESSION_SECRET_KEY is set before provisioning. If absent,
+    # the Bicep conditional !empty(appSessionSecretKeyValue) silently omits the
+    # ACA secret and env ref, causing a crash-loop on the next deployment.
+    - shell: sh
+      run: ./hooks/ensure_session_secret.sh
   postprovision:
     # This hook is a no-op when ENTRA_CLIENT_ID is not present, which covers
     # environments provisioned with deployEntraAppRegistration=false.

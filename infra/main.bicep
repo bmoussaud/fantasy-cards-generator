@@ -18,7 +18,7 @@ param containerImage string = ''
 param serviceName string = 'web-nat'
 
 @description('Set to true to provision the Microsoft Entra ID app registration via the Graph Bicep extension.')
-param deployEntraAppRegistration bool = false
+param deployEntraAppRegistration bool = true
 
 @description('Display name used for the Microsoft Entra ID app registration when deployEntraAppRegistration is true.')
 param entraAppRegistrationName string = take('Fantasy Cards Generator (${toUpper(environmentName)})', 120)
@@ -207,7 +207,7 @@ param monitoringGenerationAdverseOutcomeThreshold int = 3
 @minValue(1)
 param monitoringContainerRestartThreshold int = 3
 
-var namePrefix = 'fcg'
+var namePrefix = 'fcag'
 var deployerPrincipalId = deployer().objectId
 var resourceToken = toLower('${namePrefix}-${environmentName}')
 var telemetryEnvironmentName = environmentName == 'prod' ? 'production' : 'development'
@@ -220,8 +220,8 @@ var keyVaultBase = replace(
   ''
 )
 var keyVaultName = toLower(take(keyVaultBase, 24))
-var containerAppsEnvironmentName = take('${resourceToken}-cae-nat', 32)
-var containerAppName = take('${resourceToken}-app-nat', 32)
+var containerAppsEnvironmentName = take('${resourceToken}-cae', 32)
+var containerAppName = take('${resourceToken}-app', 32)
 var cosmosAccountName = toLower(take('${resourceToken}-cosmos-${uniqueToken}', 44))
 var storageAccountBase = replace('st${namePrefix}${environmentName}${uniqueToken}', '-', '')
 var storageAccountName = toLower(take(storageAccountBase, 24))
@@ -326,7 +326,10 @@ module containerApps './modules/container-apps.bicep' = {
     blobEndpoint: 'https://${storageAccountName}.blob.${environment().suffixes.storage}/'
     containerAppName: containerAppName
     containerAppsEnvironmentResourceId: containerAppsEnvironment.outputs.containerAppsEnvironmentResourceId
-    containerImage: empty(containerImage) ? '${registry.outputs.registryLoginServer}/fantasy-cards-generator:latest' : containerImage
+    // On first provision the private registry is empty; use a public placeholder so
+    // the Container App ARM resource is created successfully. azd deploy then pushes
+    // the real image and updates the running revision.
+    containerImage: empty(containerImage) ? 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest' : containerImage
     cosmosContainerName: cosmosContainerName
     cosmosDatabaseName: cosmosDatabaseName
     cosmosEndpoint: 'https://${cosmosAccountName}.documents.azure.com:443/'
@@ -408,6 +411,18 @@ module cosmosDb './modules/cosmos-db.bicep' = {
   }
 }
 
+module cosmosPrivateEndpoint './modules/cosmos-private-endpoint.bicep' = {
+  name: 'cosmos-private-endpoint'
+  params: {
+    cosmosAccountName: cosmosAccountName
+    cosmosAccountResourceId: cosmosDb.outputs.cosmosAccountResourceId
+    location: location
+    privateEndpointSubnetResourceId: network.outputs.privateEndpointSubnetResourceId
+    tags: tags
+    virtualNetworkResourceId: network.outputs.virtualNetworkResourceId
+  }
+}
+
 module storage './modules/storage.bicep' = {
   name: 'storage'
   params: {
@@ -474,6 +489,8 @@ output cosmosAccountResourceId string = cosmosDb.outputs.cosmosAccountResourceId
 output cosmosContainerName string = cosmosDb.outputs.cosmosContainerName
 output cosmosDatabaseName string = cosmosDb.outputs.cosmosDatabaseName
 output cosmosIpRules array = cosmosDb.outputs.cosmosIpRules
+output cosmosPrivateEndpointResourceId string = cosmosPrivateEndpoint.outputs.cosmosPrivateEndpointResourceId
+output cosmosSqlPrivateDnsZoneName string = cosmosPrivateEndpoint.outputs.cosmosSqlPrivateDnsZoneName
 output keyVaultName string = security.outputs.keyVaultName
 output keyVaultUri string = security.outputs.keyVaultUri
 output logAnalyticsWorkspaceName string = monitoring.outputs.logAnalyticsWorkspaceName

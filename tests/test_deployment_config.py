@@ -59,8 +59,17 @@ def test_bicep_exposes_azd_container_outputs_without_helloworld_image() -> None:
     main_bicep = (REPO_ROOT / "infra" / "main.bicep").read_text()
     container_apps_bicep = (REPO_ROOT / "infra" / "modules" / "container-apps.bicep").read_text()
 
-    assert "mcr.microsoft.com/azuredocs/containerapps-helloworld" not in main_bicep
-    assert "mcr.microsoft.com/azuredocs/containerapps-helloworld" not in container_apps_bicep
+    # The helloworld image is allowed in main.bicep only as a safe-provision
+    # conditional fallback (when containerImage is empty on first provision).
+    # It must never be hard-coded unconditionally, and must not leak into the
+    # container-apps module (which always receives the resolved image value).
+    helloworld_image = "mcr.microsoft.com/azuredocs/containerapps-helloworld"
+    assert helloworld_image not in container_apps_bicep
+    # When present in main.bicep it must be guarded by an empty() conditional.
+    if helloworld_image in main_bicep:
+        assert f"empty(containerImage) ? '{helloworld_image}" in main_bicep, (
+            "helloworld image must only appear as the conditional fallback when containerImage is empty"
+        )
     assert "modules/container-registry.bicep" in main_bicep
     assert "output AZURE_CONTAINER_REGISTRY_ENDPOINT" in main_bicep
     assert "output AZURE_CONTAINER_APP_NAME" in main_bicep
@@ -282,8 +291,38 @@ def test_cosmos_container_enables_item_level_ttl() -> None:
     assert "defaultTtl: -1" in cosmos_bicep
 
 
-def test_cosmos_account_explicitly_keeps_public_network_access_for_mvp() -> None:
+def test_cosmos_private_endpoint_bypasses_pna_disabled_governance_policy() -> None:
+    """Assert Private Endpoint posture for Cosmos DB (approved path, 2026-09-02).
+
+    Root cause (established 2026-09-02 by independent Gandalf investigation):
+    Azure Policy 'CosmosDB_PublicNetwork_Modify' (MCAPSGovDeployPolicies initiative,
+    effect: modify) is assigned at Management Group 31b6a5c6-8762-4d6b-bf6e-f37931c67a75
+    and forcibly keeps publicNetworkAccess: Disabled on every Cosmos account in this
+    tenant.  This is an SFI governance policy — NOT a Serverless platform limitation.
+    Every REST PATCH to set publicNetworkAccess: Enabled returns HTTP 200/Succeeded but
+    the value snaps back asynchronously.  No resource locks or RG/subscription-level
+    policies are involved.
+
+    Approved unblocking path (Benoit, 2026-09-02):
+    Deploy a Private Endpoint for the Cosmos account into the private-endpoints subnet.
+    Private Endpoint connections bypass publicNetworkAccess: Disabled; the Cosmos FQDN
+    (*.documents.azure.com) resolves to a private IP via privatelink.documents.azure.com
+    from within the VNet, so the Container App connects without touching the public path.
+
+    IaC posture:
+    - cosmos-private-endpoint.bicep: PE (group ID: Sql), private DNS zone
+      (privatelink.documents.azure.com), VNet link, DNS zone group.
+    - publicNetworkAccess: 'Disabled' retained in cosmos-db.bicep — matches governance
+      policy and is correct for Private Endpoint access.
+    - isVirtualNetworkFilterEnabled: false and virtualNetworkRules: [] — VNet service
+      endpoint filter is inactive; the VNet path goes through the PE, not a service ep.
+    - Microsoft.AzureCosmosDB service endpoint REMOVED from aca-infra subnet — no longer
+      needed once the PE path is validated.
+    - ipRules retained (inert under PNA: Disabled; documented, not cleaned until further
+      instruction).
+    """
     cosmos_bicep = (REPO_ROOT / "infra" / "modules" / "cosmos-db.bicep").read_text()
+    cosmos_pe_bicep = (REPO_ROOT / "infra" / "modules" / "cosmos-private-endpoint.bicep").read_text()
     main_bicep = (REPO_ROOT / "infra" / "main.bicep").read_text()
     main_parameters = (REPO_ROOT / "infra" / "main.parameters.json").read_text()
     network_bicep = (REPO_ROOT / "infra" / "modules" / "network.bicep").read_text()
@@ -291,25 +330,52 @@ def test_cosmos_account_explicitly_keeps_public_network_access_for_mvp() -> None
         REPO_ROOT / "infra" / "modules" / "container-apps-environment.bicep"
     ).read_text()
 
+    # Cosmos PE module: correct group ID, DNS zone, VNet link, DNS zone group
+    assert "groupIds: [" in cosmos_pe_bicep
+    assert "'Sql'" in cosmos_pe_bicep
+    assert "privatelink.documents.azure.com" in cosmos_pe_bicep
+    assert "Microsoft.Network/privateDnsZones@" in cosmos_pe_bicep
+    assert "Microsoft.Network/privateDnsZones/virtualNetworkLinks@" in cosmos_pe_bicep
+    assert "Microsoft.Network/privateEndpoints@" in cosmos_pe_bicep
+    assert "Microsoft.Network/privateEndpoints/privateDnsZoneGroups@" in cosmos_pe_bicep
+
+    # PE module wired into main.bicep with correct params
+    assert "modules/cosmos-private-endpoint.bicep" in main_bicep
+    assert "cosmosAccountResourceId: cosmosDb.outputs.cosmosAccountResourceId" in main_bicep
+    assert "privateEndpointSubnetResourceId: network.outputs.privateEndpointSubnetResourceId" in main_bicep
+    assert "virtualNetworkResourceId: network.outputs.virtualNetworkResourceId" in main_bicep
+
+    # Cosmos account: governance-policy-enforced PNA: Disabled, no VNet filter
+    assert "publicNetworkAccess: 'Disabled'" in cosmos_bicep
+    assert "isVirtualNetworkFilterEnabled: false" in cosmos_bicep
+    assert "virtualNetworkRules: []" in cosmos_bicep
+    assert "param containerAppsSubnetId string" not in cosmos_bicep
+    assert "containerAppsSubnetId: network.outputs.containerAppsSubnetResourceId" not in main_bicep
+
+    # Service endpoint removed from aca-infra (PE path supersedes service endpoint)
+    assert "Microsoft.AzureCosmosDB" not in network_bicep
+
+    # IP rules retained (inert under PNA: Disabled; documented, not broadening access)
     assert "param natGatewayPublicIpAddress string" in cosmos_bicep
     assert "ipAddressOrRange: natGatewayPublicIpAddress" in cosmos_bicep
     assert "ipRules: cosmosIpRules" in cosmos_bicep
     assert "natGatewayPublicIpAddress: network.outputs.natGatewayPublicIpAddress" in main_bicep
     assert "legacyIpRule: legacyCosmosIpRule" in main_bicep
     assert '"value": "${LEGACY_COSMOS_IP_RULE=}"' in main_parameters
-    assert "isVirtualNetworkFilterEnabled: false" in cosmos_bicep
     assert "networkAclBypass: 'None'" in cosmos_bicep
-    assert "networkAclBypassResourceIds: []" in cosmos_bicep
-    assert "publicNetworkAccess: 'Enabled'" in cosmos_bicep
-    assert "virtualNetworkRules: []" in cosmos_bicep
+
+    # Incident IP must never be hard-coded in source
     assert "20.10.253.231" not in cosmos_bicep
     assert "20.10.253.231" not in main_bicep
     assert "20.10.253.231" not in main_parameters
+
+    # Network module retains NAT gateway, delegation, and private-endpoints subnet
     assert "Microsoft.Network/natGateways@" in network_bicep
     assert "publicIPAllocationMethod: 'Static'" in network_bicep
     assert "serviceName: 'Microsoft.App/environments'" in network_bicep
+    assert "privateEndpointNetworkPolicies: 'Disabled'" in network_bicep
     assert "param infrastructureSubnetId string" in container_apps_environment_bicep
-    assert "infrastructureSubnetId: infrastructureSubnetId" in (container_apps_environment_bicep)
+    assert "infrastructureSubnetId: infrastructureSubnetId" in container_apps_environment_bicep
     assert "workloadProfiles:" in container_apps_environment_bicep
 
 
@@ -452,3 +518,71 @@ def test_production_container_starts_through_telemetry_first_entrypoint() -> Non
     assert '"uvicorn", "app.entrypoint:app"' in dockerfile
     assert "azure-monitor-opentelemetry" in pyproject
     assert "opentelemetry-instrumentation-httpx" in pyproject
+
+
+def test_preprovision_hook_guards_session_secret() -> None:
+    """Verify ensure_session_secret.sh guards APP_SESSION_SECRET_KEY before provision.
+
+    The hook must:
+    - Disable shell tracing (set +x) to prevent secret values reaching stdout/logs
+    - Check the azd env for an existing APP_SESSION_SECRET_KEY before generating
+    - Generate via python3 secrets module (cryptographically secure)
+    - Store via `azd env set` without echoing the value
+    - Unset the bash variable after storing (defence-in-depth)
+    """
+    hook = (REPO_ROOT / "hooks" / "ensure_session_secret.sh").read_text()
+
+    # Secret-safe: tracing must be disabled to prevent value leaking into logs
+    assert "set +x" in hook
+
+    # Check for existing key first (idempotent / additive behaviour)
+    assert "APP_SESSION_SECRET_KEY" in hook
+    assert "azd env get-values" in hook
+
+    # Cryptographically secure generation using Python's secrets module
+    assert "secrets.token_hex" in hook
+
+    # Store via azd env set (stdout suppressed so value is never echoed)
+    assert "azd env set APP_SESSION_SECRET_KEY" in hook
+
+    # Bash variable must be unset after use (defence-in-depth)
+    assert "unset" in hook
+
+
+def test_azd_yaml_wires_preprovision_session_secret_hook() -> None:
+    """Verify azure.yaml has a preprovision hook that runs ensure_session_secret.sh.
+
+    Without the preprovision hook, a fresh azd env (or one that has lost
+    APP_SESSION_SECRET_KEY) silently passes an empty value through the
+    Bicep conditional, stripping the ACA secret and env ref on the next
+    azd up and causing a crash-loop.
+    """
+    azure_yaml = (REPO_ROOT / "azure.yaml").read_text()
+
+    assert "preprovision:" in azure_yaml
+    assert "ensure_session_secret.sh" in azure_yaml
+
+
+def test_session_secret_bicep_conditional_covers_both_secret_and_env_ref() -> None:
+    """Verify the Bicep conditional gates the ACA secret AND the env ref together.
+
+    If only one of the two is gated, either:
+    - The secret exists but APP_SESSION_SECRET_KEY is never injected → crash-loop, or
+    - APP_SESSION_SECRET_KEY references a non-existent secret → ARM deployment failure.
+    Both paths must be guarded by the same !empty(appSessionSecretKeyValue) condition.
+    """
+    container_apps_bicep = (REPO_ROOT / "infra" / "modules" / "container-apps.bicep").read_text()
+    main_parameters = (REPO_ROOT / "infra" / "main.parameters.json").read_text()
+
+    # Both the ACA native secret and the env secretRef are inside !empty() guards
+    assert "!empty(appSessionSecretKeyValue)" in container_apps_bicep
+    # The secret entry (for the secrets: [] array)
+    assert "name: 'app-session-secret-key'" in container_apps_bicep
+    assert "value: appSessionSecretKeyValue" in container_apps_bicep
+    # The env entry (for the env: [] array)
+    assert "name: 'APP_SESSION_SECRET_KEY'" in container_apps_bicep
+    assert "secretRef: 'app-session-secret-key'" in container_apps_bicep
+
+    # The azd parameter sentinel defaults to empty (not to a static value)
+    # so a missing azd env var triggers the guard rather than deploying a blank secret
+    assert '"value": "${APP_SESSION_SECRET_KEY=}"' in main_parameters

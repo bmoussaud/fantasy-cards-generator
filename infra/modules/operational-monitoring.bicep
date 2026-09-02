@@ -78,7 +78,7 @@ var resourceToken = 'fcg-${environmentName}'
 var availabilityTestName = take('${resourceToken}-healthz', 64)
 var hasAlertRouting = length(actionGroupEmailReceivers) > 0 || length(actionGroupWebhookReceivers) > 0
 var alertsEnabled = enableAlerts && hasAlertRouting
-var ingestionWarningGb = json(dailyQuotaGb) * ingestionWarningPercent / json('100.0')
+// ARM mul() is integer-only; compute threshold inside the KQL query (see ingestionCapQuery) to avoid float arithmetic in ARM expressions.
 var appInsightsHiddenLinkTag = 'hidden-link:${appInsightsResourceId}'
 
 resource actionGroup 'Microsoft.Insights/actionGroups@2023-01-01' = {
@@ -368,14 +368,15 @@ ContainerAppSystemLogs_CL
 | project Breach=1
 ''', containerAppName, containerRestartThreshold)
 
+// Threshold computed in KQL to avoid ARM mul() float constraints: dailyQuotaGb * ingestionWarningPercent / 100.0
 var ingestionCapQuery = format('''
 Usage
 | where IsBillable == true
 | where TimeGenerated >= ago(24h)
 | summarize BillableGB=sum(Quantity) / 1000.0
-| where BillableGB >= {0}
+| where BillableGB >= ({0} * {1} / 100.0)
 | project Breach=1
-''', ingestionWarningGb)
+''', dailyQuotaGb, ingestionWarningPercent)
 
 var alertDefinitions = [
   {

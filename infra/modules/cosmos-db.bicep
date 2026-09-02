@@ -62,6 +62,22 @@ resource databaseAccount 'Microsoft.DocumentDB/databaseAccounts@2024-05-15' = {
     enableAutomaticFailover: false
     enableMultipleWriteLocations: false
     ipRules: cosmosIpRules
+    // GOVERNANCE POLICY ENFORCEMENT (2026-09-02):
+    // Azure Policy 'CosmosDB_PublicNetwork_Modify' (MCAPSGovDeployPolicies, effect: modify)
+    // is assigned at Management Group 31b6a5c6-8762-4d6b-bf6e-f37931c67a75 and forcibly
+    // sets publicNetworkAccess: Disabled on every Cosmos account in this tenant regardless
+    // of serverless/provisioned mode. Every REST PATCH to set publicNetworkAccess: Enabled
+    // returns HTTP 200 / Succeeded but the value snaps back — Azure Policy re-applies Disabled
+    // asynchronously. No resource locks or RG-level policy assignments are involved.
+    // publicNetworkAccess: Disabled blocks ALL traffic including IP rules and VNet service
+    // endpoints; the ipRules below are inert while this flag is Disabled.
+    // ACTIVE UNBLOCKING PATH (deployed 2026-09-02):
+    //   Private Endpoint deployed via cosmos-private-endpoint.bicep into the private-endpoints
+    //   subnet (privatelink.documents.azure.com DNS zone, VNet link, zone group). PE connection
+    //   status: Approved. Container App resolves *.documents.azure.com to private IPs
+    //   (10.42.2.5/10.42.2.6) via the VNet-linked private DNS zone.
+    //   The aca-infra subnet Microsoft.AzureCosmosDB service endpoint has been removed.
+    //   ipRules are retained but inert (PNA: Disabled); can be cleaned in a future pass.
     isVirtualNetworkFilterEnabled: false
     locations: [
       {
@@ -72,7 +88,7 @@ resource databaseAccount 'Microsoft.DocumentDB/databaseAccounts@2024-05-15' = {
     ]
     networkAclBypass: 'None'
     networkAclBypassResourceIds: []
-    publicNetworkAccess: 'Enabled'
+    publicNetworkAccess: 'Disabled'
     virtualNetworkRules: []
   }
 }
