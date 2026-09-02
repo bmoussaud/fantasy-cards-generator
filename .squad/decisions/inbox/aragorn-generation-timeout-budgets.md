@@ -1,4 +1,0 @@
-### 2026-08-29: Separate text, image, and overall generation timeout budgets
-**By:** Aragorn
-**What:** Use 20 seconds per text attempt with two retries, 150 seconds for one image attempt with no automatic image retries, and a 225-second overall request budget. If the overall budget expires during image generation after valid text exists, persist and return `awaiting_artwork_retry` instead of a generic 504. Emit content-free request, stage, attempt, elapsed, and budget logs.
-**Why:** The deployed 8-second shared stage timeout and 18-second overall timeout allowed the outer timeout to cancel image retry handling before it could return the established partial-success contract. Image calls have materially different latency and duplicate-cost characteristics from text calls, while the 225-second total remains below the default 240-second Azure Container Apps ingress timeout.

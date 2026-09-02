@@ -1,4 +1,0 @@
-### 2026-08-28: Namespaced card vs audit IDs in shared Cosmos storage
-**By:** Samwise
-**What:** Fixed the single-card generation flow so card reservations and generation-audit records no longer share the same physical Cosmos document ID when deployed in Azure. Cards now persist under a `card:` document-id namespace and audits under `audit:` while keeping the public `cardId` stable for API behavior and replay logic.
-**Why:** `create_services()` wires Azure mode to one `AzureCosmosCardRepository` instance for both cards and audits, so the previous shared `id=card_id` keyspace let an audit overwrite the reserved card document and then get deleted by card cleanup on early failures (for example rate limiting). I also added explicit shared-repository test coverage because the old split in-memory repositories masked this class of bug; that mismatch is worth keeping as a standing testing convention whenever deployed topology shares storage.
