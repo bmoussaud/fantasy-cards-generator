@@ -199,7 +199,7 @@ def test_deployer_gets_cosmos_data_reader_at_account_root() -> None:
     )
 
 
-def test_deployer_gets_blob_data_reader_at_storage_account_scope() -> None:
+def test_deployer_gets_blob_data_reader_at_storage_account_scope_and_runtime_is_container_scoped() -> None:
     main_bicep = (REPO_ROOT / "infra" / "main.bicep").read_text()
     storage_bicep = (REPO_ROOT / "infra" / "modules" / "storage.bicep").read_text()
     storage_module = _bicep_block(main_bicep, "module storage './modules/storage.bicep'")
@@ -232,6 +232,73 @@ def test_deployer_gets_blob_data_reader_at_storage_account_scope() -> None:
     assert "principalId: containerAppPrincipalId" in runtime_assignment
     assert "principalType: 'ServicePrincipal'" in runtime_assignment
     assert "storageBlobDataContributorRoleDefinitionId" in runtime_assignment
+    assert "scope: cardAssetsContainer" in runtime_assignment
+    assert "scope: storageAccount" not in runtime_assignment
+    assert (
+        "guid(cardAssetsContainer.id, containerAppPrincipalId, "
+        "storageBlobDataContributorRoleDefinitionId)" in runtime_assignment
+    )
+
+
+def test_healthz_dependency_probe_rbac_and_timeouts_are_iac_managed() -> None:
+    main_bicep = (REPO_ROOT / "infra" / "main.bicep").read_text()
+    main_parameters = (REPO_ROOT / "infra" / "main.parameters.json").read_text()
+    container_apps_bicep = (REPO_ROOT / "infra" / "modules" / "container-apps.bicep").read_text()
+    cosmos_bicep = (REPO_ROOT / "infra" / "modules" / "cosmos-db.bicep").read_text()
+    storage_bicep = (REPO_ROOT / "infra" / "modules" / "storage.bicep").read_text()
+    readme = (REPO_ROOT / "infra" / "README.md").read_text()
+    runtime_cosmos_assignment = _bicep_block(
+        cosmos_bicep, "resource sqlRoleAssignment"
+    )
+    runtime_blob_assignment = _bicep_block(
+        storage_bicep, "resource storageBlobDataContributorRoleAssignment"
+    )
+
+    assert "scope: '${databaseAccount.id}/dbs/${databaseName}/colls/${containerName}'" in (
+        runtime_cosmos_assignment
+    )
+    assert "scope: cardAssetsContainer" in runtime_blob_assignment
+    assert (
+        "param healthzCosmosTimeoutMs int = 1500" in main_bicep
+        and "param healthzBlobTimeoutMs int = 1500" in main_bicep
+    )
+    assert (
+        "param healthzCosmosTimeoutMs int = 1500" in container_apps_bicep
+        and "param healthzBlobTimeoutMs int = 1500" in container_apps_bicep
+    )
+    assert "healthzCosmosTimeoutMs: healthzCosmosTimeoutMs" in main_bicep
+    assert "healthzBlobTimeoutMs: healthzBlobTimeoutMs" in main_bicep
+    assert "name: 'HEALTHZ_COSMOS_TIMEOUT_MS'" in container_apps_bicep
+    assert "value: string(healthzCosmosTimeoutMs)" in container_apps_bicep
+    assert "name: 'HEALTHZ_BLOB_TIMEOUT_MS'" in container_apps_bicep
+    assert "value: string(healthzBlobTimeoutMs)" in container_apps_bicep
+    assert '"value": "${HEALTHZ_COSMOS_TIMEOUT_MS=1500}"' in main_parameters
+    assert '"value": "${HEALTHZ_BLOB_TIMEOUT_MS=1500}"' in main_parameters
+
+    # Healthz probe tuning stays non-secret: no secure params, secret refs,
+    # account keys, or connection strings were introduced for these settings.
+    assert "@secure()\n@description('Bounded Cosmos metadata probe timeout for /healthz" not in (
+        main_bicep
+    )
+    assert "@secure()\n@description('Bounded Blob container-properties probe timeout for /healthz" not in (
+        main_bicep
+    )
+    assert "secretRef: 'healthz-cosmos-timeout-ms'" not in container_apps_bicep
+    assert "secretRef: 'healthz-blob-timeout-ms'" not in container_apps_bicep
+    assert "HEALTHZ_COSMOS_TIMEOUT_MS_CONNECTION_STRING" not in container_apps_bicep
+    assert "HEALTHZ_BLOB_TIMEOUT_MS_CONNECTION_STRING" not in container_apps_bicep
+    assert "HEALTHZ_COSMOS_TIMEOUT_MS" not in (
+        (REPO_ROOT / "infra" / "modules" / "security.bicep").read_text()
+    )
+    assert "HEALTHZ_BLOB_TIMEOUT_MS" not in (
+        (REPO_ROOT / "infra" / "modules" / "security.bicep").read_text()
+    )
+
+    assert "/healthz" in readme
+    assert "HEALTHZ_COSMOS_TIMEOUT_MS" in readme
+    assert "HEALTHZ_BLOB_TIMEOUT_MS" in readme
+    assert "readiness every 10s" in readme
+    assert "liveness every 30s" in readme
 
 
 def test_container_apps_wire_key_vault_backed_auth_env_vars() -> None:

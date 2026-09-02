@@ -55,6 +55,14 @@ param cosmosContainerName string = 'cards'
 @description('Blob container name for persisted card assets.')
 param cardAssetsContainerName string = 'card-assets'
 
+@minValue(1)
+@description('Bounded Cosmos metadata probe timeout for /healthz, in milliseconds.')
+param healthzCosmosTimeoutMs int = 1500
+
+@minValue(1)
+@description('Bounded Blob container-properties probe timeout for /healthz, in milliseconds.')
+param healthzBlobTimeoutMs int = 1500
+
 @description('Azure AI Foundry project name for the current environment.')
 param aiFoundryProjectName string = 'fantasy-cards'
 
@@ -342,6 +350,8 @@ module containerApps './modules/container-apps.bicep' = {
     foundryEndpoint: 'https://${aiFoundryAccountName}.cognitiveservices.azure.com/'
     foundryImageDeployment: aiFoundryImageDeploymentName
     foundryTextDeployment: aiFoundryTextDeploymentName
+    healthzBlobTimeoutMs: healthzBlobTimeoutMs
+    healthzCosmosTimeoutMs: healthzCosmosTimeoutMs
     imageMaxRetries: imageMaxRetries
     imageTimeoutSeconds: imageTimeoutSeconds
     imageSize: imageSize
