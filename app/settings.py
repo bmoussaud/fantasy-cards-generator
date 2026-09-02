@@ -52,6 +52,8 @@ class AppSettings:
     cosmos_container_name: str | None
     blob_endpoint: str | None
     blob_container_name: str | None
+    healthz_cosmos_timeout_ms: int
+    healthz_blob_timeout_ms: int
     moderation_service: str
     moderation_policy_name: str
     user_rate_limit: RateLimitSettings
@@ -115,6 +117,8 @@ def load_app_settings() -> AppSettings:
         cosmos_container_name=_optional_env("COSMOS_CONTAINER_NAME"),
         blob_endpoint=_optional_env("BLOB_ENDPOINT"),
         blob_container_name=_optional_env("BLOB_CONTAINER_NAME"),
+        healthz_cosmos_timeout_ms=_int_env("HEALTHZ_COSMOS_TIMEOUT_MS", default=1500, minimum=1),
+        healthz_blob_timeout_ms=_int_env("HEALTHZ_BLOB_TIMEOUT_MS", default=1500, minimum=1),
         moderation_service=_string_env("MODERATION_SERVICE", default="heuristic"),
         moderation_policy_name=_string_env(
             "MODERATION_POLICY_NAME",

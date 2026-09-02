@@ -15,6 +15,12 @@ from uuid import uuid4
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from app.health import (
+    AzureBlobHealthProbe,
+    AzureCosmosHealthProbe,
+    HealthDependencyProbe,
+    NotApplicableHealthProbe,
+)
 from app.problems import ProblemDetails
 from app.settings import AppSettings, RateLimitSettings
 from app.telemetry import (
@@ -781,6 +787,9 @@ class AzureCosmosCardRepository(AbstractCardRepository, AbstractAuditRepository)
             self._container = database.get_container_client(self._container_name)
         return self._container
 
+    async def get_health_container_client(self):
+        return await self._get_container()
+
     def _record_document(self, record: StoredCard, *, document_id: str) -> dict[str, Any]:
         document = record.to_document()
         document["id"] = document_id
@@ -984,6 +993,9 @@ class AzureBlobAssetStore(AbstractAssetStore):
             credential=_default_azure_credential(),
         )
         self._container = self._service.get_container_client(self._container_name)
+
+    def get_health_container_client(self):
+        return self._container
 
     async def upload(self, blob_name: str, payload: bytes, content_type: str) -> dict[str, Any]:
         blob = self._container.get_blob_client(blob_name)
@@ -1350,6 +1362,8 @@ class AppServices:
     moderation_service: HeuristicModerationService
     rate_limiter: RateLimiter
     csrf_protector: CsrfProtector
+    cosmos_health_probe: HealthDependencyProbe | None = None
+    blob_health_probe: HealthDependencyProbe | None = None
 
 
 class CardGenerationService:
@@ -2431,12 +2445,25 @@ def create_services(settings: AppSettings) -> AppServices:
         card_repository = AzureCosmosCardRepository(settings)
         audit_repository = card_repository
         asset_store = AzureBlobAssetStore(settings)
+        cosmos_health_probe: HealthDependencyProbe | None = AzureCosmosHealthProbe(
+            get_container_client=card_repository.get_health_container_client,
+            endpoint=settings.cosmos_endpoint,
+            database_name=settings.cosmos_database_name,
+            container_name=settings.cosmos_container_name,
+        )
+        blob_health_probe: HealthDependencyProbe | None = AzureBlobHealthProbe(
+            get_container_client=asset_store.get_health_container_client,
+            endpoint=settings.blob_endpoint,
+            container_name=settings.blob_container_name,
+        )
     else:
         card_repository = InMemoryCardRepository()
         audit_repository = InMemoryAuditRepository(
             audit_ttl_seconds=settings.audit_retention_days * 24 * 60 * 60
         )
         asset_store = InMemoryAssetStore()
+        cosmos_health_probe = NotApplicableHealthProbe("cosmos")
+        blob_health_probe = NotApplicableHealthProbe("blob")
 
     ai_client = (
         MockAIClient(settings) if settings.ai_mode == "mock" else AzureFoundryAIClient(settings)
@@ -2450,6 +2477,8 @@ def create_services(settings: AppSettings) -> AppServices:
         moderation_service=HeuristicModerationService(settings.moderation_policy_name),
         rate_limiter=RateLimiter(),
         csrf_protector=CsrfProtector(),
+        cosmos_health_probe=cosmos_health_probe,
+        blob_health_probe=blob_health_probe,
     )
 
 

@@ -13,7 +13,22 @@ def test_healthz() -> None:
     response = client.get("/healthz")
 
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    assert response.json() == {
+        "status": "ok",
+        "dependencies": {
+            "cosmos": {
+                "status": "not_applicable",
+                "durationMs": 0,
+                "errorCategory": "none",
+            },
+            "blob": {
+                "status": "not_applicable",
+                "durationMs": 0,
+                "errorCategory": "none",
+            },
+        },
+    }
+    assert response.headers["cache-control"] == "no-store"
     assert REQUEST_ID_PATTERN.fullmatch(response.headers["x-request-id"])
 
 

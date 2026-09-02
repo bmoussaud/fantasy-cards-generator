@@ -39,6 +39,7 @@ from app.generation import (
     client_ip_from_request,
     create_services,
 )
+from app.health import NotApplicableHealthProbe, build_healthz_payload, run_dependency_probes
 from app.problems import ProblemDetails
 from app.settings import SettingsError, load_app_settings
 from app.telemetry import (
@@ -290,8 +291,27 @@ def create_app(services: AppServices | None = None) -> FastAPI:
         )
 
     @app.get("/healthz")
-    async def healthz() -> dict[str, str]:
-        return {"status": "ok"}
+    async def healthz(request: Request) -> JSONResponse:
+        services: AppServices = request.app.state.services
+        results = await run_dependency_probes(
+            probes=[
+                (
+                    services.cosmos_health_probe or NotApplicableHealthProbe("cosmos"),
+                    services.settings.healthz_cosmos_timeout_ms / 1000,
+                ),
+                (
+                    services.blob_health_probe or NotApplicableHealthProbe("blob"),
+                    services.settings.healthz_blob_timeout_ms / 1000,
+                ),
+            ],
+            request_id=request.state.request_id,
+        )
+        payload = build_healthz_payload(results)
+        return JSONResponse(
+            payload,
+            status_code=200 if payload["status"] == "ok" else 503,
+            headers={"Cache-Control": "no-store"},
+        )
 
     @app.get("/partials/ping", response_class=HTMLResponse)
     async def ping_partial(request: Request) -> HTMLResponse:
