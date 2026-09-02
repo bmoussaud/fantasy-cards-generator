@@ -74,5 +74,12 @@ def test_card_preview_styles_preserve_generated_image_aspect_ratio() -> None:
     response = client.get("/static/css/app.css")
 
     assert response.status_code == 200
-    assert ".card-portrait.is-broken {\n  aspect-ratio: 4 / 3;" in response.text
-    assert ".card-portrait img {\n  width: 100%;\n  height: auto;\n}" in response.text
+    placeholder_rule = re.search(r"\.card-portrait\.is-broken\s*\{([^}]*)\}", response.text)
+    artwork_rule = re.search(r"\.card-portrait img\s*\{([^}]*)\}", response.text)
+
+    assert placeholder_rule is not None
+    assert re.search(r"aspect-ratio\s*:\s*4\s*/\s*3\s*;", placeholder_rule.group(1))
+    assert artwork_rule is not None
+    assert re.search(r"width\s*:\s*100%\s*;", artwork_rule.group(1))
+    assert re.search(r"height\s*:\s*auto\s*;", artwork_rule.group(1))
+    assert not re.search(r"object-fit\s*:\s*cover\s*;", artwork_rule.group(1))
