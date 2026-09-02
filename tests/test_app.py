@@ -75,5 +75,4 @@ def test_card_preview_styles_preserve_generated_image_aspect_ratio() -> None:
 
     assert response.status_code == 200
     assert ".card-portrait.is-broken {\n  aspect-ratio: 4 / 3;" in response.text
-    assert ".card-portrait img {\n  width: 100%;\n  height: auto;" in response.text
-    assert "object-fit: cover;" not in response.text
+    assert ".card-portrait img {\n  width: 100%;\n  height: auto;\n}" in response.text
