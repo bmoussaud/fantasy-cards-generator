@@ -7,6 +7,16 @@ param keyVaultName string
 @description('Principal ID of the managed identity granted read access to Key Vault secrets (the Container App\'s ACR-pull identity).')
 param keyVaultAccessPrincipalId string
 
+@description('Microsoft Entra object ID of the azd/ARM deployment caller that needs metadata-only browse access to Key Vault objects.')
+param deployerPrincipalId string
+
+@allowed([
+  'ServicePrincipal'
+  'User'
+])
+@description('Microsoft Entra principal type for the azd/ARM deployment caller.')
+param deployerPrincipalType string
+
 @secure()
 @description('Session cookie signing secret stored in Key Vault as APP_SESSION_SECRET_KEY. Empty skips creating the secret.')
 param appSessionSecretKeyValue string = ''
@@ -19,6 +29,7 @@ param entraClientSecretValue string = ''
 param tags object = {}
 
 var keyVaultSecretsUserRoleDefinitionId = '4633458b-17de-408a-b874-0445c86b69e6'
+var keyVaultReaderRoleDefinitionId = '21090545-7ca7-4776-b22c-e363652d74d2'
 var hasAppSessionSecretKeyValue = !empty(appSessionSecretKeyValue)
 var hasEntraClientSecretValue = !empty(entraClientSecretValue)
 
@@ -49,6 +60,16 @@ resource keyVaultSecretsUserRoleAssignment 'Microsoft.Authorization/roleAssignme
     principalId: keyVaultAccessPrincipalId
     principalType: 'ServicePrincipal'
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', keyVaultSecretsUserRoleDefinitionId)
+  }
+}
+
+resource deployerKeyVaultReaderRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(keyVault.id, deployerPrincipalId, keyVaultReaderRoleDefinitionId)
+  scope: keyVault
+  properties: {
+    principalId: deployerPrincipalId
+    principalType: deployerPrincipalType
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', keyVaultReaderRoleDefinitionId)
   }
 }
 

@@ -269,6 +269,8 @@ module security './modules/security.bicep' = {
   name: 'security'
   params: {
     appSessionSecretKeyValue: appSessionSecretKeyValue
+    deployerPrincipalId: deployerPrincipalId
+    deployerPrincipalType: deployerPrincipalType
     entraClientSecretValue: entraClientSecretValue
     keyVaultName: keyVaultName
     keyVaultAccessPrincipalId: registry.outputs.acrPullIdentityPrincipalId
