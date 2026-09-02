@@ -248,9 +248,7 @@ def test_healthz_dependency_probe_rbac_and_timeouts_are_iac_managed() -> None:
     cosmos_bicep = (REPO_ROOT / "infra" / "modules" / "cosmos-db.bicep").read_text()
     storage_bicep = (REPO_ROOT / "infra" / "modules" / "storage.bicep").read_text()
     readme = (REPO_ROOT / "infra" / "README.md").read_text()
-    runtime_cosmos_assignment = _bicep_block(
-        cosmos_bicep, "resource sqlRoleAssignment"
-    )
+    runtime_cosmos_assignment = _bicep_block(cosmos_bicep, "resource sqlRoleAssignment")
     runtime_blob_assignment = _bicep_block(
         storage_bicep, "resource storageBlobDataContributorRoleAssignment"
     )
