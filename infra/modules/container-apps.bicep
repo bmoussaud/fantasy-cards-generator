@@ -139,7 +139,7 @@ param overallTimeoutSeconds string = '225'
 param auditRetentionDays int = 30
 
 @description('Requested image size injected as IMAGE_SIZE.')
-param imageSize string = '1024x1024'
+param imageSize string = '1024x1536'
 
 @description('Image generation quality level injected as IMAGE_QUALITY (low, medium, high).')
 param imageQuality string = 'low'

@@ -147,7 +147,7 @@ param overallTimeoutSeconds string = '225'
 param auditRetentionDays int = 30
 
 @description('Requested image size for artwork generation.')
-param imageSize string = '1024x1024'
+param imageSize string = '1024x1536'
 
 @description('Requested image quality for artwork generation. Valid values are "low", "medium", and "high".')
 param imageQuality string = 'medium'
