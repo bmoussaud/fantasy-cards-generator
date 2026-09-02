@@ -96,6 +96,14 @@ param blobEndpoint string = ''
 @description('Blob container name injected as BLOB_CONTAINER_NAME.')
 param blobContainerName string = 'card-assets'
 
+@minValue(1)
+@description('Cosmos metadata probe timeout injected as HEALTHZ_COSMOS_TIMEOUT_MS.')
+param healthzCosmosTimeoutMs int = 1500
+
+@minValue(1)
+@description('Blob container-properties probe timeout injected as HEALTHZ_BLOB_TIMEOUT_MS.')
+param healthzBlobTimeoutMs int = 1500
+
 @description('Moderation service injected as MODERATION_SERVICE.')
 param moderationService string = 'heuristic'
 
@@ -249,6 +257,14 @@ var containerAppEnv = concat(
     {
       name: 'BLOB_CONTAINER_NAME'
       value: blobContainerName
+    }
+    {
+      name: 'HEALTHZ_COSMOS_TIMEOUT_MS'
+      value: string(healthzCosmosTimeoutMs)
+    }
+    {
+      name: 'HEALTHZ_BLOB_TIMEOUT_MS'
+      value: string(healthzBlobTimeoutMs)
     }
     {
       name: 'MODERATION_SERVICE'

@@ -30,6 +30,21 @@ rules, cost estimation, deployment verification, and rollback. No monitoring
 resources are deployed by repository changes alone; deployment remains a separate,
 explicitly authorized `azd` operation.
 
+## `/healthz` dependency probe budget
+
+Issue [#51](https://github.com/bmoussaud/fantasy-cards-generator/issues/51)
+keeps dependency-aware `/healthz` checks bounded through IaC rather than portal drift.
+
+- `HEALTHZ_COSMOS_TIMEOUT_MS` and `HEALTHZ_BLOB_TIMEOUT_MS` are plain azd/Bicep
+  parameters, both defaulting to `1500` ms and both overrideable per environment.
+- ACA probe cadence is already bounded in
+  [`modules/container-apps.bicep`](./modules/container-apps.bicep): startup every
+  5s until healthy, readiness every 10s, and liveness every 30s.
+- The app response contract keeps `Cache-Control: no-store`; do not add an
+  external cache in front of `/healthz`, and do not tighten the probe interval
+  below the existing ACA configuration unless RU / transaction impact is
+  re-evaluated.
+
 ## Dev/MVP NAT Gateway baseline for Cosmos egress
 
 Issue [#35](https://github.com/bmoussaud/fantasy-cards-generator/issues/35)

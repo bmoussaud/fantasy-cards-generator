@@ -1289,9 +1289,7 @@ def test_image_quality_defaults_to_low(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.parametrize("quality", ["low", "medium", "high"])
-def test_image_quality_accepts_valid_values(
-    monkeypatch: pytest.MonkeyPatch, quality: str
-) -> None:
+def test_image_quality_accepts_valid_values(monkeypatch: pytest.MonkeyPatch, quality: str) -> None:
     monkeypatch.setenv("IMAGE_QUALITY", quality)
 
     settings = load_app_settings()
@@ -1364,9 +1362,9 @@ def test_foundry_image_request_payload_includes_quality(
 
     payload = captured["payload"]
     assert isinstance(payload, dict)
-    assert payload.get("quality") == "medium", (
-        "Image generation payload must include 'quality' matching IMAGE_QUALITY setting"
-    )
+    assert (
+        payload.get("quality") == "medium"
+    ), "Image generation payload must include 'quality' matching IMAGE_QUALITY setting"
 
 
 def test_foundry_image_request_payload_quality_matches_low_default(
@@ -1418,9 +1416,9 @@ def test_foundry_image_request_payload_quality_matches_low_default(
 
     payload = captured["payload"]
     assert isinstance(payload, dict)
-    assert payload.get("quality") == "low", (
-        "Image generation payload must default to quality='low' when IMAGE_QUALITY is unset"
-    )
+    assert (
+        payload.get("quality") == "low"
+    ), "Image generation payload must default to quality='low' when IMAGE_QUALITY is unset"
 
 
 # ---------------------------------------------------------------------------
@@ -1470,9 +1468,9 @@ def test_partial_card_persists_selected_image_quality(
     record = asyncio.run(run())
     assert record is not None
     assert record.status == "awaiting_artwork_retry"
-    assert record.image_quality == "high", (
-        "Partial card must persist the image_quality used during the initial generation"
-    )
+    assert (
+        record.image_quality == "high"
+    ), "Partial card must persist the image_quality used during the initial generation"
 
 
 def test_retry_artwork_uses_original_image_quality(
@@ -1646,6 +1644,6 @@ def test_retry_artwork_legacy_record_without_quality_falls_back_to_settings(
 
     retry_qualities, legacy_quality = asyncio.run(run())
     assert legacy_quality is None, "Legacy record round-trip must have image_quality=None"
-    assert retry_qualities == ["medium"], (
-        "Legacy records without imageQuality must fall back to settings.image_quality ('medium')"
-    )
+    assert retry_qualities == [
+        "medium"
+    ], "Legacy records without imageQuality must fall back to settings.image_quality ('medium')"

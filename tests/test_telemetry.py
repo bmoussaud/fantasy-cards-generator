@@ -178,7 +178,22 @@ def test_production_startup_fails_open_for_malformed_telemetry_configuration(
     with TestClient(namespace["app"], base_url="https://testserver") as client:
         response = client.get("/healthz")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json() == {
+        "status": "ok",
+        "dependencies": {
+            "cosmos": {
+                "status": "not_applicable",
+                "durationMs": 0,
+                "errorCategory": "none",
+            },
+            "blob": {
+                "status": "not_applicable",
+                "durationMs": 0,
+                "errorCategory": "none",
+            },
+        },
+    }
 
 
 def test_configured_telemetry_passes_bounded_resource_and_sampling_settings(

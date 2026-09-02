@@ -120,7 +120,10 @@ SAFE_ERROR_CODES = {
     "rate_limit_exceeded",
     "request_replay_timeout",
     "retry_conflict",
+    "misconfigured",
+    "timeout",
     "unauthorized",
+    "unavailable",
     "upstream_failure",
     "upstream_timeout",
     "validation_error",
@@ -142,6 +145,7 @@ SAFE_ATTRIBUTE_KEYS = {
     "fcg.store",
     "fcg.persistence_operation",
     "fcg.token_type",
+    "fcg.duration_ms",
     "http.route",
     "http.response.status_code",
 }
@@ -679,6 +683,11 @@ def safe_attributes(attributes: dict[str, Any]) -> dict[str, Any]:
             )
         elif key == "fcg.token_type":
             safe[key] = _bounded_value(value, {"input", "output", "total"}, "total")
+        elif key == "fcg.duration_ms":
+            try:
+                safe[key] = max(0, int(value))
+            except (TypeError, ValueError):
+                continue
         elif key == "http.route":
             safe[key] = normalize_route(str(value))
         elif key == "http.response.status_code" and isinstance(value, int):

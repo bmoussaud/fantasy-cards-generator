@@ -134,8 +134,8 @@ resource blobPrivateDnsZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZ
 }
 
 resource storageBlobDataContributorRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  scope: storageAccount
-  name: guid(storageAccount.id, containerAppPrincipalId, storageBlobDataContributorRoleDefinitionId)
+  scope: cardAssetsContainer
+  name: guid(cardAssetsContainer.id, containerAppPrincipalId, storageBlobDataContributorRoleDefinitionId)
   properties: {
     principalId: containerAppPrincipalId
     principalType: 'ServicePrincipal'

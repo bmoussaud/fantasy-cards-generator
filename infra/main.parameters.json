@@ -23,6 +23,12 @@
     "entraClientSecretValue": {
       "value": "${ENTRA_CLIENT_SECRET=}"
     },
+    "healthzCosmosTimeoutMs": {
+      "value": "${HEALTHZ_COSMOS_TIMEOUT_MS=1500}"
+    },
+    "healthzBlobTimeoutMs": {
+      "value": "${HEALTHZ_BLOB_TIMEOUT_MS=1500}"
+    },
     "monitoringRetentionInDays": {
       "value": "${MONITORING_RETENTION_DAYS=30}"
     },
