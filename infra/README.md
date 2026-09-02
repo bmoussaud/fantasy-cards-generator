@@ -76,8 +76,10 @@ azd up
 
 Root `infra/main.bicep` resolves `deployer().objectId` once from the ARM
 deployment context and passes that Microsoft Entra object ID to the data and
-Foundry modules. Do not replace it with a hard-coded object ID or application
-client ID.
+Foundry modules **and** to the Key Vault security module. That same derived
+object ID represents the signed-in interactive user for local `azd` runs and
+the federated service principal for supported CI runs. Do not replace it with a
+hard-coded object ID or application client ID.
 
 `deployer()` does not expose the caller's principal type. `azd` therefore still
 supplies `AZURE_PRINCIPAL_TYPE`, which must match the caller (`User` for an
@@ -85,8 +87,16 @@ interactive deployment or `ServicePrincipal` for the supported federated CI
 case). A direct Bicep deployment that bypasses `azd` must provide
 `deployerPrincipalType` explicitly.
 
+No new azd environment variable is required for the deployer principal ID: the
+template derives it directly from the authenticated deployment context via
+`deployer().objectId`.
+
 Provisioning grants the deployment caller only:
 
+- **Key Vault Reader** at Key Vault scope, allowing metadata-only list/browse
+  access for secrets, keys, and certificates. This role does **not** permit
+  secret-value reads, key material reads, private-key export, cryptographic key
+  operations, object mutation, purge/recover, or Key Vault RBAC changes.
 - Cosmos DB Built-in **Data Reader** at the Cosmos account root, using Cosmos
   native data-plane RBAC. Account-root scope is required for `readMetadata`,
   database discovery, and container discovery.
@@ -102,8 +112,9 @@ Cosmos items or blobs through the reader roles.
 
 The deploying identity must already be allowed to create assignments:
 
-- `Microsoft.Authorization/roleAssignments/write` for the Storage and Foundry
-  ARM role assignments.
+- `Microsoft.Authorization/roleAssignments/write` for the Key Vault, Storage,
+  and Foundry ARM role assignments. Key Vault scope is sufficient for the vault
+  reader assignment; resource-group scope also works if delegated there.
 - `Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments/write` for the
   Cosmos native role assignment.
 
@@ -171,6 +182,11 @@ After a live deploy, verify:
 9. From a VNet-connected host with private DNS, use Microsoft Entra
    authentication to enumerate Blob containers and list/read a blob. Confirm
    upload and delete operations remain unavailable to the deployer.
+10. Using the deployment identity, confirm the Key Vault data plane allows
+    listing secrets, keys, and certificates plus reading only their metadata.
+    Also confirm representative forbidden operations stay denied: reading a
+    secret value, exporting certificate private key material, key crypto
+    operations, and any create/update/delete/recover/purge action.
 
 The key live-network assertion — ACA outbound traffic actually using the NAT
 public IP — requires an Azure deployment and cannot be proven from source alone.

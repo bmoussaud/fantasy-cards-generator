@@ -241,6 +241,53 @@ def test_deployer_blob_reader_at_account_scope_runtime_container_scoped() -> Non
     )
 
 
+def test_deployer_gets_key_vault_reader_at_vault_scope() -> None:
+    main_bicep = (REPO_ROOT / "infra" / "main.bicep").read_text()
+    main_parameters = json.loads((REPO_ROOT / "infra" / "main.parameters.json").read_text())
+    security_bicep = (REPO_ROOT / "infra" / "modules" / "security.bicep").read_text()
+    security_module = _bicep_block(main_bicep, "module security './modules/security.bicep'")
+    deployer_assignment = _bicep_block(
+        security_bicep, "resource deployerKeyVaultReaderRoleAssignment"
+    )
+    runtime_assignment = _bicep_block(security_bicep, "resource keyVaultSecretsUserRoleAssignment")
+
+    assert main_bicep.count("deployer().objectId") == 1
+    assert "param deployerPrincipalId" not in main_bicep
+    assert "deployerPrincipalId" not in main_parameters["parameters"]
+    assert (
+        main_parameters["parameters"]["deployerPrincipalType"]["value"] == "${AZURE_PRINCIPAL_TYPE}"
+    )
+    assert "deployerPrincipalId: deployerPrincipalId" in security_module
+    assert "deployerPrincipalType: deployerPrincipalType" in security_module
+
+    assert (
+        "var keyVaultReaderRoleDefinitionId = '21090545-7ca7-4776-b22c-e363652d74d2'"
+        in security_bicep
+    )
+    assert (
+        "resource deployerKeyVaultReaderRoleAssignment "
+        "'Microsoft.Authorization/roleAssignments@2022-04-01'" in security_bicep
+    )
+    assert "scope: keyVault" in deployer_assignment
+    assert "principalId: deployerPrincipalId" in deployer_assignment
+    assert "principalType: deployerPrincipalType" in deployer_assignment
+    assert (
+        "guid(keyVault.id, deployerPrincipalId, keyVaultReaderRoleDefinitionId)"
+        in deployer_assignment
+    )
+    assert (
+        "roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', "
+        "keyVaultReaderRoleDefinitionId)" in deployer_assignment
+    )
+
+    # Runtime secret-value access remains a separate assignment for the
+    # Container App identity.
+    assert "scope: keyVault" in runtime_assignment
+    assert "principalId: keyVaultAccessPrincipalId" in runtime_assignment
+    assert "principalType: 'ServicePrincipal'" in runtime_assignment
+    assert "keyVaultSecretsUserRoleDefinitionId" in runtime_assignment
+
+
 def test_healthz_dependency_probe_rbac_and_timeouts_are_iac_managed() -> None:
     main_bicep = (REPO_ROOT / "infra" / "main.bicep").read_text()
     main_parameters = (REPO_ROOT / "infra" / "main.parameters.json").read_text()
@@ -290,6 +337,10 @@ def test_healthz_dependency_probe_rbac_and_timeouts_are_iac_managed() -> None:
     )
 
     assert "/healthz" in readme
+    assert "deployer().objectId" in readme
+    assert "AZURE_PRINCIPAL_TYPE" in readme
+    assert "Key Vault Reader" in readme
+    assert "key vault scope" in readme.lower()
     assert "HEALTHZ_COSMOS_TIMEOUT_MS" in readme
     assert "HEALTHZ_BLOB_TIMEOUT_MS" in readme
     assert "readiness every 10s" in readme
