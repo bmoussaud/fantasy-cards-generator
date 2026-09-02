@@ -68,3 +68,12 @@ def test_static_stylesheet_is_mounted_and_served() -> None:
     assert response.status_code == 200
     assert "text/css" in response.headers["content-type"]
     assert "--color-accent" in response.text
+
+
+def test_card_preview_styles_preserve_generated_image_aspect_ratio() -> None:
+    response = client.get("/static/css/app.css")
+
+    assert response.status_code == 200
+    assert ".card-portrait.is-broken {\n  aspect-ratio: 4 / 3;" in response.text
+    assert ".card-portrait img {\n  width: 100%;\n  height: auto;" in response.text
+    assert "object-fit: cover;" not in response.text
