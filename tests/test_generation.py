@@ -83,6 +83,8 @@ def test_app_shell_renders_generation_form(authenticated_client: TestClient) -> 
     assert 'name="idempotency_key"' in response.text
     assert 'name="photo"' in response.text
     assert 'name="saved_photo_id"' in response.text
+    assert "data-saved-photo-id-input" in response.text
+    assert "disabled" in response.text.split("data-saved-photo-id-input", 1)[1].split(">", 1)[0]
     assert 'name="save_photo"' in response.text
     assert 'name="photo_label"' in response.text
     assert 'accept="image/jpeg,image/png,image/webp"' in response.text
