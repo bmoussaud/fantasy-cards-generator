@@ -53,8 +53,9 @@ runtime settings.
 
 Signed-in users can open `/app` to generate cards and `/my/cards` to browse
 their own saved cards. In Azure persistence mode, the library reads card
-metadata from Cosmos DB and renders Blob artwork through short-lived, read-only
-user-delegation SAS URLs.
+metadata from Cosmos DB and streams Blob artwork through the same
+backend-proxy image route (`GET /cards/{card_id}/image`) used by the card
+generation flow, so the browser never talks to Blob Storage directly.
 
 ## Azure deployment
 
