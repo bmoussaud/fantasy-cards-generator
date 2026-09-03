@@ -485,4 +485,7 @@ def test_my_account_page_renders_deletion_copy(monkeypatch: pytest.MonkeyPatch) 
     assert 'data-confirm-title="Delete your account permanently?"' in response.text
     assert 'data-confirm-confirm-label="Delete account"' in response.text
     assert "Delete your account and all generated content permanently?" in response.text
-    assert "I understand this permanently deletes my account and all generated content." in response.text
+    assert (
+        "I understand this permanently deletes my account and all generated content."
+        in response.text
+    )
