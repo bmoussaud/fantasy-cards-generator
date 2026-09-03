@@ -38,8 +38,14 @@ def test_app_shell_renders_generation_form(authenticated_client: TestClient) -> 
 
     assert response.status_code == 200
     assert 'hx-post="/ui/cards/generate"' in response.text
+    assert 'hx-encoding="multipart/form-data"' in response.text
+    assert 'enctype="multipart/form-data"' in response.text
     assert 'name="csrf_token"' in response.text
     assert 'name="idempotency_key"' in response.text
+    assert 'name="photo"' in response.text
+    assert 'accept="image/jpeg,image/png,image/webp"' in response.text
+    assert "Reference photo preview" in response.text
+    assert "up to 5 MB" in response.text
 
 
 def test_api_requires_authentication() -> None:
@@ -991,6 +997,48 @@ def test_htmx_flow_renders_error_panel(authenticated_client: TestClient) -> None
     assert response.status_code == 422
     assert "error-panel" in response.text
     assert "Prompt Rejected" in response.text
+
+
+def test_ui_rejects_unsupported_photo_content_type_with_error_panel(
+    authenticated_client: TestClient,
+) -> None:
+    csrf_token = extract_hidden_value(authenticated_client.get("/app").text, "csrf_token")
+
+    response = authenticated_client.post(
+        "/ui/cards/generate",
+        data={
+            "prompt": "create a safe fantasy knight with a moonlit shield",
+            "idempotency_key": "idem-ui-photo-type",
+            "csrf_token": csrf_token,
+        },
+        files={"photo": ("portrait.gif", b"GIF89a", "image/gif")},
+    )
+
+    assert response.status_code == 415
+    assert "error-panel" in response.text
+    assert "Unsupported Photo Type" in response.text
+    assert "JPEG, PNG, or WebP" in response.text
+
+
+def test_ui_rejects_oversized_photo_upload_with_error_panel(
+    authenticated_client: TestClient,
+) -> None:
+    csrf_token = extract_hidden_value(authenticated_client.get("/app").text, "csrf_token")
+
+    response = authenticated_client.post(
+        "/ui/cards/generate",
+        data={
+            "prompt": "create a safe fantasy knight with a moonlit shield",
+            "idempotency_key": "idem-ui-photo-size",
+            "csrf_token": csrf_token,
+        },
+        files={"photo": ("portrait.png", b"x" * ((5 * 1024 * 1024) + 1), "image/png")},
+    )
+
+    assert response.status_code == 413
+    assert "error-panel" in response.text
+    assert "Photo Too Large" in response.text
+    assert "5 MB or smaller" in response.text
 
 
 def test_persistence_cleanup_deletes_orphaned_blob(

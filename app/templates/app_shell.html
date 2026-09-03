@@ -13,7 +13,9 @@
                 hx-post="/ui/cards/generate"
                 hx-target="#generation-result"
                 hx-swap="innerHTML"
+                hx-encoding="multipart/form-data"
                 hx-indicator="#generation-pending"
+                enctype="multipart/form-data"
             >
                 <div class="field">
                     <label class="field__label" for="prompt">Card prompt</label>
@@ -38,6 +40,31 @@
                         <option value="medium">Medium</option>
                         <option value="high">High</option>
                     </select>
+                </div>
+                <div class="field">
+                    <label class="field__label" for="photo">Upload your photo</label>
+                    <p class="field__hint" id="photo-hint">
+                        Optional. JPG, PNG, or WebP only, up to 5 MB. We use it only as a reference for this generation request.
+                    </p>
+                    <input
+                        class="field__control field__control--file"
+                        id="photo"
+                        name="photo"
+                        type="file"
+                        accept="image/jpeg,image/png,image/webp"
+                        aria-describedby="photo-hint photo-feedback"
+                        data-photo-input
+                    />
+                    <p class="field__hint" id="photo-feedback" data-photo-feedback aria-live="polite"></p>
+                    <div class="photo-preview" data-photo-preview hidden>
+                        <p class="photo-preview__label">Reference photo preview</p>
+                        <img
+                            class="photo-preview__image"
+                            data-photo-preview-image
+                            alt="Selected profile photo preview"
+                        />
+                        <p class="photo-preview__meta" data-photo-preview-meta></p>
+                    </div>
                 </div>
                 <input id="generate-idempotency-key" type="hidden" name="idempotency_key" value="{{ generate_idempotency_key }}" />
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
