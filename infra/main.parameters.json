@@ -29,6 +29,33 @@
     "healthzBlobTimeoutMs": {
       "value": "${HEALTHZ_BLOB_TIMEOUT_MS=1500}"
     },
+    "contentSafetyEndpoint": {
+      "value": "${CONTENT_SAFETY_ENDPOINT=}"
+    },
+    "contentSafetyApiVersion": {
+      "value": "${CONTENT_SAFETY_API_VERSION=2024-09-01}"
+    },
+    "contentSafetyMaxHateSeverity": {
+      "value": "${CONTENT_SAFETY_MAX_HATE_SEVERITY=2}"
+    },
+    "contentSafetyMaxSelfHarmSeverity": {
+      "value": "${CONTENT_SAFETY_MAX_SELF_HARM_SEVERITY=2}"
+    },
+    "contentSafetyMaxSexualSeverity": {
+      "value": "${CONTENT_SAFETY_MAX_SEXUAL_SEVERITY=2}"
+    },
+    "contentSafetyMaxViolenceSeverity": {
+      "value": "${CONTENT_SAFETY_MAX_VIOLENCE_SEVERITY=2}"
+    },
+    "savedPhotoMaxCount": {
+      "value": "${SAVED_PHOTO_MAX_COUNT=10}"
+    },
+    "savedPhotoMaxBytes": {
+      "value": "${SAVED_PHOTO_MAX_BYTES=4194304}"
+    },
+    "savedPhotoThumbnailSize": {
+      "value": "${SAVED_PHOTO_THUMBNAIL_SIZE=200}"
+    },
     "monitoringRetentionInDays": {
       "value": "${MONITORING_RETENTION_DAYS=30}"
     },

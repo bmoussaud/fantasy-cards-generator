@@ -94,6 +94,13 @@ def test_generation_runtime_env_vars_are_wired_from_bicep_outputs() -> None:
     assert "name: 'COSMOS_CONTAINER_NAME'" in container_apps_bicep
     assert "name: 'BLOB_ENDPOINT'" in container_apps_bicep
     assert "name: 'BLOB_CONTAINER_NAME'" in container_apps_bicep
+    assert "name: 'PROFILE_PHOTOS_CONTAINER_NAME'" in container_apps_bicep
+    assert "name: 'CONTENT_SAFETY_ENDPOINT'" in container_apps_bicep
+    assert "name: 'CONTENT_SAFETY_API_VERSION'" in container_apps_bicep
+    assert "name: 'CONTENT_SAFETY_MAX_HATE_SEVERITY'" in container_apps_bicep
+    assert "name: 'CONTENT_SAFETY_MAX_SELF_HARM_SEVERITY'" in container_apps_bicep
+    assert "name: 'CONTENT_SAFETY_MAX_SEXUAL_SEVERITY'" in container_apps_bicep
+    assert "name: 'CONTENT_SAFETY_MAX_VIOLENCE_SEVERITY'" in container_apps_bicep
     assert "name: 'MODERATION_SERVICE'" in container_apps_bicep
     assert "name: 'MODERATION_POLICY_NAME'" in container_apps_bicep
     assert "name: 'RATE_LIMIT_USER_REQUESTS'" in container_apps_bicep
@@ -106,11 +113,15 @@ def test_generation_runtime_env_vars_are_wired_from_bicep_outputs() -> None:
     assert "name: 'AUDIT_RETENTION_DAYS'" in container_apps_bicep
     assert "name: 'IMAGE_SIZE'" in container_apps_bicep
     assert "name: 'IMAGE_QUALITY'" in container_apps_bicep
+    assert "name: 'SAVED_PHOTO_MAX_COUNT'" in container_apps_bicep
+    assert "name: 'SAVED_PHOTO_MAX_BYTES'" in container_apps_bicep
+    assert "name: 'SAVED_PHOTO_THUMBNAIL_SIZE'" in container_apps_bicep
 
     assert (
         "foundryEndpoint: 'https://${aiFoundryAccountName}.cognitiveservices.azure.com/'"
         in main_bicep
     )
+    assert "contentSafetyEndpoint: resolvedContentSafetyEndpoint" in main_bicep
     assert "foundryTextDeployment: aiFoundryTextDeploymentName" in main_bicep
     assert "foundryImageDeployment: aiFoundryImageDeploymentName" in main_bicep
     assert "cosmosEndpoint: 'https://${cosmosAccountName}.documents.azure.com:443/'" in main_bicep
@@ -210,9 +221,13 @@ def test_deployer_blob_reader_at_account_scope_runtime_container_scoped() -> Non
     runtime_assignment = _bicep_block(
         storage_bicep, "resource storageBlobDataContributorRoleAssignment"
     )
+    profile_runtime_assignment = _bicep_block(
+        storage_bicep, "resource profilePhotosBlobDataContributorRoleAssignment"
+    )
 
     assert "deployerPrincipalId: deployerPrincipalId" in storage_module
     assert "deployerPrincipalType: deployerPrincipalType" in storage_module
+    assert "profilePhotosContainerName: profilePhotosContainerName" in storage_module
     assert (
         "var storageBlobDataReaderRoleDefinitionId = "
         "'2a2b9908-6ea1-4ae2-8e65-a410df84e7d1'" in storage_bicep
@@ -239,6 +254,15 @@ def test_deployer_blob_reader_at_account_scope_runtime_container_scoped() -> Non
     assert (
         "guid(cardAssetsContainer.id, containerAppPrincipalId, "
         "storageBlobDataContributorRoleDefinitionId)" in runtime_assignment
+    )
+    assert "principalId: containerAppPrincipalId" in profile_runtime_assignment
+    assert "principalType: 'ServicePrincipal'" in profile_runtime_assignment
+    assert "storageBlobDataContributorRoleDefinitionId" in profile_runtime_assignment
+    assert "scope: profilePhotosContainer" in profile_runtime_assignment
+    assert "scope: storageAccount" not in profile_runtime_assignment
+    assert (
+        "guid(profilePhotosContainer.id, containerAppPrincipalId, "
+        "storageBlobDataContributorRoleDefinitionId)" in profile_runtime_assignment
     )
 
 
@@ -321,6 +345,11 @@ def test_healthz_dependency_probe_rbac_and_timeouts_are_iac_managed() -> None:
     assert "value: string(healthzBlobTimeoutMs)" in container_apps_bicep
     assert '"value": "${HEALTHZ_COSMOS_TIMEOUT_MS=1500}"' in main_parameters
     assert '"value": "${HEALTHZ_BLOB_TIMEOUT_MS=1500}"' in main_parameters
+    assert '"value": "${CONTENT_SAFETY_ENDPOINT=}"' in main_parameters
+    assert '"value": "${CONTENT_SAFETY_API_VERSION=2024-09-01}"' in main_parameters
+    assert '"value": "${SAVED_PHOTO_MAX_COUNT=10}"' in main_parameters
+    assert '"value": "${SAVED_PHOTO_MAX_BYTES=4194304}"' in main_parameters
+    assert '"value": "${SAVED_PHOTO_THUMBNAIL_SIZE=200}"' in main_parameters
 
     # Healthz probe tuning stays non-secret: no secure params, secret refs,
     # account keys, or connection strings were introduced for these settings.
@@ -344,6 +373,8 @@ def test_healthz_dependency_probe_rbac_and_timeouts_are_iac_managed() -> None:
     assert "key vault scope" in readme.lower()
     assert "HEALTHZ_COSMOS_TIMEOUT_MS" in readme
     assert "HEALTHZ_BLOB_TIMEOUT_MS" in readme
+    assert "profile-photos" in readme
+    assert "CONTENT_SAFETY_ENDPOINT" in readme
     assert "readiness every 10s" in readme
     assert "liveness every 30s" in readme
 

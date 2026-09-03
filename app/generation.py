@@ -149,6 +149,7 @@ class CardGenerateBody(BaseModel):
     prompt: str = Field(min_length=12, max_length=400)
     idempotencyKey: str | None = Field(default=None, min_length=8, max_length=128)
     csrfToken: str | None = Field(default=None, min_length=8, max_length=256)
+    savedPhotoId: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 class ArtworkRetryBody(BaseModel):
@@ -1033,12 +1034,12 @@ class AzureCosmosCardRepository(AbstractCardRepository, AbstractAuditRepository)
 
 
 class AzureBlobAssetStore(AbstractAssetStore):
-    def __init__(self, settings: AppSettings) -> None:
+    def __init__(self, settings: AppSettings, *, container_name: str | None = None) -> None:
         from azure.storage.blob import ContentSettings
         from azure.storage.blob.aio import BlobServiceClient
 
         self._content_settings_class = ContentSettings
-        self._container_name = settings.blob_container_name or "card-assets"
+        self._container_name = container_name or settings.blob_container_name or "card-assets"
         self._service = BlobServiceClient(
             settings.blob_endpoint,
             credential=_default_azure_credential(),
@@ -1524,6 +1525,9 @@ class AppServices:
     csrf_protector: CsrfProtector
     cosmos_health_probe: HealthDependencyProbe | None = None
     blob_health_probe: HealthDependencyProbe | None = None
+    saved_photo_repository: Any | None = None
+    photo_asset_store: AbstractAssetStore | None = None
+    photo_moderation_service: Any | None = None
 
 
 class CardGenerationService:
@@ -2684,10 +2688,21 @@ class CardGenerationService:
 
 
 def create_services(settings: AppSettings) -> AppServices:
+    from app.photos import (
+        AzureCosmosSavedPhotoRepository,
+        ContentSafetyPhotoModerationService,
+        InMemorySavedPhotoRepository,
+    )
+
     if settings.persistence_mode == "azure":
         card_repository = AzureCosmosCardRepository(settings)
         audit_repository = card_repository
         asset_store = AzureBlobAssetStore(settings)
+        saved_photo_repository = AzureCosmosSavedPhotoRepository(settings)
+        photo_asset_store = AzureBlobAssetStore(
+            settings,
+            container_name=settings.profile_photos_container_name,
+        )
         cosmos_health_probe: HealthDependencyProbe | None = AzureCosmosHealthProbe(
             get_container_client=card_repository.get_health_container_client,
             endpoint=settings.cosmos_endpoint,
@@ -2705,6 +2720,8 @@ def create_services(settings: AppSettings) -> AppServices:
             audit_ttl_seconds=settings.audit_retention_days * 24 * 60 * 60
         )
         asset_store = InMemoryAssetStore()
+        saved_photo_repository = InMemorySavedPhotoRepository()
+        photo_asset_store = InMemoryAssetStore()
         cosmos_health_probe = NotApplicableHealthProbe("cosmos")
         blob_health_probe = NotApplicableHealthProbe("blob")
 
@@ -2722,6 +2739,9 @@ def create_services(settings: AppSettings) -> AppServices:
         csrf_protector=CsrfProtector(),
         cosmos_health_probe=cosmos_health_probe,
         blob_health_probe=blob_health_probe,
+        saved_photo_repository=saved_photo_repository,
+        photo_asset_store=photo_asset_store,
+        photo_moderation_service=ContentSafetyPhotoModerationService(settings),
     )
 
 
@@ -2759,8 +2779,11 @@ def deterministic_card_id(owner_id: str, idempotency_key: str) -> str:
 
 
 def build_blob_name(owner_id: str, card_id: str) -> str:
-    owner_hash = hashlib.sha256(owner_id.encode("utf-8")).hexdigest()[:16]
-    return f"cards/{owner_hash}/{card_id}.png"
+    return f"cards/{build_owner_hash(owner_id)}/{card_id}.png"
+
+
+def build_owner_hash(owner_id: str) -> str:
+    return hashlib.sha256(owner_id.encode("utf-8")).hexdigest()[:16]
 
 
 def digest_text(text: str) -> str:

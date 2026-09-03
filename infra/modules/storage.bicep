@@ -7,6 +7,9 @@ param storageAccountName string
 @description('Blob container used to store card assets.')
 param containerName string
 
+@description('Blob container used to store durable saved profile photos and thumbnails.')
+param profilePhotosContainerName string = 'profile-photos'
+
 @description('Managed identity principal ID for the Container App that needs Blob Storage data-plane access.')
 param containerAppPrincipalId string
 
@@ -69,6 +72,14 @@ resource blobService 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01'
 resource cardAssetsContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
   parent: blobService
   name: containerName
+  properties: {
+    publicAccess: 'None'
+  }
+}
+
+resource profilePhotosContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
+  parent: blobService
+  name: profilePhotosContainerName
   properties: {
     publicAccess: 'None'
   }
@@ -143,6 +154,16 @@ resource storageBlobDataContributorRoleAssignment 'Microsoft.Authorization/roleA
   }
 }
 
+resource profilePhotosBlobDataContributorRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: profilePhotosContainer
+  name: guid(profilePhotosContainer.id, containerAppPrincipalId, storageBlobDataContributorRoleDefinitionId)
+  properties: {
+    principalId: containerAppPrincipalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', storageBlobDataContributorRoleDefinitionId)
+  }
+}
+
 resource deployerStorageBlobDataReaderRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   scope: storageAccount
   name: guid(storageAccount.id, deployerPrincipalId, storageBlobDataReaderRoleDefinitionId)
@@ -157,4 +178,5 @@ output storageAccountName string = storageAccount.name
 output storageAccountResourceId string = storageAccount.id
 output storageBlobEndpoint string = storageAccount.properties.primaryEndpoints.blob
 output storageContainerName string = containerName
+output profilePhotosContainerName string = profilePhotosContainerName
 output storageBlobPrivateEndpointResourceId string = blobPrivateEndpoint.id

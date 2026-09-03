@@ -400,6 +400,127 @@ code {
   padding: var(--space-2);
 }
 
+.reference-photo-section {
+  display: grid;
+  gap: var(--space-4);
+  margin: 0 0 var(--space-4);
+  padding: 0;
+  border: 0;
+}
+
+.saved-photo-picker {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--color-border-subtle);
+  background: linear-gradient(180deg, rgba(41, 32, 54, 0.62), rgba(21, 17, 31, 0.95));
+}
+
+.saved-photo-picker__header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.saved-photo-picker__title {
+  font-size: var(--text-xl);
+  margin-bottom: var(--space-1);
+}
+
+.saved-photo-picker__manage-link,
+.saved-photo-picker__clear {
+  padding-inline: 1rem;
+}
+
+.saved-photo-picker__grid,
+.photo-library-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(12rem, 1fr));
+  gap: var(--space-4);
+}
+
+.saved-photo-option {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border-subtle);
+  background: rgba(12, 10, 19, 0.4);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color var(--motion-fast) var(--motion-ease),
+    transform var(--motion-fast) var(--motion-ease),
+    box-shadow var(--motion-fast) var(--motion-ease);
+}
+
+.saved-photo-option:hover,
+.saved-photo-option:focus-visible {
+  border-color: var(--color-border-strong);
+  transform: translateY(-1px);
+}
+
+.saved-photo-option.is-selected {
+  border-color: var(--color-accent);
+  box-shadow: var(--elevation-glow);
+}
+
+.saved-photo-option__image,
+.photo-library-card__media img {
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border-subtle);
+  background: var(--color-surface-1);
+}
+
+.saved-photo-option__body {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.saved-photo-option__label,
+.photo-library-card__body h2 {
+  font-size: var(--text-base);
+  font-weight: 700;
+  color: var(--color-parchment);
+}
+
+.saved-photo-option__meta,
+.photo-library-card__meta {
+  font-size: var(--text-xs);
+  color: var(--color-parchment-dim);
+  margin: 0;
+}
+
+.reference-photo-divider {
+  position: relative;
+  text-align: center;
+  color: var(--color-parchment-dim);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.reference-photo-divider::before {
+  content: "";
+  position: absolute;
+  inset: 50% 0 auto;
+  border-top: 1px solid var(--color-border-subtle);
+}
+
+.reference-photo-divider span {
+  position: relative;
+  display: inline-block;
+  padding: 0 var(--space-3);
+  background: var(--color-surface-1);
+}
+
 .photo-preview {
   display: grid;
   gap: var(--space-2);
@@ -437,6 +558,23 @@ code {
   border: 1px solid var(--color-border-subtle);
   object-fit: cover;
   background: var(--color-surface-1);
+}
+
+.checkbox-field {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.checkbox-field__label {
+  display: inline-flex;
+  align-items: start;
+  gap: var(--space-2);
+  color: var(--color-parchment);
+  font-weight: 700;
+}
+
+.checkbox-field__label input {
+  margin-top: 0.2rem;
 }
 
 .panel {
@@ -768,6 +906,35 @@ code {
   align-self: start;
 }
 
+.photo-library-card {
+  display: grid;
+  overflow: hidden;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-lg);
+  background: linear-gradient(180deg, rgba(41, 32, 54, 0.95), rgba(21, 17, 31, 0.98));
+  box-shadow: var(--elevation-2);
+}
+
+.photo-library-card__media {
+  padding: var(--space-4) var(--space-4) 0;
+}
+
+.photo-library-card__body {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-4);
+}
+
+.photo-library-card__body h2 {
+  margin: 0;
+}
+
+.photo-library-card__actions {
+  display: flex;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
 /* ------------------------------------------------------------------ */
 /* 10. Card face component + grid                                       */
 /* ------------------------------------------------------------------ */
@@ -1045,6 +1212,15 @@ code {
 
   .hero__actions {
     flex-direction: column;
+  }
+
+  .saved-photo-picker__header {
+    align-items: stretch;
+  }
+
+  .saved-photo-picker__manage-link,
+  .photo-library-card__actions .btn {
+    width: 100%;
   }
 }
 

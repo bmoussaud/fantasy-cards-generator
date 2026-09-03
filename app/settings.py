@@ -52,6 +52,13 @@ class AppSettings:
     cosmos_container_name: str | None
     blob_endpoint: str | None
     blob_container_name: str | None
+    profile_photos_container_name: str
+    content_safety_endpoint: str | None
+    content_safety_api_version: str
+    content_safety_max_hate_severity: int
+    content_safety_max_self_harm_severity: int
+    content_safety_max_sexual_severity: int
+    content_safety_max_violence_severity: int
     healthz_cosmos_timeout_ms: int
     healthz_blob_timeout_ms: int
     moderation_service: str
@@ -63,6 +70,9 @@ class AppSettings:
     audit_retention_days: int
     image_size: str
     image_quality: Literal["low", "medium", "high"]
+    saved_photo_max_count: int
+    saved_photo_max_bytes: int
+    saved_photo_thumbnail_size: int
 
 
 class SettingsError(RuntimeError):
@@ -117,6 +127,36 @@ def load_app_settings() -> AppSettings:
         cosmos_container_name=_optional_env("COSMOS_CONTAINER_NAME"),
         blob_endpoint=_optional_env("BLOB_ENDPOINT"),
         blob_container_name=_optional_env("BLOB_CONTAINER_NAME"),
+        profile_photos_container_name=_string_env(
+            "PROFILE_PHOTOS_CONTAINER_NAME",
+            default="profile-photos",
+        ),
+        content_safety_endpoint=_optional_env("CONTENT_SAFETY_ENDPOINT")
+        or _optional_env("FOUNDRY_ENDPOINT"),
+        content_safety_api_version=_string_env(
+            "CONTENT_SAFETY_API_VERSION",
+            default="2024-09-01",
+        ),
+        content_safety_max_hate_severity=_int_env(
+            "CONTENT_SAFETY_MAX_HATE_SEVERITY",
+            default=2,
+            minimum=0,
+        ),
+        content_safety_max_self_harm_severity=_int_env(
+            "CONTENT_SAFETY_MAX_SELF_HARM_SEVERITY",
+            default=2,
+            minimum=0,
+        ),
+        content_safety_max_sexual_severity=_int_env(
+            "CONTENT_SAFETY_MAX_SEXUAL_SEVERITY",
+            default=2,
+            minimum=0,
+        ),
+        content_safety_max_violence_severity=_int_env(
+            "CONTENT_SAFETY_MAX_VIOLENCE_SEVERITY",
+            default=2,
+            minimum=0,
+        ),
         healthz_cosmos_timeout_ms=_int_env("HEALTHZ_COSMOS_TIMEOUT_MS", default=1500, minimum=1),
         healthz_blob_timeout_ms=_int_env("HEALTHZ_BLOB_TIMEOUT_MS", default=1500, minimum=1),
         moderation_service=_string_env("MODERATION_SERVICE", default="heuristic"),
@@ -162,6 +202,17 @@ def load_app_settings() -> AppSettings:
         audit_retention_days=_int_env("AUDIT_RETENTION_DAYS", default=30, minimum=1),
         image_size=_string_env("IMAGE_SIZE", default="1024x1536"),
         image_quality=image_quality_raw,  # type: ignore[arg-type]
+        saved_photo_max_count=_int_env("SAVED_PHOTO_MAX_COUNT", default=10, minimum=1),
+        saved_photo_max_bytes=_int_env(
+            "SAVED_PHOTO_MAX_BYTES",
+            default=4 * 1024 * 1024,
+            minimum=1,
+        ),
+        saved_photo_thumbnail_size=_int_env(
+            "SAVED_PHOTO_THUMBNAIL_SIZE",
+            default=200,
+            minimum=50,
+        ),
     )
     _validate_app_settings(settings)
     return settings
@@ -206,6 +257,15 @@ def _validate_app_settings(settings: AppSettings) -> None:
 
     if settings.retry.overall_timeout_seconds <= settings.retry.text_timeout_seconds:
         raise SettingsError("OVERALL_TIMEOUT_SECONDS must be greater than TEXT_TIMEOUT_SECONDS.")
+
+    for name, value in (
+        ("CONTENT_SAFETY_MAX_HATE_SEVERITY", settings.content_safety_max_hate_severity),
+        ("CONTENT_SAFETY_MAX_SELF_HARM_SEVERITY", settings.content_safety_max_self_harm_severity),
+        ("CONTENT_SAFETY_MAX_SEXUAL_SEVERITY", settings.content_safety_max_sexual_severity),
+        ("CONTENT_SAFETY_MAX_VIOLENCE_SEVERITY", settings.content_safety_max_violence_severity),
+    ):
+        if value not in {0, 2, 4, 6}:
+            raise SettingsError(f"{name} must be one of: 0, 2, 4, 6.")
 
 
 def _optional_env(name: str) -> str | None:

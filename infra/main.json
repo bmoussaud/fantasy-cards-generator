@@ -6,7 +6,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.46.1.21595",
-      "templateHash": "13111438453316505279"
+      "templateHash": "6403546889161816476"
     }
   },
   "parameters": {
@@ -50,7 +50,7 @@
     },
     "deployEntraAppRegistration": {
       "type": "bool",
-      "defaultValue": false,
+      "defaultValue": true,
       "metadata": {
         "description": "Set to true to provision the Microsoft Entra ID app registration via the Graph Bicep extension."
       }
@@ -130,6 +130,29 @@
       "defaultValue": "card-assets",
       "metadata": {
         "description": "Blob container name for persisted card assets."
+      }
+    },
+    "profilePhotosContainerName": {
+      "type": "string",
+      "defaultValue": "profile-photos",
+      "metadata": {
+        "description": "Blob container name for durable saved profile photos and thumbnails."
+      }
+    },
+    "healthzCosmosTimeoutMs": {
+      "type": "int",
+      "defaultValue": 1500,
+      "minValue": 1,
+      "metadata": {
+        "description": "Bounded Cosmos metadata probe timeout for /healthz, in milliseconds."
+      }
+    },
+    "healthzBlobTimeoutMs": {
+      "type": "int",
+      "defaultValue": 1500,
+      "minValue": 1,
+      "metadata": {
+        "description": "Bounded Blob container-properties probe timeout for /healthz, in milliseconds."
       }
     },
     "aiFoundryProjectName": {
@@ -254,6 +277,96 @@
         "description": "Moderation policy name for the app runtime."
       }
     },
+    "contentSafetyEndpoint": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Azure AI Content Safety endpoint for saved-photo moderation. Defaults to the Azure AI Services account endpoint when empty."
+      }
+    },
+    "contentSafetyApiVersion": {
+      "type": "string",
+      "defaultValue": "2024-09-01",
+      "metadata": {
+        "description": "Azure AI Content Safety API version for saved-photo moderation."
+      }
+    },
+    "contentSafetyMaxHateSeverity": {
+      "type": "int",
+      "defaultValue": 2,
+      "allowedValues": [
+        0,
+        2,
+        4,
+        6
+      ],
+      "metadata": {
+        "description": "Maximum allowed Hate severity for saved-photo moderation before the save is rejected."
+      }
+    },
+    "contentSafetyMaxSelfHarmSeverity": {
+      "type": "int",
+      "defaultValue": 2,
+      "allowedValues": [
+        0,
+        2,
+        4,
+        6
+      ],
+      "metadata": {
+        "description": "Maximum allowed SelfHarm severity for saved-photo moderation before the save is rejected."
+      }
+    },
+    "contentSafetyMaxSexualSeverity": {
+      "type": "int",
+      "defaultValue": 2,
+      "allowedValues": [
+        0,
+        2,
+        4,
+        6
+      ],
+      "metadata": {
+        "description": "Maximum allowed Sexual severity for saved-photo moderation before the save is rejected."
+      }
+    },
+    "contentSafetyMaxViolenceSeverity": {
+      "type": "int",
+      "defaultValue": 2,
+      "allowedValues": [
+        0,
+        2,
+        4,
+        6
+      ],
+      "metadata": {
+        "description": "Maximum allowed Violence severity for saved-photo moderation before the save is rejected."
+      }
+    },
+    "savedPhotoMaxCount": {
+      "type": "int",
+      "defaultValue": 10,
+      "minValue": 1,
+      "metadata": {
+        "description": "Per-user saved-photo cap enforced by the backend."
+      }
+    },
+    "savedPhotoMaxBytes": {
+      "type": "int",
+      "defaultValue": 4194304,
+      "minValue": 1,
+      "metadata": {
+        "description": "Maximum saved-photo upload size in bytes for moderation-compatible persistence."
+      }
+    },
+    "savedPhotoThumbnailSize": {
+      "type": "int",
+      "defaultValue": 200,
+      "minValue": 50,
+      "metadata": {
+        "description": "Maximum width or height, in pixels, for generated saved-photo thumbnails."
+      }
+    },
     "rateLimitUserRequests": {
       "type": "int",
       "defaultValue": 6,
@@ -340,23 +453,132 @@
     },
     "imageSize": {
       "type": "string",
-      "defaultValue": "1024x1024",
+      "defaultValue": "1024x1536",
       "metadata": {
         "description": "Requested image size for artwork generation."
       }
+    },
+    "imageQuality": {
+      "type": "string",
+      "defaultValue": "medium",
+      "metadata": {
+        "description": "Requested image quality for artwork generation. Valid values are \"low\", \"medium\", and \"high\"."
+      }
+    },
+    "monitoringRetentionInDays": {
+      "type": "int",
+      "defaultValue": 30,
+      "minValue": 30,
+      "maxValue": 730,
+      "metadata": {
+        "description": "Per-environment Log Analytics retention in days."
+      }
+    },
+    "monitoringDailyQuotaGb": {
+      "type": "string",
+      "defaultValue": "0.25",
+      "metadata": {
+        "description": "Per-environment Log Analytics daily ingestion cap in GB, represented as a decimal string for ARM/Bicep compatibility."
+      }
+    },
+    "telemetrySamplingRatio": {
+      "type": "string",
+      "defaultValue": "1.0",
+      "metadata": {
+        "description": "Parent-consistent OpenTelemetry trace sampling ratio."
+      }
+    },
+    "monitoringAlertsEnabled": {
+      "type": "bool",
+      "defaultValue": false,
+      "metadata": {
+        "description": "Master alert switch. Disabled by default for the initial dashboard-only rollout."
+      }
+    },
+    "monitoringEmailReceivers": {
+      "type": "array",
+      "defaultValue": [],
+      "metadata": {
+        "description": "Action Group email receiver array. Empty by default."
+      }
+    },
+    "monitoringWebhookReceivers": {
+      "type": "array",
+      "defaultValue": [],
+      "metadata": {
+        "description": "Action Group webhook receiver array. Empty by default."
+      }
+    },
+    "monitoringAvailabilityLocations": {
+      "type": "array",
+      "defaultValue": [
+        "emea-nl-ams-azr",
+        "us-va-ash-azr"
+      ],
+      "metadata": {
+        "description": "Availability test locations."
+      }
+    },
+    "monitoringIngestionWarningPercent": {
+      "type": "int",
+      "defaultValue": 80,
+      "minValue": 1,
+      "maxValue": 100
+    },
+    "monitoringAvailabilityFailureThreshold": {
+      "type": "int",
+      "defaultValue": 2,
+      "minValue": 1
+    },
+    "monitoringRequestFailurePercentThreshold": {
+      "type": "int",
+      "defaultValue": 5,
+      "minValue": 1,
+      "maxValue": 100
+    },
+    "monitoringRequestTrafficFloor": {
+      "type": "int",
+      "defaultValue": 5,
+      "minValue": 1
+    },
+    "monitoringRequestP95LatencyMsThreshold": {
+      "type": "int",
+      "defaultValue": 10000,
+      "minValue": 1
+    },
+    "monitoringDependencyFailureThreshold": {
+      "type": "int",
+      "defaultValue": 5,
+      "minValue": 1
+    },
+    "monitoringExceptionThreshold": {
+      "type": "int",
+      "defaultValue": 5,
+      "minValue": 1
+    },
+    "monitoringGenerationAdverseOutcomeThreshold": {
+      "type": "int",
+      "defaultValue": 3,
+      "minValue": 1
+    },
+    "monitoringContainerRestartThreshold": {
+      "type": "int",
+      "defaultValue": 3,
+      "minValue": 1
     }
   },
   "variables": {
-    "namePrefix": "fcg",
+    "namePrefix": "fcag",
     "deployerPrincipalId": "[deployer().objectId]",
     "resourceToken": "[toLower(format('{0}-{1}', variables('namePrefix'), parameters('environmentName')))]",
+    "telemetryEnvironmentName": "[if(equals(parameters('environmentName'), 'prod'), 'production', 'development')]",
     "uniqueToken": "[uniqueString(subscription().id, resourceGroup().id)]",
     "logAnalyticsName": "[take(format('{0}-law', variables('resourceToken')), 63)]",
     "appInsightsName": "[take(format('{0}-appi', variables('resourceToken')), 63)]",
     "keyVaultBase": "[replace(format('kv{0}{1}{2}', variables('namePrefix'), parameters('environmentName'), variables('uniqueToken')), '-', '')]",
     "keyVaultName": "[toLower(take(variables('keyVaultBase'), 24))]",
-    "containerAppsEnvironmentName": "[take(format('{0}-cae-nat', variables('resourceToken')), 32)]",
-    "containerAppName": "[take(format('{0}-app-nat', variables('resourceToken')), 32)]",
+    "containerAppsEnvironmentName": "[take(format('{0}-cae', variables('resourceToken')), 32)]",
+    "containerAppName": "[take(format('{0}-app', variables('resourceToken')), 32)]",
     "cosmosAccountName": "[toLower(take(format('{0}-cosmos-{1}', variables('resourceToken'), variables('uniqueToken')), 44))]",
     "storageAccountBase": "[replace(format('st{0}{1}{2}', variables('namePrefix'), parameters('environmentName'), variables('uniqueToken')), '-', '')]",
     "storageAccountName": "[toLower(take(variables('storageAccountBase'), 24))]",
@@ -368,7 +590,8 @@
     "containerAppsSubnetName": "aca-infra",
     "privateEndpointSubnetName": "private-endpoints",
     "natGatewayName": "[take(format('{0}-nat', variables('resourceToken')), 64)]",
-    "natGatewayPublicIpName": "[take(format('{0}-nat-pip', variables('resourceToken')), 64)]"
+    "natGatewayPublicIpName": "[take(format('{0}-nat-pip', variables('resourceToken')), 64)]",
+    "resolvedContentSafetyEndpoint": "[if(empty(parameters('contentSafetyEndpoint')), format('https://{0}.cognitiveservices.azure.com/', variables('aiFoundryAccountName')), parameters('contentSafetyEndpoint'))]"
   },
   "resources": {
     "monitoring": {
@@ -390,6 +613,12 @@
           "appInsightsName": {
             "value": "[variables('appInsightsName')]"
           },
+          "dailyQuotaGb": {
+            "value": "[parameters('monitoringDailyQuotaGb')]"
+          },
+          "retentionInDays": {
+            "value": "[parameters('monitoringRetentionInDays')]"
+          },
           "tags": {
             "value": "[parameters('tags')]"
           }
@@ -402,7 +631,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.46.1.21595",
-              "templateHash": "1003028800320011666"
+              "templateHash": "371610117508571754"
             }
           },
           "parameters": {
@@ -424,6 +653,22 @@
                 "description": "Application Insights resource name."
               }
             },
+            "retentionInDays": {
+              "type": "int",
+              "defaultValue": 30,
+              "minValue": 30,
+              "maxValue": 730,
+              "metadata": {
+                "description": "Log Analytics retention in days."
+              }
+            },
+            "dailyQuotaGb": {
+              "type": "string",
+              "defaultValue": "0.25",
+              "metadata": {
+                "description": "Log Analytics daily ingestion cap in GB, represented as a decimal string for ARM/Bicep compatibility."
+              }
+            },
             "tags": {
               "type": "object",
               "defaultValue": {},
@@ -440,9 +685,12 @@
               "location": "[parameters('location')]",
               "tags": "[parameters('tags')]",
               "properties": {
-                "retentionInDays": 30,
+                "retentionInDays": "[parameters('retentionInDays')]",
                 "sku": {
                   "name": "PerGB2018"
+                },
+                "workspaceCapping": {
+                  "dailyQuotaGb": "[json(parameters('dailyQuotaGb'))]"
                 }
               }
             },
@@ -455,7 +703,9 @@
               "tags": "[parameters('tags')]",
               "properties": {
                 "Application_Type": "web",
-                "WorkspaceResourceId": "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsWorkspaceName'))]"
+                "WorkspaceResourceId": "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsWorkspaceName'))]",
+                "DisableIpMasking": false,
+                "IngestionMode": "LogAnalytics"
               },
               "dependsOn": [
                 "logAnalyticsWorkspace"
@@ -470,6 +720,14 @@
             "appInsightsName": {
               "type": "string",
               "value": "[parameters('appInsightsName')]"
+            },
+            "appInsightsResourceId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Insights/components', parameters('appInsightsName'))]"
+            },
+            "dailyQuotaGb": {
+              "type": "string",
+              "value": "[parameters('dailyQuotaGb')]"
             },
             "logAnalyticsWorkspaceCustomerId": {
               "type": "string",
@@ -630,6 +888,12 @@
           "appSessionSecretKeyValue": {
             "value": "[parameters('appSessionSecretKeyValue')]"
           },
+          "deployerPrincipalId": {
+            "value": "[variables('deployerPrincipalId')]"
+          },
+          "deployerPrincipalType": {
+            "value": "[parameters('deployerPrincipalType')]"
+          },
           "entraClientSecretValue": {
             "value": "[parameters('entraClientSecretValue')]"
           },
@@ -653,7 +917,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.46.1.21595",
-              "templateHash": "1887611723901076507"
+              "templateHash": "4030989371104425907"
             }
           },
           "parameters": {
@@ -673,6 +937,22 @@
               "type": "string",
               "metadata": {
                 "description": "Principal ID of the managed identity granted read access to Key Vault secrets (the Container App's ACR-pull identity)."
+              }
+            },
+            "deployerPrincipalId": {
+              "type": "string",
+              "metadata": {
+                "description": "Microsoft Entra object ID of the azd/ARM deployment caller that needs metadata-only browse access to Key Vault objects."
+              }
+            },
+            "deployerPrincipalType": {
+              "type": "string",
+              "allowedValues": [
+                "ServicePrincipal",
+                "User"
+              ],
+              "metadata": {
+                "description": "Microsoft Entra principal type for the azd/ARM deployment caller."
               }
             },
             "appSessionSecretKeyValue": {
@@ -699,6 +979,7 @@
           },
           "variables": {
             "keyVaultSecretsUserRoleDefinitionId": "4633458b-17de-408a-b874-0445c86b69e6",
+            "keyVaultReaderRoleDefinitionId": "21090545-7ca7-4776-b22c-e363652d74d2",
             "hasAppSessionSecretKeyValue": "[not(empty(parameters('appSessionSecretKeyValue')))]",
             "hasEntraClientSecretValue": "[not(empty(parameters('entraClientSecretValue')))]"
           },
@@ -733,6 +1014,20 @@
                 "principalId": "[parameters('keyVaultAccessPrincipalId')]",
                 "principalType": "ServicePrincipal",
                 "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('keyVaultSecretsUserRoleDefinitionId'))]"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]",
+              "name": "[guid(resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName')), parameters('deployerPrincipalId'), variables('keyVaultReaderRoleDefinitionId'))]",
+              "properties": {
+                "principalId": "[parameters('deployerPrincipalId')]",
+                "principalType": "[parameters('deployerPrincipalType')]",
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('keyVaultReaderRoleDefinitionId'))]"
               },
               "dependsOn": [
                 "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]"
@@ -1336,7 +1631,7 @@
           "containerAppsEnvironmentResourceId": {
             "value": "[reference('containerAppsEnvironment').outputs.containerAppsEnvironmentResourceId.value]"
           },
-          "containerImage": "[if(empty(parameters('containerImage')), createObject('value', format('{0}/fantasy-cards-generator:latest', reference('registry').outputs.registryLoginServer.value)), createObject('value', parameters('containerImage')))]",
+          "containerImage": "[if(empty(parameters('containerImage')), createObject('value', 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest'), createObject('value', parameters('containerImage')))]",
           "cosmosContainerName": {
             "value": "[parameters('cosmosContainerName')]"
           },
@@ -1346,12 +1641,33 @@
           "cosmosEndpoint": {
             "value": "[format('https://{0}.documents.azure.com:443/', variables('cosmosAccountName'))]"
           },
+          "deploymentEnvironment": {
+            "value": "[parameters('environmentName')]"
+          },
           "entraClientId": "[if(parameters('deployEntraAppRegistration'), createObject('value', reference('appRegistration').outputs.appId.value), createObject('value', ''))]",
           "entraClientSecretValue": {
             "value": "[parameters('entraClientSecretValue')]"
           },
           "entraPostLogoutRedirectUri": "[if(parameters('deployEntraAppRegistration'), createObject('value', format('{0}{1}', format('https://{0}.{1}', variables('containerAppName'), reference('containerAppsEnvironment').outputs.containerAppsEnvironmentDefaultDomain.value), parameters('entraPostLogoutRedirectPath'))), createObject('value', ''))]",
           "entraRedirectUri": "[if(parameters('deployEntraAppRegistration'), createObject('value', format('{0}{1}', format('https://{0}.{1}', variables('containerAppName'), reference('containerAppsEnvironment').outputs.containerAppsEnvironmentDefaultDomain.value), parameters('entraRedirectPath'))), createObject('value', ''))]",
+          "contentSafetyApiVersion": {
+            "value": "[parameters('contentSafetyApiVersion')]"
+          },
+          "contentSafetyEndpoint": {
+            "value": "[variables('resolvedContentSafetyEndpoint')]"
+          },
+          "contentSafetyMaxHateSeverity": {
+            "value": "[parameters('contentSafetyMaxHateSeverity')]"
+          },
+          "contentSafetyMaxSelfHarmSeverity": {
+            "value": "[parameters('contentSafetyMaxSelfHarmSeverity')]"
+          },
+          "contentSafetyMaxSexualSeverity": {
+            "value": "[parameters('contentSafetyMaxSexualSeverity')]"
+          },
+          "contentSafetyMaxViolenceSeverity": {
+            "value": "[parameters('contentSafetyMaxViolenceSeverity')]"
+          },
           "foundryApiVersion": {
             "value": "2025-03-01-preview"
           },
@@ -1364,6 +1680,12 @@
           "foundryTextDeployment": {
             "value": "[parameters('aiFoundryTextDeploymentName')]"
           },
+          "healthzBlobTimeoutMs": {
+            "value": "[parameters('healthzBlobTimeoutMs')]"
+          },
+          "healthzCosmosTimeoutMs": {
+            "value": "[parameters('healthzCosmosTimeoutMs')]"
+          },
           "imageMaxRetries": {
             "value": "[parameters('imageMaxRetries')]"
           },
@@ -1372,6 +1694,9 @@
           },
           "imageSize": {
             "value": "[parameters('imageSize')]"
+          },
+          "imageQuality": {
+            "value": "[parameters('imageQuality')]"
           },
           "keyVaultUri": {
             "value": "[reference('security').outputs.keyVaultUri.value]"
@@ -1391,6 +1716,9 @@
           "persistenceMode": {
             "value": "[parameters('persistenceMode')]"
           },
+          "profilePhotosContainerName": {
+            "value": "[parameters('profilePhotosContainerName')]"
+          },
           "rateLimitIpRequests": {
             "value": "[parameters('rateLimitIpRequests')]"
           },
@@ -1403,11 +1731,29 @@
           "rateLimitUserWindowSeconds": {
             "value": "[parameters('rateLimitUserWindowSeconds')]"
           },
+          "savedPhotoMaxBytes": {
+            "value": "[string(parameters('savedPhotoMaxBytes'))]"
+          },
+          "savedPhotoMaxCount": {
+            "value": "[parameters('savedPhotoMaxCount')]"
+          },
+          "savedPhotoThumbnailSize": {
+            "value": "[parameters('savedPhotoThumbnailSize')]"
+          },
           "serviceName": {
             "value": "[parameters('serviceName')]"
           },
           "tags": {
             "value": "[parameters('tags')]"
+          },
+          "telemetryEnvironmentName": {
+            "value": "[variables('telemetryEnvironmentName')]"
+          },
+          "telemetrySamplingRatio": {
+            "value": "[parameters('telemetrySamplingRatio')]"
+          },
+          "telemetryServiceName": {
+            "value": "fantasy-cards-generator"
           },
           "trustedProxyHops": {
             "value": "[parameters('trustedProxyHops')]"
@@ -1429,7 +1775,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.46.1.21595",
-              "templateHash": "12263727961492094094"
+              "templateHash": "16939217761326766987"
             }
           },
           "parameters": {
@@ -1474,6 +1820,40 @@
               "defaultValue": "web-nat",
               "metadata": {
                 "description": "Service name as defined in azure.yaml."
+              }
+            },
+            "telemetryServiceName": {
+              "type": "string",
+              "defaultValue": "fantasy-cards-generator",
+              "metadata": {
+                "description": "Stable OpenTelemetry service name and Application Insights cloud role."
+              }
+            },
+            "deploymentEnvironment": {
+              "type": "string",
+              "allowedValues": [
+                "dev",
+                "prod"
+              ],
+              "metadata": {
+                "description": "Stable deployment environment dimension."
+              }
+            },
+            "telemetryEnvironmentName": {
+              "type": "string",
+              "allowedValues": [
+                "development",
+                "production"
+              ],
+              "metadata": {
+                "description": "Normalized OpenTelemetry environment dimension."
+              }
+            },
+            "telemetrySamplingRatio": {
+              "type": "string",
+              "defaultValue": "1.0",
+              "metadata": {
+                "description": "Parent-consistent trace sampling ratio passed to OpenTelemetry."
               }
             },
             "appInsightsConnectionString": {
@@ -1600,6 +1980,95 @@
                 "description": "Blob container name injected as BLOB_CONTAINER_NAME."
               }
             },
+            "profilePhotosContainerName": {
+              "type": "string",
+              "defaultValue": "profile-photos",
+              "metadata": {
+                "description": "Blob container name injected as PROFILE_PHOTOS_CONTAINER_NAME."
+              }
+            },
+            "contentSafetyEndpoint": {
+              "type": "string",
+              "defaultValue": "",
+              "metadata": {
+                "description": "Azure AI Content Safety endpoint injected as CONTENT_SAFETY_ENDPOINT."
+              }
+            },
+            "contentSafetyApiVersion": {
+              "type": "string",
+              "defaultValue": "2024-09-01",
+              "metadata": {
+                "description": "Azure AI Content Safety API version injected as CONTENT_SAFETY_API_VERSION."
+              }
+            },
+            "contentSafetyMaxHateSeverity": {
+              "type": "int",
+              "defaultValue": 2,
+              "allowedValues": [
+                0,
+                2,
+                4,
+                6
+              ],
+              "metadata": {
+                "description": "Maximum allowed Hate severity injected as CONTENT_SAFETY_MAX_HATE_SEVERITY."
+              }
+            },
+            "contentSafetyMaxSelfHarmSeverity": {
+              "type": "int",
+              "defaultValue": 2,
+              "allowedValues": [
+                0,
+                2,
+                4,
+                6
+              ],
+              "metadata": {
+                "description": "Maximum allowed SelfHarm severity injected as CONTENT_SAFETY_MAX_SELF_HARM_SEVERITY."
+              }
+            },
+            "contentSafetyMaxSexualSeverity": {
+              "type": "int",
+              "defaultValue": 2,
+              "allowedValues": [
+                0,
+                2,
+                4,
+                6
+              ],
+              "metadata": {
+                "description": "Maximum allowed Sexual severity injected as CONTENT_SAFETY_MAX_SEXUAL_SEVERITY."
+              }
+            },
+            "contentSafetyMaxViolenceSeverity": {
+              "type": "int",
+              "defaultValue": 2,
+              "allowedValues": [
+                0,
+                2,
+                4,
+                6
+              ],
+              "metadata": {
+                "description": "Maximum allowed Violence severity injected as CONTENT_SAFETY_MAX_VIOLENCE_SEVERITY."
+              }
+            },
+            "healthzCosmosTimeoutMs": {
+              "type": "int",
+              "defaultValue": 1500,
+              "minValue": 1,
+              "metadata": {
+                "description": "Cosmos metadata probe timeout injected as HEALTHZ_COSMOS_TIMEOUT_MS."
+              }
+            },
+            "healthzBlobTimeoutMs": {
+              "type": "int",
+              "defaultValue": 1500,
+              "minValue": 1,
+              "metadata": {
+                "description": "Blob container-properties probe timeout injected as HEALTHZ_BLOB_TIMEOUT_MS."
+              }
+            },
             "moderationService": {
               "type": "string",
               "defaultValue": "heuristic",
@@ -1700,9 +2169,37 @@
             },
             "imageSize": {
               "type": "string",
-              "defaultValue": "1024x1024",
+              "defaultValue": "1024x1536",
               "metadata": {
                 "description": "Requested image size injected as IMAGE_SIZE."
+              }
+            },
+            "imageQuality": {
+              "type": "string",
+              "defaultValue": "low",
+              "metadata": {
+                "description": "Image generation quality level injected as IMAGE_QUALITY (low, medium, high)."
+              }
+            },
+            "savedPhotoMaxCount": {
+              "type": "int",
+              "defaultValue": 10,
+              "metadata": {
+                "description": "Per-user saved-photo cap injected as SAVED_PHOTO_MAX_COUNT."
+              }
+            },
+            "savedPhotoMaxBytes": {
+              "type": "string",
+              "defaultValue": "4194304",
+              "metadata": {
+                "description": "Saved-photo upload max bytes injected as SAVED_PHOTO_MAX_BYTES."
+              }
+            },
+            "savedPhotoThumbnailSize": {
+              "type": "int",
+              "defaultValue": 200,
+              "metadata": {
+                "description": "Saved-photo thumbnail size injected as SAVED_PHOTO_THUMBNAIL_SIZE."
               }
             },
             "tags": {
@@ -1715,7 +2212,7 @@
           },
           "variables": {
             "containerAppSecrets": "[concat(createArray(createObject('name', 'applicationinsights-connection-string', 'value', parameters('appInsightsConnectionString'))), if(not(empty(parameters('appSessionSecretKeyValue'))), createArray(createObject('name', 'app-session-secret-key', 'value', parameters('appSessionSecretKeyValue'))), createArray()), if(not(empty(parameters('entraClientSecretValue'))), createArray(createObject('name', 'entra-client-secret', 'value', parameters('entraClientSecretValue'))), createArray()))]",
-            "containerAppEnv": "[concat(createArray(createObject('name', 'APPLICATIONINSIGHTS_CONNECTION_STRING', 'secretRef', 'applicationinsights-connection-string'), createObject('name', 'AI_MODE', 'value', parameters('aiMode')), createObject('name', 'PERSISTENCE_MODE', 'value', parameters('persistenceMode')), createObject('name', 'FOUNDRY_ENDPOINT', 'value', parameters('foundryEndpoint')), createObject('name', 'FOUNDRY_API_VERSION', 'value', parameters('foundryApiVersion')), createObject('name', 'FOUNDRY_TEXT_DEPLOYMENT', 'value', parameters('foundryTextDeployment')), createObject('name', 'FOUNDRY_IMAGE_DEPLOYMENT', 'value', parameters('foundryImageDeployment')), createObject('name', 'COSMOS_ENDPOINT', 'value', parameters('cosmosEndpoint')), createObject('name', 'COSMOS_DATABASE_NAME', 'value', parameters('cosmosDatabaseName')), createObject('name', 'COSMOS_CONTAINER_NAME', 'value', parameters('cosmosContainerName')), createObject('name', 'BLOB_ENDPOINT', 'value', parameters('blobEndpoint')), createObject('name', 'BLOB_CONTAINER_NAME', 'value', parameters('blobContainerName')), createObject('name', 'MODERATION_SERVICE', 'value', parameters('moderationService')), createObject('name', 'MODERATION_POLICY_NAME', 'value', parameters('moderationPolicyName')), createObject('name', 'RATE_LIMIT_USER_REQUESTS', 'value', string(parameters('rateLimitUserRequests'))), createObject('name', 'RATE_LIMIT_USER_WINDOW_SECONDS', 'value', string(parameters('rateLimitUserWindowSeconds'))), createObject('name', 'RATE_LIMIT_IP_REQUESTS', 'value', string(parameters('rateLimitIpRequests'))), createObject('name', 'RATE_LIMIT_IP_WINDOW_SECONDS', 'value', string(parameters('rateLimitIpWindowSeconds'))), createObject('name', 'TRUSTED_PROXY_HOPS', 'value', string(parameters('trustedProxyHops'))), createObject('name', 'UPSTREAM_MAX_RETRIES', 'value', string(parameters('upstreamMaxRetries'))), createObject('name', 'IMAGE_MAX_RETRIES', 'value', string(parameters('imageMaxRetries'))), createObject('name', 'UPSTREAM_BASE_BACKOFF_SECONDS', 'value', parameters('upstreamBaseBackoffSeconds')), createObject('name', 'TEXT_TIMEOUT_SECONDS', 'value', parameters('textTimeoutSeconds')), createObject('name', 'IMAGE_TIMEOUT_SECONDS', 'value', parameters('imageTimeoutSeconds')), createObject('name', 'OVERALL_TIMEOUT_SECONDS', 'value', parameters('overallTimeoutSeconds')), createObject('name', 'AUDIT_RETENTION_DAYS', 'value', string(parameters('auditRetentionDays'))), createObject('name', 'IMAGE_SIZE', 'value', parameters('imageSize')), createObject('name', 'KEY_VAULT_URI', 'value', parameters('keyVaultUri'))), if(not(empty(parameters('appSessionSecretKeyValue'))), createArray(createObject('name', 'APP_SESSION_SECRET_KEY', 'secretRef', 'app-session-secret-key')), createArray()), if(not(empty(parameters('entraClientId'))), createArray(createObject('name', 'ENTRA_CLIENT_ID', 'value', parameters('entraClientId'))), createArray()), if(not(empty(parameters('entraClientSecretValue'))), createArray(createObject('name', 'ENTRA_CLIENT_SECRET', 'secretRef', 'entra-client-secret')), createArray()), if(not(empty(parameters('entraRedirectUri'))), createArray(createObject('name', 'ENTRA_REDIRECT_URI', 'value', parameters('entraRedirectUri'))), createArray()), if(not(empty(parameters('entraPostLogoutRedirectUri'))), createArray(createObject('name', 'ENTRA_POST_LOGOUT_REDIRECT_URI', 'value', parameters('entraPostLogoutRedirectUri'))), createArray()))]"
+            "containerAppEnv": "[concat(createArray(createObject('name', 'APPLICATIONINSIGHTS_CONNECTION_STRING', 'secretRef', 'applicationinsights-connection-string'), createObject('name', 'TELEMETRY_ENABLED', 'value', 'true'), createObject('name', 'APP_ENV', 'value', parameters('deploymentEnvironment')), createObject('name', 'TELEMETRY_SAMPLING_RATIO', 'value', parameters('telemetrySamplingRatio')), createObject('name', 'OTEL_SERVICE_NAME', 'value', parameters('telemetryServiceName')), createObject('name', 'OTEL_RESOURCE_ATTRIBUTES', 'value', format('deployment.environment.name={0},cloud.platform=azure_container_apps', parameters('telemetryEnvironmentName'))), createObject('name', 'OTEL_TRACES_SAMPLER', 'value', 'parentbased_trace_id_ratio'), createObject('name', 'OTEL_TRACES_SAMPLER_ARG', 'value', parameters('telemetrySamplingRatio')), createObject('name', 'AI_MODE', 'value', parameters('aiMode')), createObject('name', 'PERSISTENCE_MODE', 'value', parameters('persistenceMode')), createObject('name', 'FOUNDRY_ENDPOINT', 'value', parameters('foundryEndpoint')), createObject('name', 'FOUNDRY_API_VERSION', 'value', parameters('foundryApiVersion')), createObject('name', 'FOUNDRY_TEXT_DEPLOYMENT', 'value', parameters('foundryTextDeployment')), createObject('name', 'FOUNDRY_IMAGE_DEPLOYMENT', 'value', parameters('foundryImageDeployment')), createObject('name', 'COSMOS_ENDPOINT', 'value', parameters('cosmosEndpoint')), createObject('name', 'COSMOS_DATABASE_NAME', 'value', parameters('cosmosDatabaseName')), createObject('name', 'COSMOS_CONTAINER_NAME', 'value', parameters('cosmosContainerName')), createObject('name', 'BLOB_ENDPOINT', 'value', parameters('blobEndpoint')), createObject('name', 'BLOB_CONTAINER_NAME', 'value', parameters('blobContainerName')), createObject('name', 'PROFILE_PHOTOS_CONTAINER_NAME', 'value', parameters('profilePhotosContainerName')), createObject('name', 'CONTENT_SAFETY_ENDPOINT', 'value', parameters('contentSafetyEndpoint')), createObject('name', 'CONTENT_SAFETY_API_VERSION', 'value', parameters('contentSafetyApiVersion')), createObject('name', 'CONTENT_SAFETY_MAX_HATE_SEVERITY', 'value', string(parameters('contentSafetyMaxHateSeverity'))), createObject('name', 'CONTENT_SAFETY_MAX_SELF_HARM_SEVERITY', 'value', string(parameters('contentSafetyMaxSelfHarmSeverity'))), createObject('name', 'CONTENT_SAFETY_MAX_SEXUAL_SEVERITY', 'value', string(parameters('contentSafetyMaxSexualSeverity'))), createObject('name', 'CONTENT_SAFETY_MAX_VIOLENCE_SEVERITY', 'value', string(parameters('contentSafetyMaxViolenceSeverity'))), createObject('name', 'HEALTHZ_COSMOS_TIMEOUT_MS', 'value', string(parameters('healthzCosmosTimeoutMs'))), createObject('name', 'HEALTHZ_BLOB_TIMEOUT_MS', 'value', string(parameters('healthzBlobTimeoutMs'))), createObject('name', 'MODERATION_SERVICE', 'value', parameters('moderationService')), createObject('name', 'MODERATION_POLICY_NAME', 'value', parameters('moderationPolicyName')), createObject('name', 'RATE_LIMIT_USER_REQUESTS', 'value', string(parameters('rateLimitUserRequests'))), createObject('name', 'RATE_LIMIT_USER_WINDOW_SECONDS', 'value', string(parameters('rateLimitUserWindowSeconds'))), createObject('name', 'RATE_LIMIT_IP_REQUESTS', 'value', string(parameters('rateLimitIpRequests'))), createObject('name', 'RATE_LIMIT_IP_WINDOW_SECONDS', 'value', string(parameters('rateLimitIpWindowSeconds'))), createObject('name', 'TRUSTED_PROXY_HOPS', 'value', string(parameters('trustedProxyHops'))), createObject('name', 'UPSTREAM_MAX_RETRIES', 'value', string(parameters('upstreamMaxRetries'))), createObject('name', 'IMAGE_MAX_RETRIES', 'value', string(parameters('imageMaxRetries'))), createObject('name', 'UPSTREAM_BASE_BACKOFF_SECONDS', 'value', parameters('upstreamBaseBackoffSeconds')), createObject('name', 'TEXT_TIMEOUT_SECONDS', 'value', parameters('textTimeoutSeconds')), createObject('name', 'IMAGE_TIMEOUT_SECONDS', 'value', parameters('imageTimeoutSeconds')), createObject('name', 'OVERALL_TIMEOUT_SECONDS', 'value', parameters('overallTimeoutSeconds')), createObject('name', 'AUDIT_RETENTION_DAYS', 'value', string(parameters('auditRetentionDays'))), createObject('name', 'IMAGE_SIZE', 'value', parameters('imageSize')), createObject('name', 'IMAGE_QUALITY', 'value', parameters('imageQuality')), createObject('name', 'SAVED_PHOTO_MAX_COUNT', 'value', string(parameters('savedPhotoMaxCount'))), createObject('name', 'SAVED_PHOTO_MAX_BYTES', 'value', parameters('savedPhotoMaxBytes')), createObject('name', 'SAVED_PHOTO_THUMBNAIL_SIZE', 'value', string(parameters('savedPhotoThumbnailSize'))), createObject('name', 'KEY_VAULT_URI', 'value', parameters('keyVaultUri'))), if(not(empty(parameters('appSessionSecretKeyValue'))), createArray(createObject('name', 'APP_SESSION_SECRET_KEY', 'secretRef', 'app-session-secret-key')), createArray()), if(not(empty(parameters('entraClientId'))), createArray(createObject('name', 'ENTRA_CLIENT_ID', 'value', parameters('entraClientId'))), createArray()), if(not(empty(parameters('entraClientSecretValue'))), createArray(createObject('name', 'ENTRA_CLIENT_SECRET', 'secretRef', 'entra-client-secret')), createArray()), if(not(empty(parameters('entraRedirectUri'))), createArray(createObject('name', 'ENTRA_REDIRECT_URI', 'value', parameters('entraRedirectUri'))), createArray()), if(not(empty(parameters('entraPostLogoutRedirectUri'))), createArray(createObject('name', 'ENTRA_POST_LOGOUT_REDIRECT_URI', 'value', parameters('entraPostLogoutRedirectUri'))), createArray()))]"
           },
           "resources": [
             {
@@ -1757,7 +2254,48 @@
                         "cpu": "[json('0.5')]",
                         "memory": "1Gi"
                       },
-                      "env": "[variables('containerAppEnv')]"
+                      "env": "[variables('containerAppEnv')]",
+                      "probes": [
+                        {
+                          "type": "Startup",
+                          "httpGet": {
+                            "path": "/healthz",
+                            "port": 8000,
+                            "scheme": "HTTP"
+                          },
+                          "initialDelaySeconds": 0,
+                          "periodSeconds": 5,
+                          "timeoutSeconds": 3,
+                          "failureThreshold": 30,
+                          "successThreshold": 1
+                        },
+                        {
+                          "type": "Liveness",
+                          "httpGet": {
+                            "path": "/healthz",
+                            "port": 8000,
+                            "scheme": "HTTP"
+                          },
+                          "initialDelaySeconds": 10,
+                          "periodSeconds": 30,
+                          "timeoutSeconds": 3,
+                          "failureThreshold": 3,
+                          "successThreshold": 1
+                        },
+                        {
+                          "type": "Readiness",
+                          "httpGet": {
+                            "path": "/healthz",
+                            "port": 8000,
+                            "scheme": "HTTP"
+                          },
+                          "initialDelaySeconds": 5,
+                          "periodSeconds": 10,
+                          "timeoutSeconds": 3,
+                          "failureThreshold": 3,
+                          "successThreshold": 1
+                        }
+                      ]
                     }
                   ],
                   "scale": {
@@ -1799,6 +2337,586 @@
         "monitoring",
         "registry",
         "security"
+      ]
+    },
+    "operationalMonitoring": {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "operational-monitoring",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "actionGroupEmailReceivers": {
+            "value": "[parameters('monitoringEmailReceivers')]"
+          },
+          "actionGroupWebhookReceivers": {
+            "value": "[parameters('monitoringWebhookReceivers')]"
+          },
+          "appInsightsResourceId": {
+            "value": "[reference('monitoring').outputs.appInsightsResourceId.value]"
+          },
+          "availabilityFailureThreshold": {
+            "value": "[parameters('monitoringAvailabilityFailureThreshold')]"
+          },
+          "availabilityTestLocations": {
+            "value": "[parameters('monitoringAvailabilityLocations')]"
+          },
+          "containerAppName": {
+            "value": "[reference('containerApps').outputs.containerAppName.value]"
+          },
+          "containerAppUrl": {
+            "value": "[reference('containerApps').outputs.containerAppUrl.value]"
+          },
+          "containerRestartThreshold": {
+            "value": "[parameters('monitoringContainerRestartThreshold')]"
+          },
+          "dailyQuotaGb": {
+            "value": "[parameters('monitoringDailyQuotaGb')]"
+          },
+          "dependencyFailureThreshold": {
+            "value": "[parameters('monitoringDependencyFailureThreshold')]"
+          },
+          "enableAlerts": {
+            "value": "[parameters('monitoringAlertsEnabled')]"
+          },
+          "environmentName": {
+            "value": "[parameters('environmentName')]"
+          },
+          "exceptionThreshold": {
+            "value": "[parameters('monitoringExceptionThreshold')]"
+          },
+          "generationAdverseOutcomeThreshold": {
+            "value": "[parameters('monitoringGenerationAdverseOutcomeThreshold')]"
+          },
+          "ingestionWarningPercent": {
+            "value": "[parameters('monitoringIngestionWarningPercent')]"
+          },
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "logAnalyticsWorkspaceResourceId": {
+            "value": "[reference('monitoring').outputs.logAnalyticsWorkspaceResourceId.value]"
+          },
+          "requestFailurePercentThreshold": {
+            "value": "[parameters('monitoringRequestFailurePercentThreshold')]"
+          },
+          "requestP95LatencyMsThreshold": {
+            "value": "[parameters('monitoringRequestP95LatencyMsThreshold')]"
+          },
+          "requestTrafficFloor": {
+            "value": "[parameters('monitoringRequestTrafficFloor')]"
+          },
+          "serviceName": {
+            "value": "fantasy-cards-generator"
+          },
+          "tags": {
+            "value": "[parameters('tags')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.46.1.21595",
+              "templateHash": "2810852726231496297"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "Deployment location for operational monitoring resources."
+              }
+            },
+            "environmentName": {
+              "type": "string",
+              "allowedValues": [
+                "dev",
+                "prod"
+              ],
+              "metadata": {
+                "description": "Environment isolated by this monitoring stack."
+              }
+            },
+            "serviceName": {
+              "type": "string",
+              "metadata": {
+                "description": "Stable OpenTelemetry service name."
+              }
+            },
+            "containerAppName": {
+              "type": "string",
+              "metadata": {
+                "description": "Container App name used to filter platform logs."
+              }
+            },
+            "containerAppUrl": {
+              "type": "string",
+              "metadata": {
+                "description": "Public Container App URL without a trailing slash."
+              }
+            },
+            "appInsightsResourceId": {
+              "type": "string",
+              "metadata": {
+                "description": "Existing workspace-based Application Insights resource ID."
+              }
+            },
+            "logAnalyticsWorkspaceResourceId": {
+              "type": "string",
+              "metadata": {
+                "description": "Existing Log Analytics workspace resource ID."
+              }
+            },
+            "dailyQuotaGb": {
+              "type": "string",
+              "defaultValue": "0.25",
+              "metadata": {
+                "description": "Configured workspace ingestion cap in GB/day."
+              }
+            },
+            "ingestionWarningPercent": {
+              "type": "int",
+              "defaultValue": 80,
+              "minValue": 1,
+              "maxValue": 100,
+              "metadata": {
+                "description": "Ingestion percentage that triggers the cap-risk alert."
+              }
+            },
+            "enableAlerts": {
+              "type": "bool",
+              "defaultValue": false,
+              "metadata": {
+                "description": "Master alert switch. Disabled by default; rules also require at least one configured receiver."
+              }
+            },
+            "actionGroupEmailReceivers": {
+              "type": "array",
+              "defaultValue": [],
+              "metadata": {
+                "description": "Action Group email receivers. Each item uses name, emailAddress, and useCommonAlertSchema."
+              }
+            },
+            "actionGroupWebhookReceivers": {
+              "type": "array",
+              "defaultValue": [],
+              "metadata": {
+                "description": "Action Group webhook receivers. Each item uses name, serviceUri, and useCommonAlertSchema. Do not embed credentials in serviceUri."
+              }
+            },
+            "availabilityTestLocations": {
+              "type": "array",
+              "defaultValue": [
+                "emea-nl-ams-azr",
+                "us-va-ash-azr"
+              ],
+              "metadata": {
+                "description": "Azure availability-test location IDs."
+              }
+            },
+            "availabilityFailureThreshold": {
+              "type": "int",
+              "defaultValue": 2,
+              "minValue": 1
+            },
+            "requestFailurePercentThreshold": {
+              "type": "int",
+              "defaultValue": 5,
+              "minValue": 1,
+              "maxValue": 100
+            },
+            "requestTrafficFloor": {
+              "type": "int",
+              "defaultValue": 5,
+              "minValue": 1
+            },
+            "requestP95LatencyMsThreshold": {
+              "type": "int",
+              "defaultValue": 10000,
+              "minValue": 1
+            },
+            "dependencyFailureThreshold": {
+              "type": "int",
+              "defaultValue": 5,
+              "minValue": 1
+            },
+            "exceptionThreshold": {
+              "type": "int",
+              "defaultValue": 5,
+              "minValue": 1
+            },
+            "generationAdverseOutcomeThreshold": {
+              "type": "int",
+              "defaultValue": 3,
+              "minValue": 1
+            },
+            "containerRestartThreshold": {
+              "type": "int",
+              "defaultValue": 3,
+              "minValue": 1
+            },
+            "tags": {
+              "type": "object",
+              "defaultValue": {},
+              "metadata": {
+                "description": "Optional tags shared by operational monitoring resources."
+              }
+            }
+          },
+          "variables": {
+            "resourceToken": "[format('fcg-{0}', parameters('environmentName'))]",
+            "availabilityTestName": "[take(format('{0}-healthz', variables('resourceToken')), 64)]",
+            "hasAlertRouting": "[or(greater(length(parameters('actionGroupEmailReceivers')), 0), greater(length(parameters('actionGroupWebhookReceivers')), 0))]",
+            "alertsEnabled": "[and(parameters('enableAlerts'), variables('hasAlertRouting'))]",
+            "appInsightsHiddenLinkTag": "[format('hidden-link:{0}', parameters('appInsightsResourceId'))]",
+            "workbookData": {
+              "version": "Notebook/1.0",
+              "items": [
+                {
+                  "type": 1,
+                  "content": {
+                    "json": "[format('# Fantasy Cards Generator — {0} operations\nEnvironment-isolated workbook. No prompts, generated content, identity, or raw client network data are queried.', toUpper(parameters('environmentName')))]"
+                  },
+                  "name": "overview"
+                },
+                {
+                  "type": 9,
+                  "content": {
+                    "version": "KqlParameterItem/1.0",
+                    "parameters": [
+                      {
+                        "id": "[guid('workbook-service', parameters('environmentName'))]",
+                        "version": "KqlParameterItem/1.0",
+                        "name": "Service",
+                        "type": 1,
+                        "isRequired": true,
+                        "value": "[parameters('serviceName')]"
+                      },
+                      {
+                        "id": "[guid('workbook-revision', parameters('environmentName'))]",
+                        "version": "KqlParameterItem/1.0",
+                        "name": "Revision",
+                        "type": 1,
+                        "isRequired": true,
+                        "value": "*"
+                      }
+                    ],
+                    "style": "pills",
+                    "queryType": 0,
+                    "resourceType": "microsoft.operationalinsights/workspaces"
+                  },
+                  "name": "filters"
+                },
+                {
+                  "type": 3,
+                  "content": {
+                    "version": "KqlItem/1.0",
+                    "title": "Requests: volume, failures, and latency percentiles",
+                    "query": "AppRequests\n| where AppRoleName == '{Service}'\n| summarize Requests=count(), Failures=countif(Success == false), p50=percentile(DurationMs, 50), p95=percentile(DurationMs, 95), p99=percentile(DurationMs, 99) by bin(TimeGenerated, 1h)\n| order by TimeGenerated asc\n",
+                    "size": 0,
+                    "queryType": 0,
+                    "resourceType": "microsoft.operationalinsights/workspaces",
+                    "visualization": "timechart"
+                  },
+                  "name": "requests"
+                },
+                {
+                  "type": 3,
+                  "content": {
+                    "version": "KqlItem/1.0",
+                    "title": "Dependencies: success and latency",
+                    "query": "AppDependencies\n| where AppRoleName == '{Service}'\n| summarize Calls=count(), Failures=countif(Success == false), Throttles=countif(ResultCode == \"429\"), p50=percentile(DurationMs, 50), p95=percentile(DurationMs, 95), p99=percentile(DurationMs, 99) by DependencyType, bin(TimeGenerated, 1h)\n| order by TimeGenerated desc\n",
+                    "size": 0,
+                    "queryType": 0,
+                    "resourceType": "microsoft.operationalinsights/workspaces"
+                  },
+                  "name": "dependencies"
+                },
+                {
+                  "type": 3,
+                  "content": {
+                    "version": "KqlItem/1.0",
+                    "title": "Exceptions and bounded application errors",
+                    "query": "union isfuzzy=true\n  (AppExceptions | where AppRoleName == '{Service}' | project TimeGenerated, Signal=\"exception\", Type=ExceptionType, Severity=SeverityLevel),\n  (AppTraces | where AppRoleName == '{Service}' and SeverityLevel >= 3 | project TimeGenerated, Signal=\"trace\", Type=tostring(Properties[\"fcg.error_code\"]), Severity=SeverityLevel)\n| order by TimeGenerated desc\n| take 100\n",
+                    "size": 0,
+                    "queryType": 0,
+                    "resourceType": "microsoft.operationalinsights/workspaces"
+                  },
+                  "name": "errors"
+                },
+                {
+                  "type": 3,
+                  "content": {
+                    "version": "KqlItem/1.0",
+                    "title": "Generation, moderation, retries, persistence, and token aggregates",
+                    "query": "AppMetrics\n| where AppRoleName == '{Service}'\n| where Name startswith \"fcg.\"\n| extend Dimension = case(\n    Name in (\"fcg.generation.requests\", \"fcg.generation.duration\", \"fcg.artwork.retries\"), strcat(\"outcome=\", tostring(Properties[\"fcg.outcome\"])),\n    Name == \"fcg.generation.partial_results\", strcat(\"partial=\", tostring(Properties[\"fcg.partial_reason\"])),\n    Name in (\"fcg.dependency.attempts\", \"fcg.dependency.duration\"), strcat(\"dependency=\", tostring(Properties[\"fcg.dependency\"]), \";attempt=\", tostring(Properties[\"fcg.attempt\"]), \";outcome=\", tostring(Properties[\"fcg.outcome\"])),\n    Name in (\"fcg.dependency.throttles\", \"fcg.dependency.timeouts\"), strcat(\"dependency=\", tostring(Properties[\"fcg.dependency\"])),\n    Name == \"fcg.moderation.decisions\", strcat(\"stage=\", tostring(Properties[\"fcg.stage\"]), \";moderation=\", tostring(Properties[\"fcg.moderation_reason\"]), \";outcome=\", tostring(Properties[\"fcg.outcome\"])),\n    Name == \"fcg.persistence.operations\", strcat(\"store=\", tostring(Properties[\"fcg.store\"]), \";operation=\", tostring(Properties[\"fcg.persistence_operation\"]), \";outcome=\", tostring(Properties[\"fcg.outcome\"])),\n    Name == \"fcg.ai.tokens\", strcat(\"operation=\", tostring(Properties[\"fcg.operation\"]), \";token_type=\", tostring(Properties[\"fcg.token_type\"])),\n    \"aggregate\")\n| summarize Value=sum(Sum) by Name, Dimension, bin(TimeGenerated, 1h)\n| order by TimeGenerated desc\n",
+                    "size": 0,
+                    "queryType": 0,
+                    "resourceType": "microsoft.operationalinsights/workspaces",
+                    "visualization": "timechart"
+                  },
+                  "name": "generation"
+                },
+                {
+                  "type": 3,
+                  "content": {
+                    "version": "KqlItem/1.0",
+                    "title": "ACA revision, restart, and platform errors",
+                    "query": "[replace('ContainerAppSystemLogs_CL\n| where ContainerAppName_s == ''__CONTAINER_APP_NAME__''\n| where ''{Revision}'' == ''*'' or RevisionName_s == ''{Revision}''\n| where Reason_s in (\"Restarting\", \"Unhealthy\", \"HealthProbeFailed\") or Log_s has_any (\"restart\", \"unhealthy\", \"probe failed\")\n| project TimeGenerated, RevisionName_s, Reason_s, Log_s\n| order by TimeGenerated desc\n| take 100\n', '__CONTAINER_APP_NAME__', parameters('containerAppName'))]",
+                    "size": 0,
+                    "queryType": 0,
+                    "resourceType": "microsoft.operationalinsights/workspaces"
+                  },
+                  "name": "aca-health"
+                },
+                {
+                  "type": 3,
+                  "content": {
+                    "version": "KqlItem/1.0",
+                    "title": "Billable ingestion and daily-cap utilization",
+                    "query": "[replace(replace('Usage\n| where IsBillable == true\n| summarize BillableGB=sum(Quantity) / 1000.0 by bin(TimeGenerated, 1d)\n| extend DailyCapGB=__DAILY_QUOTA_GB__, CapUtilizationPercent=100.0 * BillableGB / __DAILY_QUOTA_GB__\n| order by TimeGenerated desc\n', '__DAILY_QUOTA_GB__', string(parameters('dailyQuotaGb'))), '__DAILY_QUOTA_GB__', string(parameters('dailyQuotaGb')))]",
+                    "size": 0,
+                    "queryType": 0,
+                    "resourceType": "microsoft.operationalinsights/workspaces"
+                  },
+                  "name": "ingestion"
+                }
+              ],
+              "isLocked": false,
+              "fallbackResourceIds": [
+                "[parameters('logAnalyticsWorkspaceResourceId')]"
+              ]
+            },
+            "availabilityQuery": "[format('AppAvailabilityResults\n| where Name == ''{0}'' and Success == false\n| summarize Failures=count()\n| where Failures >= {1}\n| project Breach=1\n', variables('availabilityTestName'), parameters('availabilityFailureThreshold'))]",
+            "requestFailureQuery": "[format('AppRequests\n| where AppRoleName == ''{0}''\n| summarize Total=count(), Failed=countif(Success == false or ResultCode startswith \"5\")\n| where Total >= {1} and (100.0 * Failed / Total) >= {2}\n| project Breach=1\n', parameters('serviceName'), parameters('requestTrafficFloor'), parameters('requestFailurePercentThreshold'))]",
+            "requestLatencyQuery": "[format('AppRequests\n| where AppRoleName == ''{0}''\n| summarize Total=count(), P95=percentile(DurationMs, 95)\n| where Total >= {1} and P95 >= {2}\n| project Breach=1\n', parameters('serviceName'), parameters('requestTrafficFloor'), parameters('requestP95LatencyMsThreshold'))]",
+            "dependencyFailureQuery": "[format('AppDependencies\n| where AppRoleName == ''{0}''\n| where Success == false or ResultCode in (\"408\", \"429\", \"504\")\n| summarize Failures=count()\n| where Failures >= {1}\n| project Breach=1\n', parameters('serviceName'), parameters('dependencyFailureThreshold'))]",
+            "exceptionQuery": "[format('AppExceptions\n| where AppRoleName == ''{0}''\n| summarize Exceptions=count()\n| where Exceptions >= {1}\n| project Breach=1\n', parameters('serviceName'), parameters('exceptionThreshold'))]",
+            "generationAdverseQuery": "[format('AppMetrics\n| where AppRoleName == ''{0}''\n| where (Name == \"fcg.generation.requests\" and tostring(Properties[\"fcg.outcome\"]) in (\"failed\", \"timed_out\", \"throttled\"))\n    or Name == \"fcg.generation.partial_results\"\n    or (Name == \"fcg.persistence.operations\" and tostring(Properties[\"fcg.outcome\"]) != \"completed\")\n| summarize AdverseOutcomes=sum(Sum)\n| where AdverseOutcomes >= {1}\n| project Breach=1\n', parameters('serviceName'), parameters('generationAdverseOutcomeThreshold'))]",
+            "containerRestartQuery": "[format('ContainerAppSystemLogs_CL\n| where ContainerAppName_s == ''{0}''\n| where Reason_s in (\"Restarting\", \"Unhealthy\", \"HealthProbeFailed\") or Log_s has_any (\"restart\", \"unhealthy\", \"probe failed\")\n| summarize RestartOrUnhealthyEvents=count()\n| where RestartOrUnhealthyEvents >= {1}\n| project Breach=1\n', parameters('containerAppName'), parameters('containerRestartThreshold'))]",
+            "ingestionCapQuery": "[format('Usage\n| where IsBillable == true\n| where TimeGenerated >= ago(24h)\n| summarize BillableGB=sum(Quantity) / 1000.0\n| where BillableGB >= ({0} * {1} / 100.0)\n| project Breach=1\n', parameters('dailyQuotaGb'), parameters('ingestionWarningPercent'))]",
+            "alertDefinitions": [
+              {
+                "name": "availability",
+                "displayName": "Health endpoint unavailable",
+                "description": "/healthz availability failures reached the configured threshold.",
+                "severity": 1,
+                "evaluationFrequency": "PT5M",
+                "windowSize": "PT15M",
+                "query": "[variables('availabilityQuery')]"
+              },
+              {
+                "name": "request-failures",
+                "displayName": "Elevated request failure ratio",
+                "description": "Request failures exceeded the configured ratio and traffic floor.",
+                "severity": 1,
+                "evaluationFrequency": "PT5M",
+                "windowSize": "PT15M",
+                "query": "[variables('requestFailureQuery')]"
+              },
+              {
+                "name": "request-latency",
+                "displayName": "Sustained request p95 latency",
+                "description": "Request p95 latency exceeded the configured threshold and traffic floor.",
+                "severity": 2,
+                "evaluationFrequency": "PT5M",
+                "windowSize": "PT15M",
+                "query": "[variables('requestLatencyQuery')]"
+              },
+              {
+                "name": "dependency-failures",
+                "displayName": "Dependency failure burst",
+                "description": "Dependency failures, throttles, or timeouts reached the configured threshold.",
+                "severity": 1,
+                "evaluationFrequency": "PT5M",
+                "windowSize": "PT15M",
+                "query": "[variables('dependencyFailureQuery')]"
+              },
+              {
+                "name": "exceptions",
+                "displayName": "Exception burst",
+                "description": "Application exceptions reached the configured threshold.",
+                "severity": 1,
+                "evaluationFrequency": "PT5M",
+                "windowSize": "PT15M",
+                "query": "[variables('exceptionQuery')]"
+              },
+              {
+                "name": "generation-adverse",
+                "displayName": "Generation adverse outcomes",
+                "description": "Generation failures, partial results, or persistence failures reached the configured threshold.",
+                "severity": 1,
+                "evaluationFrequency": "PT5M",
+                "windowSize": "PT15M",
+                "query": "[variables('generationAdverseQuery')]"
+              },
+              {
+                "name": "container-restarts",
+                "displayName": "Container restart or unhealthy burst",
+                "description": "ACA restart, unhealthy, or probe-failure events reached the configured threshold.",
+                "severity": 1,
+                "evaluationFrequency": "PT5M",
+                "windowSize": "PT15M",
+                "query": "[variables('containerRestartQuery')]"
+              },
+              {
+                "name": "ingestion-cap",
+                "displayName": "Telemetry ingestion approaching cap",
+                "description": "Billable ingestion over 24 hours reached the configured percentage of the daily workspace cap.",
+                "severity": 2,
+                "evaluationFrequency": "PT1H",
+                "windowSize": "P1D",
+                "query": "[variables('ingestionCapQuery')]"
+              }
+            ]
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Insights/actionGroups",
+              "apiVersion": "2023-01-01",
+              "name": "[take(format('{0}-operations-ag', variables('resourceToken')), 260)]",
+              "location": "global",
+              "tags": "[parameters('tags')]",
+              "properties": {
+                "enabled": "[variables('hasAlertRouting')]",
+                "groupShortName": "[take(format('fcg{0}', parameters('environmentName')), 12)]",
+                "emailReceivers": "[parameters('actionGroupEmailReceivers')]",
+                "webhookReceivers": "[parameters('actionGroupWebhookReceivers')]"
+              }
+            },
+            {
+              "type": "Microsoft.Insights/webtests",
+              "apiVersion": "2022-06-15",
+              "name": "[variables('availabilityTestName')]",
+              "location": "[parameters('location')]",
+              "kind": "standard",
+              "tags": "[union(parameters('tags'), createObject(format('{0}', variables('appInsightsHiddenLinkTag')), 'Resource'))]",
+              "properties": {
+                "copy": [
+                  {
+                    "name": "Locations",
+                    "count": "[length(parameters('availabilityTestLocations'))]",
+                    "input": {
+                      "Id": "[parameters('availabilityTestLocations')[copyIndex('Locations')]]"
+                    }
+                  }
+                ],
+                "SyntheticMonitorId": "[variables('availabilityTestName')]",
+                "Name": "[variables('availabilityTestName')]",
+                "Description": "[format('Environment-isolated /healthz availability check for {0}.', parameters('serviceName'))]",
+                "Enabled": true,
+                "Frequency": 300,
+                "Timeout": 30,
+                "Kind": "standard",
+                "RetryEnabled": true,
+                "Request": {
+                  "RequestUrl": "[format('{0}/healthz', parameters('containerAppUrl'))]",
+                  "HttpVerb": "GET",
+                  "ParseDependentRequests": false,
+                  "FollowRedirects": false
+                },
+                "ValidationRules": {
+                  "ExpectedHttpStatusCode": 200,
+                  "IgnoreHttpStatusCode": false,
+                  "SSLCheck": true,
+                  "SSLCertRemainingLifetimeCheck": 30
+                }
+              }
+            },
+            {
+              "type": "Microsoft.Insights/workbooks",
+              "apiVersion": "2022-04-01",
+              "name": "[guid(resourceGroup().id, parameters('environmentName'), 'fantasy-cards-operations')]",
+              "location": "[parameters('location')]",
+              "kind": "shared",
+              "tags": "[parameters('tags')]",
+              "properties": {
+                "displayName": "[format('Fantasy Cards {0} Operations', toUpper(parameters('environmentName')))]",
+                "serializedData": "[string(variables('workbookData'))]",
+                "version": "1.0",
+                "sourceId": "[parameters('logAnalyticsWorkspaceResourceId')]",
+                "category": "workbook"
+              }
+            },
+            {
+              "copy": {
+                "name": "alertRules",
+                "count": "[length(variables('alertDefinitions'))]"
+              },
+              "type": "Microsoft.Insights/scheduledQueryRules",
+              "apiVersion": "2023-12-01",
+              "name": "[take(format('{0}-{1}', variables('resourceToken'), variables('alertDefinitions')[copyIndex()].name), 260)]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "properties": {
+                "displayName": "[format('{0} {1}', toUpper(parameters('environmentName')), variables('alertDefinitions')[copyIndex()].displayName)]",
+                "description": "[variables('alertDefinitions')[copyIndex()].description]",
+                "severity": "[variables('alertDefinitions')[copyIndex()].severity]",
+                "enabled": "[variables('alertsEnabled')]",
+                "evaluationFrequency": "[variables('alertDefinitions')[copyIndex()].evaluationFrequency]",
+                "windowSize": "[variables('alertDefinitions')[copyIndex()].windowSize]",
+                "scopes": [
+                  "[parameters('logAnalyticsWorkspaceResourceId')]"
+                ],
+                "targetResourceTypes": [
+                  "Microsoft.OperationalInsights/workspaces"
+                ],
+                "criteria": {
+                  "allOf": [
+                    {
+                      "query": "[variables('alertDefinitions')[copyIndex()].query]",
+                      "timeAggregation": "Count",
+                      "operator": "GreaterThan",
+                      "threshold": 0,
+                      "failingPeriods": {
+                        "numberOfEvaluationPeriods": 1,
+                        "minFailingPeriodsToAlert": 1
+                      }
+                    }
+                  ]
+                },
+                "autoMitigate": true,
+                "skipQueryValidation": true,
+                "actions": {
+                  "actionGroups": [
+                    "[resourceId('Microsoft.Insights/actionGroups', take(format('{0}-operations-ag', variables('resourceToken')), 260))]"
+                  ]
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Insights/actionGroups', take(format('{0}-operations-ag', variables('resourceToken')), 260))]"
+              ]
+            }
+          ],
+          "outputs": {
+            "actionGroupName": {
+              "type": "string",
+              "value": "[take(format('{0}-operations-ag', variables('resourceToken')), 260)]"
+            },
+            "alertsEnabled": {
+              "type": "bool",
+              "value": "[variables('alertsEnabled')]"
+            },
+            "availabilityTestName": {
+              "type": "string",
+              "value": "[variables('availabilityTestName')]"
+            },
+            "workbookName": {
+              "type": "string",
+              "value": "[guid(resourceGroup().id, parameters('environmentName'), 'fantasy-cards-operations')]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "containerApps",
+        "monitoring"
       ]
     },
     "cosmosDb": {
@@ -1846,7 +2964,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.46.1.21595",
-              "templateHash": "18209717279062771331"
+              "templateHash": "5080484497298381421"
             }
           },
           "parameters": {
@@ -1945,7 +3063,7 @@
                 ],
                 "networkAclBypass": "None",
                 "networkAclBypassResourceIds": [],
-                "publicNetworkAccess": "Enabled",
+                "publicNetworkAccess": "Disabled",
                 "virtualNetworkRules": []
               }
             },
@@ -2043,6 +3161,181 @@
         "network"
       ]
     },
+    "cosmosPrivateEndpoint": {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "cosmos-private-endpoint",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "cosmosAccountName": {
+            "value": "[variables('cosmosAccountName')]"
+          },
+          "cosmosAccountResourceId": {
+            "value": "[reference('cosmosDb').outputs.cosmosAccountResourceId.value]"
+          },
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "privateEndpointSubnetResourceId": {
+            "value": "[reference('network').outputs.privateEndpointSubnetResourceId.value]"
+          },
+          "tags": {
+            "value": "[parameters('tags')]"
+          },
+          "virtualNetworkResourceId": {
+            "value": "[reference('network').outputs.virtualNetworkResourceId.value]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.46.1.21595",
+              "templateHash": "16749877639784632872"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "Deployment location for the private endpoint and related resources."
+              }
+            },
+            "cosmosAccountName": {
+              "type": "string",
+              "metadata": {
+                "description": "Cosmos DB account name (used for naming derived resources)."
+              }
+            },
+            "cosmosAccountResourceId": {
+              "type": "string",
+              "metadata": {
+                "description": "Cosmos DB account resource ID — target of the private endpoint."
+              }
+            },
+            "privateEndpointSubnetResourceId": {
+              "type": "string",
+              "metadata": {
+                "description": "Resource ID of the private-endpoints subnet."
+              }
+            },
+            "virtualNetworkResourceId": {
+              "type": "string",
+              "metadata": {
+                "description": "Resource ID of the virtual network to link the private DNS zone to."
+              }
+            },
+            "tags": {
+              "type": "object",
+              "defaultValue": {},
+              "metadata": {
+                "description": "Optional tags applied to all resources in this module."
+              }
+            }
+          },
+          "variables": {
+            "cosmosSqlPrivateDnsZoneName": "privatelink.documents.azure.com",
+            "privateEndpointName": "[take(format('{0}-sql-pe', parameters('cosmosAccountName')), 80)]"
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Network/privateDnsZones",
+              "apiVersion": "2024-06-01",
+              "name": "[variables('cosmosSqlPrivateDnsZoneName')]",
+              "location": "global",
+              "tags": "[parameters('tags')]"
+            },
+            {
+              "type": "Microsoft.Network/privateDnsZones/virtualNetworkLinks",
+              "apiVersion": "2024-06-01",
+              "name": "[format('{0}/{1}', variables('cosmosSqlPrivateDnsZoneName'), take(format('{0}-sql-vnet-link', parameters('cosmosAccountName')), 80))]",
+              "location": "global",
+              "tags": "[parameters('tags')]",
+              "properties": {
+                "registrationEnabled": false,
+                "virtualNetwork": {
+                  "id": "[parameters('virtualNetworkResourceId')]"
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Network/privateDnsZones', variables('cosmosSqlPrivateDnsZoneName'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Network/privateEndpoints",
+              "apiVersion": "2024-05-01",
+              "name": "[variables('privateEndpointName')]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "properties": {
+                "privateLinkServiceConnections": [
+                  {
+                    "name": "[format('{0}-connection', variables('privateEndpointName'))]",
+                    "properties": {
+                      "groupIds": [
+                        "Sql"
+                      ],
+                      "privateLinkServiceId": "[parameters('cosmosAccountResourceId')]"
+                    }
+                  }
+                ],
+                "subnet": {
+                  "id": "[parameters('privateEndpointSubnetResourceId')]"
+                }
+              }
+            },
+            {
+              "type": "Microsoft.Network/privateEndpoints/privateDnsZoneGroups",
+              "apiVersion": "2024-05-01",
+              "name": "[format('{0}/{1}', variables('privateEndpointName'), 'default')]",
+              "properties": {
+                "privateDnsZoneConfigs": [
+                  {
+                    "name": "sql",
+                    "properties": {
+                      "privateDnsZoneId": "[resourceId('Microsoft.Network/privateDnsZones', variables('cosmosSqlPrivateDnsZoneName'))]"
+                    }
+                  }
+                ]
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Network/privateEndpoints', variables('privateEndpointName'))]",
+                "[resourceId('Microsoft.Network/privateDnsZones/virtualNetworkLinks', variables('cosmosSqlPrivateDnsZoneName'), take(format('{0}-sql-vnet-link', parameters('cosmosAccountName')), 80))]",
+                "[resourceId('Microsoft.Network/privateDnsZones', variables('cosmosSqlPrivateDnsZoneName'))]"
+              ]
+            }
+          ],
+          "outputs": {
+            "cosmosPrivateEndpointResourceId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Network/privateEndpoints', variables('privateEndpointName'))]"
+            },
+            "cosmosPrivateEndpointName": {
+              "type": "string",
+              "value": "[variables('privateEndpointName')]"
+            },
+            "cosmosSqlPrivateDnsZoneName": {
+              "type": "string",
+              "value": "[variables('cosmosSqlPrivateDnsZoneName')]"
+            },
+            "cosmosSqlPrivateDnsZoneResourceId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Network/privateDnsZones', variables('cosmosSqlPrivateDnsZoneName'))]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "cosmosDb",
+        "network"
+      ]
+    },
     "storage": {
       "type": "Microsoft.Resources/deployments",
       "apiVersion": "2025-04-01",
@@ -2071,6 +3364,9 @@
           "privateEndpointSubnetResourceId": {
             "value": "[reference('network').outputs.privateEndpointSubnetResourceId.value]"
           },
+          "profilePhotosContainerName": {
+            "value": "[parameters('profilePhotosContainerName')]"
+          },
           "storageAccountName": {
             "value": "[variables('storageAccountName')]"
           },
@@ -2088,7 +3384,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.46.1.21595",
-              "templateHash": "1562738573642520457"
+              "templateHash": "495362804089436313"
             }
           },
           "parameters": {
@@ -2108,6 +3404,13 @@
               "type": "string",
               "metadata": {
                 "description": "Blob container used to store card assets."
+              }
+            },
+            "profilePhotosContainerName": {
+              "type": "string",
+              "defaultValue": "profile-photos",
+              "metadata": {
+                "description": "Blob container used to store durable saved profile photos and thumbnails."
               }
             },
             "containerAppPrincipalId": {
@@ -2207,6 +3510,17 @@
               ]
             },
             {
+              "type": "Microsoft.Storage/storageAccounts/blobServices/containers",
+              "apiVersion": "2023-05-01",
+              "name": "[format('{0}/{1}/{2}', parameters('storageAccountName'), 'default', parameters('profilePhotosContainerName'))]",
+              "properties": {
+                "publicAccess": "None"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Storage/storageAccounts/blobServices', parameters('storageAccountName'), 'default')]"
+              ]
+            },
+            {
               "type": "Microsoft.Network/privateDnsZones",
               "apiVersion": "2024-06-01",
               "name": "[variables('blobPrivateDnsZoneName')]",
@@ -2278,15 +3592,29 @@
             {
               "type": "Microsoft.Authorization/roleAssignments",
               "apiVersion": "2022-04-01",
-              "scope": "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]",
-              "name": "[guid(resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName')), parameters('containerAppPrincipalId'), variables('storageBlobDataContributorRoleDefinitionId'))]",
+              "scope": "[resourceId('Microsoft.Storage/storageAccounts/blobServices/containers', parameters('storageAccountName'), 'default', parameters('containerName'))]",
+              "name": "[guid(resourceId('Microsoft.Storage/storageAccounts/blobServices/containers', parameters('storageAccountName'), 'default', parameters('containerName')), parameters('containerAppPrincipalId'), variables('storageBlobDataContributorRoleDefinitionId'))]",
               "properties": {
                 "principalId": "[parameters('containerAppPrincipalId')]",
                 "principalType": "ServicePrincipal",
                 "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('storageBlobDataContributorRoleDefinitionId'))]"
               },
               "dependsOn": [
-                "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]"
+                "[resourceId('Microsoft.Storage/storageAccounts/blobServices/containers', parameters('storageAccountName'), 'default', parameters('containerName'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[resourceId('Microsoft.Storage/storageAccounts/blobServices/containers', parameters('storageAccountName'), 'default', parameters('profilePhotosContainerName'))]",
+              "name": "[guid(resourceId('Microsoft.Storage/storageAccounts/blobServices/containers', parameters('storageAccountName'), 'default', parameters('profilePhotosContainerName')), parameters('containerAppPrincipalId'), variables('storageBlobDataContributorRoleDefinitionId'))]",
+              "properties": {
+                "principalId": "[parameters('containerAppPrincipalId')]",
+                "principalType": "ServicePrincipal",
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('storageBlobDataContributorRoleDefinitionId'))]"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Storage/storageAccounts/blobServices/containers', parameters('storageAccountName'), 'default', parameters('profilePhotosContainerName'))]"
               ]
             },
             {
@@ -2320,6 +3648,10 @@
             "storageContainerName": {
               "type": "string",
               "value": "[parameters('containerName')]"
+            },
+            "profilePhotosContainerName": {
+              "type": "string",
+              "value": "[parameters('profilePhotosContainerName')]"
             },
             "storageBlobPrivateEndpointResourceId": {
               "type": "string",
@@ -2691,6 +4023,22 @@
       "type": "string",
       "value": "[reference('monitoring').outputs.appInsightsName.value]"
     },
+    "monitoringActionGroupName": {
+      "type": "string",
+      "value": "[reference('operationalMonitoring').outputs.actionGroupName.value]"
+    },
+    "monitoringAlertsEnabled": {
+      "type": "bool",
+      "value": "[reference('operationalMonitoring').outputs.alertsEnabled.value]"
+    },
+    "monitoringAvailabilityTestName": {
+      "type": "string",
+      "value": "[reference('operationalMonitoring').outputs.availabilityTestName.value]"
+    },
+    "monitoringWorkbookName": {
+      "type": "string",
+      "value": "[reference('operationalMonitoring').outputs.workbookName.value]"
+    },
     "aiFoundryAccountEndpoint": {
       "type": "string",
       "value": "[reference('aiFoundry').outputs.aiFoundryAccountEndpoint.value]"
@@ -2775,6 +4123,14 @@
       "type": "array",
       "value": "[reference('cosmosDb').outputs.cosmosIpRules.value]"
     },
+    "cosmosPrivateEndpointResourceId": {
+      "type": "string",
+      "value": "[reference('cosmosPrivateEndpoint').outputs.cosmosPrivateEndpointResourceId.value]"
+    },
+    "cosmosSqlPrivateDnsZoneName": {
+      "type": "string",
+      "value": "[reference('cosmosPrivateEndpoint').outputs.cosmosSqlPrivateDnsZoneName.value]"
+    },
     "keyVaultName": {
       "type": "string",
       "value": "[reference('security').outputs.keyVaultName.value]"
@@ -2818,6 +4174,10 @@
     "storageContainerName": {
       "type": "string",
       "value": "[reference('storage').outputs.storageContainerName.value]"
+    },
+    "profilePhotosContainerName": {
+      "type": "string",
+      "value": "[reference('storage').outputs.profilePhotosContainerName.value]"
     },
     "virtualNetworkName": {
       "type": "string",
