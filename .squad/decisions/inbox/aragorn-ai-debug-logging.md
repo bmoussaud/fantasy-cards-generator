@@ -1,4 +1,0 @@
-### 2026-09-03: Dev-only Azure Foundry payload debug logging
-**By:** Aragorn
-**What:** Added a dev-only `DEBUG_LOG_AI_PAYLOADS` setting that auto-enables raw Azure Foundry payload/response debug logging only when `APP_ENV=development`, uses the standard `logging` logger `app.ai_debug`, logs full text request/response bodies for `generate_card()`, and logs metadata-only request/response details for image generation/edit calls without logging reference-image bytes or base64 image payloads.
-**Why:** The team needed a local escape hatch to inspect `/chat/completions` input/output while preserving the existing production privacy posture. I hard-blocked payload logging outside `development` even if `DEBUG_LOG_AI_PAYLOADS=true`, so shared/test/production deployments cannot accidentally emit raw prompts or model outputs.

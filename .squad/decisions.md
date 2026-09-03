@@ -456,3 +456,8 @@ Card generation now accepts a saved photo as an alternative reference source. `P
 **What:** Updated the generator form so the hidden `saved_photo_id` field is rendered disabled by default and is only enabled by `app/static/js/app.js` while a saved photo is actively selected. Clearing the picker selection or switching back to a fresh upload now disables the field again so browsers omit it from form submissions.
 **Why:** Aragorn's backend hardening now tolerates blank optional form values, but the saved-photo picker should not submit an empty hidden field in the first place. Keeping the browser-side state aligned with the actual picker selection closes the regression path from #67 and preserves the upload-vs-saved-photo exclusivity flow.
 
+
+### 2026-09-03: Dev-only Azure Foundry payload debug logging
+**By:** Aragorn
+**What:** Added a dev-only `DEBUG_LOG_AI_PAYLOADS` setting that auto-enables raw Azure Foundry payload/response debug logging only when `APP_ENV=development`, uses the standard `logging` logger `app.ai_debug`, logs full text request/response bodies for `generate_card()`, and logs metadata-only request/response details for image generation/edit calls without logging reference-image bytes or base64 image payloads.
+**Why:** The team needed a local escape hatch to inspect `/chat/completions` input/output while preserving the existing production privacy posture. I hard-blocked payload logging outside `development` even if `DEBUG_LOG_AI_PAYLOADS=true`, so shared/test/production deployments cannot accidentally emit raw prompts or model outputs.
