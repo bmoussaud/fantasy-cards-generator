@@ -569,6 +569,9 @@ class AbstractAuditRepository:
     async def get_audit(self, owner_id: str, card_id: str) -> StoredCard | None:
         raise NotImplementedError
 
+    async def list_audits_by_owner(self, owner_id: str) -> list[StoredCard]:
+        raise NotImplementedError
+
     async def delete_audit(self, owner_id: str, card_id: str) -> None:
         raise NotImplementedError
 
@@ -680,6 +683,15 @@ class InMemoryAuditRepository(AbstractAuditRepository):
         async with self._lock:
             return self._records.get((owner_id, card_id))
 
+    async def list_audits_by_owner(self, owner_id: str) -> list[StoredCard]:
+        async with self._lock:
+            records = [
+                record
+                for (stored_owner_id, _), record in self._records.items()
+                if stored_owner_id == owner_id and record.document_type == "generation-audit"
+            ]
+        return sorted(records, key=lambda record: (record.created_at, record.id), reverse=True)
+
     async def delete_audit(self, owner_id: str, card_id: str) -> None:
         async with self._lock:
             self._records.pop((owner_id, card_id), None)
@@ -774,6 +786,15 @@ class InMemorySharedCardAuditRepository(AbstractCardRepository, AbstractAuditRep
     async def get_audit(self, owner_id: str, card_id: str) -> StoredCard | None:
         async with self._lock:
             return self._records.get((owner_id, _audit_document_id(card_id)))
+
+    async def list_audits_by_owner(self, owner_id: str) -> list[StoredCard]:
+        async with self._lock:
+            records = [
+                record
+                for (stored_owner_id, _), record in self._records.items()
+                if stored_owner_id == owner_id and record.document_type == "generation-audit"
+            ]
+        return sorted(records, key=lambda record: (record.created_at, record.id), reverse=True)
 
     async def delete_audit(self, owner_id: str, card_id: str) -> None:
         async with self._lock:
@@ -998,6 +1019,26 @@ class AzureCosmosCardRepository(AbstractCardRepository, AbstractAuditRepository)
             document_id=_audit_document_id(card_id),
             expected_document_type="generation-audit",
         )
+
+    async def list_audits_by_owner(self, owner_id: str) -> list[StoredCard]:
+        container = await self._get_container()
+        iterator = container.query_items(
+            query=(
+                "SELECT * FROM c WHERE c.userId = @ownerId AND c.documentType = @documentType "
+                "ORDER BY c.createdAt DESC"
+            ),
+            parameters=[
+                {"name": "@ownerId", "value": owner_id},
+                {"name": "@documentType", "value": "generation-audit"},
+            ],
+            partition_key=owner_id,
+        )
+        records: list[StoredCard] = []
+        async for document in iterator:
+            record = self._match_document_type(document, expected_document_type="generation-audit")
+            if record is not None:
+                records.append(record)
+        return records
 
     async def reserve_audit(
         self,
@@ -1482,6 +1523,8 @@ class AzureFoundryAIClient:
         return response.json()
 
     def _debug_log(self, event: str, *, request_id: str, **fields: object) -> None:
+        if not self._debug_log_ai_payloads:
+            return
         _ai_debug_logger.error(
             "azure_foundry.%s request_id=%s %s",
             event,
@@ -1615,6 +1658,7 @@ class AppServices:
     saved_photo_repository: Any | None = None
     photo_asset_store: AbstractAssetStore | None = None
     photo_moderation_service: Any | None = None
+    deletion_audit_repository: Any | None = None
 
 
 class CardGenerationService:
@@ -2775,6 +2819,7 @@ class CardGenerationService:
 
 
 def create_services(settings: AppSettings) -> AppServices:
+    from app.deletion import AzureCosmosDeletionAuditRepository, InMemoryDeletionAuditRepository
     from app.photos import (
         AzureCosmosSavedPhotoRepository,
         ContentSafetyPhotoModerationService,
@@ -2790,6 +2835,7 @@ def create_services(settings: AppSettings) -> AppServices:
             settings,
             container_name=settings.profile_photos_container_name,
         )
+        deletion_audit_repository = AzureCosmosDeletionAuditRepository(settings)
         cosmos_health_probe: HealthDependencyProbe | None = AzureCosmosHealthProbe(
             get_container_client=card_repository.get_health_container_client,
             endpoint=settings.cosmos_endpoint,
@@ -2809,6 +2855,7 @@ def create_services(settings: AppSettings) -> AppServices:
         asset_store = InMemoryAssetStore()
         saved_photo_repository = InMemorySavedPhotoRepository()
         photo_asset_store = InMemoryAssetStore()
+        deletion_audit_repository = InMemoryDeletionAuditRepository()
         cosmos_health_probe = NotApplicableHealthProbe("cosmos")
         blob_health_probe = NotApplicableHealthProbe("blob")
 
@@ -2829,6 +2876,7 @@ def create_services(settings: AppSettings) -> AppServices:
         saved_photo_repository=saved_photo_repository,
         photo_asset_store=photo_asset_store,
         photo_moderation_service=ContentSafetyPhotoModerationService(settings),
+        deletion_audit_repository=deletion_audit_repository,
     )
 
 

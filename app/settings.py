@@ -123,7 +123,9 @@ def load_app_settings() -> AppSettings:
         # is ignored outside development so shared/test/prod deployments cannot
         # accidentally persist payload bodies.
         debug_log_ai_payloads=(
-            True if app_env_normalized == "development" else False
+            _bool_env("DEBUG_LOG_AI_PAYLOADS", default=True)
+            if app_env_normalized == "development"
+            else False
         ),
         ai_mode=ai_mode,
         persistence_mode=persistence_mode,
