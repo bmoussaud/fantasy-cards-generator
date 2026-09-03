@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from app import main as main_module
 from app.generation import StoredCard, create_services
+from app.library import format_card_timestamp
 from app.main import create_app
 from app.settings import load_app_settings
 from tests.conftest import TEST_OWNER_ID, FakeOAuthClient
@@ -77,6 +78,22 @@ def store_asset(client: TestClient, blob_name: str, payload: bytes, content_type
     asyncio.run(client.app.state.services.asset_store.upload(blob_name, payload, content_type))
 
 
+@pytest.mark.parametrize(
+    ("timestamp", "expected"),
+    [
+        ("2026-09-03T08:04:01Z", "Sep 3, 2026, 8:04 AM UTC"),
+        ("2026-09-03T20:15:00+02:00", "Sep 3, 2026, 6:15 PM UTC"),
+        ("not-a-timestamp", "not-a-timestamp"),
+        (None, None),
+    ],
+)
+def test_format_card_timestamp_handles_expected_inputs(
+    timestamp: str | None,
+    expected: str | None,
+) -> None:
+    assert format_card_timestamp(timestamp) == expected
+
+
 def test_my_cards_requires_authentication() -> None:
     client = TestClient(create_app(), base_url="https://testserver")
 
@@ -119,6 +136,10 @@ def test_my_cards_renders_only_signed_in_users_cards(
     assert "/my/cards/own-card" in response.text
     assert "/cards/own-card/image" in response.text
     assert "cards/other-card.png" not in response.text
+    assert (
+        'Created <time datetime="2026-09-02T13:00:00Z">Sep 2, 2026, 1:00 PM UTC</time>'
+        in response.text
+    )
 
 
 def test_my_cards_shows_empty_state(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -160,6 +181,29 @@ def test_my_card_detail_renders_owned_card(monkeypatch: pytest.MonkeyPatch) -> N
     assert "Prompt for Detail Ranger" in response.text
     assert "moonlit precision" in response.text
     assert "/cards/detail-card/image" in response.text
+    assert '<time datetime="2026-09-02T13:00:00Z">Sep 2, 2026, 1:00 PM UTC</time>' in response.text
+    assert '<time datetime="2026-09-02T14:00:00Z">Sep 2, 2026, 2:00 PM UTC</time>' in response.text
+
+
+def test_my_card_detail_omits_completed_date_when_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = make_authenticated_client(monkeypatch)
+    store_card(
+        client,
+        make_card(
+            owner_id=TEST_OWNER_ID,
+            card_id="pending-card",
+            name="Pending Ranger",
+            status="pending",
+        ),
+    )
+
+    response = client.get("/my/cards/pending-card")
+
+    assert response.status_code == 200
+    assert "Pending Ranger" in response.text
+    assert "Completed" not in response.text
 
 
 def test_my_card_detail_returns_404_for_other_users_card(
