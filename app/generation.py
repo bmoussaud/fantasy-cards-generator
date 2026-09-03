@@ -4,6 +4,7 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import logging
 import time
 from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable
@@ -42,6 +43,8 @@ PNG_1X1_BASE64 = (
 )
 CARD_DOCUMENT_ID_PREFIX = "card:"
 AUDIT_DOCUMENT_ID_PREFIX = "audit:"
+AI_DEBUG_LOGGER_NAME = "app.ai_debug"
+_ai_debug_logger = logging.getLogger(AI_DEBUG_LOGGER_NAME)
 
 
 def _exception_diagnostic(exc: Exception) -> tuple[str, int | None, str | None]:
@@ -1222,6 +1225,7 @@ class AzureFoundryAIClient:
     def __init__(self, settings: AppSettings) -> None:
         self.settings = settings
         self._credential = _default_azure_credential()
+        self._debug_log_ai_payloads = settings.debug_log_ai_payloads
 
     async def _access_token(self) -> str:
         token = await asyncio.to_thread(
@@ -1252,12 +1256,22 @@ class AzureFoundryAIClient:
                 },
             },
         }
+        self._debug_log(
+            "generate_card.request",
+            request_id=request_id,
+            payload=payload,
+        )
         started_at = time.perf_counter()
         response = await self._post(
             f"/openai/deployments/{self.settings.foundry_text_deployment}/chat/completions",
             payload,
             api_version=self.settings.foundry_api_version,
             service_name="foundry-text",
+        )
+        self._debug_log(
+            "generate_card.response",
+            request_id=request_id,
+            response=response,
         )
         choices = response.get("choices") or []
         if not choices:
@@ -1300,6 +1314,16 @@ class AzureFoundryAIClient:
         quality = image_quality if image_quality is not None else self.settings.image_quality
         if quality not in {"low", "medium", "high"}:
             raise ValueError(f"image_quality must be low, medium, or high; got {quality!r}")
+        self._debug_log(
+            "generate_image.request",
+            request_id=request_id,
+            payload={
+                "deployment": self.settings.foundry_image_deployment,
+                "prompt": art_prompt,
+                "size": self.settings.image_size,
+                "quality": quality,
+            },
+        )
         started_at = time.perf_counter()
         response = await self._post(
             f"/openai/deployments/{self.settings.foundry_image_deployment}/images/generations",
@@ -1312,12 +1336,18 @@ class AzureFoundryAIClient:
             service_name="foundry-image",
         )
         data = response.get("data") or []
+        self._debug_log(
+            "generate_image.response",
+            request_id=request_id,
+            response=_image_debug_response_metadata(data),
+        )
         if not data:
             raise UpstreamServiceError("foundry-image", "Image generation returned no data.")
         first = data[0]
         b64_image = first.get("b64_json")
         if not isinstance(b64_image, str):
             raise UpstreamServiceError("foundry-image", "Image generation payload was invalid.")
+        decoded_image = base64.b64decode(b64_image)
         usage = UsageAudit(
             inputTokens=0,
             outputTokens=0,
@@ -1326,7 +1356,7 @@ class AzureFoundryAIClient:
         )
         return AIImageResult(
             image=ImageResult(
-                content=base64.b64decode(b64_image),
+                content=decoded_image,
                 content_type="image/png",
                 revised_prompt=first.get("revised_prompt"),
             ),
@@ -1350,6 +1380,18 @@ class AzureFoundryAIClient:
         quality = image_quality if image_quality is not None else self.settings.image_quality
         if quality not in {"low", "medium", "high"}:
             raise ValueError(f"image_quality must be low, medium, or high; got {quality!r}")
+        self._debug_log(
+            "generate_image_edit.request",
+            request_id=request_id,
+            payload={
+                "deployment": self.settings.foundry_image_deployment,
+                "prompt": art_prompt,
+                "size": self.settings.image_size,
+                "quality": quality,
+                "reference_image_content_type": reference_image.content_type,
+                "reference_image_bytes": len(reference_image.content),
+            },
+        )
         started_at = time.perf_counter()
         response = await self._post_multipart(
             f"/openai/deployments/{self.settings.foundry_image_deployment}/images/edits",
@@ -1369,12 +1411,18 @@ class AzureFoundryAIClient:
             service_name="foundry-image",
         )
         data = response.get("data") or []
+        self._debug_log(
+            "generate_image_edit.response",
+            request_id=request_id,
+            response=_image_debug_response_metadata(data),
+        )
         if not data:
             raise UpstreamServiceError("foundry-image", "Image edit returned no data.")
         first = data[0]
         b64_image = first.get("b64_json")
         if not isinstance(b64_image, str):
             raise UpstreamServiceError("foundry-image", "Image edit payload was invalid.")
+        decoded_image = base64.b64decode(b64_image)
         usage = UsageAudit(
             inputTokens=0,
             outputTokens=0,
@@ -1383,7 +1431,7 @@ class AzureFoundryAIClient:
         )
         return AIImageResult(
             image=ImageResult(
-                content=base64.b64decode(b64_image),
+                content=decoded_image,
                 content_type="image/png",
                 revised_prompt=first.get("revised_prompt"),
             ),
@@ -1433,6 +1481,16 @@ class AzureFoundryAIClient:
             )
         return response.json()
 
+    def _debug_log(self, event: str, *, request_id: str, **fields: object) -> None:
+        if not self._debug_log_ai_payloads:
+            return
+        _ai_debug_logger.debug(
+            "azure_foundry.%s request_id=%s %s",
+            event,
+            request_id,
+            " ".join(f"{name}={value!r}" for name, value in fields.items()),
+        )
+
     async def _post_multipart(
         self,
         path: str,
@@ -1470,6 +1528,30 @@ class AzureFoundryAIClient:
                 diagnostic_message=diagnostic_message,
             )
         return response.json()
+
+
+def _image_debug_response_metadata(data: object) -> dict[str, object]:
+    if not isinstance(data, list) or not data:
+        return {
+            "data_count": len(data) if isinstance(data, list) else 0,
+            "b64_json_present": False,
+            "decoded_image_bytes": None,
+            "revised_prompt": None,
+        }
+    first = data[0] if isinstance(data[0], dict) else {}
+    b64_image = first.get("b64_json") if isinstance(first, dict) else None
+    decoded_length = None
+    if isinstance(b64_image, str):
+        try:
+            decoded_length = len(base64.b64decode(b64_image))
+        except (ValueError, TypeError):
+            decoded_length = None
+    return {
+        "data_count": len(data),
+        "b64_json_present": isinstance(b64_image, str),
+        "decoded_image_bytes": decoded_length,
+        "revised_prompt": first.get("revised_prompt") if isinstance(first, dict) else None,
+    }
 
 
 def _azure_error_diagnostic(

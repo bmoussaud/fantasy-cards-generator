@@ -226,6 +226,7 @@ CONTENT_SAFETY_API_VERSION=2024-09-01
 
 Additional operational settings:
 
+- `DEBUG_LOG_AI_PAYLOADS` (optional local-only override; raw Azure Foundry payload logging is auto-enabled only when `APP_ENV=development` and is hard-blocked outside development)
 - `RATE_LIMIT_USER_REQUESTS`, `RATE_LIMIT_USER_WINDOW_SECONDS`
 - `RATE_LIMIT_IP_REQUESTS`, `RATE_LIMIT_IP_WINDOW_SECONDS`
 - `TRUSTED_PROXY_HOPS` (`0` by default; set to `1` behind Azure Container Apps ingress so the app trusts only ACA's rightmost appended `X-Forwarded-For` hop)

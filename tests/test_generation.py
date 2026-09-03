@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 from types import SimpleNamespace
 from typing import Literal
 from uuid import uuid4
@@ -1867,6 +1868,51 @@ def test_image_quality_rejects_invalid_value(
         load_app_settings()
 
 
+def test_debug_log_ai_payloads_defaults_to_enabled_when_app_env_is_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("APP_ENV", raising=False)
+    monkeypatch.delenv("DEBUG_LOG_AI_PAYLOADS", raising=False)
+
+    settings = load_app_settings()
+
+    assert settings.app_env == "development"
+    assert settings.debug_log_ai_payloads is True
+
+
+def test_debug_log_ai_payloads_defaults_to_disabled_in_production(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.delenv("DEBUG_LOG_AI_PAYLOADS", raising=False)
+
+    settings = load_app_settings()
+
+    assert settings.debug_log_ai_payloads is False
+
+
+@pytest.mark.parametrize(
+    ("app_env", "override", "expected"),
+    [
+        ("development", "false", False),
+        ("development", "true", True),
+        ("production", "true", False),
+    ],
+)
+def test_debug_log_ai_payloads_env_override(
+    monkeypatch: pytest.MonkeyPatch,
+    app_env: str,
+    override: str,
+    expected: bool,
+) -> None:
+    monkeypatch.setenv("APP_ENV", app_env)
+    monkeypatch.setenv("DEBUG_LOG_AI_PAYLOADS", override)
+
+    settings = load_app_settings()
+
+    assert settings.debug_log_ai_payloads is expected
+
+
 # ---------------------------------------------------------------------------
 # Image quality — generation payload contract
 # ---------------------------------------------------------------------------
@@ -2048,6 +2094,132 @@ def test_foundry_image_edit_uses_edits_endpoint_and_multipart(
     assert b'name="prompt"' in body
     assert b"A radiant knight raising a silver shield." in body
     assert b'name="image"; filename="portrait.png"' in body
+
+
+def test_generate_card_emits_debug_logs_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.setenv("DEBUG_LOG_AI_PAYLOADS", "true")
+    monkeypatch.setenv("AI_MODE", "live")
+    monkeypatch.setenv("PERSISTENCE_MODE", "memory")
+    monkeypatch.setenv("FOUNDRY_ENDPOINT", "https://foundry.example")
+    monkeypatch.setenv("FOUNDRY_TEXT_DEPLOYMENT", "gpt-5-5")
+    monkeypatch.setenv("FOUNDRY_IMAGE_DEPLOYMENT", "gpt-image-2")
+
+    real_async_client = httpx.AsyncClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"name":"Knight of Dawn","cardType":"hero","rarity":"rare",'
+                                '"manaCost":4,"attack":5,"health":4,'
+                                '"rulesText":"Charge into the dawning light.",'
+                                '"flavorText":"Dawn follows.",'
+                                '"artBrief":"A radiant knight raising a silver shield.",'
+                                '"schemaVersion":1}'
+                            )
+                        }
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    def build_client(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_async_client(*args, **kwargs)
+
+    monkeypatch.setattr(generation_module.httpx, "AsyncClient", build_client)
+    client = AzureFoundryAIClient(load_app_settings())
+    client._credential = SimpleNamespace(  # type: ignore[attr-defined]
+        get_token=lambda *_args, **_kwargs: SimpleNamespace(token="live-access-token")
+    )
+
+    with caplog.at_level(logging.DEBUG, logger=generation_module.AI_DEBUG_LOGGER_NAME):
+        asyncio.run(
+            client.generate_card(
+                "create a safe fantasy knight with a moonlit shield",
+                request_id="req-debug-enabled",
+            )
+        )
+
+    debug_records = [
+        record for record in caplog.records if record.name == generation_module.AI_DEBUG_LOGGER_NAME
+    ]
+    assert len(debug_records) == 2
+    messages = [record.getMessage() for record in debug_records]
+    assert any("generate_card.request" in message for message in messages)
+    assert any("generate_card.response" in message for message in messages)
+    assert any(
+        "create a safe fantasy knight with a moonlit shield" in message for message in messages
+    )
+    assert any("Knight of Dawn" in message for message in messages)
+
+
+def test_generate_card_does_not_emit_debug_logs_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("DEBUG_LOG_AI_PAYLOADS", "true")
+    monkeypatch.setenv("AI_MODE", "live")
+    monkeypatch.setenv("PERSISTENCE_MODE", "memory")
+    monkeypatch.setenv("FOUNDRY_ENDPOINT", "https://foundry.example")
+    monkeypatch.setenv("FOUNDRY_TEXT_DEPLOYMENT", "gpt-5-5")
+    monkeypatch.setenv("FOUNDRY_IMAGE_DEPLOYMENT", "gpt-image-2")
+
+    real_async_client = httpx.AsyncClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"name":"Knight of Dawn","cardType":"hero","rarity":"rare",'
+                                '"manaCost":4,"attack":5,"health":4,'
+                                '"rulesText":"Charge into the dawning light.",'
+                                '"flavorText":"Dawn follows.",'
+                                '"artBrief":"A radiant knight raising a silver shield.",'
+                                '"schemaVersion":1}'
+                            )
+                        }
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    def build_client(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_async_client(*args, **kwargs)
+
+    monkeypatch.setattr(generation_module.httpx, "AsyncClient", build_client)
+    client = AzureFoundryAIClient(load_app_settings())
+    client._credential = SimpleNamespace(  # type: ignore[attr-defined]
+        get_token=lambda *_args, **_kwargs: SimpleNamespace(token="live-access-token")
+    )
+
+    with caplog.at_level(logging.DEBUG, logger=generation_module.AI_DEBUG_LOGGER_NAME):
+        asyncio.run(
+            client.generate_card(
+                "create a safe fantasy knight with a moonlit shield",
+                request_id="req-debug-disabled",
+            )
+        )
+
+    assert not [
+        record for record in caplog.records if record.name == generation_module.AI_DEBUG_LOGGER_NAME
+    ]
 
 
 # ---------------------------------------------------------------------------
