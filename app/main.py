@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import secrets
+from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import parse_qs
 from uuid import uuid4
 
 from authlib.integrations.base_client.errors import OAuthError
@@ -13,6 +13,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from pydantic import ValidationError
+from starlette.datastructures import UploadFile
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.auth import (
@@ -36,6 +38,7 @@ from app.generation import (
     CardGenerateBody,
     CardGenerationService,
     CardResponseModel,
+    ReferenceImageUpload,
     client_ip_from_request,
     create_services,
 )
@@ -52,6 +55,18 @@ from app.telemetry import (
 )
 
 load_dotenv()
+
+ALLOWED_PHOTO_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp"}
+MAX_REFERENCE_PHOTO_BYTES = 5 * 1024 * 1024
+
+
+@dataclass(slots=True)
+class ParsedCardGenerateRequest:
+    prompt: str
+    idempotency_key: str | None
+    csrf_token: str | None
+    image_quality: str | None = None
+    reference_image: ReferenceImageUpload | None = None
 
 
 def create_app(services: AppServices | None = None) -> FastAPI:
@@ -380,10 +395,10 @@ def create_app(services: AppServices | None = None) -> FastAPI:
     @app.post("/api/v1/cards/generate", response_model=CardResponseModel)
     async def api_generate_card(
         request: Request,
-        body: CardGenerateBody,
         _: AuthenticatedUser = Depends(require_api_user),
     ) -> CardResponseModel:
-        app_services.csrf_protector.validate(request, body.csrfToken)
+        payload = await _parse_card_generate_request(request)
+        app_services.csrf_protector.validate(request, payload.csrf_token)
         owner = get_authenticated_owner(request)
         if owner is None:
             raise ProblemDetails(
@@ -396,13 +411,14 @@ def create_app(services: AppServices | None = None) -> FastAPI:
             )
         return await card_service.generate_card(
             owner=owner,
-            prompt=body.prompt,
-            idempotency_key=body.idempotencyKey or uuid4().hex,
+            prompt=payload.prompt,
+            idempotency_key=payload.idempotency_key or uuid4().hex,
             request_id=request.state.request_id,
             client_ip=client_ip_from_request(
                 request,
                 trusted_proxy_hops=app_services.settings.trusted_proxy_hops,
             ),
+            reference_image=payload.reference_image,
         )
 
     @app.post("/api/v1/cards/{card_id}/artwork/retry", response_model=CardResponseModel)
@@ -438,7 +454,7 @@ def create_app(services: AppServices | None = None) -> FastAPI:
     async def ui_generate_card(
         request: Request,
     ) -> HTMLResponse:
-        form = await _parse_form_payload(request)
+        payload = await _parse_card_generate_request(request)
         owner = get_authenticated_owner(request)
         if owner is None:
             raise ProblemDetails(
@@ -448,19 +464,20 @@ def create_app(services: AppServices | None = None) -> FastAPI:
                 type="/problems/unauthorized",
                 error_code="unauthorized",
             )
-        app_services.csrf_protector.validate(request, form.get("csrf_token"))
-        raw_quality = form.get("quality", "low")
+        app_services.csrf_protector.validate(request, payload.csrf_token)
+        raw_quality = payload.image_quality or "low"
         image_quality = raw_quality if raw_quality in {"low", "medium", "high"} else "low"
         result = await card_service.generate_card(
             owner=owner,
-            prompt=form.get("prompt", ""),
-            idempotency_key=form.get("idempotency_key") or uuid4().hex,
+            prompt=payload.prompt,
+            idempotency_key=payload.idempotency_key or uuid4().hex,
             request_id=request.state.request_id,
             client_ip=client_ip_from_request(
                 request,
                 trusted_proxy_hops=app_services.settings.trusted_proxy_hops,
             ),
             image_quality=image_quality,
+            reference_image=payload.reference_image,
         )
         return templates.TemplateResponse(
             request,
@@ -530,10 +547,100 @@ def create_app(services: AppServices | None = None) -> FastAPI:
     return app
 
 
+async def _parse_card_generate_request(request: Request) -> ParsedCardGenerateRequest:
+    content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if content_type == "application/json":
+        body = _validate_card_generate_body(await request.json())
+        return ParsedCardGenerateRequest(
+            prompt=body.prompt,
+            idempotency_key=body.idempotencyKey,
+            csrf_token=body.csrfToken,
+        )
+
+    form = await request.form()
+    body = _validate_card_generate_body(
+        {
+            "prompt": _form_string(form, "prompt"),
+            "idempotencyKey": _form_string(form, "idempotency_key", "idempotencyKey"),
+            "csrfToken": _form_string(form, "csrf_token", "csrfToken"),
+        }
+    )
+    return ParsedCardGenerateRequest(
+        prompt=body.prompt,
+        idempotency_key=body.idempotencyKey,
+        csrf_token=body.csrfToken,
+        image_quality=_form_string(form, "quality"),
+        reference_image=await _parse_reference_image(form.get("photo")),
+    )
+
+
+def _validate_card_generate_body(payload: object) -> CardGenerateBody:
+    try:
+        return CardGenerateBody.model_validate(payload)
+    except ValidationError as exc:
+        raise RequestValidationError(exc.errors()) from exc
+
+
 async def _parse_form_payload(request: Request) -> dict[str, str]:
-    body = await request.body()
-    parsed = parse_qs(body.decode("utf-8"), keep_blank_values=True)
-    return {key: values[-1] for key, values in parsed.items()}
+    form = await request.form()
+    return {
+        key: value for key, value in form.items() if isinstance(key, str) and isinstance(value, str)
+    }
+
+
+def _form_string(form, *keys: str) -> str | None:
+    for key in keys:
+        value = form.get(key)
+        if isinstance(value, str):
+            return value
+    return None
+
+
+async def _parse_reference_image(value: object) -> ReferenceImageUpload | None:
+    if value is None:
+        return None
+    if not isinstance(value, UploadFile):
+        raise ProblemDetails(
+            status_code=422,
+            title="Invalid Photo Upload",
+            detail="The photo field must be uploaded as a file.",
+            type="/problems/invalid-photo-upload",
+            error_code="invalid_photo_upload",
+        )
+    filename = value.filename or None
+    content_type = (value.content_type or "").lower()
+    if not filename:
+        return None
+    if content_type not in ALLOWED_PHOTO_CONTENT_TYPES:
+        raise ProblemDetails(
+            status_code=415,
+            title="Unsupported Photo Type",
+            detail="Photo uploads must be JPEG, PNG, or WebP images.",
+            type="/problems/unsupported-photo-type",
+            error_code="unsupported_photo_type",
+        )
+    payload = await value.read()
+    if not payload:
+        raise ProblemDetails(
+            status_code=422,
+            title="Invalid Photo Upload",
+            detail="The uploaded photo was empty.",
+            type="/problems/invalid-photo-upload",
+            error_code="invalid_photo_upload",
+        )
+    if len(payload) > MAX_REFERENCE_PHOTO_BYTES:
+        raise ProblemDetails(
+            status_code=413,
+            title="Photo Too Large",
+            detail="Photo uploads must be 5 MB or smaller.",
+            type="/problems/photo-too-large",
+            error_code="photo_too_large",
+        )
+    return ReferenceImageUpload(
+        content=payload,
+        content_type=content_type,
+        filename=filename,
+    )
 
 
 app = create_app()

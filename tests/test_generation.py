@@ -21,6 +21,7 @@ from app.generation import (
     InMemoryCardRepository,
     InMemorySharedCardAuditRepository,
     MockAIClient,
+    ReferenceImageUpload,
     StoredCard,
     UpstreamServiceError,
     client_ip_from_request,
@@ -64,6 +65,40 @@ def test_api_rejects_missing_csrf(authenticated_client: TestClient) -> None:
     assert response.json()["errorCode"] == "csrf_failed"
 
 
+def test_api_rejects_unsupported_photo_content_type(authenticated_client: TestClient) -> None:
+    csrf_token = extract_hidden_value(authenticated_client.get("/app").text, "csrf_token")
+
+    response = authenticated_client.post(
+        "/api/v1/cards/generate",
+        data={
+            "prompt": "create a safe fantasy knight with a moonlit shield",
+            "idempotencyKey": "idem-photo-type",
+            "csrfToken": csrf_token,
+        },
+        files={"photo": ("portrait.gif", b"GIF89a", "image/gif")},
+    )
+
+    assert response.status_code == 415
+    assert response.json()["errorCode"] == "unsupported_photo_type"
+
+
+def test_api_rejects_oversized_photo_upload(authenticated_client: TestClient) -> None:
+    csrf_token = extract_hidden_value(authenticated_client.get("/app").text, "csrf_token")
+
+    response = authenticated_client.post(
+        "/api/v1/cards/generate",
+        data={
+            "prompt": "create a safe fantasy knight with a moonlit shield",
+            "idempotencyKey": "idem-photo-size",
+            "csrfToken": csrf_token,
+        },
+        files={"photo": ("portrait.png", b"x" * ((5 * 1024 * 1024) + 1), "image/png")},
+    )
+
+    assert response.status_code == 413
+    assert response.json()["errorCode"] == "photo_too_large"
+
+
 def test_generate_card_success_persists_card_and_private_asset(
     authenticated_client: TestClient,
 ) -> None:
@@ -96,6 +131,228 @@ def test_generate_card_success_persists_card_and_private_asset(
     assert card.prompt == "create a safe fantasy knight with a moonlit shield"
     assert card.blob_name is not None
     assert "sas" not in str(card.to_document()).lower()
+
+
+def test_generation_with_photo_uses_reference_image_edit_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class TrackingAIClient(MockAIClient):
+        def __init__(self, settings) -> None:
+            super().__init__(settings)
+            self.text_calls = 0
+            self.image_calls = 0
+            self.image_edit_calls = 0
+            self.reference_image: ReferenceImageUpload | None = None
+
+        async def generate_card(self, prompt: str, *, request_id: str):
+            self.text_calls += 1
+            return await super().generate_card(prompt, request_id=request_id)
+
+        async def generate_image(
+            self,
+            art_prompt: str,
+            *,
+            request_id: str,
+            image_quality: Literal["low", "medium", "high"] | None = None,
+        ):
+            self.image_calls += 1
+            return await super().generate_image(
+                art_prompt,
+                request_id=request_id,
+                image_quality=image_quality,
+            )
+
+        async def generate_image_edit(
+            self,
+            art_prompt: str,
+            *,
+            reference_image: ReferenceImageUpload,
+            request_id: str,
+            image_quality: Literal["low", "medium", "high"] | None = None,
+        ):
+            self.image_edit_calls += 1
+            self.reference_image = reference_image
+            return await super().generate_image(
+                art_prompt,
+                request_id=request_id,
+                image_quality=image_quality,
+            )
+
+    settings = load_app_settings()
+    defaults = create_services(settings)
+    ai_client = TrackingAIClient(settings)
+    services = AppServices(
+        settings=settings,
+        card_repository=InMemoryCardRepository(),
+        audit_repository=InMemoryAuditRepository(),
+        asset_store=InMemoryAssetStore(),
+        ai_client=ai_client,
+        moderation_service=defaults.moderation_service,
+        rate_limiter=defaults.rate_limiter,
+        csrf_protector=defaults.csrf_protector,
+    )
+    client = TestClient(create_app(services=services), base_url="https://testserver")
+    from app import main as main_module
+    from tests.conftest import FakeOAuthClient
+
+    monkeypatch.setattr(main_module, "create_oauth_client", lambda settings: FakeOAuthClient())
+    client.get("/auth/login", follow_redirects=False)
+    client.get("/auth/callback?code=valid-code&state=opaque", follow_redirects=False)
+    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
+
+    response = client.post(
+        "/api/v1/cards/generate",
+        data={
+            "prompt": "create a safe fantasy knight with a moonlit shield",
+            "idempotencyKey": "idem-photo-edit",
+            "csrfToken": csrf_token,
+        },
+        files={"photo": ("portrait.webp", b"RIFFmockwebp", "image/webp")},
+    )
+
+    assert response.status_code == 200
+    assert ai_client.text_calls == 1
+    assert ai_client.image_calls == 0
+    assert ai_client.image_edit_calls == 1
+    assert ai_client.reference_image is not None
+    assert ai_client.reference_image.content == b"RIFFmockwebp"
+    assert ai_client.reference_image.content_type == "image/webp"
+
+
+def test_generation_with_photo_returns_clear_error_when_edits_are_unsupported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class UnsupportedEditAIClient(MockAIClient):
+        async def generate_image_edit(
+            self,
+            art_prompt: str,
+            *,
+            reference_image: ReferenceImageUpload,
+            request_id: str,
+            image_quality: Literal["low", "medium", "high"] | None = None,
+        ):
+            raise UpstreamServiceError(
+                "foundry-image",
+                "Image edits are unavailable on this deployment.",
+                status_code=400,
+                retryable=False,
+                error_code="unsupported_operation",
+            )
+
+    settings = load_app_settings()
+    defaults = create_services(settings)
+    services = AppServices(
+        settings=settings,
+        card_repository=InMemoryCardRepository(),
+        audit_repository=InMemoryAuditRepository(),
+        asset_store=InMemoryAssetStore(),
+        ai_client=UnsupportedEditAIClient(settings),
+        moderation_service=defaults.moderation_service,
+        rate_limiter=defaults.rate_limiter,
+        csrf_protector=defaults.csrf_protector,
+    )
+    client = TestClient(create_app(services=services), base_url="https://testserver")
+    from app import main as main_module
+    from tests.conftest import FakeOAuthClient
+
+    monkeypatch.setattr(main_module, "create_oauth_client", lambda settings: FakeOAuthClient())
+    client.get("/auth/login", follow_redirects=False)
+    client.get("/auth/callback?code=valid-code&state=opaque", follow_redirects=False)
+    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
+
+    response = client.post(
+        "/api/v1/cards/generate",
+        data={
+            "prompt": "create a safe fantasy knight with a moonlit shield",
+            "idempotencyKey": "idem-photo-unsupported",
+            "csrfToken": csrf_token,
+        },
+        files={"photo": ("portrait.png", b"\x89PNG\r\n\x1a\nmock", "image/png")},
+    )
+
+    assert response.status_code == 502
+    assert response.json()["errorCode"] == "reference_image_unsupported"
+    assert services.card_repository._records == {}
+
+
+def test_generation_without_photo_keeps_text_only_image_generation_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class TrackingAIClient(MockAIClient):
+        def __init__(self, settings) -> None:
+            super().__init__(settings)
+            self.text_calls = 0
+            self.image_calls = 0
+            self.image_edit_calls = 0
+
+        async def generate_card(self, prompt: str, *, request_id: str):
+            self.text_calls += 1
+            return await super().generate_card(prompt, request_id=request_id)
+
+        async def generate_image(
+            self,
+            art_prompt: str,
+            *,
+            request_id: str,
+            image_quality: Literal["low", "medium", "high"] | None = None,
+        ):
+            self.image_calls += 1
+            return await super().generate_image(
+                art_prompt,
+                request_id=request_id,
+                image_quality=image_quality,
+            )
+
+        async def generate_image_edit(
+            self,
+            art_prompt: str,
+            *,
+            reference_image: ReferenceImageUpload,
+            request_id: str,
+            image_quality: Literal["low", "medium", "high"] | None = None,
+        ):
+            self.image_edit_calls += 1
+            return await super().generate_image(
+                art_prompt,
+                request_id=request_id,
+                image_quality=image_quality,
+            )
+
+    settings = load_app_settings()
+    defaults = create_services(settings)
+    ai_client = TrackingAIClient(settings)
+    services = AppServices(
+        settings=settings,
+        card_repository=InMemoryCardRepository(),
+        audit_repository=InMemoryAuditRepository(),
+        asset_store=InMemoryAssetStore(),
+        ai_client=ai_client,
+        moderation_service=defaults.moderation_service,
+        rate_limiter=defaults.rate_limiter,
+        csrf_protector=defaults.csrf_protector,
+    )
+    client = TestClient(create_app(services=services), base_url="https://testserver")
+    from app import main as main_module
+    from tests.conftest import FakeOAuthClient
+
+    monkeypatch.setattr(main_module, "create_oauth_client", lambda settings: FakeOAuthClient())
+    client.get("/auth/login", follow_redirects=False)
+    client.get("/auth/callback?code=valid-code&state=opaque", follow_redirects=False)
+    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
+
+    response = client.post(
+        "/api/v1/cards/generate",
+        json={
+            "prompt": "create a safe fantasy knight with a moonlit shield",
+            "idempotencyKey": "idem-no-photo",
+            "csrfToken": csrf_token,
+        },
+    )
+
+    assert response.status_code == 200
+    assert ai_client.text_calls == 1
+    assert ai_client.image_calls == 1
+    assert ai_client.image_edit_calls == 0
 
 
 def test_card_document_omits_ttl_when_no_item_expiry_is_intended() -> None:
@@ -1419,6 +1676,73 @@ def test_foundry_image_request_payload_quality_matches_low_default(
     assert (
         payload.get("quality") == "low"
     ), "Image generation payload must default to quality='low' when IMAGE_QUALITY is unset"
+
+
+def test_foundry_image_edit_uses_edits_endpoint_and_multipart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AI_MODE", "live")
+    monkeypatch.setenv("PERSISTENCE_MODE", "memory")
+    monkeypatch.setenv("FOUNDRY_ENDPOINT", "https://foundry.example")
+    monkeypatch.setenv("FOUNDRY_TEXT_DEPLOYMENT", "gpt-5-5")
+    monkeypatch.setenv("FOUNDRY_IMAGE_DEPLOYMENT", "gpt-image-2")
+
+    captured: dict[str, object] = {}
+    real_async_client = httpx.AsyncClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["content_type"] = request.headers["Content-Type"]
+        captured["body"] = request.content
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "b64_json": (
+                            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk"
+                            "YPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+                        ),
+                        "revised_prompt": "A radiant knight based on the uploaded portrait.",
+                    }
+                ]
+            },
+        )
+
+    def build_client(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_async_client(*args, **kwargs)
+
+    monkeypatch.setattr(generation_module.httpx, "AsyncClient", build_client)
+    client = AzureFoundryAIClient(load_app_settings())
+    client._credential = SimpleNamespace(  # type: ignore[attr-defined]
+        get_token=lambda *_args, **_kwargs: SimpleNamespace(token="live-access-token")
+    )
+
+    asyncio.run(
+        client.generate_image_edit(
+            "A radiant knight raising a silver shield.",
+            reference_image=ReferenceImageUpload(
+                content=b"mock-image-bytes",
+                content_type="image/png",
+                filename="portrait.png",
+            ),
+            request_id="req-edit",
+        )
+    )
+
+    assert captured["url"] == (
+        "https://foundry.example/openai/deployments/gpt-image-2/images/edits"
+        "?api-version=2025-04-01-preview"
+    )
+    content_type = captured["content_type"]
+    assert isinstance(content_type, str)
+    assert content_type.startswith("multipart/form-data; boundary=")
+    body = captured["body"]
+    assert isinstance(body, bytes)
+    assert b'name="prompt"' in body
+    assert b"A radiant knight raising a silver shield." in body
+    assert b'name="image"; filename="portrait.png"' in body
 
 
 # ---------------------------------------------------------------------------
