@@ -389,5 +389,18 @@
 
 ### 2026-09-02: Authenticated library uses 5-minute user-delegation Blob SAS URLs
 **By:** Legolas
+**Status:** ⚠️ **SUPERSEDED** by 2026-09-03T08:15:45+0000 decision (backend-proxy route).
 **What:** Library pages mint read-only user-delegation SAS URLs for card artwork with a fixed 5-minute expiry, staying within the storage account's existing 15-minute SAS policy window. The Container App runtime identity keeps container-scoped Blob Data Contributor for uploads and gains account-scoped Storage Blob Delegator only for SAS signing. Cross-user detail lookups fail closed as 404s from the authenticated user's partition rather than revealing whether another owner's card exists.
 **Why:** User-delegation SAS keeps storage private, avoids Shared Key access, and matches the repo's Entra-first posture. Five minutes is long enough for normal page loads and reloads but short enough to limit replay value if a URL leaks. Returning 404 for non-owned card IDs avoids existence disclosure while still enforcing strict per-user scoping.
+
+### 2026-09-03T08:15:45+0000: Authenticated library serves artwork via backend-proxy image route, not SAS URLs
+
+**By:** Legolas
+
+**Supersedes:** the 2026-09-02 decision "Authenticated library uses 5-minute user-delegation Blob SAS URLs."
+
+**What:** Card artwork on `/my/cards` and `/my/cards/{card_id}` is now served through the existing backend-proxy route `GET /cards/{card_id}/image` (`app/main.py` → `card_service.fetch_image()`), which streams blob bytes read by the Container App's managed identity over the private endpoint. `CardLibraryService._resolve_image_url` now returns `record.image_url_path` directly (already set to `/cards/{card_id}/image` at persistence time) instead of minting a signed URL. `AzureBlobSasUrlSigner`, `create_asset_url_signer`, and the `AbstractAssetUrlSigner` protocol were removed from `app/library.py`, and the now-unused **Storage Blob Delegator** RBAC role assignment was removed from `infra/modules/storage.bicep` (confirmed via repo-wide grep that nothing else depended on it). Ownership enforcement (401 unauthenticated, 404 for non-owned cards) is preserved because it already lives in the shared `AbstractCardRepository.get(owner_id, card_id)` scoping used by both the library and the original card-generation image route.
+
+**Why:** The 2026-09-02 SAS approach doesn't work — the storage account is deployed with `networkAcls.defaultAction: Deny` and `publicNetworkAccess: Disabled` (Gimli's private-endpoint-only posture), so a browser on the public internet can never reach `*.blob.core.windows.net` directly. Azure Storage returns HTTP 403 for network-ACL-blocked requests regardless of SAS validity — this was a network-layer denial, not a signing bug. Reusing the pre-existing backend-proxy pattern (the same one the non-library card generation flow already used successfully) avoids reintroducing any client-direct-to-storage dependency and keeps the storage account's network posture untouched, as required. Any future image-delivery work for authenticated views should assume the browser will never talk to Blob Storage directly while `publicNetworkAccess: Disabled` remains in force.
+
+**Evidence:** Issue https://github.com/bmoussaud/fantasy-cards-generator/issues/59, PR https://github.com/bmoussaud/fantasy-cards-generator/pull/60. `python -m pytest tests/` (139 passed), `ruff check .`, `black --check .`, and `az bicep build --file infra/main.bicep` all pass locally.
