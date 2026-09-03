@@ -501,8 +501,124 @@
     manager.dataset.photoLibraryBound = "true";
   }
 
+  function bindConfirmModalForms() {
+    var modal = document.querySelector("[data-confirm-modal]");
+    if (!modal || modal.dataset.confirmModalBound === "true") {
+      return;
+    }
+
+    var dialog = modal.querySelector('[role="dialog"]');
+    var titleElement = modal.querySelector("[data-confirm-modal-title]");
+    var messageElement = modal.querySelector("[data-confirm-modal-message]");
+    var cancelButtons = modal.querySelectorAll("[data-confirm-modal-cancel]");
+    var confirmButton = modal.querySelector("[data-confirm-modal-confirm]");
+    var activeForm = null;
+    var lastFocusedElement = null;
+
+    if (!dialog || !titleElement || !messageElement || !confirmButton || !cancelButtons.length) {
+      return;
+    }
+
+    function getFocusableElements() {
+      return dialog.querySelectorAll(
+        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      );
+    }
+
+    function closeModal() {
+      modal.hidden = true;
+      activeForm = null;
+      if (lastFocusedElement && typeof lastFocusedElement.focus === "function") {
+        lastFocusedElement.focus();
+      }
+    }
+
+    function openModal(form, trigger) {
+      activeForm = form;
+      lastFocusedElement = trigger || document.activeElement;
+      titleElement.textContent = form.dataset.confirmTitle || "Confirm action";
+      messageElement.textContent = form.dataset.confirmMessage || "Are you sure you want to continue?";
+      confirmButton.textContent = form.dataset.confirmConfirmLabel || "Confirm";
+      modal.hidden = false;
+      confirmButton.focus();
+    }
+
+    document.addEventListener("submit", function (event) {
+      var form = event.target;
+      if (!form || !form.matches || !form.matches("[data-confirm-modal-form]")) {
+        return;
+      }
+
+      if (form.dataset.confirmModalApproved === "true") {
+        delete form.dataset.confirmModalApproved;
+        return;
+      }
+
+      event.preventDefault();
+      openModal(form);
+    });
+
+    document.addEventListener("click", function (event) {
+      var target = event.target;
+      if (!target || !target.closest) {
+        return;
+      }
+      var trigger = target.closest("[data-confirm-modal-form] button[type='submit']");
+      if (!trigger || !trigger.form) {
+        return;
+      }
+      lastFocusedElement = trigger;
+    });
+
+    cancelButtons.forEach(function (button) {
+      button.addEventListener("click", closeModal);
+    });
+
+    confirmButton.addEventListener("click", function () {
+      if (!activeForm) {
+        return;
+      }
+      activeForm.dataset.confirmModalApproved = "true";
+      if (typeof activeForm.requestSubmit === "function") {
+        activeForm.requestSubmit();
+      } else {
+        activeForm.submit();
+      }
+      modal.hidden = true;
+      activeForm = null;
+    });
+
+    modal.addEventListener("keydown", function (event) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeModal();
+        return;
+      }
+      if (event.key !== "Tab") {
+        return;
+      }
+      var focusableElements = getFocusableElements();
+      if (!focusableElements.length) {
+        event.preventDefault();
+        return;
+      }
+      var first = focusableElements[0];
+      var last = focusableElements[focusableElements.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    });
+
+    modal.dataset.confirmModalBound = "true";
+  }
+
   bindPhotoReferenceForm();
   bindPhotoLibraryManager();
+  bindConfirmModalForms();
 
   /**
    * Runtime artwork failures (broken URL, network error) are not something

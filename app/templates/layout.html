@@ -38,6 +38,25 @@
     <footer class="site-footer">
         <p>Forged in a living grimoire &middot; original cards, original art.</p>
     </footer>
+    <div class="confirm-modal" data-confirm-modal hidden>
+        <div class="confirm-modal__backdrop" data-confirm-modal-cancel></div>
+        <div
+            class="confirm-modal__dialog panel"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="confirm-modal-title"
+            aria-describedby="confirm-modal-message"
+            tabindex="-1"
+        >
+            <h2 id="confirm-modal-title" data-confirm-modal-title>Confirm action</h2>
+            <p id="confirm-modal-message" data-confirm-modal-message></p>
+            <p class="field__hint">This action cannot be undone.</p>
+            <div class="confirm-modal__actions">
+                <button class="btn btn-ghost" type="button" data-confirm-modal-cancel>Cancel</button>
+                <button class="btn btn-secondary" type="button" data-confirm-modal-confirm>Delete</button>
+            </div>
+        </div>
+    </div>
     <script src="/static/js/app.js" defer></script>
 </body>
 </html>

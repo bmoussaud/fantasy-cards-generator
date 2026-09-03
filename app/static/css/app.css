@@ -906,6 +906,45 @@ code {
   align-self: start;
 }
 
+.confirm-modal[hidden] {
+  display: none;
+}
+
+.confirm-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  padding: var(--space-5);
+}
+
+.confirm-modal__backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(8, 6, 13, 0.72);
+}
+
+.confirm-modal__dialog {
+  position: relative;
+  width: min(100%, 30rem);
+  z-index: 1;
+  display: grid;
+  gap: var(--space-4);
+}
+
+.confirm-modal__dialog h2,
+.confirm-modal__dialog p {
+  margin: 0;
+}
+
+.confirm-modal__actions {
+  display: flex;
+  gap: var(--space-3);
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
 .photo-library-card {
   display: grid;
   overflow: hidden;

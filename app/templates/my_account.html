@@ -16,9 +16,22 @@
         <p>
             A minimal deletion audit record is retained for {{ audit_retention_days }} days, then purged automatically.
         </p>
-        <form method="post" action="/my/account/delete" onsubmit="return window.confirm('Delete your account and all generated content permanently?');">
+        <form
+            method="post"
+            action="/my/account/delete"
+            data-confirm-modal-form
+            data-confirm-title="Delete your account permanently?"
+            data-confirm-message="Delete your account and all generated content permanently? This action cannot be undone."
+            data-confirm-confirm-label="Delete account"
+        >
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
             <button class="btn btn-secondary" type="submit">Delete my account</button>
+            <noscript>
+                <label class="field__hint">
+                    <input type="checkbox" required />
+                    I understand this permanently deletes my account and all generated content.
+                </label>
+            </noscript>
         </form>
     </section>
 {% endblock %}

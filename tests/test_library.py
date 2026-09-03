@@ -207,6 +207,10 @@ def test_my_card_detail_renders_owned_card(monkeypatch: pytest.MonkeyPatch) -> N
     assert "/cards/detail-card/image" in response.text
     assert '<time datetime="2026-09-02T13:00:00Z">Sep 2, 2026, 1:00 PM UTC</time>' in response.text
     assert '<time datetime="2026-09-02T14:00:00Z">Sep 2, 2026, 2:00 PM UTC</time>' in response.text
+    assert "data-confirm-modal-form" in response.text
+    assert 'data-confirm-title="Delete this card?"' in response.text
+    assert 'data-confirm-confirm-label="Delete card"' in response.text
+    assert "I understand this permanently deletes this card." in response.text
 
 
 def test_my_card_detail_omits_completed_date_when_missing(

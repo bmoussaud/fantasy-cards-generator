@@ -85,9 +85,22 @@
                 {% endif %}
             </dl>
             <div class="stack-actions">
-                <form method="post" action="/my/cards/{{ card.card_id }}/delete" onsubmit="return window.confirm('Delete this card permanently?');">
+                <form
+                    method="post"
+                    action="/my/cards/{{ card.card_id }}/delete"
+                    data-confirm-modal-form
+                    data-confirm-title="Delete this card?"
+                    data-confirm-message="This permanently deletes this card. Artwork cleanup will continue in the background."
+                    data-confirm-confirm-label="Delete card"
+                >
                     <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
                     <button class="btn btn-secondary" type="submit">Delete this card</button>
+                    <noscript>
+                        <label class="field__hint">
+                            <input type="checkbox" required />
+                            I understand this permanently deletes this card.
+                        </label>
+                    </noscript>
                 </form>
                 <p class="field__hint">This permanently removes the card metadata now and queues artwork cleanup in the background.</p>
             </div>
