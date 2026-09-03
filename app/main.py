@@ -793,7 +793,9 @@ def _form_string(form, *keys: str) -> str | None:
     for key in keys:
         value = form.get(key)
         if isinstance(value, str):
-            return value
+            normalized = value.strip()
+            if normalized:
+                return normalized
     return None
 
 

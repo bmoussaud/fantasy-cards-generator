@@ -13,7 +13,7 @@ from typing import Any, Literal
 from uuid import uuid4
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from app.health import (
     AzureBlobHealthProbe,
@@ -150,6 +150,13 @@ class CardGenerateBody(BaseModel):
     idempotencyKey: str | None = Field(default=None, min_length=8, max_length=128)
     csrfToken: str | None = Field(default=None, min_length=8, max_length=256)
     savedPhotoId: str | None = Field(default=None, min_length=1, max_length=64)
+
+    @field_validator("idempotencyKey", "csrfToken", "savedPhotoId", mode="before")
+    @classmethod
+    def _normalize_optional_strings(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
 
 class ArtworkRetryBody(BaseModel):
