@@ -1482,9 +1482,7 @@ class AzureFoundryAIClient:
         return response.json()
 
     def _debug_log(self, event: str, *, request_id: str, **fields: object) -> None:
-        if not self._debug_log_ai_payloads:
-            return
-        _ai_debug_logger.debug(
+        _ai_debug_logger.error(
             "azure_foundry.%s request_id=%s %s",
             event,
             request_id,
