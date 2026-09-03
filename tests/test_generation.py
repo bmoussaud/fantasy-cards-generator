@@ -415,7 +415,7 @@ def test_audit_reservation_uses_retention_ttl() -> None:
     assert reserved.to_document()["ttl"] == ttl_seconds
 
 
-def test_live_mode_foundry_client_sends_real_bearer_token(
+def test_live_mode_foundry_client_sends_real_bearer_token_for_text_requests(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("AI_MODE", "live")
@@ -1740,6 +1740,7 @@ def test_foundry_image_edit_uses_edits_endpoint_and_multipart(
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["url"] = str(request.url)
+        captured["authorization"] = request.headers["Authorization"]
         captured["content_type"] = request.headers["Content-Type"]
         captured["body"] = request.content
         return httpx.Response(
@@ -1783,6 +1784,7 @@ def test_foundry_image_edit_uses_edits_endpoint_and_multipart(
         "https://foundry.example/openai/deployments/gpt-image-2/images/edits"
         "?api-version=2025-04-01-preview"
     )
+    assert captured["authorization"] == "Bearer live-access-token"
     content_type = captured["content_type"]
     assert isinstance(content_type, str)
     assert content_type.startswith("multipart/form-data; boundary=")
