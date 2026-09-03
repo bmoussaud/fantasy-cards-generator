@@ -424,3 +424,8 @@
 **By:** Legolas
 **What:** Added an optional profile photo file input to the card generator form, wired the HTMX form for multipart submission, and added inline client-side preview/validation messaging for JPEG, PNG, and WebP uploads up to 5 MB.
 **Why:** This keeps the new reference-image capability visible and understandable in the existing server-rendered UI while matching Aragorn's backend upload contract and preserving the current error-panel flow for server-side validation failures.
+
+### 2026-09-03: Fix Azure Foundry bearer auth headers for all live image/text calls
+**By:** Aragorn
+**What:** `AzureFoundryAIClient._post()` and `_post_multipart()` now send the actual Microsoft Entra access token using an Authorization header built with plain string concatenation, and regression coverage asserts the real bearer value is passed on both the JSON (`/chat/completions`) and multipart (`/images/edits`) request paths.
+**Why:** Repository inspection confirmed `_access_token()` has always requested the Cognitive Services scope (`https://cognitiveservices.azure.com/.default`), which matches Azure AI Foundry / Azure OpenAI bearer-token auth, but the outbound header code never interpolated the token. Git history shows the bug has existed since commit `87c51d0` introduced the live Foundry client, so there is no prior working bearer-header implementation in this codebase. This environment can silently rewrite the on-disk display of code using an f-string for this specific header shape, so future fixes should keep the concatenation form instead of an f-string. Local/test workflows defaulting to `AI_MODE=mock`, plus the prior live-mode regression test asserting the placeholder, explain why the breakage escaped detection.
