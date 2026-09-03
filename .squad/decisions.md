@@ -404,3 +404,8 @@
 **Why:** The 2026-09-02 SAS approach doesn't work — the storage account is deployed with `networkAcls.defaultAction: Deny` and `publicNetworkAccess: Disabled` (Gimli's private-endpoint-only posture), so a browser on the public internet can never reach `*.blob.core.windows.net` directly. Azure Storage returns HTTP 403 for network-ACL-blocked requests regardless of SAS validity — this was a network-layer denial, not a signing bug. Reusing the pre-existing backend-proxy pattern (the same one the non-library card generation flow already used successfully) avoids reintroducing any client-direct-to-storage dependency and keeps the storage account's network posture untouched, as required. Any future image-delivery work for authenticated views should assume the browser will never talk to Blob Storage directly while `publicNetworkAccess: Disabled` remains in force.
 
 **Evidence:** Issue https://github.com/bmoussaud/fantasy-cards-generator/issues/59, PR https://github.com/bmoussaud/fantasy-cards-generator/pull/60. `python -m pytest tests/` (139 passed), `ruff check .`, `black --check .`, and `az bicep build --file infra/main.bicep` all pass locally.
+
+### 2026-09-03T08:46:26+0000: Library timestamps render as friendly UTC labels
+**By:** Legolas
+**What:** Authenticated library views should render card timestamps as human-friendly UTC text like `Sep 3, 2026, 8:04 AM UTC` while preserving the original ISO-8601 value in each `<time datetime="...">` attribute.
+**Why:** This keeps the UI readable without changing storage or API contracts, and it establishes a reusable presentation convention for future server-rendered metadata in the app until we have a user-specific timezone or locale strategy.
