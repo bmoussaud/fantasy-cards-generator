@@ -1,4 +1,0 @@
-### 2026-09-03: Issue 67 frontend uses a dedicated My Photos page plus client-side saved-photo picker
-**By:** Legolas
-**What:** Added a new authenticated UI route at `/my/photos/library` for managing saved reference photos, while keeping the existing `GET /my/photos` JSON endpoint as the shared data source for both the library page and the generator's saved-photo picker. The generator now enforces the upload-vs-saved-photo exclusivity in the browser by clearing the file input when a saved photo is chosen and clearing the saved-photo selection when a fresh upload is chosen.
-**Why:** This avoids colliding with Aragorn's API route names, keeps the frontend aligned with the established `/my/cards` navigation pattern, and lets the browser reuse the same owner-scoped API contract for listing and deleting photos without adding new backend HTML partial endpoints.
