@@ -409,3 +409,18 @@
 **By:** Legolas
 **What:** Authenticated library views should render card timestamps as human-friendly UTC text like `Sep 3, 2026, 8:04 AM UTC` while preserving the original ISO-8601 value in each `<time datetime="...">` attribute.
 **Why:** This keeps the UI readable without changing storage or API contracts, and it establishes a reusable presentation convention for future server-rendered metadata in the app until we have a user-specific timezone or locale strategy.
+
+### 2026-09-03: Profile-photo image conditioning is feasible on current GPT-image-2 stack
+**By:** Aragorn
+**What:** Issue #63 can proceed without an Azure model swap. The current backend already targets the `gpt-image-2` deployment in Azure AI Foundry for artwork generation, and the smallest viable implementation is to keep that deployment, add an optional backend-mediated photo upload, and switch photo-backed generations onto an image-edit/reference-image call while preserving the existing text-only `/images/generations` path as fallback.
+**Why:** Repository inspection shows today's flow is text-only end to end (`CardGenerateBody` + URL-encoded form parsing + JSON-only `generate_image()` call), so the gap is API/request-shape support rather than model capability. Microsoft Foundry docs for `gpt-image-2` indicate text+image inputs, edits/variations, and face-preservation support, which matches the issue goal better than reverting to older DALL-E guidance; however, uploads must stay on the existing backend-proxy pattern because Blob Storage is private-endpoint-only and prior SAS-url attempts failed under `publicNetworkAccess: Disabled`.
+
+### 2026-09-03: Profile photo generation backend contract for issue 63
+**By:** Aragorn
+**What:** The card generation backend now accepts an optional `photo` upload for reference-image generation. Frontend-integrated HTMX requests should submit `POST /ui/cards/generate` as `multipart/form-data` with fields `prompt` (required string), `csrf_token` (required string), `idempotency_key` (optional string), `quality` (optional `low|medium|high`), and `photo` (optional file). The JSON API `POST /api/v1/cards/generate` remains unchanged for text-only requests (`prompt`, `csrfToken`, `idempotencyKey`) and also accepts `multipart/form-data` with `prompt`, `csrfToken`, `idempotencyKey`, and optional `photo`. Accepted `photo` content types are `image/jpeg`, `image/png`, and `image/webp`, with a 5 MB max; invalid type returns `415 unsupported_photo_type`, oversized upload returns `413 photo_too_large`. When `photo` is present, backend generation uses Azure AI Foundry `POST /openai/deployments/{FOUNDRY_IMAGE_DEPLOYMENT}/images/edits?api-version=2025-04-01-preview`; when `photo` is absent, it keeps the existing `/images/generations` flow.
+**Why:** This gives Legolas an exact upload contract to build against without changing the existing text-only flow. The uploaded image is read in memory only for the single request and is never persisted to Blob Storage or any durable store, matching the privacy/retention requirement and avoiding browser-facing photo URLs.
+
+### 2026-09-03: Profile photo upload UI for issue 63
+**By:** Legolas
+**What:** Added an optional profile photo file input to the card generator form, wired the HTMX form for multipart submission, and added inline client-side preview/validation messaging for JPEG, PNG, and WebP uploads up to 5 MB.
+**Why:** This keeps the new reference-image capability visible and understandable in the existing server-rendered UI while matching Aragorn's backend upload contract and preserving the current error-panel flow for server-side validation failures.
