@@ -17,6 +17,7 @@ from app.generation import (
     AppServices,
     AuthenticatedOwner,
     AzureFoundryAIClient,
+    CardGenerateBody,
     CardGenerationService,
     InMemoryAssetStore,
     InMemoryAuditRepository,
@@ -82,6 +83,8 @@ def test_app_shell_renders_generation_form(authenticated_client: TestClient) -> 
     assert 'name="idempotency_key"' in response.text
     assert 'name="photo"' in response.text
     assert 'name="saved_photo_id"' in response.text
+    assert "data-saved-photo-id-input" in response.text
+    assert "disabled" in response.text.split("data-saved-photo-id-input", 1)[1].split(">", 1)[0]
     assert 'name="save_photo"' in response.text
     assert 'name="photo_label"' in response.text
     assert 'accept="image/jpeg,image/png,image/webp"' in response.text
@@ -968,6 +971,74 @@ def test_ui_generate_renders_composed_card_face_with_type_and_rarity_labels(
     assert 'hx-swap-oob="true"' in body
 
 
+def test_ui_generate_ignores_blank_optional_form_fields(
+    authenticated_client: TestClient,
+) -> None:
+    csrf_token = extract_hidden_value(authenticated_client.get("/app").text, "csrf_token")
+
+    response = authenticated_client.post(
+        "/ui/cards/generate",
+        data={
+            "prompt": "create a safe fantasy knight with a radiant crown",
+            "idempotency_key": "   ",
+            "csrf_token": csrf_token,
+            "saved_photo_id": "",
+            "photo_label": "   ",
+            "quality": "   ",
+        },
+        headers={"content-type": "application/x-www-form-urlencoded"},
+    )
+
+    assert response.status_code == 200
+    assert 'class="card-face"' in response.text
+
+    services = authenticated_client.app.state.services
+    assert len(services.card_repository._records) == 1
+    stored_card = next(iter(services.card_repository._records.values()))
+    assert stored_card.idempotency_key
+    assert stored_card.prompt == "create a safe fantasy knight with a radiant crown"
+
+
+def test_ui_generate_blank_csrf_token_still_fails_csrf(
+    authenticated_client: TestClient,
+) -> None:
+    response = authenticated_client.post(
+        "/ui/cards/generate",
+        data={
+            "prompt": "create a safe fantasy knight with a radiant crown",
+            "idempotency_key": "idem-ui-blank-csrf",
+            "csrf_token": "   ",
+            "saved_photo_id": "",
+        },
+        headers={"content-type": "application/x-www-form-urlencoded"},
+    )
+
+    assert response.status_code == 403
+    assert "error-panel" in response.text
+    assert "A valid CSRF token is required for this action." in response.text
+
+
+def test_ui_generate_still_rejects_non_blank_invalid_idempotency_key(
+    authenticated_client: TestClient,
+) -> None:
+    csrf_token = extract_hidden_value(authenticated_client.get("/app").text, "csrf_token")
+
+    response = authenticated_client.post(
+        "/ui/cards/generate",
+        data={
+            "prompt": "create a safe fantasy knight with a radiant crown",
+            "idempotency_key": "short",
+            "csrf_token": csrf_token,
+            "saved_photo_id": "",
+        },
+        headers={"content-type": "application/x-www-form-urlencoded"},
+    )
+
+    assert response.status_code == 422
+    assert "error-panel" in response.text
+    assert "Unprocessable Entity" in response.text
+
+
 def test_ui_overall_timeout_during_image_returns_partial_card(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1208,6 +1279,21 @@ def test_ui_surfaces_missing_saved_photo_errors(authenticated_client: TestClient
     assert response.status_code == 404
     assert "error-panel" in response.text
     assert "No saved photo was found for this user." in response.text
+
+
+def test_card_generate_body_normalizes_blank_optional_strings() -> None:
+    body = CardGenerateBody.model_validate(
+        {
+            "prompt": "create a safe fantasy knight with a radiant crown",
+            "idempotencyKey": "   ",
+            "csrfToken": "   ",
+            "savedPhotoId": "",
+        }
+    )
+
+    assert body.idempotencyKey is None
+    assert body.csrfToken is None
+    assert body.savedPhotoId is None
 
 
 def test_persistence_cleanup_deletes_orphaned_blob(

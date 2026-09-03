@@ -267,9 +267,14 @@
       }
     }
 
+    function syncSavedPhotoInput() {
+      savedPhotoInput.value = selectedSavedPhotoId;
+      savedPhotoInput.disabled = !selectedSavedPhotoId;
+    }
+
     function clearSavedPhotoSelection() {
       selectedSavedPhotoId = "";
-      savedPhotoInput.value = "";
+      syncSavedPhotoInput();
       clearSavedPhotoButton.hidden = true;
       picker.querySelectorAll(".saved-photo-option").forEach(function (button) {
         button.classList.remove("is-selected");
@@ -290,7 +295,7 @@
       }
       clearSavedPhotoSelection();
       selectedSavedPhotoId = nextPhotoId;
-      savedPhotoInput.value = nextPhotoId;
+      syncSavedPhotoInput();
       picker.querySelectorAll(".saved-photo-option").forEach(function (item) {
         var isSelected = item === button;
         item.classList.toggle("is-selected", isSelected);
@@ -377,6 +382,7 @@
       });
 
     syncSavePhotoControls();
+    syncSavedPhotoInput();
     form.dataset.photoReferenceBound = "true";
   }
 
