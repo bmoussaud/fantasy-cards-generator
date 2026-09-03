@@ -1398,7 +1398,7 @@ class AzureFoundryAIClient:
     ) -> dict[str, Any]:
         token = await self._access_token()
         headers = {
-            "Authorization": f"Bearer {token}",
+            "Authorization": "Bearer " + token,
             "Content-Type": "application/json",
         }
         async with httpx.AsyncClient(
@@ -1434,9 +1434,9 @@ class AzureFoundryAIClient:
         api_version: str,
         service_name: str,
     ) -> dict[str, Any]:
-        await self._access_token()
+        token = await self._access_token()
         headers = {
-            "Authorization": "******",
+            "Authorization": "Bearer " + token,
         }
         async with httpx.AsyncClient(
             base_url=self.settings.foundry_endpoint,
