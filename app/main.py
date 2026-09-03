@@ -301,6 +301,24 @@ def create_app(services: AppServices | None = None) -> FastAPI:
             ),
         )
 
+    @app.get("/my/photos/library", response_class=HTMLResponse)
+    async def my_photo_library(
+        request: Request,
+        user: AuthenticatedUser = Depends(require_api_user),
+    ) -> HTMLResponse:
+        owner = get_authenticated_owner(request)
+        if owner is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                headers={"WWW-Authenticate": "Session"},
+                detail="Authentication required.",
+            )
+        return templates.TemplateResponse(
+            request,
+            "my_photos.html",
+            template_context(request, page_title="My Photos", user=user),
+        )
+
     @app.post("/my/photos", response_model=SavedPhotoResponseModel, status_code=201)
     async def save_my_photo(
         request: Request,

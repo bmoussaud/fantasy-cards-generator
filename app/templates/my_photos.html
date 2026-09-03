@@ -1,0 +1,33 @@
+{% extends "layout.html" %}
+
+{% block content %}
+    <section class="page-hero">
+        <p class="eyebrow">Library</p>
+        <h1>My Photos</h1>
+        <p>Manage the reference photos you can reuse for future card generations.</p>
+    </section>
+
+    <section
+        class="panel"
+        data-photo-library-manager
+        data-photo-library-endpoint="/my/photos"
+        data-photo-library-csrf-token="{{ csrf_token }}"
+    >
+        <div class="saved-photo-picker__header">
+            <div>
+                <h2 class="saved-photo-picker__title">Saved reference photos</h2>
+                <p class="field__hint">Delete any photo you no longer want to keep in your personal library.</p>
+            </div>
+            <a class="btn btn-secondary" href="/app">Use a photo in the generator</a>
+        </div>
+
+        <div data-photo-library-error hidden></div>
+        <div class="photo-library-grid" data-photo-library-grid aria-live="polite">
+            <div class="empty-state">
+                <svg class="empty-state__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 5.5h16v13H4z"/><path d="M8 9.5h8M8 13h5" stroke-linecap="round"/></svg>
+                <h2>Loading your photos</h2>
+                <p>Fetching your saved reference-photo library.</p>
+            </div>
+        </div>
+    </section>
+{% endblock %}

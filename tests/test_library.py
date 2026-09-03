@@ -152,6 +152,30 @@ def test_my_cards_shows_empty_state(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "Your library is empty." in response.text
 
 
+def test_my_photos_library_requires_authentication() -> None:
+    client = TestClient(create_app(), base_url="https://testserver")
+
+    response = client.get("/my/photos/library")
+
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == "Session"
+
+
+def test_my_photos_library_renders_management_shell(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = make_authenticated_client(monkeypatch)
+
+    response = client.get("/my/photos/library")
+
+    assert response.status_code == 200
+    assert "My Photos" in response.text
+    assert "Saved reference photos" in response.text
+    assert "data-photo-library-manager" in response.text
+    assert 'data-photo-library-endpoint="/my/photos"' in response.text
+    assert "Delete any photo you no longer want to keep" in response.text
+
+
 def test_my_card_detail_requires_authentication() -> None:
     client = TestClient(create_app(), base_url="https://testserver")
 

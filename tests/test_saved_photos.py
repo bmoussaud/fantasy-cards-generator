@@ -159,6 +159,14 @@ def test_save_photo_generates_thumbnail_and_lists_newest_first(
 
     assert first.status_code == 201
     assert second.status_code == 201
+    first_photo_id = first.json()["photoId"]
+    second_photo_id = second.json()["photoId"]
+    first_record = services.saved_photo_repository._records[(TEST_OWNER_ID, first_photo_id)]
+    second_record = services.saved_photo_repository._records[(TEST_OWNER_ID, second_photo_id)]
+    first_record.created_at = "2026-09-03T10:00:00Z"
+    first_record.updated_at = "2026-09-03T10:00:00Z"
+    second_record.created_at = "2026-09-03T10:05:00Z"
+    second_record.updated_at = "2026-09-03T10:05:00Z"
     saved = SavedPhotoResponseModel.model_validate(second.json())
     assert saved.label == "Second portrait"
     assert saved.image.url == f"/my/photos/{saved.photoId}/image"

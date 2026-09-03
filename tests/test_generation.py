@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from types import SimpleNamespace
 from typing import Literal
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -32,6 +34,42 @@ from app.problems import ProblemDetails
 from app.settings import SettingsError, load_app_settings
 from tests.conftest import TEST_OWNER_ID, extract_hidden_value, make_authenticated_client
 
+VALID_PNG_BYTES = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+nmJsAAAAASUVORK5CYII="
+)
+
+
+class AllowAllPhotoModerationService:
+    async def assert_allowed(self, photo: ReferenceImageUpload) -> list[dict[str, object]]:
+        return [
+            {"category": "Hate", "severity": 0},
+            {"category": "SelfHarm", "severity": 0},
+            {"category": "Sexual", "severity": 0},
+            {"category": "Violence", "severity": 0},
+        ]
+
+
+class RejectingPhotoModerationService:
+    async def assert_allowed(self, photo: ReferenceImageUpload) -> list[dict[str, object]]:
+        raise ProblemDetails(
+            status_code=422,
+            title="Saved Photo Rejected",
+            detail=(
+                "The uploaded photo could not be saved because it exceeded "
+                "the allowed safety threshold (Sexual=4)."
+            ),
+            type="/problems/saved-photo-rejected",
+            error_code="saved_photo_rejected",
+        )
+
+
+def build_services(monkeypatch: pytest.MonkeyPatch, **env_overrides: str) -> AppServices:
+    for key, value in env_overrides.items():
+        monkeypatch.setenv(key, value)
+    services = create_services(load_app_settings())
+    services.photo_moderation_service = AllowAllPhotoModerationService()
+    return services
+
 
 def test_app_shell_renders_generation_form(authenticated_client: TestClient) -> None:
     response = authenticated_client.get("/app")
@@ -43,9 +81,14 @@ def test_app_shell_renders_generation_form(authenticated_client: TestClient) -> 
     assert 'name="csrf_token"' in response.text
     assert 'name="idempotency_key"' in response.text
     assert 'name="photo"' in response.text
+    assert 'name="saved_photo_id"' in response.text
+    assert 'name="save_photo"' in response.text
+    assert 'name="photo_label"' in response.text
     assert 'accept="image/jpeg,image/png,image/webp"' in response.text
     assert "Reference photo preview" in response.text
     assert "up to 5 MB" in response.text
+    assert "Pick from your library" in response.text
+    assert "/my/photos/library" in response.text
 
 
 def test_api_requires_authentication() -> None:
@@ -1039,6 +1082,132 @@ def test_ui_rejects_oversized_photo_upload_with_error_panel(
     assert "error-panel" in response.text
     assert "Photo Too Large" in response.text
     assert "5 MB or smaller" in response.text
+
+
+def test_ui_rejects_photo_and_saved_photo_together_with_error_panel(
+    authenticated_client: TestClient,
+) -> None:
+    csrf_token = extract_hidden_value(authenticated_client.get("/app").text, "csrf_token")
+
+    response = authenticated_client.post(
+        "/ui/cards/generate",
+        data={
+            "prompt": "create a safe fantasy knight with a moonlit shield",
+            "idempotency_key": "idem-ui-photo-conflict",
+            "csrf_token": csrf_token,
+            "saved_photo_id": uuid4().hex,
+        },
+        files={"photo": ("portrait.png", b"\x89PNG\r\n\x1a\nmock", "image/png")},
+    )
+
+    assert response.status_code == 422
+    assert "error-panel" in response.text
+    assert "Conflicting Photo Inputs" in response.text
+    assert "Provide either photo or saved_photo_id, but not both." in response.text
+
+
+def test_ui_requires_upload_when_save_photo_is_enabled(
+    authenticated_client: TestClient,
+) -> None:
+    csrf_token = extract_hidden_value(authenticated_client.get("/app").text, "csrf_token")
+
+    response = authenticated_client.post(
+        "/ui/cards/generate",
+        data={
+            "prompt": "create a safe fantasy knight with a moonlit shield",
+            "idempotency_key": "idem-ui-save-without-upload",
+            "csrf_token": csrf_token,
+            "save_photo": "true",
+        },
+        headers={"content-type": "application/x-www-form-urlencoded"},
+    )
+
+    assert response.status_code == 422
+    assert "error-panel" in response.text
+    assert "Saved Photo Requires Upload" in response.text
+    assert "save_photo=true requires a fresh photo upload." in response.text
+
+
+def test_ui_surfaces_saved_photo_limit_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    services = build_services(monkeypatch, SAVED_PHOTO_MAX_COUNT="1")
+    client = TestClient(create_app(services=services), base_url="https://testserver")
+    from app import main as main_module
+    from tests.conftest import FakeOAuthClient
+
+    monkeypatch.setattr(main_module, "create_oauth_client", lambda settings: FakeOAuthClient())
+    client.get("/auth/login", follow_redirects=False)
+    client.get("/auth/callback?code=valid-code&state=opaque", follow_redirects=False)
+    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
+    first_save = client.post(
+        "/my/photos",
+        data={"label": "Existing photo", "csrf_token": csrf_token},
+        files={"photo": ("existing.png", VALID_PNG_BYTES, "image/png")},
+    )
+    assert first_save.status_code == 201
+
+    response = client.post(
+        "/ui/cards/generate",
+        data={
+            "prompt": "create a safe fantasy knight with a moonlit shield",
+            "idempotency_key": "idem-ui-save-limit",
+            "csrf_token": csrf_token,
+            "save_photo": "true",
+            "photo_label": "Moonlit ranger",
+        },
+        files={"photo": ("portrait.png", b"\x89PNG\r\n\x1a\nmock", "image/png")},
+    )
+
+    assert response.status_code == 409
+    assert "error-panel" in response.text
+    assert "Saved Photo Limit Reached" in response.text
+
+
+def test_ui_surfaces_saved_photo_rejected_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    services = build_services(monkeypatch)
+    services.photo_moderation_service = RejectingPhotoModerationService()
+    client = TestClient(create_app(services=services), base_url="https://testserver")
+    from app import main as main_module
+    from tests.conftest import FakeOAuthClient
+
+    monkeypatch.setattr(main_module, "create_oauth_client", lambda settings: FakeOAuthClient())
+    client.get("/auth/login", follow_redirects=False)
+    client.get("/auth/callback?code=valid-code&state=opaque", follow_redirects=False)
+    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
+
+    response = client.post(
+        "/ui/cards/generate",
+        data={
+            "prompt": "create a safe fantasy knight with a moonlit shield",
+            "idempotency_key": "idem-ui-save-rejected",
+            "csrf_token": csrf_token,
+            "save_photo": "true",
+            "photo_label": "Unsafe portrait",
+        },
+        files={"photo": ("portrait.png", b"\x89PNG\r\n\x1a\nmock", "image/png")},
+    )
+
+    assert response.status_code == 422
+    assert "error-panel" in response.text
+    assert "Saved Photo Rejected" in response.text
+
+
+def test_ui_surfaces_missing_saved_photo_errors(authenticated_client: TestClient) -> None:
+    csrf_token = extract_hidden_value(authenticated_client.get("/app").text, "csrf_token")
+
+    response = authenticated_client.post(
+        "/ui/cards/generate",
+        data={
+            "prompt": "create a safe fantasy knight with a moonlit shield",
+            "idempotency_key": "idem-ui-missing-saved-photo",
+            "csrf_token": csrf_token,
+            "saved_photo_id": "missing-photo",
+        },
+        headers={"content-type": "application/x-www-form-urlencoded"},
+    )
+
+    assert response.status_code == 404
+    assert "error-panel" in response.text
+    assert "No saved photo was found for this user." in response.text
 
 
 def test_persistence_cleanup_deletes_orphaned_blob(
