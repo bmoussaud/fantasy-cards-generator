@@ -41,6 +41,7 @@ class TelemetrySettings:
 @dataclass(frozen=True)
 class AppSettings:
     app_env: str
+    debug_log_ai_payloads: bool
     ai_mode: Literal["mock", "live"]
     persistence_mode: Literal["memory", "azure"]
     foundry_endpoint: str | None
@@ -101,6 +102,7 @@ def load_telemetry_settings() -> TelemetrySettings:
 
 def load_app_settings() -> AppSettings:
     app_env = _string_env("APP_ENV", default="development")
+    app_env_normalized = app_env.strip().lower()
     ai_mode = _string_env("AI_MODE", default="mock")
     if ai_mode not in AI_MODE_VALUES:
         raise SettingsError("AI_MODE must be one of: live, mock.")
@@ -116,6 +118,18 @@ def load_app_settings() -> AppSettings:
 
     settings = AppSettings(
         app_env=app_env,
+        # Defense in depth: raw AI prompts/responses are only ever loggable in a
+        # local development app_env. Even an explicit DEBUG_LOG_AI_PAYLOADS=true
+        # is ignored outside development so shared/test/prod deployments cannot
+        # accidentally persist payload bodies.
+        debug_log_ai_payloads=(
+            _bool_env(
+                "DEBUG_LOG_AI_PAYLOADS",
+                default=app_env_normalized == "development",
+            )
+            if app_env_normalized == "development"
+            else False
+        ),
         ai_mode=ai_mode,
         persistence_mode=persistence_mode,
         foundry_endpoint=_optional_env("FOUNDRY_ENDPOINT"),
