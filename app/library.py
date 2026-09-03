@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from app.generation import (
     AbstractCardRepository,
@@ -9,6 +10,26 @@ from app.generation import (
     GeneratedCardModel,
     StoredCard,
 )
+
+
+def format_card_timestamp(timestamp: str | None) -> str | None:
+    if timestamp is None:
+        return None
+
+    try:
+        parsed_timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        return timestamp
+
+    if parsed_timestamp.tzinfo is None:
+        return timestamp
+
+    utc_timestamp = parsed_timestamp.astimezone(UTC)
+    hour = utc_timestamp.strftime("%I").lstrip("0") or "0"
+    return (
+        f"{utc_timestamp.strftime('%b')} {utc_timestamp.day}, {utc_timestamp.year}, "
+        f"{hour}:{utc_timestamp.strftime('%M')} {utc_timestamp.strftime('%p')} UTC"
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +45,8 @@ class LibraryCardSummary:
     image_url: str | None
     created_at: str
     completed_at: str | None
+    created_at_display: str
+    completed_at_display: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +66,8 @@ class LibraryCardDetail:
     image_url: str | None
     created_at: str
     completed_at: str | None
+    created_at_display: str
+    completed_at_display: str | None
 
 
 class CardLibraryService:
@@ -82,6 +107,8 @@ class CardLibraryService:
             image_url=await self._resolve_image_url(record),
             created_at=record.created_at,
             completed_at=record.completed_at,
+            created_at_display=format_card_timestamp(record.created_at) or record.created_at,
+            completed_at_display=format_card_timestamp(record.completed_at),
         )
 
     async def _build_detail(self, record: StoredCard) -> LibraryCardDetail:
@@ -102,6 +129,8 @@ class CardLibraryService:
             image_url=await self._resolve_image_url(record),
             created_at=record.created_at,
             completed_at=record.completed_at,
+            created_at_display=format_card_timestamp(record.created_at) or record.created_at,
+            completed_at_display=format_card_timestamp(record.completed_at),
         )
 
     async def _resolve_image_url(self, record: StoredCard) -> str | None:

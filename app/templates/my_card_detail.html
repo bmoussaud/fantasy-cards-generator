@@ -65,12 +65,12 @@
                 </div>
                 <div>
                     <dt>Created</dt>
-                    <dd><time datetime="{{ card.created_at }}">{{ card.created_at }}</time></dd>
+                    <dd><time datetime="{{ card.created_at }}">{{ card.created_at_display }}</time></dd>
                 </div>
                 {% if card.completed_at %}
                     <div>
                         <dt>Completed</dt>
-                        <dd><time datetime="{{ card.completed_at }}">{{ card.completed_at }}</time></dd>
+                        <dd><time datetime="{{ card.completed_at }}">{{ card.completed_at_display }}</time></dd>
                     </div>
                 {% endif %}
                 <div>
