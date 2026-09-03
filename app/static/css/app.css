@@ -369,6 +369,10 @@ code {
   margin: 0;
 }
 
+.field__hint[data-invalid="true"] {
+  color: var(--color-danger-text);
+}
+
 .field__control {
   width: 100%;
   border-radius: var(--radius-md);
@@ -390,6 +394,49 @@ code {
 
 .field__control:hover {
   border-color: var(--color-border-strong);
+}
+
+.field__control--file {
+  padding: var(--space-2);
+}
+
+.photo-preview {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border-subtle);
+  background: var(--color-surface-2);
+}
+
+.photo-preview[hidden] {
+  display: none;
+}
+
+.photo-preview__label,
+.photo-preview__meta {
+  margin: 0;
+}
+
+.photo-preview__label {
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: var(--color-parchment);
+}
+
+.photo-preview__meta {
+  font-size: var(--text-xs);
+  color: var(--color-parchment-dim);
+}
+
+.photo-preview__image {
+  display: block;
+  width: min(100%, 14rem);
+  max-height: 14rem;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border-subtle);
+  object-fit: cover;
+  background: var(--color-surface-1);
 }
 
 .panel {

@@ -357,6 +357,13 @@ class ImageResult:
 
 
 @dataclass(slots=True)
+class ReferenceImageUpload:
+    content: bytes
+    content_type: str
+    filename: str | None = None
+
+
+@dataclass(slots=True)
 class AITextResult:
     payload: dict[str, Any]
     metadata: ModelMetadata
@@ -1188,6 +1195,20 @@ class MockAIClient:
             usage=usage,
         )
 
+    async def generate_image_edit(
+        self,
+        art_prompt: str,
+        *,
+        reference_image: ReferenceImageUpload,
+        request_id: str,
+        image_quality: Literal["low", "medium", "high"] | None = None,
+    ) -> AIImageResult:
+        return await self.generate_image(
+            art_prompt,
+            request_id=request_id,
+            image_quality=image_quality,
+        )
+
 
 class AzureFoundryAIClient:
     def __init__(self, settings: AppSettings) -> None:
@@ -1310,6 +1331,63 @@ class AzureFoundryAIClient:
             usage=usage,
         )
 
+    async def generate_image_edit(
+        self,
+        art_prompt: str,
+        *,
+        reference_image: ReferenceImageUpload,
+        request_id: str,
+        image_quality: Literal["low", "medium", "high"] | None = None,
+    ) -> AIImageResult:
+        quality = image_quality if image_quality is not None else self.settings.image_quality
+        if quality not in {"low", "medium", "high"}:
+            raise ValueError(f"image_quality must be low, medium, or high; got {quality!r}")
+        started_at = time.perf_counter()
+        response = await self._post_multipart(
+            f"/openai/deployments/{self.settings.foundry_image_deployment}/images/edits",
+            data={
+                "prompt": art_prompt,
+                "size": self.settings.image_size,
+                "quality": quality,
+            },
+            files={
+                "image": (
+                    reference_image.filename or "reference-image",
+                    reference_image.content,
+                    reference_image.content_type,
+                )
+            },
+            api_version="2025-04-01-preview",
+            service_name="foundry-image",
+        )
+        data = response.get("data") or []
+        if not data:
+            raise UpstreamServiceError("foundry-image", "Image edit returned no data.")
+        first = data[0]
+        b64_image = first.get("b64_json")
+        if not isinstance(b64_image, str):
+            raise UpstreamServiceError("foundry-image", "Image edit payload was invalid.")
+        usage = UsageAudit(
+            inputTokens=0,
+            outputTokens=0,
+            totalTokens=0,
+            latencyMs=int((time.perf_counter() - started_at) * 1000),
+        )
+        return AIImageResult(
+            image=ImageResult(
+                content=base64.b64decode(b64_image),
+                content_type="image/png",
+                revised_prompt=first.get("revised_prompt"),
+            ),
+            metadata=ModelMetadata(
+                provider="azure-openai",
+                deployment=self.settings.foundry_image_deployment or "",
+                model="gpt-image-2",
+                mode="live",
+            ),
+            usage=usage,
+        )
+
     async def _post(
         self,
         path: str,
@@ -1334,6 +1412,44 @@ class AzureFoundryAIClient:
             )
         if response.is_error:
             error_code, diagnostic_message = _azure_error_diagnostic(response, payload)
+            raise UpstreamServiceError(
+                service_name,
+                (
+                    f"{service_name} request failed with Azure error "
+                    f"{error_code}: {diagnostic_message}"
+                ),
+                status_code=response.status_code,
+                retryable=response.status_code == 429 or response.status_code >= 500,
+                error_code=error_code,
+                diagnostic_message=diagnostic_message,
+            )
+        return response.json()
+
+    async def _post_multipart(
+        self,
+        path: str,
+        *,
+        data: dict[str, str],
+        files: dict[str, tuple[str, bytes, str]],
+        api_version: str,
+        service_name: str,
+    ) -> dict[str, Any]:
+        await self._access_token()
+        headers = {
+            "Authorization": "******",
+        }
+        async with httpx.AsyncClient(
+            base_url=self.settings.foundry_endpoint,
+            timeout=None,
+        ) as client:
+            response = await client.post(
+                f"{path}?api-version={api_version}",
+                headers=headers,
+                data=data,
+                files=files,
+            )
+        if response.is_error:
+            error_code, diagnostic_message = _azure_error_diagnostic(response, dict(data))
             raise UpstreamServiceError(
                 service_name,
                 (
@@ -1424,12 +1540,13 @@ class CardGenerationService:
         request_id: str,
         client_ip: str,
         image_quality: Literal["low", "medium", "high"] | None = None,
+        reference_image: ReferenceImageUpload | None = None,
     ) -> CardResponseModel:
         resolved_quality: Literal["low", "medium", "high"] = (
             image_quality if image_quality is not None else self.services.settings.image_quality
         )
         normalized_prompt = normalize_prompt(prompt)
-        request_hash = digest_text(normalized_prompt)
+        request_hash = digest_generation_request(normalized_prompt, reference_image)
         card_id = deterministic_card_id(owner.owner_id, idempotency_key)
         reservation, created = await self.services.card_repository.reserve_document(
             owner_id=owner.owner_id,
@@ -1479,13 +1596,15 @@ class CardGenerationService:
                     request_id=request_id,
                     progress=progress,
                     image_quality=resolved_quality,
+                    reference_image=reference_image,
                 ),
                 timeout=self.services.settings.retry.overall_timeout_seconds,
             )
             return result
         except asyncio.TimeoutError as exc:
             if (
-                progress.stage == "foundry-image"
+                reference_image is None
+                and progress.stage == "foundry-image"
                 and progress.validated_payload is not None
                 and progress.derived_art_prompt is not None
                 and progress.text_result is not None
@@ -1505,12 +1624,24 @@ class CardGenerationService:
                     partial_reason="image_timeout",
                 )
                 return self._as_response(partial)
-            problem = ProblemDetails(
-                status_code=504,
-                title="Gateway Timeout",
-                detail="The generation request exceeded the overall timeout.",
-                type="/problems/upstream-timeout",
-                error_code="upstream_timeout",
+            problem = (
+                ProblemDetails(
+                    status_code=504,
+                    title="Reference Photo Generation Timed Out",
+                    detail=(
+                        "Azure AI Foundry did not finish the reference-photo " "image edit in time."
+                    ),
+                    type="/problems/reference-image-timeout",
+                    error_code="reference_image_timeout",
+                )
+                if reference_image is not None
+                else ProblemDetails(
+                    status_code=504,
+                    title="Gateway Timeout",
+                    detail="The generation request exceeded the overall timeout.",
+                    type="/problems/upstream-timeout",
+                    error_code="upstream_timeout",
+                )
             )
             await self.services.card_repository.delete(owner.owner_id, card_id)
             await self._save_audit_failure(
@@ -1674,6 +1805,7 @@ class CardGenerationService:
         request_id: str,
         progress: GenerationProgress,
         image_quality: Literal["low", "medium", "high"],
+        reference_image: ReferenceImageUpload | None = None,
     ) -> CardResponseModel:
         moderation: list[ModerationDecision] = []
         progress.stage = "pre-moderation"
@@ -1810,17 +1942,42 @@ class CardGenerationService:
         progress.text_result = text_result
         progress.stage = "foundry-image"
         try:
-            image_result = await self._retry_upstream(
-                lambda q=image_quality: self.services.ai_client.generate_image(
-                    derived_art_prompt,
+            if reference_image is None:
+                image_result = await self._retry_upstream(
+                    lambda q=image_quality: self.services.ai_client.generate_image(
+                        derived_art_prompt,
+                        request_id=request_id,
+                        image_quality=q,
+                    ),
+                    service_name="foundry-image",
                     request_id=request_id,
-                    image_quality=q,
-                ),
-                service_name="foundry-image",
-                request_id=request_id,
-            )
+                )
+            else:
+                image_result = await self._retry_upstream(
+                    lambda q=image_quality: self.services.ai_client.generate_image_edit(
+                        derived_art_prompt,
+                        reference_image=reference_image,
+                        request_id=request_id,
+                        image_quality=q,
+                    ),
+                    service_name="foundry-image",
+                    request_id=request_id,
+                    on_foundry_image_failure="error",
+                )
             record_token_usage("image", image_result.usage)
-        except ProblemDetails:
+        except ProblemDetails as exc:
+            if reference_image is not None:
+                await self.services.card_repository.delete(owner.owner_id, card_id)
+                await self._save_audit_failure(
+                    owner.owner_id,
+                    card_id,
+                    request_id,
+                    idempotency_key,
+                    request_hash,
+                    exc.error_code,
+                    problem=exc,
+                )
+                raise
             partial = await self._persist_partial(
                 owner=owner,
                 card_id=card_id,
@@ -2346,6 +2503,7 @@ class CardGenerationService:
         *,
         service_name: str,
         request_id: str,
+        on_foundry_image_failure: Literal["pending", "error"] = "pending",
     ) -> Any:
         timeout_seconds, max_retries = self._upstream_policy(service_name)
         for attempt in range(max_retries + 1):
@@ -2378,13 +2536,27 @@ class CardGenerationService:
                         retryable=attempt < max_retries,
                     )
                     if attempt >= max_retries:
-                        if service_name == "foundry-image":
+                        if (
+                            service_name == "foundry-image"
+                            and on_foundry_image_failure == "pending"
+                        ):
                             raise ProblemDetails(
                                 status_code=200,
                                 title="Artwork Pending",
                                 detail="Artwork generation timed out after text generation.",
                                 type="/problems/artwork-pending",
                                 error_code="artwork_retry_available",
+                            ) from exc
+                        if service_name == "foundry-image":
+                            raise ProblemDetails(
+                                status_code=504,
+                                title="Reference Photo Generation Timed Out",
+                                detail=(
+                                    "Azure AI Foundry did not finish the reference-photo "
+                                    "image edit in time."
+                                ),
+                                type="/problems/reference-image-timeout",
+                                error_code="reference_image_timeout",
                             ) from exc
                         raise ProblemDetails(
                             status_code=504,
@@ -2405,7 +2577,7 @@ class CardGenerationService:
                         retryable=exc.retryable,
                     )
                     if not exc.retryable or attempt >= max_retries:
-                        if exc.service == "foundry-image":
+                        if exc.service == "foundry-image" and on_foundry_image_failure == "pending":
                             raise ProblemDetails(
                                 status_code=200,
                                 title="Artwork Pending",
@@ -2413,6 +2585,8 @@ class CardGenerationService:
                                 type="/problems/artwork-pending",
                                 error_code="artwork_retry_available",
                             ) from exc
+                        if exc.service == "foundry-image":
+                            raise self._reference_image_problem(exc) from exc
                         raise ProblemDetails(
                             status_code=502,
                             title="Bad Gateway",
@@ -2436,6 +2610,31 @@ class CardGenerationService:
             )
             await asyncio.sleep(self.services.settings.retry.base_backoff_seconds * (2**attempt))
         raise AssertionError("unreachable")
+
+    def _reference_image_problem(self, exc: UpstreamServiceError) -> ProblemDetails:
+        error_code = (exc.error_code or "").lower()
+        unsupported = exc.status_code in {400, 404, 405, 415, 422, 501} or any(
+            marker in error_code
+            for marker in ("unsupported", "notsupported", "not_supported", "invalidimage")
+        )
+        if unsupported:
+            return ProblemDetails(
+                status_code=502,
+                title="Reference Photo Unsupported",
+                detail=(
+                    "Azure AI Foundry image edits are not available on the configured "
+                    "deployment or region."
+                ),
+                type="/problems/reference-image-unsupported",
+                error_code="reference_image_unsupported",
+            )
+        return ProblemDetails(
+            status_code=502,
+            title="Reference Photo Generation Failed",
+            detail="Azure AI Foundry failed to generate artwork from the uploaded photo.",
+            type="/problems/reference-image-upstream-failure",
+            error_code="reference_image_generation_failed",
+        )
 
     def _upstream_policy(self, service_name: str) -> tuple[float, int]:
         retry = self.services.settings.retry
@@ -2566,6 +2765,22 @@ def build_blob_name(owner_id: str, card_id: str) -> str:
 
 def digest_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def digest_generation_request(
+    prompt: str,
+    reference_image: ReferenceImageUpload | None = None,
+) -> str:
+    digest = hashlib.sha256()
+    digest.update(prompt.encode("utf-8"))
+    digest.update(b"\0photo:")
+    if reference_image is None:
+        digest.update(b"none")
+    else:
+        digest.update(reference_image.content_type.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(reference_image.content)
+    return digest.hexdigest()
 
 
 def now_iso() -> str:
