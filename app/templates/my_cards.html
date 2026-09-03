@@ -1,0 +1,50 @@
+{% extends "layout.html" %}
+
+{% block content %}
+    <section class="page-hero">
+        <p class="eyebrow">Library</p>
+        <h1>My Cards</h1>
+        <p>Browse the cards forged for your account. Each image link is minted just-in-time and expires shortly after the page loads.</p>
+    </section>
+
+    {% if cards %}
+        <section class="card-summary-grid" aria-label="Your generated cards">
+            {% for card in cards %}
+                <article class="card-summary" data-rarity="{{ card.rarity }}">
+                    <a class="card-summary__media{% if not card.image_url %} is-broken{% endif %}" href="/my/cards/{{ card.card_id }}">
+                        {% if card.image_url %}
+                            <img src="{{ card.image_url }}" alt="Generated artwork for {{ card.name }}" loading="lazy" />
+                        {% endif %}
+                        <span class="card-summary__placeholder">
+                            <span class="visually-hidden">Artwork unavailable</span>
+                        </span>
+                    </a>
+                    <div class="card-summary__body">
+                        <div class="card-summary__header">
+                            <div>
+                                <h2><a href="/my/cards/{{ card.card_id }}">{{ card.name }}</a></h2>
+                                <p>{{ card.card_type | capitalize }} &middot; {{ card.rarity | capitalize }}</p>
+                            </div>
+                            <span class="badge">{{ card.status.replace("_", " ") | title }}</span>
+                        </div>
+                        <dl class="card-summary__stats">
+                            <div><dt>Mana</dt><dd>{{ card.mana_cost }}</dd></div>
+                            <div><dt>Attack</dt><dd>{{ card.attack }}</dd></div>
+                            <div><dt>Health</dt><dd>{{ card.health }}</dd></div>
+                        </dl>
+                        <p class="card-summary__meta">
+                            Created <time datetime="{{ card.created_at }}">{{ card.created_at }}</time>
+                        </p>
+                    </div>
+                </article>
+            {% endfor %}
+        </section>
+    {% else %}
+        <div class="empty-state">
+            <svg class="empty-state__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 5.5h16v13H4z"/><path d="M8 9.5h8M8 13h5" stroke-linecap="round"/></svg>
+            <h2>No cards yet</h2>
+            <p>Your library is empty. Generate a card first, then come back here to admire the haul.</p>
+            <p><a class="btn btn-primary" href="/app">Open the generator</a></p>
+        </div>
+    {% endif %}
+{% endblock %}

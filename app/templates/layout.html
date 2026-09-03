@@ -21,6 +21,7 @@
                 <li><a class="site-nav__link" href="/">Home</a></li>
                 {% if user %}
                     <li><a class="site-nav__link" href="/app">Generator</a></li>
+                    <li><a class="site-nav__link" href="/my/cards">My Cards</a></li>
                     <li class="site-nav__user">Signed in as <strong>{{ user.name or user.email or user.sub }}</strong></li>
                     <li><a class="site-nav__link btn btn-ghost" href="/auth/logout">Sign out</a></li>
                 {% elif auth_configured %}

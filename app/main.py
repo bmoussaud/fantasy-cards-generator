@@ -40,6 +40,7 @@ from app.generation import (
     create_services,
 )
 from app.health import NotApplicableHealthProbe, build_healthz_payload, run_dependency_probes
+from app.library import CardLibraryService, create_asset_url_signer
 from app.problems import ProblemDetails
 from app.settings import SettingsError, load_app_settings
 from app.telemetry import (
@@ -58,6 +59,10 @@ def create_app(services: AppServices | None = None) -> FastAPI:
     app_settings = load_app_settings()
     app_services = services or create_services(app_settings)
     card_service = CardGenerationService(app_services)
+    card_library_service = CardLibraryService(
+        app_services.card_repository,
+        asset_url_signer=create_asset_url_signer(app_settings),
+    )
     templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
     app = FastAPI(title="Fantasy Cards Generator")
@@ -218,6 +223,60 @@ def create_app(services: AppServices | None = None) -> FastAPI:
             request,
             "app_shell.html",
             template_context(request, page_title="Generate a card", user=user),
+        )
+
+    @app.get("/my/cards", response_class=HTMLResponse)
+    async def my_cards(
+        request: Request,
+        user: AuthenticatedUser = Depends(require_api_user),
+    ) -> HTMLResponse:
+        owner = get_authenticated_owner(request)
+        if owner is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                headers={"WWW-Authenticate": "Session"},
+                detail="Authentication required.",
+            )
+        cards = await card_library_service.list_cards(owner)
+        return templates.TemplateResponse(
+            request,
+            "my_cards.html",
+            template_context(
+                request,
+                page_title="My Cards",
+                user=user,
+                cards=cards,
+            ),
+        )
+
+    @app.get("/my/cards/{card_id}", response_class=HTMLResponse)
+    async def my_card_detail(
+        card_id: str,
+        request: Request,
+        user: AuthenticatedUser = Depends(require_api_user),
+    ) -> HTMLResponse:
+        owner = get_authenticated_owner(request)
+        if owner is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                headers={"WWW-Authenticate": "Session"},
+                detail="Authentication required.",
+            )
+        card = await card_library_service.get_card(owner, card_id)
+        if card is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No card was found for this user.",
+            )
+        return templates.TemplateResponse(
+            request,
+            "my_card_detail.html",
+            template_context(
+                request,
+                page_title=card.name,
+                user=user,
+                card=card,
+            ),
         )
 
     @app.get("/auth/login")
