@@ -269,7 +269,6 @@
 
     function syncSavedPhotoInput() {
       savedPhotoInput.value = selectedSavedPhotoId;
-      savedPhotoInput.disabled = !selectedSavedPhotoId;
     }
 
     function clearSavedPhotoSelection() {
@@ -363,6 +362,22 @@
 
     savePhotoToggle.addEventListener("change", syncSavePhotoControls);
     clearSavedPhotoButton.addEventListener("click", clearSavedPhotoSelection);
+    form.addEventListener("htmx:configRequest", function (event) {
+      var request = event.detail;
+      if (!request || !request.formData || !request.parameters) {
+        return;
+      }
+      syncSavedPhotoInput();
+      if (selectedSavedPhotoId) {
+        request.formData.set("saved_photo_id", selectedSavedPhotoId);
+        request.parameters.saved_photo_id = selectedSavedPhotoId;
+        request.formData.delete("photo");
+        delete request.parameters.photo;
+        return;
+      }
+      request.formData.delete("saved_photo_id");
+      delete request.parameters.saved_photo_id;
+    });
     window.addEventListener("pagehide", clearObjectUrl);
 
     pickerFeedback.dataset.loading = "true";
