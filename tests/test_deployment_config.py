@@ -210,9 +210,6 @@ def test_deployer_blob_reader_at_account_scope_runtime_container_scoped() -> Non
     runtime_assignment = _bicep_block(
         storage_bicep, "resource storageBlobDataContributorRoleAssignment"
     )
-    delegator_assignment = _bicep_block(
-        storage_bicep, "resource storageBlobDelegatorRoleAssignment"
-    )
 
     assert "deployerPrincipalId: deployerPrincipalId" in storage_module
     assert "deployerPrincipalType: deployerPrincipalType" in storage_module
@@ -220,10 +217,7 @@ def test_deployer_blob_reader_at_account_scope_runtime_container_scoped() -> Non
         "var storageBlobDataReaderRoleDefinitionId = "
         "'2a2b9908-6ea1-4ae2-8e65-a410df84e7d1'" in storage_bicep
     )
-    assert (
-        "var storageBlobDelegatorRoleDefinitionId = "
-        "'db58b8e5-c6ad-4a2a-8342-4190687cbf4a'" in storage_bicep
-    )
+    assert "storageBlobDelegatorRoleDefinitionId" not in storage_bicep
     assert "'Microsoft.Authorization/roleAssignments@2022-04-01'" in deployer_assignment
     assert "scope: storageAccount" in deployer_assignment
     assert "principalId: deployerPrincipalId" in deployer_assignment
@@ -245,15 +239,6 @@ def test_deployer_blob_reader_at_account_scope_runtime_container_scoped() -> Non
     assert (
         "guid(cardAssetsContainer.id, containerAppPrincipalId, "
         "storageBlobDataContributorRoleDefinitionId)" in runtime_assignment
-    )
-
-    assert "principalId: containerAppPrincipalId" in delegator_assignment
-    assert "principalType: 'ServicePrincipal'" in delegator_assignment
-    assert "scope: storageAccount" in delegator_assignment
-    assert "storageBlobDelegatorRoleDefinitionId" in delegator_assignment
-    assert (
-        "guid(storageAccount.id, containerAppPrincipalId, "
-        "storageBlobDelegatorRoleDefinitionId)" in delegator_assignment
     )
 
 

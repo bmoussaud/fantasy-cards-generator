@@ -40,7 +40,7 @@ from app.generation import (
     create_services,
 )
 from app.health import NotApplicableHealthProbe, build_healthz_payload, run_dependency_probes
-from app.library import CardLibraryService, create_asset_url_signer
+from app.library import CardLibraryService
 from app.problems import ProblemDetails
 from app.settings import SettingsError, load_app_settings
 from app.telemetry import (
@@ -59,10 +59,7 @@ def create_app(services: AppServices | None = None) -> FastAPI:
     app_settings = load_app_settings()
     app_services = services or create_services(app_settings)
     card_service = CardGenerationService(app_services)
-    card_library_service = CardLibraryService(
-        app_services.card_repository,
-        asset_url_signer=create_asset_url_signer(app_settings),
-    )
+    card_library_service = CardLibraryService(app_services.card_repository)
     templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
     app = FastAPI(title="Fantasy Cards Generator")

@@ -106,11 +106,9 @@ Provisioning grants the deployment caller only:
 
 These read-only deployer grants are intentionally separate from the existing
 Container App managed identity grants: Cosmos DB Built-in **Data Contributor**,
-container-scoped **Storage Blob Data Contributor**, account-scoped **Storage
-Blob Delegator** (for minting user-delegation SAS read URLs), and
-account-scoped **Cognitive Services User**. The deployer cannot create,
-replace, upload, overwrite, or delete Cosmos items or blobs through the reader
-roles.
+container-scoped **Storage Blob Data Contributor**, and account-scoped
+**Cognitive Services User**. The deployer cannot create, replace, upload,
+overwrite, or delete Cosmos items or blobs through the reader roles.
 
 The deploying identity must already be allowed to create assignments:
 

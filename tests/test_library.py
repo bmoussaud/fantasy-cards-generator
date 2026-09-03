@@ -1,15 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
-from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app import main as main_module
 from app.generation import StoredCard, create_services
-from app.library import AzureBlobSasUrlSigner
 from app.main import create_app
 from app.settings import load_app_settings
 from tests.conftest import TEST_OWNER_ID, FakeOAuthClient
@@ -17,19 +14,9 @@ from tests.conftest import TEST_OWNER_ID, FakeOAuthClient
 OTHER_OWNER_ID = "00000000-0000-0000-0000-000000000999:11111111-1111-1111-1111-111111111999"
 
 
-class FakeAssetUrlSigner:
-    async def sign_read_url(self, blob_name: str) -> str:
-        return f"https://blob.example.invalid/card-assets/{blob_name}?sp=r&sig=test"
-
-
-def make_authenticated_client(
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    signer: FakeAssetUrlSigner | None = None,
-) -> TestClient:
+def make_authenticated_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     services = create_services(load_app_settings())
     monkeypatch.setattr(main_module, "create_oauth_client", lambda settings: FakeOAuthClient())
-    monkeypatch.setattr(main_module, "create_asset_url_signer", lambda settings: signer)
     client = TestClient(create_app(services=services), base_url="https://testserver")
     login_response = client.get("/auth/login", follow_redirects=False)
     assert login_response.status_code == 307
@@ -86,6 +73,10 @@ def make_card(
     )
 
 
+def store_asset(client: TestClient, blob_name: str, payload: bytes, content_type: str) -> None:
+    asyncio.run(client.app.state.services.asset_store.upload(blob_name, payload, content_type))
+
+
 def test_my_cards_requires_authentication() -> None:
     client = TestClient(create_app(), base_url="https://testserver")
 
@@ -98,7 +89,7 @@ def test_my_cards_requires_authentication() -> None:
 def test_my_cards_renders_only_signed_in_users_cards(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    client = make_authenticated_client(monkeypatch, signer=FakeAssetUrlSigner())
+    client = make_authenticated_client(monkeypatch)
     store_card(
         client,
         make_card(
@@ -126,9 +117,7 @@ def test_my_cards_renders_only_signed_in_users_cards(
     assert "Legolas of Ithilien" in response.text
     assert "Boromir of Gondor" not in response.text
     assert "/my/cards/own-card" in response.text
-    assert "https://blob.example.invalid/card-assets/cards/own-card.png?sp=r&amp;sig=test" in (
-        response.text
-    )
+    assert "/cards/own-card/image" in response.text
     assert "cards/other-card.png" not in response.text
 
 
@@ -152,7 +141,7 @@ def test_my_card_detail_requires_authentication() -> None:
 
 
 def test_my_card_detail_renders_owned_card(monkeypatch: pytest.MonkeyPatch) -> None:
-    client = make_authenticated_client(monkeypatch, signer=FakeAssetUrlSigner())
+    client = make_authenticated_client(monkeypatch)
     store_card(
         client,
         make_card(
@@ -170,9 +159,7 @@ def test_my_card_detail_renders_owned_card(monkeypatch: pytest.MonkeyPatch) -> N
     assert "Detail Ranger" in response.text
     assert "Prompt for Detail Ranger" in response.text
     assert "moonlit precision" in response.text
-    assert "https://blob.example.invalid/card-assets/cards/detail-card.png?sp=r&amp;sig=test" in (
-        response.text
-    )
+    assert "/cards/detail-card/image" in response.text
 
 
 def test_my_card_detail_returns_404_for_other_users_card(
@@ -196,69 +183,53 @@ def test_my_card_detail_returns_404_for_other_users_card(
     assert response.json()["detail"] == "No card was found for this user."
 
 
-def test_azure_blob_sas_signer_generates_short_lived_read_only_urls() -> None:
-    fixed_now = datetime(2026, 9, 2, 16, 0, 0, tzinfo=UTC)
-    captured: dict[str, object] = {}
+def test_card_image_requires_authentication() -> None:
+    client = TestClient(create_app(), base_url="https://testserver")
 
-    class FakePermission:
-        def __init__(self, **kwargs: object) -> None:
-            self.read = bool(kwargs.get("read"))
-            self.write = bool(kwargs.get("write"))
-            self.delete = bool(kwargs.get("delete"))
+    response = client.get("/cards/any-card/image")
 
-    class FakeBlobClient:
-        url = "https://cardsacct.blob.core.windows.net/card-assets/cards/example.png"
+    assert response.status_code == 401
 
-    class FakeBlobServiceClient:
-        async def get_user_delegation_key(self, *, key_start_time, key_expiry_time):
-            captured["delegation_start"] = key_start_time
-            captured["delegation_expiry"] = key_expiry_time
-            return {"signed": "delegation-key"}
 
-        def get_blob_client(self, *, container: str, blob: str) -> FakeBlobClient:
-            captured["container"] = container
-            captured["blob"] = blob
-            return FakeBlobClient()
-
-    def fake_generate_blob_sas(**kwargs: object) -> str:
-        captured["sas_kwargs"] = kwargs
-        return "sp=r&sig=test"
-
-    settings = replace(
-        load_app_settings(),
-        persistence_mode="azure",
-        blob_endpoint="https://cardsacct.blob.core.windows.net/",
-        blob_container_name="card-assets",
+def test_card_image_returns_404_for_other_users_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = make_authenticated_client(monkeypatch)
+    store_card(
+        client,
+        make_card(
+            owner_id=OTHER_OWNER_ID,
+            card_id="foreign-card-image",
+            name="Hidden Enemy",
+            blob_name="cards/foreign-card-image.png",
+            image_url_path="/cards/foreign-card-image/image",
+        ),
     )
-    signer = AzureBlobSasUrlSigner(
-        settings,
-        expiry_seconds=300,
-        service=FakeBlobServiceClient(),
-        permissions_class=FakePermission,
-        generate_blob_sas_fn=fake_generate_blob_sas,
-        now_fn=lambda: fixed_now,
+    store_asset(client, "cards/foreign-card-image.png", b"fake-bytes", "image/png")
+
+    response = client.get("/cards/foreign-card-image/image")
+
+    assert response.status_code == 404
+
+
+def test_card_image_streams_bytes_for_owned_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = make_authenticated_client(monkeypatch)
+    store_card(
+        client,
+        make_card(
+            owner_id=TEST_OWNER_ID,
+            card_id="owned-card-image",
+            name="Owned Ranger",
+            blob_name="cards/owned-card-image.png",
+            image_url_path="/cards/owned-card-image/image",
+        ),
     )
+    store_asset(client, "cards/owned-card-image.png", b"fake-png-bytes", "image/png")
 
-    signed_url = asyncio.run(signer.sign_read_url("cards/example.png"))
+    response = client.get("/cards/owned-card-image/image")
 
-    assert (
-        signed_url
-        == "https://cardsacct.blob.core.windows.net/card-assets/cards/example.png?sp=r&sig=test"
-    )
-    assert captured["container"] == "card-assets"
-    assert captured["blob"] == "cards/example.png"
-    assert captured["delegation_start"] == fixed_now - timedelta(minutes=1)
-    assert captured["delegation_expiry"] == fixed_now + timedelta(minutes=5)
-
-    sas_kwargs = captured["sas_kwargs"]
-    assert isinstance(sas_kwargs, dict)
-    assert sas_kwargs["account_name"] == "cardsacct"
-    assert sas_kwargs["container_name"] == "card-assets"
-    assert sas_kwargs["blob_name"] == "cards/example.png"
-    assert sas_kwargs["protocol"] == "https"
-    assert sas_kwargs["start"] == fixed_now - timedelta(minutes=1)
-    assert sas_kwargs["expiry"] == fixed_now + timedelta(minutes=5)
-    permission = sas_kwargs["permission"]
-    assert permission.read is True
-    assert permission.write is False
-    assert permission.delete is False
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/png"
+    assert response.content == b"fake-png-bytes"
