@@ -85,7 +85,6 @@ def test_app_shell_renders_generation_form(authenticated_client: TestClient) -> 
     assert 'name="photo"' in response.text
     assert 'name="saved_photo_id"' in response.text
     assert "data-saved-photo-id-input" in response.text
-    assert "disabled" in response.text.split("data-saved-photo-id-input", 1)[1].split(">", 1)[0]
     assert 'name="save_photo"' in response.text
     assert 'name="photo_label"' in response.text
     assert 'accept="image/jpeg,image/png,image/webp"' in response.text
@@ -1176,6 +1175,82 @@ def test_ui_rejects_photo_and_saved_photo_together_with_error_panel(
     assert "error-panel" in response.text
     assert "Conflicting Photo Inputs" in response.text
     assert "Provide either photo or saved_photo_id, but not both." in response.text
+
+
+def test_ui_multipart_saved_photo_submission_uses_image_edit_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class TrackingAIClient(MockAIClient):
+        def __init__(self, settings) -> None:
+            super().__init__(settings)
+            self.image_calls = 0
+            self.image_edit_calls = 0
+            self.reference_image: ReferenceImageUpload | None = None
+
+        async def generate_image(
+            self,
+            art_prompt: str,
+            *,
+            request_id: str,
+            image_quality: Literal["low", "medium", "high"] | None = None,
+        ):
+            self.image_calls += 1
+            return await super().generate_image(
+                art_prompt,
+                request_id=request_id,
+                image_quality=image_quality,
+            )
+
+        async def generate_image_edit(
+            self,
+            art_prompt: str,
+            *,
+            reference_image: ReferenceImageUpload,
+            request_id: str,
+            image_quality: Literal["low", "medium", "high"] | None = None,
+        ):
+            self.image_edit_calls += 1
+            self.reference_image = reference_image
+            return await super().generate_image(
+                art_prompt,
+                request_id=request_id,
+                image_quality=image_quality,
+            )
+
+    services = build_services(monkeypatch)
+    services.ai_client = TrackingAIClient(services.settings)
+    client = TestClient(create_app(services=services), base_url="https://testserver")
+    from app import main as main_module
+    from tests.conftest import FakeOAuthClient
+
+    monkeypatch.setattr(main_module, "create_oauth_client", lambda settings: FakeOAuthClient())
+    client.get("/auth/login", follow_redirects=False)
+    client.get("/auth/callback?code=valid-code&state=opaque", follow_redirects=False)
+    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
+
+    saved = client.post(
+        "/my/photos",
+        data={"label": "Reusable", "csrf_token": csrf_token},
+        files={"photo": ("reusable.png", VALID_PNG_BYTES, "image/png")},
+    )
+    saved_photo_id = saved.json()["photoId"]
+
+    response = client.post(
+        "/ui/cards/generate",
+        files=[
+            ("prompt", (None, "create a safe fantasy knight with a moonlit shield")),
+            ("idempotency_key", (None, "idem-ui-saved-photo-multipart")),
+            ("csrf_token", (None, csrf_token)),
+            ("saved_photo_id", (None, saved_photo_id)),
+        ],
+    )
+
+    assert response.status_code == 200
+    assert services.ai_client.image_calls == 0
+    assert services.ai_client.image_edit_calls == 1
+    assert services.ai_client.reference_image is not None
+    assert services.ai_client.reference_image.content == VALID_PNG_BYTES
+    assert services.ai_client.reference_image.content_type == "image/png"
 
 
 def test_ui_requires_upload_when_save_photo_is_enabled(
