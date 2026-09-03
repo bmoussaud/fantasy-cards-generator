@@ -7,6 +7,14 @@ Programmatic card-generation endpoints live under `/api/v1`:
 - `POST /api/v1/cards/generate`
 - `POST /api/v1/cards/{cardId}/artwork/retry`
 
+Authenticated photo-library endpoints live under `/my/...`:
+
+- `POST /my/photos`
+- `GET /my/photos`
+- `GET /my/photos/{photoId}/image`
+- `GET /my/photos/{photoId}/thumbnail`
+- `DELETE /my/photos/{photoId}`
+
 HTMX/UI routes live under `/ui/...` and are intentionally UI-coupled.
 
 ## Correlation
@@ -38,9 +46,20 @@ values, credentials, cookies, authorization headers, emails, or client IPs.
 {
   "prompt": "Create a safe fantasy guardian with a moonlit shield",
   "idempotencyKey": "optional-client-supplied-key",
-  "csrfToken": "required-for-session-authenticated-browser-clients"
+  "csrfToken": "required-for-session-authenticated-browser-clients",
+  "savedPhotoId": "optional-saved-photo-id"
 }
 ```
+
+Multipart `POST /api/v1/cards/generate` and `POST /ui/cards/generate` also accept:
+
+- `photo` — optional fresh JPEG/PNG/WebP upload (max 5 MB)
+- `saved_photo_id` — optional saved photo ID
+- `save_photo` — optional boolean; when `true`, the fresh upload is also persisted
+- `photo_label` — optional 1–80 char label used only when `save_photo=true`
+
+`photo` and `saved_photo_id`/`savedPhotoId` are mutually exclusive. Sending both returns
+`422 photo_reference_conflict`.
 
 ### `POST /api/v1/cards/{cardId}/artwork/retry`
 
@@ -79,6 +98,60 @@ Successful responses return `200 OK` with schema version `1`.
 If text generation succeeds but artwork does not, the response still returns
 `200 OK` with `status: "awaiting_artwork_retry"` and a `retry_artwork` action.
 
+### `POST /my/photos`
+
+Returns `201 Created`:
+
+```json
+{
+  "schemaVersion": 1,
+  "photoId": "32-char-or-uuid-style-id",
+  "label": "Optional label",
+  "createdAt": "2026-09-03T10:00:00Z",
+  "updatedAt": "2026-09-03T10:00:00Z",
+  "image": {
+    "contentType": "image/png",
+    "sizeBytes": 12345,
+    "url": "/my/photos/{photoId}/image"
+  },
+  "thumbnail": {
+    "contentType": "image/png",
+    "url": "/my/photos/{photoId}/thumbnail"
+  }
+}
+```
+
+### `GET /my/photos`
+
+Returns `200 OK`:
+
+```json
+{
+  "schemaVersion": 1,
+  "photos": [
+    {
+      "schemaVersion": 1,
+      "photoId": "photo-id",
+      "label": "Optional label",
+      "createdAt": "2026-09-03T10:00:00Z",
+      "updatedAt": "2026-09-03T10:00:00Z",
+      "image": {
+        "contentType": "image/png",
+        "sizeBytes": 12345,
+        "url": "/my/photos/{photoId}/image"
+      },
+      "thumbnail": {
+        "contentType": "image/png",
+        "url": "/my/photos/{photoId}/thumbnail"
+      }
+    }
+  ]
+}
+```
+
+`DELETE /my/photos/{photoId}` returns `204 No Content`. The `image` and `thumbnail`
+routes stream owner-scoped bytes and return `404` for non-owned or missing photos.
+
 ## Error contract
 
 Errors return `application/problem+json`, for example:
@@ -115,6 +188,11 @@ Unsafe generated image bytes are discarded. Only a minimal sanitized forensic
 audit record is retained for 30 days; prompts, unsafe outputs, secrets, tokens,
 and SAS URLs are never logged.
 
+Saved-photo persistence uses Azure AI Content Safety image analysis before
+Blob/Cosmos persistence. The backend rejects saves when any of
+`Hate/Sexual/Violence/SelfHarm` exceeds the configured threshold (defaults: `2`
+for all categories, meaning medium/high severity are rejected).
+
 ## Runtime configuration
 
 ### Mock mode
@@ -141,6 +219,9 @@ COSMOS_DATABASE_NAME=appdb
 COSMOS_CONTAINER_NAME=cards
 BLOB_ENDPOINT=<https endpoint>
 BLOB_CONTAINER_NAME=card-assets
+PROFILE_PHOTOS_CONTAINER_NAME=profile-photos
+CONTENT_SAFETY_ENDPOINT=<https endpoint>
+CONTENT_SAFETY_API_VERSION=2024-09-01
 ```
 
 Additional operational settings:
@@ -152,3 +233,7 @@ Additional operational settings:
 - `TEXT_TIMEOUT_SECONDS`, `IMAGE_TIMEOUT_SECONDS`, `OVERALL_TIMEOUT_SECONDS`
 - `AUDIT_RETENTION_DAYS`
 - `IMAGE_SIZE`
+- `IMAGE_QUALITY`
+- `SAVED_PHOTO_MAX_COUNT`
+- `SAVED_PHOTO_MAX_BYTES`
+- `SAVED_PHOTO_THUMBNAIL_SIZE`

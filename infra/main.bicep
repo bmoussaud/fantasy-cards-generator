@@ -55,6 +55,9 @@ param cosmosContainerName string = 'cards'
 @description('Blob container name for persisted card assets.')
 param cardAssetsContainerName string = 'card-assets'
 
+@description('Blob container name for durable saved profile photos and thumbnails.')
+param profilePhotosContainerName string = 'profile-photos'
+
 @minValue(1)
 @description('Bounded Cosmos metadata probe timeout for /healthz, in milliseconds.')
 param healthzCosmosTimeoutMs int = 1500
@@ -117,6 +120,60 @@ param moderationService string = 'heuristic'
 
 @description('Moderation policy name for the app runtime.')
 param moderationPolicyName string = 'conservative-v1'
+
+@description('Azure AI Content Safety endpoint for saved-photo moderation. Defaults to the Azure AI Services account endpoint when empty.')
+param contentSafetyEndpoint string = ''
+
+@description('Azure AI Content Safety API version for saved-photo moderation.')
+param contentSafetyApiVersion string = '2024-09-01'
+
+@allowed([
+  0
+  2
+  4
+  6
+])
+@description('Maximum allowed Hate severity for saved-photo moderation before the save is rejected.')
+param contentSafetyMaxHateSeverity int = 2
+
+@allowed([
+  0
+  2
+  4
+  6
+])
+@description('Maximum allowed SelfHarm severity for saved-photo moderation before the save is rejected.')
+param contentSafetyMaxSelfHarmSeverity int = 2
+
+@allowed([
+  0
+  2
+  4
+  6
+])
+@description('Maximum allowed Sexual severity for saved-photo moderation before the save is rejected.')
+param contentSafetyMaxSexualSeverity int = 2
+
+@allowed([
+  0
+  2
+  4
+  6
+])
+@description('Maximum allowed Violence severity for saved-photo moderation before the save is rejected.')
+param contentSafetyMaxViolenceSeverity int = 2
+
+@minValue(1)
+@description('Per-user saved-photo cap enforced by the backend.')
+param savedPhotoMaxCount int = 10
+
+@minValue(1)
+@description('Maximum saved-photo upload size in bytes for moderation-compatible persistence.')
+param savedPhotoMaxBytes int = 4194304
+
+@minValue(50)
+@description('Maximum width or height, in pixels, for generated saved-photo thumbnails.')
+param savedPhotoThumbnailSize int = 200
 
 @description('Per-user request limit for generation endpoints.')
 param rateLimitUserRequests int = 6
@@ -307,6 +364,7 @@ module containerAppsEnvironment './modules/container-apps-environment.bicep' = {
 var predictedContainerAppUrl = 'https://${containerAppName}.${containerAppsEnvironment.outputs.containerAppsEnvironmentDefaultDomain}'
 var deployedAuthRedirectUri = '${predictedContainerAppUrl}${entraRedirectPath}'
 var deployedPostLogoutRedirectUri = '${predictedContainerAppUrl}${entraPostLogoutRedirectPath}'
+var resolvedContentSafetyEndpoint = empty(contentSafetyEndpoint) ? 'https://${aiFoundryAccountName}.cognitiveservices.azure.com/' : contentSafetyEndpoint
 
 module appRegistration './modules/app-registration.bicep' = if (deployEntraAppRegistration) {
   name: 'app-registration'
@@ -348,6 +406,12 @@ module containerApps './modules/container-apps.bicep' = {
     entraClientSecretValue: entraClientSecretValue
     entraPostLogoutRedirectUri: deployEntraAppRegistration ? deployedPostLogoutRedirectUri : ''
     entraRedirectUri: deployEntraAppRegistration ? deployedAuthRedirectUri : ''
+    contentSafetyApiVersion: contentSafetyApiVersion
+    contentSafetyEndpoint: resolvedContentSafetyEndpoint
+    contentSafetyMaxHateSeverity: contentSafetyMaxHateSeverity
+    contentSafetyMaxSelfHarmSeverity: contentSafetyMaxSelfHarmSeverity
+    contentSafetyMaxSexualSeverity: contentSafetyMaxSexualSeverity
+    contentSafetyMaxViolenceSeverity: contentSafetyMaxViolenceSeverity
     foundryApiVersion: '2025-03-01-preview'
     foundryEndpoint: 'https://${aiFoundryAccountName}.cognitiveservices.azure.com/'
     foundryImageDeployment: aiFoundryImageDeploymentName
@@ -364,10 +428,14 @@ module containerApps './modules/container-apps.bicep' = {
     moderationService: moderationService
     overallTimeoutSeconds: overallTimeoutSeconds
     persistenceMode: persistenceMode
+    profilePhotosContainerName: profilePhotosContainerName
     rateLimitIpRequests: rateLimitIpRequests
     rateLimitIpWindowSeconds: rateLimitIpWindowSeconds
     rateLimitUserRequests: rateLimitUserRequests
     rateLimitUserWindowSeconds: rateLimitUserWindowSeconds
+    savedPhotoMaxBytes: string(savedPhotoMaxBytes)
+    savedPhotoMaxCount: savedPhotoMaxCount
+    savedPhotoThumbnailSize: savedPhotoThumbnailSize
     serviceName: serviceName
     tags: tags
     telemetryEnvironmentName: telemetryEnvironmentName
@@ -444,6 +512,7 @@ module storage './modules/storage.bicep' = {
     deployerPrincipalType: deployerPrincipalType
     location: location
     privateEndpointSubnetResourceId: network.outputs.privateEndpointSubnetResourceId
+    profilePhotosContainerName: profilePhotosContainerName
     storageAccountName: storageAccountName
     tags: tags
     virtualNetworkResourceId: network.outputs.virtualNetworkResourceId
@@ -514,6 +583,7 @@ output storageAccountName string = storage.outputs.storageAccountName
 output storageAccountResourceId string = storage.outputs.storageAccountResourceId
 output storageBlobEndpoint string = storage.outputs.storageBlobEndpoint
 output storageContainerName string = storage.outputs.storageContainerName
+output profilePhotosContainerName string = storage.outputs.profilePhotosContainerName
 output virtualNetworkName string = network.outputs.virtualNetworkName
 output containerAppsSubnetName string = network.outputs.containerAppsSubnetName
 output privateEndpointSubnetName string = network.outputs.privateEndpointSubnetName

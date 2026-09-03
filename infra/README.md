@@ -106,9 +106,10 @@ Provisioning grants the deployment caller only:
 
 These read-only deployer grants are intentionally separate from the existing
 Container App managed identity grants: Cosmos DB Built-in **Data Contributor**,
-container-scoped **Storage Blob Data Contributor**, and account-scoped
-**Cognitive Services User**. The deployer cannot create, replace, upload,
-overwrite, or delete Cosmos items or blobs through the reader roles.
+container-scoped **Storage Blob Data Contributor** on both `card-assets` and
+`profile-photos`, and account-scoped **Cognitive Services User**. The deployer
+cannot create, replace, upload, overwrite, or delete Cosmos items or blobs
+through the reader roles.
 
 The deploying identity must already be allowed to create assignments:
 
@@ -190,6 +191,20 @@ After a live deploy, verify:
 
 The key live-network assertion — ACA outbound traffic actually using the NAT
 public IP — requires an Azure deployment and cannot be proven from source alone.
+
+## Saved-photo moderation and storage
+
+Issue [#67](https://github.com/bmoussaud/fantasy-cards-generator/issues/67)
+reuses the existing Azure AI Services / Foundry account endpoint as the default
+`CONTENT_SAFETY_ENDPOINT` for pre-persist photo moderation and adds a separate
+private Blob container, `profile-photos`, for durable user-owned photos and
+thumbnails.
+
+- Override `CONTENT_SAFETY_ENDPOINT` only if production uses a different Azure
+  AI / Content Safety resource than the default Foundry-backed account.
+- Live rollout still needs Azure-side verification that the chosen region/account
+  exposes Content Safety capacity and quota before this feature is enabled in
+  production.
 
 ## Rollback
 

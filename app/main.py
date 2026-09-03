@@ -44,6 +44,7 @@ from app.generation import (
 )
 from app.health import NotApplicableHealthProbe, build_healthz_payload, run_dependency_probes
 from app.library import CardLibraryService
+from app.photos import SavedPhotoListResponseModel, SavedPhotoResponseModel, SavedPhotoService
 from app.problems import ProblemDetails
 from app.settings import SettingsError, load_app_settings
 from app.telemetry import (
@@ -67,6 +68,9 @@ class ParsedCardGenerateRequest:
     csrf_token: str | None
     image_quality: str | None = None
     reference_image: ReferenceImageUpload | None = None
+    saved_photo_id: str | None = None
+    save_photo: bool = False
+    photo_label: str | None = None
 
 
 def create_app(services: AppServices | None = None) -> FastAPI:
@@ -75,6 +79,12 @@ def create_app(services: AppServices | None = None) -> FastAPI:
     app_services = services or create_services(app_settings)
     card_service = CardGenerationService(app_services)
     card_library_service = CardLibraryService(app_services.card_repository)
+    photo_service = SavedPhotoService(
+        settings=app_services.settings,
+        repository=app_services.saved_photo_repository,
+        asset_store=app_services.photo_asset_store,
+        moderation_service=app_services.photo_moderation_service,
+    )
     templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
     app = FastAPI(title="Fantasy Cards Generator")
@@ -291,6 +301,119 @@ def create_app(services: AppServices | None = None) -> FastAPI:
             ),
         )
 
+    @app.post("/my/photos", response_model=SavedPhotoResponseModel, status_code=201)
+    async def save_my_photo(
+        request: Request,
+        _: AuthenticatedUser = Depends(require_api_user),
+    ) -> SavedPhotoResponseModel:
+        form = await request.form()
+        app_services.csrf_protector.validate(
+            request,
+            _form_string(form, "csrf_token", "csrfToken"),
+        )
+        owner = get_authenticated_owner(request)
+        if owner is None:
+            raise ProblemDetails(
+                status_code=401,
+                title="Unauthorized",
+                detail="Authentication required.",
+                type="/problems/unauthorized",
+                error_code="unauthorized",
+                headers={"WWW-Authenticate": "Session"},
+            )
+        reference_image = await _parse_reference_image(form.get("photo"))
+        if reference_image is None:
+            raise ProblemDetails(
+                status_code=422,
+                title="Invalid Photo Upload",
+                detail="A photo file is required.",
+                type="/problems/invalid-photo-upload",
+                error_code="invalid_photo_upload",
+            )
+        return await photo_service.save_photo(
+            owner=owner,
+            photo=reference_image,
+            label=_form_string(form, "label"),
+        )
+
+    @app.get("/my/photos", response_model=SavedPhotoListResponseModel)
+    async def list_my_photos(
+        request: Request,
+        _: AuthenticatedUser = Depends(require_api_user),
+    ) -> SavedPhotoListResponseModel:
+        owner = get_authenticated_owner(request)
+        if owner is None:
+            raise ProblemDetails(
+                status_code=401,
+                title="Unauthorized",
+                detail="Authentication required.",
+                type="/problems/unauthorized",
+                error_code="unauthorized",
+                headers={"WWW-Authenticate": "Session"},
+            )
+        return await photo_service.list_photos(owner)
+
+    @app.get("/my/photos/{photo_id}/image")
+    async def my_photo_image(
+        photo_id: str,
+        request: Request,
+        _: AuthenticatedUser = Depends(require_api_user),
+    ) -> Response:
+        owner = get_authenticated_owner(request)
+        if owner is None:
+            raise ProblemDetails(
+                status_code=401,
+                title="Unauthorized",
+                detail="Authentication required.",
+                type="/problems/unauthorized",
+                error_code="unauthorized",
+                headers={"WWW-Authenticate": "Session"},
+            )
+        payload, content_type = await photo_service.fetch_original(owner, photo_id)
+        return StreamingResponse(iter([payload]), media_type=content_type)
+
+    @app.get("/my/photos/{photo_id}/thumbnail")
+    async def my_photo_thumbnail(
+        photo_id: str,
+        request: Request,
+        _: AuthenticatedUser = Depends(require_api_user),
+    ) -> Response:
+        owner = get_authenticated_owner(request)
+        if owner is None:
+            raise ProblemDetails(
+                status_code=401,
+                title="Unauthorized",
+                detail="Authentication required.",
+                type="/problems/unauthorized",
+                error_code="unauthorized",
+                headers={"WWW-Authenticate": "Session"},
+            )
+        payload, content_type = await photo_service.fetch_thumbnail(owner, photo_id)
+        return StreamingResponse(iter([payload]), media_type=content_type)
+
+    @app.delete("/my/photos/{photo_id}", status_code=204)
+    async def delete_my_photo(
+        photo_id: str,
+        request: Request,
+        _: AuthenticatedUser = Depends(require_api_user),
+    ) -> Response:
+        app_services.csrf_protector.validate(
+            request,
+            request.headers.get("x-csrf-token") or request.query_params.get("csrfToken"),
+        )
+        owner = get_authenticated_owner(request)
+        if owner is None:
+            raise ProblemDetails(
+                status_code=401,
+                title="Unauthorized",
+                detail="Authentication required.",
+                type="/problems/unauthorized",
+                error_code="unauthorized",
+                headers={"WWW-Authenticate": "Session"},
+            )
+        await photo_service.delete_photo(owner, photo_id)
+        return Response(status_code=204)
+
     @app.get("/auth/login")
     async def login(request: Request) -> RedirectResponse:
         if get_session_user(request) is not None:
@@ -409,6 +532,25 @@ def create_app(services: AppServices | None = None) -> FastAPI:
                 error_code="unauthorized",
                 headers={"WWW-Authenticate": "Session"},
             )
+        if payload.save_photo:
+            if payload.reference_image is None:
+                raise ProblemDetails(
+                    status_code=422,
+                    title="Saved Photo Requires Upload",
+                    detail="save_photo=true requires a fresh photo upload.",
+                    type="/problems/saved-photo-requires-upload",
+                    error_code="saved_photo_requires_upload",
+                )
+            await photo_service.save_photo(
+                owner=owner,
+                photo=payload.reference_image,
+                label=payload.photo_label,
+            )
+        if payload.saved_photo_id is not None:
+            payload.reference_image = await photo_service.load_reference_image(
+                owner,
+                payload.saved_photo_id,
+            )
         return await card_service.generate_card(
             owner=owner,
             prompt=payload.prompt,
@@ -465,6 +607,25 @@ def create_app(services: AppServices | None = None) -> FastAPI:
                 error_code="unauthorized",
             )
         app_services.csrf_protector.validate(request, payload.csrf_token)
+        if payload.save_photo:
+            if payload.reference_image is None:
+                raise ProblemDetails(
+                    status_code=422,
+                    title="Saved Photo Requires Upload",
+                    detail="save_photo=true requires a fresh photo upload.",
+                    type="/problems/saved-photo-requires-upload",
+                    error_code="saved_photo_requires_upload",
+                )
+            await photo_service.save_photo(
+                owner=owner,
+                photo=payload.reference_image,
+                label=payload.photo_label,
+            )
+        if payload.saved_photo_id is not None:
+            payload.reference_image = await photo_service.load_reference_image(
+                owner,
+                payload.saved_photo_id,
+            )
         raw_quality = payload.image_quality or "low"
         image_quality = raw_quality if raw_quality in {"low", "medium", "high"} else "low"
         result = await card_service.generate_card(
@@ -555,6 +716,7 @@ async def _parse_card_generate_request(request: Request) -> ParsedCardGenerateRe
             prompt=body.prompt,
             idempotency_key=body.idempotencyKey,
             csrf_token=body.csrfToken,
+            saved_photo_id=body.savedPhotoId,
         )
 
     form = await request.form()
@@ -563,15 +725,36 @@ async def _parse_card_generate_request(request: Request) -> ParsedCardGenerateRe
             "prompt": _form_string(form, "prompt"),
             "idempotencyKey": _form_string(form, "idempotency_key", "idempotencyKey"),
             "csrfToken": _form_string(form, "csrf_token", "csrfToken"),
+            "savedPhotoId": _form_string(form, "saved_photo_id", "savedPhotoId"),
         }
     )
-    return ParsedCardGenerateRequest(
+    parsed = ParsedCardGenerateRequest(
         prompt=body.prompt,
         idempotency_key=body.idempotencyKey,
         csrf_token=body.csrfToken,
         image_quality=_form_string(form, "quality"),
         reference_image=await _parse_reference_image(form.get("photo")),
+        saved_photo_id=body.savedPhotoId,
+        save_photo=_form_bool(form, "save_photo", "savePhoto"),
+        photo_label=_form_string(form, "photo_label", "photoLabel"),
     )
+    if parsed.reference_image is not None and parsed.saved_photo_id is not None:
+        raise ProblemDetails(
+            status_code=422,
+            title="Conflicting Photo Inputs",
+            detail="Provide either photo or saved_photo_id, but not both.",
+            type="/problems/photo-reference-conflict",
+            error_code="photo_reference_conflict",
+        )
+    if parsed.save_photo and parsed.saved_photo_id is not None:
+        raise ProblemDetails(
+            status_code=422,
+            title="Invalid Saved Photo Request",
+            detail="save_photo=true can only be used with a fresh photo upload.",
+            type="/problems/saved-photo-requires-upload",
+            error_code="saved_photo_requires_upload",
+        )
+    return parsed
 
 
 def _validate_card_generate_body(payload: object) -> CardGenerateBody:
@@ -594,6 +777,13 @@ def _form_string(form, *keys: str) -> str | None:
         if isinstance(value, str):
             return value
     return None
+
+
+def _form_bool(form, *keys: str) -> bool:
+    value = _form_string(form, *keys)
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 async def _parse_reference_image(value: object) -> ReferenceImageUpload | None:

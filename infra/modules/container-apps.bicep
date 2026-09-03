@@ -96,6 +96,51 @@ param blobEndpoint string = ''
 @description('Blob container name injected as BLOB_CONTAINER_NAME.')
 param blobContainerName string = 'card-assets'
 
+@description('Blob container name injected as PROFILE_PHOTOS_CONTAINER_NAME.')
+param profilePhotosContainerName string = 'profile-photos'
+
+@description('Azure AI Content Safety endpoint injected as CONTENT_SAFETY_ENDPOINT.')
+param contentSafetyEndpoint string = ''
+
+@description('Azure AI Content Safety API version injected as CONTENT_SAFETY_API_VERSION.')
+param contentSafetyApiVersion string = '2024-09-01'
+
+@allowed([
+  0
+  2
+  4
+  6
+])
+@description('Maximum allowed Hate severity injected as CONTENT_SAFETY_MAX_HATE_SEVERITY.')
+param contentSafetyMaxHateSeverity int = 2
+
+@allowed([
+  0
+  2
+  4
+  6
+])
+@description('Maximum allowed SelfHarm severity injected as CONTENT_SAFETY_MAX_SELF_HARM_SEVERITY.')
+param contentSafetyMaxSelfHarmSeverity int = 2
+
+@allowed([
+  0
+  2
+  4
+  6
+])
+@description('Maximum allowed Sexual severity injected as CONTENT_SAFETY_MAX_SEXUAL_SEVERITY.')
+param contentSafetyMaxSexualSeverity int = 2
+
+@allowed([
+  0
+  2
+  4
+  6
+])
+@description('Maximum allowed Violence severity injected as CONTENT_SAFETY_MAX_VIOLENCE_SEVERITY.')
+param contentSafetyMaxViolenceSeverity int = 2
+
 @minValue(1)
 @description('Cosmos metadata probe timeout injected as HEALTHZ_COSMOS_TIMEOUT_MS.')
 param healthzCosmosTimeoutMs int = 1500
@@ -151,6 +196,15 @@ param imageSize string = '1024x1536'
 
 @description('Image generation quality level injected as IMAGE_QUALITY (low, medium, high).')
 param imageQuality string = 'low'
+
+@description('Per-user saved-photo cap injected as SAVED_PHOTO_MAX_COUNT.')
+param savedPhotoMaxCount int = 10
+
+@description('Saved-photo upload max bytes injected as SAVED_PHOTO_MAX_BYTES.')
+param savedPhotoMaxBytes string = '4194304'
+
+@description('Saved-photo thumbnail size injected as SAVED_PHOTO_THUMBNAIL_SIZE.')
+param savedPhotoThumbnailSize int = 200
 
 @description('Optional tags shared by Container Apps resources.')
 param tags object = {}
@@ -259,6 +313,34 @@ var containerAppEnv = concat(
       value: blobContainerName
     }
     {
+      name: 'PROFILE_PHOTOS_CONTAINER_NAME'
+      value: profilePhotosContainerName
+    }
+    {
+      name: 'CONTENT_SAFETY_ENDPOINT'
+      value: contentSafetyEndpoint
+    }
+    {
+      name: 'CONTENT_SAFETY_API_VERSION'
+      value: contentSafetyApiVersion
+    }
+    {
+      name: 'CONTENT_SAFETY_MAX_HATE_SEVERITY'
+      value: string(contentSafetyMaxHateSeverity)
+    }
+    {
+      name: 'CONTENT_SAFETY_MAX_SELF_HARM_SEVERITY'
+      value: string(contentSafetyMaxSelfHarmSeverity)
+    }
+    {
+      name: 'CONTENT_SAFETY_MAX_SEXUAL_SEVERITY'
+      value: string(contentSafetyMaxSexualSeverity)
+    }
+    {
+      name: 'CONTENT_SAFETY_MAX_VIOLENCE_SEVERITY'
+      value: string(contentSafetyMaxViolenceSeverity)
+    }
+    {
       name: 'HEALTHZ_COSMOS_TIMEOUT_MS'
       value: string(healthzCosmosTimeoutMs)
     }
@@ -329,6 +411,18 @@ var containerAppEnv = concat(
     {
       name: 'IMAGE_QUALITY'
       value: imageQuality
+    }
+    {
+      name: 'SAVED_PHOTO_MAX_COUNT'
+      value: string(savedPhotoMaxCount)
+    }
+    {
+      name: 'SAVED_PHOTO_MAX_BYTES'
+      value: savedPhotoMaxBytes
+    }
+    {
+      name: 'SAVED_PHOTO_THUMBNAIL_SIZE'
+      value: string(savedPhotoThumbnailSize)
     }
     {
       name: 'KEY_VAULT_URI'
