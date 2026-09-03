@@ -526,6 +526,9 @@ class AbstractCardRepository:
     async def get(self, owner_id: str, card_id: str) -> StoredCard | None:
         raise NotImplementedError
 
+    async def list_by_owner(self, owner_id: str) -> list[StoredCard]:
+        raise NotImplementedError
+
     async def delete(self, owner_id: str, card_id: str) -> None:
         raise NotImplementedError
 
@@ -603,6 +606,15 @@ class InMemoryCardRepository(AbstractCardRepository):
     async def get(self, owner_id: str, card_id: str) -> StoredCard | None:
         async with self._lock:
             return self._records.get((owner_id, card_id))
+
+    async def list_by_owner(self, owner_id: str) -> list[StoredCard]:
+        async with self._lock:
+            records = [
+                record
+                for (stored_owner_id, _), record in self._records.items()
+                if stored_owner_id == owner_id and record.document_type == "card"
+            ]
+        return sorted(records, key=lambda record: (record.created_at, record.id), reverse=True)
 
     async def delete(self, owner_id: str, card_id: str) -> None:
         async with self._lock:
@@ -696,6 +708,15 @@ class InMemorySharedCardAuditRepository(AbstractCardRepository, AbstractAuditRep
     async def get(self, owner_id: str, card_id: str) -> StoredCard | None:
         async with self._lock:
             return self._records.get((owner_id, _card_document_id(card_id)))
+
+    async def list_by_owner(self, owner_id: str) -> list[StoredCard]:
+        async with self._lock:
+            records = [
+                record
+                for (stored_owner_id, _), record in self._records.items()
+                if stored_owner_id == owner_id and record.document_type == "card"
+            ]
+        return sorted(records, key=lambda record: (record.created_at, record.id), reverse=True)
 
     async def delete(self, owner_id: str, card_id: str) -> None:
         async with self._lock:
@@ -914,6 +935,29 @@ class AzureCosmosCardRepository(AbstractCardRepository, AbstractAuditRepository)
             document_id=_card_document_id(card_id),
             expected_document_type="card",
         )
+
+    async def list_by_owner(self, owner_id: str) -> list[StoredCard]:
+        container = await self._get_container()
+        query = (
+            "SELECT * FROM c "
+            "WHERE c.userId = @ownerId "
+            "AND (NOT IS_DEFINED(c.documentType) OR c.documentType = @documentType) "
+            "ORDER BY c.createdAt DESC"
+        )
+        iterator = container.query_items(
+            query=query,
+            parameters=[
+                {"name": "@ownerId", "value": owner_id},
+                {"name": "@documentType", "value": "card"},
+            ],
+            partition_key=owner_id,
+        )
+        records: list[StoredCard] = []
+        async for document in iterator:
+            record = self._match_document_type(document, expected_document_type="card")
+            if record is not None:
+                records.append(record)
+        return records
 
     async def delete(self, owner_id: str, card_id: str) -> None:
         await self._delete_typed_record(

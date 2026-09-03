@@ -31,6 +31,7 @@ param tags object = {}
 
 var storageBlobDataReaderRoleDefinitionId = '2a2b9908-6ea1-4ae2-8e65-a410df84e7d1'
 var storageBlobDataContributorRoleDefinitionId = 'ba92f5b4-2d11-453d-a403-e96b0029c9fe'
+var storageBlobDelegatorRoleDefinitionId = 'db58b8e5-c6ad-4a2a-8342-4190687cbf4a'
 var blobPrivateDnsZoneName = 'privatelink.blob.${environment().suffixes.storage}'
 var privateEndpointName = take('${storageAccountName}-blob-pe', 80)
 
@@ -140,6 +141,16 @@ resource storageBlobDataContributorRoleAssignment 'Microsoft.Authorization/roleA
     principalId: containerAppPrincipalId
     principalType: 'ServicePrincipal'
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', storageBlobDataContributorRoleDefinitionId)
+  }
+}
+
+resource storageBlobDelegatorRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: storageAccount
+  name: guid(storageAccount.id, containerAppPrincipalId, storageBlobDelegatorRoleDefinitionId)
+  properties: {
+    principalId: containerAppPrincipalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', storageBlobDelegatorRoleDefinitionId)
   }
 }
 

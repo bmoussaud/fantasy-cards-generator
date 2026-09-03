@@ -51,6 +51,11 @@ The single synchronous card-generation flow supports two local modes:
 See `docs/card-generation-api.md` for the API contract, moderation policy, and
 runtime settings.
 
+Signed-in users can open `/app` to generate cards and `/my/cards` to browse
+their own saved cards. In Azure persistence mode, the library reads card
+metadata from Cosmos DB and renders Blob artwork through short-lived, read-only
+user-delegation SAS URLs.
+
 ## Azure deployment
 
 Provision the application with Azure Developer CLI:
