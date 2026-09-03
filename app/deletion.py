@@ -293,6 +293,7 @@ class DeletionService:
         *,
         request_id: str,
     ) -> None:
+        had_failure = False
         for target in blob_targets:
             store = self._asset_store if target.store == "card" else self._photo_asset_store
             try:
@@ -321,7 +322,8 @@ class DeletionService:
                     request_id=request_id,
                     error_code=normalize_error_code(type(exc).__name__),
                 )
-                return
+                had_failure = True
+                continue
             record_persistence(
                 store="blob",
                 operation="delete",
@@ -329,7 +331,8 @@ class DeletionService:
                 request_id=request_id,
             )
 
-        audit.timestamps.asset_cleanup_completed_at = now_iso()
+        if not had_failure:
+            audit.timestamps.asset_cleanup_completed_at = now_iso()
         try:
             await self._deletion_audit_repository.save(audit)
         except Exception:
