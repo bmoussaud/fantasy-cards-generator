@@ -446,3 +446,13 @@ Card generation now accepts a saved photo as an alternative reference source. `P
 **What:** Added a new authenticated UI route at `/my/photos/library` for managing saved reference photos, while keeping the existing `GET /my/photos` JSON endpoint as the shared data source for both the library page and the generator's saved-photo picker. The generator now enforces the upload-vs-saved-photo exclusivity in the browser by clearing the file input when a saved photo is chosen and clearing the saved-photo selection when a fresh upload is chosen.
 **Why:** This avoids colliding with Aragorn's API route names, keeps the frontend aligned with the established `/my/cards` navigation pattern, and lets the browser reuse the same owner-scoped API contract for listing and deleting photos without adding new backend HTML partial endpoints.
 
+### 2026-09-03: Harden blank optional card-generation form fields
+**By:** Aragorn
+**What:** Normalize blank or whitespace-only card-generation form strings to `None` before validation, and add a matching `CardGenerateBody` validator for `idempotencyKey`, `csrfToken`, and `savedPhotoId`.
+**Why:** Issue #69 showed that an always-present hidden `saved_photo_id` field could submit `""` and trigger a 422 for every generation request. Hardening both form parsing and the request model covers `saved_photo_id`, `photo_label`, `idempotency_key`, `csrf_token`, and `quality` consistently while preserving CSRF failures for missing or blank tokens.
+
+### 2026-09-03: Issue 69 frontend disables empty saved-photo field submission
+**By:** Legolas
+**What:** Updated the generator form so the hidden `saved_photo_id` field is rendered disabled by default and is only enabled by `app/static/js/app.js` while a saved photo is actively selected. Clearing the picker selection or switching back to a fresh upload now disables the field again so browsers omit it from form submissions.
+**Why:** Aragorn's backend hardening now tolerates blank optional form values, but the saved-photo picker should not submit an empty hidden field in the first place. Keeping the browser-side state aligned with the actual picker selection closes the regression path from #67 and preserves the upload-vs-saved-photo exclusivity flow.
+
