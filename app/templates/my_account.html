@@ -1,0 +1,24 @@
+{% extends "layout.html" %}
+
+{% block content %}
+    <section class="page-hero page-hero--compact">
+        <p class="eyebrow">Account</p>
+        <h1>My Account</h1>
+        <p>Manage the data stored for your signed-in account.</p>
+    </section>
+
+    <section class="panel detail-panel" aria-labelledby="account-danger-zone">
+        <h2 id="account-danger-zone">Danger zone</h2>
+        <p>
+            Deleting your account permanently removes your generated cards, saved photos, and app session.
+            Card and photo blob cleanup continues asynchronously after the request returns.
+        </p>
+        <p>
+            A minimal deletion audit record is retained for {{ audit_retention_days }} days, then purged automatically.
+        </p>
+        <form method="post" action="/my/account/delete" onsubmit="return window.confirm('Delete your account and all generated content permanently?');">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+            <button class="btn btn-secondary" type="submit">Delete my account</button>
+        </form>
+    </section>
+{% endblock %}

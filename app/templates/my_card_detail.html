@@ -84,6 +84,13 @@
                     </div>
                 {% endif %}
             </dl>
+            <div class="stack-actions">
+                <form method="post" action="/my/cards/{{ card.card_id }}/delete" onsubmit="return window.confirm('Delete this card permanently?');">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+                    <button class="btn btn-secondary" type="submit">Delete this card</button>
+                </form>
+                <p class="field__hint">This permanently removes the card metadata now and queues artwork cleanup in the background.</p>
+            </div>
         </aside>
     </div>
 {% endblock %}

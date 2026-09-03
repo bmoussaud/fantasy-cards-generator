@@ -7,7 +7,7 @@ from uuid import uuid4
 
 from authlib.integrations.base_client.errors import OAuthError
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.exceptions import HTTPException as FastAPIHTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
@@ -32,6 +32,7 @@ from app.auth import (
     require_api_user,
     require_authenticated_user,
 )
+from app.deletion import DeletionService
 from app.generation import (
     AppServices,
     ArtworkRetryBody,
@@ -79,6 +80,15 @@ def create_app(services: AppServices | None = None) -> FastAPI:
     app_services = services or create_services(app_settings)
     card_service = CardGenerationService(app_services)
     card_library_service = CardLibraryService(app_services.card_repository)
+    deletion_service = DeletionService(
+        settings=app_services.settings,
+        card_repository=app_services.card_repository,
+        audit_repository=app_services.audit_repository,
+        deletion_audit_repository=app_services.deletion_audit_repository,
+        asset_store=app_services.asset_store,
+        saved_photo_repository=app_services.saved_photo_repository,
+        photo_asset_store=app_services.photo_asset_store,
+    )
     photo_service = SavedPhotoService(
         settings=app_services.settings,
         repository=app_services.saved_photo_repository,
@@ -319,6 +329,30 @@ def create_app(services: AppServices | None = None) -> FastAPI:
             template_context(request, page_title="My Photos", user=user),
         )
 
+    @app.get("/my/account", response_class=HTMLResponse)
+    async def my_account(
+        request: Request,
+        user: AuthenticatedUser = Depends(require_api_user),
+    ) -> HTMLResponse:
+        owner = get_authenticated_owner(request)
+        if owner is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                headers={"WWW-Authenticate": "Session"},
+                detail="Authentication required.",
+            )
+        return templates.TemplateResponse(
+            request,
+            "my_account.html",
+            template_context(
+                request,
+                page_title="My Account",
+                user=user,
+                owner=owner,
+                audit_retention_days=app_services.settings.audit_retention_days,
+            ),
+        )
+
     @app.post("/my/photos", response_model=SavedPhotoResponseModel, status_code=201)
     async def save_my_photo(
         request: Request,
@@ -431,6 +465,69 @@ def create_app(services: AppServices | None = None) -> FastAPI:
             )
         await photo_service.delete_photo(owner, photo_id)
         return Response(status_code=204)
+
+    @app.post("/my/cards/{card_id}/delete", status_code=303)
+    async def delete_my_card(
+        card_id: str,
+        request: Request,
+        background_tasks: BackgroundTasks,
+        _: AuthenticatedUser = Depends(require_api_user),
+    ) -> Response:
+        form = await request.form()
+        app_services.csrf_protector.validate(
+            request,
+            _form_string(form, "csrf_token", "csrfToken"),
+        )
+        owner = get_authenticated_owner(request)
+        if owner is None:
+            raise ProblemDetails(
+                status_code=401,
+                title="Unauthorized",
+                detail="Authentication required.",
+                type="/problems/unauthorized",
+                error_code="unauthorized",
+                headers={"WWW-Authenticate": "Session"},
+            )
+        await deletion_service.delete_card(
+            owner=owner,
+            card_id=card_id,
+            request_id=request.state.request_id,
+            schedule_cleanup=background_tasks.add_task,
+        )
+        return RedirectResponse(
+            url="/my/cards", status_code=status.HTTP_303_SEE_OTHER, background=background_tasks
+        )
+
+    @app.post("/my/account/delete", status_code=303)
+    async def delete_my_account(
+        request: Request,
+        background_tasks: BackgroundTasks,
+        _: AuthenticatedUser = Depends(require_api_user),
+    ) -> Response:
+        form = await request.form()
+        app_services.csrf_protector.validate(
+            request,
+            _form_string(form, "csrf_token", "csrfToken"),
+        )
+        owner = get_authenticated_owner(request)
+        if owner is None:
+            raise ProblemDetails(
+                status_code=401,
+                title="Unauthorized",
+                detail="Authentication required.",
+                type="/problems/unauthorized",
+                error_code="unauthorized",
+                headers={"WWW-Authenticate": "Session"},
+            )
+        await deletion_service.delete_account(
+            owner=owner,
+            request_id=request.state.request_id,
+            schedule_cleanup=background_tasks.add_task,
+        )
+        request.session.clear()
+        return RedirectResponse(
+            url="/", status_code=status.HTTP_303_SEE_OTHER, background=background_tasks
+        )
 
     @app.get("/auth/login")
     async def login(request: Request) -> RedirectResponse:
@@ -609,6 +706,63 @@ def create_app(services: AppServices | None = None) -> FastAPI:
                 trusted_proxy_hops=app_services.settings.trusted_proxy_hops,
             ),
         )
+
+    @app.delete("/api/v1/cards/{card_id}", status_code=204)
+    async def api_delete_card(
+        card_id: str,
+        request: Request,
+        background_tasks: BackgroundTasks,
+        _: AuthenticatedUser = Depends(require_api_user),
+    ) -> Response:
+        app_services.csrf_protector.validate(
+            request,
+            request.headers.get("x-csrf-token") or request.query_params.get("csrfToken"),
+        )
+        owner = get_authenticated_owner(request)
+        if owner is None:
+            raise ProblemDetails(
+                status_code=401,
+                title="Unauthorized",
+                detail="Authentication required.",
+                type="/problems/unauthorized",
+                error_code="unauthorized",
+                headers={"WWW-Authenticate": "Session"},
+            )
+        await deletion_service.delete_card(
+            owner=owner,
+            card_id=card_id,
+            request_id=request.state.request_id,
+            schedule_cleanup=background_tasks.add_task,
+        )
+        return Response(status_code=204, background=background_tasks)
+
+    @app.delete("/api/v1/account", status_code=204)
+    async def api_delete_account(
+        request: Request,
+        background_tasks: BackgroundTasks,
+        _: AuthenticatedUser = Depends(require_api_user),
+    ) -> Response:
+        app_services.csrf_protector.validate(
+            request,
+            request.headers.get("x-csrf-token") or request.query_params.get("csrfToken"),
+        )
+        owner = get_authenticated_owner(request)
+        if owner is None:
+            raise ProblemDetails(
+                status_code=401,
+                title="Unauthorized",
+                detail="Authentication required.",
+                type="/problems/unauthorized",
+                error_code="unauthorized",
+                headers={"WWW-Authenticate": "Session"},
+            )
+        await deletion_service.delete_account(
+            owner=owner,
+            request_id=request.state.request_id,
+            schedule_cleanup=background_tasks.add_task,
+        )
+        request.session.clear()
+        return Response(status_code=204, background=background_tasks)
 
     @app.post("/ui/cards/generate", response_class=HTMLResponse)
     async def ui_generate_card(
