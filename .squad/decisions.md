@@ -386,3 +386,8 @@
 **By:** Aragorn, Legolas
 **What:** Standardize image quality as a `low|medium|high` setting, defaulting to `low`, across the UI form, request handling, service layer, settings validation, and the Azure OpenAI `gpt-image-2` image-generation request. The UI submits the selected value, controller/service code forwards it to `CardGenerationService.generate_card()`, invalid values are normalized or rejected consistently, and deployments must wire `IMAGE_QUALITY` through local env examples and Bicep/Container Apps configuration.
 **Why:** Quality materially affects latency and cost, so the team needs one repo-wide contract instead of separate frontend and backend assumptions. Consolidating the UI and backend decisions records that the form, handler, service signature, and Azure request parameter must evolve together.
+
+### 2026-09-02: Authenticated library uses 5-minute user-delegation Blob SAS URLs
+**By:** Legolas
+**What:** Library pages mint read-only user-delegation SAS URLs for card artwork with a fixed 5-minute expiry, staying within the storage account's existing 15-minute SAS policy window. The Container App runtime identity keeps container-scoped Blob Data Contributor for uploads and gains account-scoped Storage Blob Delegator only for SAS signing. Cross-user detail lookups fail closed as 404s from the authenticated user's partition rather than revealing whether another owner's card exists.
+**Why:** User-delegation SAS keeps storage private, avoids Shared Key access, and matches the repo's Entra-first posture. Five minutes is long enough for normal page loads and reloads but short enough to limit replay value if a URL leaks. Returning 404 for non-owned card IDs avoids existence disclosure while still enforcing strict per-user scoping.
