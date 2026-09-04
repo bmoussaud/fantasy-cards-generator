@@ -624,6 +624,47 @@ Any implementation should preserve:
 
 ## Open questions and risks
 
+### Region/runtime availability findings (issue #96)
+
+**Repo-verified deployment region configuration**
+
+- The IaC is currently **single-region and parameterized**, not hard-coded to one checked-in Azure region: `infra/main.bicep` defines a single `location` parameter (defaulting to `resourceGroup().location`) and passes that shared value into the downstream modules, including Azure AI Foundry (`infra/main.bicep:1-2`, `infra/modules/ai-foundry.bicep:1-2`).
+- `azd` injects that deployment location through `AZURE_LOCATION` in `infra/main.parameters.json` (`infra/main.parameters.json:8-10`).
+- No committed `.azure` environment state in this repo pins a live deployed region. The checked-in handoff notes explicitly say subscription and location are still deferred until deployment handoff (`.azure/deployment-plan.md:49`, `.azure/deployment-plan.md:519-527`).
+- The only concrete region value currently present in checked-in docs/examples is **`eastus2`** via the provisioning steps in `README.md` and `infra/README.md` (`README.md:64-66`, `README.md:97-103`, `infra/README.md:70-72`).
+
+**What this means today**
+
+- Based on source control alone, **`eastus2` is the only repo-evidenced candidate region**, but the actual live deployment region for the current Azure subscription/environment is still **not conclusively verified from the repo**.
+- The current Foundry model defaults are:
+  - text deployment alias `gpt-5-5` → model `gpt-5.5` with `GlobalStandard` SKU (`infra/main.bicep:106-115`)
+  - image deployment alias `gpt-image-2` → model `gpt-image-2` with `GlobalStandard` SKU (`infra/main.bicep:121-130`)
+- The architecture document's hosted `card-orchestrator` example response also names `gpt-5-5` as the model deployment returned by the agent layer (`docs/architecture-agents-foundry.md:310-312`).
+
+**Externally sourced region/runtime checks (Microsoft Learn, retrieved 2026-09-04)**
+
+- Microsoft Learn's Foundry region-support page lists **East US 2** as a supported region for creating Foundry projects and explicitly says to use feature-specific pages to confirm the exact feature/model combination before deployment: <https://learn.microsoft.com/en-us/azure/foundry/reference/region-support>
+- Microsoft Learn's Foundry Agent Service quotas/regions page lists **East US 2 = Yes** for **Responses API** and **Agents**, which is the closest public confirmation that the target region supports the hosted-agent runtime needed by the proposed `card-orchestrator`: <https://learn.microsoft.com/en-us/azure/foundry/agents/concepts/limits-quotas-regions>
+- Microsoft Learn's Foundry model region-availability matrix shows **`eastus2` = ✅** for:
+  - `gpt-5.5` (`2026-04-24`) under **Global Standard**
+  - `gpt-image-2` (`2026-04-21`) under **Global Standard**
+  Source: <https://learn.microsoft.com/en-us/azure/foundry/foundry-models/concepts/models-sold-directly-by-azure-region-availability>
+- Confidence level: **medium-high for `eastus2` specifically**, because the public documentation is explicit for that region. Confidence is **low for any other actual deployment region** until the team confirms the real `AZURE_LOCATION` / deployed resource-group location in the live subscription.
+
+**Quota assessment**
+
+- The best repo evidence for initial load is still modest: the checked-in deployment plan classifies the workload as **low traffic: fewer than 100 requests/day** (`.azure/deployment-plan.md:40-49`), and the architecture proposal says phase 1 should add the hosted orchestrator in **shadow mode** for sampled/internal traffic before any live switchover (`docs/architecture-agents-foundry.md:579-586`).
+- That implies the first hosted-agent rollout mainly adds **one Agent Service + text-model hop per sampled generation request**, while the existing `gpt-image-2` image generation path remains in the app.
+- **UNRESOLVED — requires live Azure subscription check.** Public docs can confirm supported regions and default service behavior, but they **cannot** confirm this subscription's allocated quota/capacity for `gpt-5.5`, `gpt-image-2`, or any production rollout headroom in the chosen region.
+- Before implementation, run a live quota check against the real subscription and region (for example via the Foundry portal **Manage → Quota** with **Show all** enabled, plus Azure CLI checks such as `az cognitiveservices usage list --location <region>` and any model-specific quota views available to the subscription).
+
+**Remaining open items**
+
+- Confirm the actual live deployment region(s) for the active `azd` environment(s) and resource groups; do not rely on the checked-in `eastus2` example alone.
+- In that same subscription/tenant, verify that the Foundry project can create/use hosted agents in the selected region, not just that the docs say the region is supported globally.
+- Confirm live quota/capacity for `gpt-5.5` and `gpt-image-2` in the selected region and whether any increase request is needed before phase-1 agent rollout.
+- If the real deployment region is **not** `eastus2`, rerun the region/model support check against that specific region before implementation.
+
 1. **Region/runtime availability**  
    Hosted-agent support, model availability, and quota must be checked against the actual deployment region strategy before implementation.
 
