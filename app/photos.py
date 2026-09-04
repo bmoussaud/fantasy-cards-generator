@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 from dataclasses import dataclass, field
 from io import BytesIO
 from typing import Any, Literal
@@ -26,6 +27,47 @@ from app.settings import AppSettings
 SAVED_PHOTO_DOCUMENT_ID_PREFIX = "photo:"
 CONTENT_SAFETY_CATEGORIES = ("Hate", "SelfHarm", "Sexual", "Violence")
 THUMBNAIL_BLOB_CONTENT_TYPE = "image/png"
+logger = logging.getLogger(__name__)
+
+
+def _log_saved_photo_exception(
+    *,
+    action: str,
+    stage: str,
+    exc: Exception,
+    owner_id: str | None = None,
+    photo_id: str | None = None,
+) -> None:
+    exception_type = type(exc).__name__
+    logger.exception(
+        "Saved photo %s failed during %s "
+        "(owner_id=%s, photo_id=%s, exc_type=%s, exc_message=%s)",
+        action,
+        stage,
+        owner_id or "unknown",
+        photo_id or "unknown",
+        exception_type,
+        str(exc),
+        extra={
+            "saved_photo_action": action,
+            "saved_photo_stage": stage,
+            "owner_id": owner_id,
+            "photo_id": photo_id,
+            "exception_type": exception_type,
+        },
+    )
+
+
+def _save_photo_failure_stage(
+    *,
+    uploaded_original: bool,
+    uploaded_thumbnail: bool,
+) -> str:
+    if not uploaded_original:
+        return "blob upload"
+    if not uploaded_thumbnail:
+        return "thumbnail upload"
+    return "cosmos save"
 
 
 class SavedPhotoImageModel(BaseModel):
@@ -518,10 +560,30 @@ class SavedPhotoService:
                 )
             )
         except Exception as exc:
+            _log_saved_photo_exception(
+                action="save",
+                stage=_save_photo_failure_stage(
+                    uploaded_original=uploaded_original,
+                    uploaded_thumbnail=uploaded_thumbnail,
+                ),
+                owner_id=owner.owner_id,
+                photo_id=photo_id,
+                exc=exc,
+            )
             if uploaded_thumbnail:
-                await self._safe_delete_blob(thumbnail_blob_name)
+                await self._safe_delete_blob(
+                    thumbnail_blob_name,
+                    owner_id=owner.owner_id,
+                    photo_id=photo_id,
+                    stage="thumbnail cleanup",
+                )
             if uploaded_original:
-                await self._safe_delete_blob(blob_name)
+                await self._safe_delete_blob(
+                    blob_name,
+                    owner_id=owner.owner_id,
+                    photo_id=photo_id,
+                    stage="blob cleanup",
+                )
             raise ProblemDetails(
                 status_code=503,
                 title="Photo Library Unavailable",
@@ -558,8 +620,18 @@ class SavedPhotoService:
 
     async def delete_photo(self, owner: AuthenticatedOwner, photo_id: str) -> None:
         record = await self._require_photo(owner.owner_id, photo_id)
-        await self._delete_blob(record.blob_name)
-        await self._delete_blob(record.thumbnail_blob_name)
+        await self._delete_blob(
+            record.blob_name,
+            owner_id=owner.owner_id,
+            photo_id=photo_id,
+            stage="blob delete",
+        )
+        await self._delete_blob(
+            record.thumbnail_blob_name,
+            owner_id=owner.owner_id,
+            photo_id=photo_id,
+            stage="thumbnail delete",
+        )
         await self._repository.delete(owner.owner_id, photo_id)
 
     async def _require_photo(self, owner_id: str, photo_id: str) -> StoredSavedPhoto:
@@ -586,18 +658,44 @@ class SavedPhotoService:
                 error_code="saved_photo_image_not_found",
             ) from exc
 
-    async def _safe_delete_blob(self, blob_name: str) -> None:
+    async def _safe_delete_blob(
+        self,
+        blob_name: str,
+        *,
+        owner_id: str | None = None,
+        photo_id: str | None = None,
+        stage: str = "blob cleanup",
+    ) -> None:
         try:
-            await self._delete_blob(blob_name)
-        except Exception:
+            await self._delete_blob(
+                blob_name,
+                owner_id=owner_id,
+                photo_id=photo_id,
+                stage=stage,
+            )
+        except ProblemDetails:
             return
 
-    async def _delete_blob(self, blob_name: str) -> None:
+    async def _delete_blob(
+        self,
+        blob_name: str,
+        *,
+        owner_id: str | None = None,
+        photo_id: str | None = None,
+        stage: str = "blob delete",
+    ) -> None:
         try:
             await self._asset_store.delete(blob_name)
         except Exception as exc:
             if _is_not_found_exception(exc):
                 return
+            _log_saved_photo_exception(
+                action="delete",
+                stage=stage,
+                owner_id=owner_id,
+                photo_id=photo_id,
+                exc=exc,
+            )
             raise ProblemDetails(
                 status_code=503,
                 title="Photo Library Unavailable",
