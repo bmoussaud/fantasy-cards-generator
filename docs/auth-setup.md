@@ -38,7 +38,7 @@ ENTRA_SCOPES=openid profile email
   `https://localhost:8000/...`. Plain HTTP is fine only for anonymous pages
   that do not exercise sign-in.
 
-## Deployed environments: Key Vault + Container Apps secret wiring
+## Deployed environments: Key Vault runtime retrieval via managed identity
 
 `.env` is intentionally **not** shipped in the container image (it stays
 gitignored and is for local development only). Deployed Container Apps get
@@ -47,11 +47,12 @@ their runtime configuration entirely from `infra/main.bicep` /
 
 | Variable | Source in deployed environments |
 |---|---|
-| `APP_SESSION_SECRET_KEY` | Stored in Key Vault as `app-session-secret-key`, then mirrored into the Container App's own secret set as `app-session-secret-key` |
-| `ENTRA_CLIENT_SECRET` | Stored in Key Vault as `entra-client-secret`, then mirrored into the Container App's own secret set as `entra-client-secret` |
+| `APP_SESSION_SECRET_KEY` | Stored in Key Vault as `app-session-secret-key`; fetched at runtime from Key Vault using the Container App managed identity |
+| `ENTRA_CLIENT_SECRET` | Stored in Key Vault as `entra-client-secret`; fetched at runtime from Key Vault using the Container App managed identity |
 | `ENTRA_CLIENT_ID` | Plain env var, sourced from the Entra app-registration Bicep module output |
 | `ENTRA_REDIRECT_URI` | Plain env var, auto-derived from the deployed Container Apps hostname (`deployedAuthRedirectUri` output) — never set manually |
 | `ENTRA_POST_LOGOUT_REDIRECT_URI` | Plain env var, auto-derived the same way |
+| `SECRET_PROVIDER_BACKEND`, `KEY_VAULT_URI`, `SECRET_PROVIDER_*` | Plain non-secret env vars injected by Bicep to point the runtime secret provider at Key Vault and control cache/retry/stale behavior |
 | `ENTRA_AUTHORITY`, `ENTRA_SCOPES` | Not injected; the app's code defaults are used in every environment |
 
 To populate the two deployment-time secret values before `azd provision`:
@@ -66,9 +67,10 @@ azd env set APP_SESSION_SECRET_KEY "$(openssl rand -base64 48)"
 
 Both values flow into Bicep via `infra/main.parameters.json`
 (`appSessionSecretKeyValue` / `entraClientSecretValue`) as `@secure()`
-parameters. The deployment writes them to Key Vault and also into Azure
-Container Apps' secret store so the app does not depend on the platform's
-Key Vault `secretRef` resolution path during revision provisioning.
+parameters. The deployment writes them to Key Vault only. The Container App
+receives the Key Vault URI plus non-secret secret-provider settings, and its
+runtime managed identity is granted **Key Vault Secrets User** at vault scope
+so the app can read secret values directly.
 
 At runtime, the app resolves `ENTRA_CLIENT_SECRET` via the secret-provider
 abstraction from `app/secrets.py`. In Azure that lets the auth flow adopt a
@@ -76,9 +78,10 @@ new Key Vault secret version without restarting the application; in local
 development the same code path falls back to environment variables.
 
 If `APP_SESSION_SECRET_KEY` or `ENTRA_CLIENT_SECRET` are unset when
-`azd provision` runs, the corresponding Key Vault secret (and therefore the
-corresponding Container App env var) is simply not created — the app then
-fails closed at startup exactly as it does locally when `.env` is incomplete.
+`azd provision` runs, the corresponding Key Vault secret is simply not
+created. The app then fails closed at startup when its managed-identity
+Key Vault lookup cannot load the required value, exactly as incomplete local
+`.env` config fails closed.
 
 ## Register the application in Microsoft Entra ID
 

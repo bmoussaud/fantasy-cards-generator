@@ -6,7 +6,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.46.1.21595",
-      "templateHash": "6403546889161816476"
+      "templateHash": "5764471614278944518"
     }
   },
   "parameters": {
@@ -101,14 +101,61 @@
       "type": "securestring",
       "defaultValue": "",
       "metadata": {
-        "description": "Session cookie signing secret stored in Key Vault and mirrored into the Container App secret set (APP_SESSION_SECRET_KEY). Set via `azd env set APP_SESSION_SECRET_KEY <value>` before provisioning."
+        "description": "Session cookie signing secret stored in Key Vault as APP_SESSION_SECRET_KEY. Set via `azd env set APP_SESSION_SECRET_KEY <value>` before provisioning."
       }
     },
     "entraClientSecretValue": {
       "type": "securestring",
       "defaultValue": "",
       "metadata": {
-        "description": "Microsoft Entra ID client secret stored in Key Vault and mirrored into the Container App secret set (ENTRA_CLIENT_SECRET). Populated automatically by hooks/gen_client_secret.sh when deployEntraAppRegistration=true."
+        "description": "Microsoft Entra ID client secret stored in Key Vault as ENTRA_CLIENT_SECRET. Populated automatically by hooks/gen_client_secret.sh when deployEntraAppRegistration=true."
+      }
+    },
+    "keyVaultProviderBackend": {
+      "type": "string",
+      "defaultValue": "azure",
+      "allowedValues": [
+        "auto",
+        "azure",
+        "env"
+      ],
+      "metadata": {
+        "description": "Secret provider backend injected into the Container App runtime."
+      }
+    },
+    "keyVaultCacheTtlSeconds": {
+      "type": "string",
+      "defaultValue": "60",
+      "metadata": {
+        "description": "Secret-provider cache TTL in seconds injected into the Container App runtime."
+      }
+    },
+    "keyVaultRequestTimeoutSeconds": {
+      "type": "string",
+      "defaultValue": "2",
+      "metadata": {
+        "description": "Secret-provider request timeout in seconds injected into the Container App runtime."
+      }
+    },
+    "keyVaultMaxRetries": {
+      "type": "int",
+      "defaultValue": 2,
+      "metadata": {
+        "description": "Secret-provider max retries injected into the Container App runtime."
+      }
+    },
+    "keyVaultRetryBackoffSeconds": {
+      "type": "string",
+      "defaultValue": "0.25",
+      "metadata": {
+        "description": "Secret-provider retry backoff in seconds injected into the Container App runtime."
+      }
+    },
+    "keyVaultMaxStaleSeconds": {
+      "type": "string",
+      "defaultValue": "300",
+      "metadata": {
+        "description": "Secret-provider max stale window in seconds injected into the Container App runtime."
       }
     },
     "cosmosDatabaseName": {
@@ -591,9 +638,30 @@
     "privateEndpointSubnetName": "private-endpoints",
     "natGatewayName": "[take(format('{0}-nat', variables('resourceToken')), 64)]",
     "natGatewayPublicIpName": "[take(format('{0}-nat-pip', variables('resourceToken')), 64)]",
+    "keyVaultSecretsUserRoleDefinitionId": "4633458b-17de-408a-b874-0445c86b69e6",
     "resolvedContentSafetyEndpoint": "[if(empty(parameters('contentSafetyEndpoint')), format('https://{0}.cognitiveservices.azure.com/', variables('aiFoundryAccountName')), parameters('contentSafetyEndpoint'))]"
   },
   "resources": {
+    "keyVault": {
+      "existing": true,
+      "type": "Microsoft.KeyVault/vaults",
+      "apiVersion": "2023-07-01",
+      "name": "[variables('keyVaultName')]"
+    },
+    "containerAppKeyVaultSecretsUserRoleAssignment": {
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "scope": "[resourceId('Microsoft.KeyVault/vaults', variables('keyVaultName'))]",
+      "name": "[guid(resourceId('Microsoft.KeyVault/vaults', variables('keyVaultName')), variables('containerAppName'), variables('keyVaultSecretsUserRoleDefinitionId'))]",
+      "properties": {
+        "principalId": "[reference('containerApps').outputs.containerAppPrincipalId.value]",
+        "principalType": "ServicePrincipal",
+        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('keyVaultSecretsUserRoleDefinitionId'))]"
+      },
+      "dependsOn": [
+        "containerApps"
+      ]
+    },
     "monitoring": {
       "type": "Microsoft.Resources/deployments",
       "apiVersion": "2025-04-01",
@@ -900,9 +968,6 @@
           "keyVaultName": {
             "value": "[variables('keyVaultName')]"
           },
-          "keyVaultAccessPrincipalId": {
-            "value": "[reference('registry').outputs.acrPullIdentityPrincipalId.value]"
-          },
           "location": {
             "value": "[parameters('location')]"
           },
@@ -917,7 +982,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.46.1.21595",
-              "templateHash": "4030989371104425907"
+              "templateHash": "120795706429035663"
             }
           },
           "parameters": {
@@ -931,12 +996,6 @@
               "type": "string",
               "metadata": {
                 "description": "Key Vault resource name. Must be globally unique."
-              }
-            },
-            "keyVaultAccessPrincipalId": {
-              "type": "string",
-              "metadata": {
-                "description": "Principal ID of the managed identity granted read access to Key Vault secrets (the Container App's ACR-pull identity)."
               }
             },
             "deployerPrincipalId": {
@@ -978,7 +1037,6 @@
             }
           },
           "variables": {
-            "keyVaultSecretsUserRoleDefinitionId": "4633458b-17de-408a-b874-0445c86b69e6",
             "keyVaultReaderRoleDefinitionId": "21090545-7ca7-4776-b22c-e363652d74d2",
             "hasAppSessionSecretKeyValue": "[not(empty(parameters('appSessionSecretKeyValue')))]",
             "hasEntraClientSecretValue": "[not(empty(parameters('entraClientSecretValue')))]"
@@ -1004,20 +1062,6 @@
                 },
                 "tenantId": "[tenant().tenantId]"
               }
-            },
-            {
-              "type": "Microsoft.Authorization/roleAssignments",
-              "apiVersion": "2022-04-01",
-              "scope": "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]",
-              "name": "[guid(resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName')), parameters('keyVaultAccessPrincipalId'), variables('keyVaultSecretsUserRoleDefinitionId'))]",
-              "properties": {
-                "principalId": "[parameters('keyVaultAccessPrincipalId')]",
-                "principalType": "ServicePrincipal",
-                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('keyVaultSecretsUserRoleDefinitionId'))]"
-              },
-              "dependsOn": [
-                "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]"
-              ]
             },
             {
               "type": "Microsoft.Authorization/roleAssignments",
@@ -1063,6 +1107,10 @@
               "type": "string",
               "value": "[parameters('keyVaultName')]"
             },
+            "keyVaultResourceId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]"
+            },
             "keyVaultUri": {
               "type": "string",
               "value": "[reference(resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName')), '2023-07-01').vaultUri]"
@@ -1077,10 +1125,7 @@
             }
           }
         }
-      },
-      "dependsOn": [
-        "registry"
-      ]
+      }
     },
     "network": {
       "type": "Microsoft.Resources/deployments",
@@ -1613,9 +1658,6 @@
           "appInsightsConnectionString": {
             "value": "[reference('monitoring').outputs.appInsightsConnectionString.value]"
           },
-          "appSessionSecretKeyValue": {
-            "value": "[parameters('appSessionSecretKeyValue')]"
-          },
           "auditRetentionDays": {
             "value": "[parameters('auditRetentionDays')]"
           },
@@ -1645,9 +1687,6 @@
             "value": "[parameters('environmentName')]"
           },
           "entraClientId": "[if(parameters('deployEntraAppRegistration'), createObject('value', reference('appRegistration').outputs.appId.value), createObject('value', ''))]",
-          "entraClientSecretValue": {
-            "value": "[parameters('entraClientSecretValue')]"
-          },
           "entraPostLogoutRedirectUri": "[if(parameters('deployEntraAppRegistration'), createObject('value', format('{0}{1}', format('https://{0}.{1}', variables('containerAppName'), reference('containerAppsEnvironment').outputs.containerAppsEnvironmentDefaultDomain.value), parameters('entraPostLogoutRedirectPath'))), createObject('value', ''))]",
           "entraRedirectUri": "[if(parameters('deployEntraAppRegistration'), createObject('value', format('{0}{1}', format('https://{0}.{1}', variables('containerAppName'), reference('containerAppsEnvironment').outputs.containerAppsEnvironmentDefaultDomain.value), parameters('entraRedirectPath'))), createObject('value', ''))]",
           "contentSafetyApiVersion": {
@@ -1740,6 +1779,24 @@
           "savedPhotoThumbnailSize": {
             "value": "[parameters('savedPhotoThumbnailSize')]"
           },
+          "keyVaultProviderBackend": {
+            "value": "[parameters('keyVaultProviderBackend')]"
+          },
+          "keyVaultCacheTtlSeconds": {
+            "value": "[parameters('keyVaultCacheTtlSeconds')]"
+          },
+          "keyVaultRequestTimeoutSeconds": {
+            "value": "[parameters('keyVaultRequestTimeoutSeconds')]"
+          },
+          "keyVaultMaxRetries": {
+            "value": "[parameters('keyVaultMaxRetries')]"
+          },
+          "keyVaultRetryBackoffSeconds": {
+            "value": "[parameters('keyVaultRetryBackoffSeconds')]"
+          },
+          "keyVaultMaxStaleSeconds": {
+            "value": "[parameters('keyVaultMaxStaleSeconds')]"
+          },
           "serviceName": {
             "value": "[parameters('serviceName')]"
           },
@@ -1775,7 +1832,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.46.1.21595",
-              "templateHash": "16939217761326766987"
+              "templateHash": "7031173849370039804"
             }
           },
           "parameters": {
@@ -1868,18 +1925,51 @@
                 "description": "Key Vault URI injected in the web app environment."
               }
             },
-            "appSessionSecretKeyValue": {
-              "type": "securestring",
-              "defaultValue": "",
+            "keyVaultProviderBackend": {
+              "type": "string",
+              "defaultValue": "azure",
+              "allowedValues": [
+                "auto",
+                "azure",
+                "env"
+              ],
               "metadata": {
-                "description": "Session cookie signing secret injected into the Container App. Empty skips creating the secret."
+                "description": "Secret provider backend injected as SECRET_PROVIDER_BACKEND."
               }
             },
-            "entraClientSecretValue": {
-              "type": "securestring",
-              "defaultValue": "",
+            "keyVaultCacheTtlSeconds": {
+              "type": "string",
+              "defaultValue": "60",
               "metadata": {
-                "description": "Microsoft Entra ID client secret injected into the Container App. Empty skips creating the secret."
+                "description": "Secret-provider cache TTL injected as SECRET_PROVIDER_CACHE_TTL_SECONDS."
+              }
+            },
+            "keyVaultRequestTimeoutSeconds": {
+              "type": "string",
+              "defaultValue": "2",
+              "metadata": {
+                "description": "Secret-provider request timeout injected as SECRET_PROVIDER_REQUEST_TIMEOUT_SECONDS."
+              }
+            },
+            "keyVaultMaxRetries": {
+              "type": "int",
+              "defaultValue": 2,
+              "metadata": {
+                "description": "Secret-provider max retries injected as SECRET_PROVIDER_MAX_RETRIES."
+              }
+            },
+            "keyVaultRetryBackoffSeconds": {
+              "type": "string",
+              "defaultValue": "0.25",
+              "metadata": {
+                "description": "Secret-provider retry backoff injected as SECRET_PROVIDER_RETRY_BACKOFF_SECONDS."
+              }
+            },
+            "keyVaultMaxStaleSeconds": {
+              "type": "string",
+              "defaultValue": "300",
+              "metadata": {
+                "description": "Secret-provider max stale window injected as SECRET_PROVIDER_MAX_STALE_SECONDS."
               }
             },
             "entraClientId": {
@@ -2211,8 +2301,8 @@
             }
           },
           "variables": {
-            "containerAppSecrets": "[concat(createArray(createObject('name', 'applicationinsights-connection-string', 'value', parameters('appInsightsConnectionString'))), if(not(empty(parameters('appSessionSecretKeyValue'))), createArray(createObject('name', 'app-session-secret-key', 'value', parameters('appSessionSecretKeyValue'))), createArray()), if(not(empty(parameters('entraClientSecretValue'))), createArray(createObject('name', 'entra-client-secret', 'value', parameters('entraClientSecretValue'))), createArray()))]",
-            "containerAppEnv": "[concat(createArray(createObject('name', 'APPLICATIONINSIGHTS_CONNECTION_STRING', 'secretRef', 'applicationinsights-connection-string'), createObject('name', 'TELEMETRY_ENABLED', 'value', 'true'), createObject('name', 'APP_ENV', 'value', parameters('deploymentEnvironment')), createObject('name', 'TELEMETRY_SAMPLING_RATIO', 'value', parameters('telemetrySamplingRatio')), createObject('name', 'OTEL_SERVICE_NAME', 'value', parameters('telemetryServiceName')), createObject('name', 'OTEL_RESOURCE_ATTRIBUTES', 'value', format('deployment.environment.name={0},cloud.platform=azure_container_apps', parameters('telemetryEnvironmentName'))), createObject('name', 'OTEL_TRACES_SAMPLER', 'value', 'parentbased_trace_id_ratio'), createObject('name', 'OTEL_TRACES_SAMPLER_ARG', 'value', parameters('telemetrySamplingRatio')), createObject('name', 'AI_MODE', 'value', parameters('aiMode')), createObject('name', 'PERSISTENCE_MODE', 'value', parameters('persistenceMode')), createObject('name', 'FOUNDRY_ENDPOINT', 'value', parameters('foundryEndpoint')), createObject('name', 'FOUNDRY_API_VERSION', 'value', parameters('foundryApiVersion')), createObject('name', 'FOUNDRY_TEXT_DEPLOYMENT', 'value', parameters('foundryTextDeployment')), createObject('name', 'FOUNDRY_IMAGE_DEPLOYMENT', 'value', parameters('foundryImageDeployment')), createObject('name', 'COSMOS_ENDPOINT', 'value', parameters('cosmosEndpoint')), createObject('name', 'COSMOS_DATABASE_NAME', 'value', parameters('cosmosDatabaseName')), createObject('name', 'COSMOS_CONTAINER_NAME', 'value', parameters('cosmosContainerName')), createObject('name', 'BLOB_ENDPOINT', 'value', parameters('blobEndpoint')), createObject('name', 'BLOB_CONTAINER_NAME', 'value', parameters('blobContainerName')), createObject('name', 'PROFILE_PHOTOS_CONTAINER_NAME', 'value', parameters('profilePhotosContainerName')), createObject('name', 'CONTENT_SAFETY_ENDPOINT', 'value', parameters('contentSafetyEndpoint')), createObject('name', 'CONTENT_SAFETY_API_VERSION', 'value', parameters('contentSafetyApiVersion')), createObject('name', 'CONTENT_SAFETY_MAX_HATE_SEVERITY', 'value', string(parameters('contentSafetyMaxHateSeverity'))), createObject('name', 'CONTENT_SAFETY_MAX_SELF_HARM_SEVERITY', 'value', string(parameters('contentSafetyMaxSelfHarmSeverity'))), createObject('name', 'CONTENT_SAFETY_MAX_SEXUAL_SEVERITY', 'value', string(parameters('contentSafetyMaxSexualSeverity'))), createObject('name', 'CONTENT_SAFETY_MAX_VIOLENCE_SEVERITY', 'value', string(parameters('contentSafetyMaxViolenceSeverity'))), createObject('name', 'HEALTHZ_COSMOS_TIMEOUT_MS', 'value', string(parameters('healthzCosmosTimeoutMs'))), createObject('name', 'HEALTHZ_BLOB_TIMEOUT_MS', 'value', string(parameters('healthzBlobTimeoutMs'))), createObject('name', 'MODERATION_SERVICE', 'value', parameters('moderationService')), createObject('name', 'MODERATION_POLICY_NAME', 'value', parameters('moderationPolicyName')), createObject('name', 'RATE_LIMIT_USER_REQUESTS', 'value', string(parameters('rateLimitUserRequests'))), createObject('name', 'RATE_LIMIT_USER_WINDOW_SECONDS', 'value', string(parameters('rateLimitUserWindowSeconds'))), createObject('name', 'RATE_LIMIT_IP_REQUESTS', 'value', string(parameters('rateLimitIpRequests'))), createObject('name', 'RATE_LIMIT_IP_WINDOW_SECONDS', 'value', string(parameters('rateLimitIpWindowSeconds'))), createObject('name', 'TRUSTED_PROXY_HOPS', 'value', string(parameters('trustedProxyHops'))), createObject('name', 'UPSTREAM_MAX_RETRIES', 'value', string(parameters('upstreamMaxRetries'))), createObject('name', 'IMAGE_MAX_RETRIES', 'value', string(parameters('imageMaxRetries'))), createObject('name', 'UPSTREAM_BASE_BACKOFF_SECONDS', 'value', parameters('upstreamBaseBackoffSeconds')), createObject('name', 'TEXT_TIMEOUT_SECONDS', 'value', parameters('textTimeoutSeconds')), createObject('name', 'IMAGE_TIMEOUT_SECONDS', 'value', parameters('imageTimeoutSeconds')), createObject('name', 'OVERALL_TIMEOUT_SECONDS', 'value', parameters('overallTimeoutSeconds')), createObject('name', 'AUDIT_RETENTION_DAYS', 'value', string(parameters('auditRetentionDays'))), createObject('name', 'IMAGE_SIZE', 'value', parameters('imageSize')), createObject('name', 'IMAGE_QUALITY', 'value', parameters('imageQuality')), createObject('name', 'SAVED_PHOTO_MAX_COUNT', 'value', string(parameters('savedPhotoMaxCount'))), createObject('name', 'SAVED_PHOTO_MAX_BYTES', 'value', parameters('savedPhotoMaxBytes')), createObject('name', 'SAVED_PHOTO_THUMBNAIL_SIZE', 'value', string(parameters('savedPhotoThumbnailSize'))), createObject('name', 'KEY_VAULT_URI', 'value', parameters('keyVaultUri'))), if(not(empty(parameters('appSessionSecretKeyValue'))), createArray(createObject('name', 'APP_SESSION_SECRET_KEY', 'secretRef', 'app-session-secret-key')), createArray()), if(not(empty(parameters('entraClientId'))), createArray(createObject('name', 'ENTRA_CLIENT_ID', 'value', parameters('entraClientId'))), createArray()), if(not(empty(parameters('entraClientSecretValue'))), createArray(createObject('name', 'ENTRA_CLIENT_SECRET', 'secretRef', 'entra-client-secret')), createArray()), if(not(empty(parameters('entraRedirectUri'))), createArray(createObject('name', 'ENTRA_REDIRECT_URI', 'value', parameters('entraRedirectUri'))), createArray()), if(not(empty(parameters('entraPostLogoutRedirectUri'))), createArray(createObject('name', 'ENTRA_POST_LOGOUT_REDIRECT_URI', 'value', parameters('entraPostLogoutRedirectUri'))), createArray()))]"
+            "containerAppSecrets": "[concat(createArray(createObject('name', 'applicationinsights-connection-string', 'value', parameters('appInsightsConnectionString'))))]",
+            "containerAppEnv": "[concat(createArray(createObject('name', 'APPLICATIONINSIGHTS_CONNECTION_STRING', 'secretRef', 'applicationinsights-connection-string'), createObject('name', 'TELEMETRY_ENABLED', 'value', 'true'), createObject('name', 'APP_ENV', 'value', parameters('deploymentEnvironment')), createObject('name', 'TELEMETRY_SAMPLING_RATIO', 'value', parameters('telemetrySamplingRatio')), createObject('name', 'OTEL_SERVICE_NAME', 'value', parameters('telemetryServiceName')), createObject('name', 'OTEL_RESOURCE_ATTRIBUTES', 'value', format('deployment.environment.name={0},cloud.platform=azure_container_apps', parameters('telemetryEnvironmentName'))), createObject('name', 'OTEL_TRACES_SAMPLER', 'value', 'parentbased_trace_id_ratio'), createObject('name', 'OTEL_TRACES_SAMPLER_ARG', 'value', parameters('telemetrySamplingRatio')), createObject('name', 'AI_MODE', 'value', parameters('aiMode')), createObject('name', 'PERSISTENCE_MODE', 'value', parameters('persistenceMode')), createObject('name', 'FOUNDRY_ENDPOINT', 'value', parameters('foundryEndpoint')), createObject('name', 'FOUNDRY_API_VERSION', 'value', parameters('foundryApiVersion')), createObject('name', 'FOUNDRY_TEXT_DEPLOYMENT', 'value', parameters('foundryTextDeployment')), createObject('name', 'FOUNDRY_IMAGE_DEPLOYMENT', 'value', parameters('foundryImageDeployment')), createObject('name', 'COSMOS_ENDPOINT', 'value', parameters('cosmosEndpoint')), createObject('name', 'COSMOS_DATABASE_NAME', 'value', parameters('cosmosDatabaseName')), createObject('name', 'COSMOS_CONTAINER_NAME', 'value', parameters('cosmosContainerName')), createObject('name', 'BLOB_ENDPOINT', 'value', parameters('blobEndpoint')), createObject('name', 'BLOB_CONTAINER_NAME', 'value', parameters('blobContainerName')), createObject('name', 'PROFILE_PHOTOS_CONTAINER_NAME', 'value', parameters('profilePhotosContainerName')), createObject('name', 'CONTENT_SAFETY_ENDPOINT', 'value', parameters('contentSafetyEndpoint')), createObject('name', 'CONTENT_SAFETY_API_VERSION', 'value', parameters('contentSafetyApiVersion')), createObject('name', 'CONTENT_SAFETY_MAX_HATE_SEVERITY', 'value', string(parameters('contentSafetyMaxHateSeverity'))), createObject('name', 'CONTENT_SAFETY_MAX_SELF_HARM_SEVERITY', 'value', string(parameters('contentSafetyMaxSelfHarmSeverity'))), createObject('name', 'CONTENT_SAFETY_MAX_SEXUAL_SEVERITY', 'value', string(parameters('contentSafetyMaxSexualSeverity'))), createObject('name', 'CONTENT_SAFETY_MAX_VIOLENCE_SEVERITY', 'value', string(parameters('contentSafetyMaxViolenceSeverity'))), createObject('name', 'HEALTHZ_COSMOS_TIMEOUT_MS', 'value', string(parameters('healthzCosmosTimeoutMs'))), createObject('name', 'HEALTHZ_BLOB_TIMEOUT_MS', 'value', string(parameters('healthzBlobTimeoutMs'))), createObject('name', 'MODERATION_SERVICE', 'value', parameters('moderationService')), createObject('name', 'MODERATION_POLICY_NAME', 'value', parameters('moderationPolicyName')), createObject('name', 'RATE_LIMIT_USER_REQUESTS', 'value', string(parameters('rateLimitUserRequests'))), createObject('name', 'RATE_LIMIT_USER_WINDOW_SECONDS', 'value', string(parameters('rateLimitUserWindowSeconds'))), createObject('name', 'RATE_LIMIT_IP_REQUESTS', 'value', string(parameters('rateLimitIpRequests'))), createObject('name', 'RATE_LIMIT_IP_WINDOW_SECONDS', 'value', string(parameters('rateLimitIpWindowSeconds'))), createObject('name', 'TRUSTED_PROXY_HOPS', 'value', string(parameters('trustedProxyHops'))), createObject('name', 'UPSTREAM_MAX_RETRIES', 'value', string(parameters('upstreamMaxRetries'))), createObject('name', 'IMAGE_MAX_RETRIES', 'value', string(parameters('imageMaxRetries'))), createObject('name', 'UPSTREAM_BASE_BACKOFF_SECONDS', 'value', parameters('upstreamBaseBackoffSeconds')), createObject('name', 'TEXT_TIMEOUT_SECONDS', 'value', parameters('textTimeoutSeconds')), createObject('name', 'IMAGE_TIMEOUT_SECONDS', 'value', parameters('imageTimeoutSeconds')), createObject('name', 'OVERALL_TIMEOUT_SECONDS', 'value', parameters('overallTimeoutSeconds')), createObject('name', 'AUDIT_RETENTION_DAYS', 'value', string(parameters('auditRetentionDays'))), createObject('name', 'IMAGE_SIZE', 'value', parameters('imageSize')), createObject('name', 'IMAGE_QUALITY', 'value', parameters('imageQuality')), createObject('name', 'SAVED_PHOTO_MAX_COUNT', 'value', string(parameters('savedPhotoMaxCount'))), createObject('name', 'SAVED_PHOTO_MAX_BYTES', 'value', parameters('savedPhotoMaxBytes')), createObject('name', 'SAVED_PHOTO_THUMBNAIL_SIZE', 'value', string(parameters('savedPhotoThumbnailSize'))), createObject('name', 'SECRET_PROVIDER_BACKEND', 'value', parameters('keyVaultProviderBackend')), createObject('name', 'KEY_VAULT_URI', 'value', parameters('keyVaultUri')), createObject('name', 'SECRET_PROVIDER_CACHE_TTL_SECONDS', 'value', parameters('keyVaultCacheTtlSeconds')), createObject('name', 'SECRET_PROVIDER_REQUEST_TIMEOUT_SECONDS', 'value', parameters('keyVaultRequestTimeoutSeconds')), createObject('name', 'SECRET_PROVIDER_MAX_RETRIES', 'value', string(parameters('keyVaultMaxRetries'))), createObject('name', 'SECRET_PROVIDER_RETRY_BACKOFF_SECONDS', 'value', parameters('keyVaultRetryBackoffSeconds')), createObject('name', 'SECRET_PROVIDER_MAX_STALE_SECONDS', 'value', parameters('keyVaultMaxStaleSeconds'))), if(not(empty(parameters('entraClientId'))), createArray(createObject('name', 'ENTRA_CLIENT_ID', 'value', parameters('entraClientId'))), createArray()), if(not(empty(parameters('entraRedirectUri'))), createArray(createObject('name', 'ENTRA_REDIRECT_URI', 'value', parameters('entraRedirectUri'))), createArray()), if(not(empty(parameters('entraPostLogoutRedirectUri'))), createArray(createObject('name', 'ENTRA_POST_LOGOUT_REDIRECT_URI', 'value', parameters('entraPostLogoutRedirectUri'))), createArray()))]"
           },
           "resources": [
             {

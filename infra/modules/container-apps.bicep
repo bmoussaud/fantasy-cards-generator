@@ -46,13 +46,28 @@ param appInsightsConnectionString string
 @description('Key Vault URI injected in the web app environment.')
 param keyVaultUri string
 
-@secure()
-@description('Session cookie signing secret injected into the Container App. Empty skips creating the secret.')
-param appSessionSecretKeyValue string = ''
+@allowed([
+  'auto'
+  'azure'
+  'env'
+])
+@description('Secret provider backend injected as SECRET_PROVIDER_BACKEND.')
+param keyVaultProviderBackend string = 'azure'
 
-@secure()
-@description('Microsoft Entra ID client secret injected into the Container App. Empty skips creating the secret.')
-param entraClientSecretValue string = ''
+@description('Secret-provider cache TTL injected as SECRET_PROVIDER_CACHE_TTL_SECONDS.')
+param keyVaultCacheTtlSeconds string = '60'
+
+@description('Secret-provider request timeout injected as SECRET_PROVIDER_REQUEST_TIMEOUT_SECONDS.')
+param keyVaultRequestTimeoutSeconds string = '2'
+
+@description('Secret-provider max retries injected as SECRET_PROVIDER_MAX_RETRIES.')
+param keyVaultMaxRetries int = 2
+
+@description('Secret-provider retry backoff injected as SECRET_PROVIDER_RETRY_BACKOFF_SECONDS.')
+param keyVaultRetryBackoffSeconds string = '0.25'
+
+@description('Secret-provider max stale window injected as SECRET_PROVIDER_MAX_STALE_SECONDS.')
+param keyVaultMaxStaleSeconds string = '300'
 
 @description('Microsoft Entra ID application (client) ID injected as ENTRA_CLIENT_ID. Empty when Entra app registration is disabled.')
 param entraClientId string = ''
@@ -215,23 +230,7 @@ var containerAppSecrets = concat(
       name: 'applicationinsights-connection-string'
       value: appInsightsConnectionString
     }
-  ],
-  !empty(appSessionSecretKeyValue)
-    ? [
-        {
-          name: 'app-session-secret-key'
-          value: appSessionSecretKeyValue
-        }
-      ]
-    : [],
-  !empty(entraClientSecretValue)
-    ? [
-        {
-          name: 'entra-client-secret'
-          value: entraClientSecretValue
-        }
-      ]
-    : []
+  ]
 )
 
 var containerAppEnv = concat(
@@ -425,31 +424,39 @@ var containerAppEnv = concat(
       value: string(savedPhotoThumbnailSize)
     }
     {
+      name: 'SECRET_PROVIDER_BACKEND'
+      value: keyVaultProviderBackend
+    }
+    {
       name: 'KEY_VAULT_URI'
       value: keyVaultUri
     }
+    {
+      name: 'SECRET_PROVIDER_CACHE_TTL_SECONDS'
+      value: keyVaultCacheTtlSeconds
+    }
+    {
+      name: 'SECRET_PROVIDER_REQUEST_TIMEOUT_SECONDS'
+      value: keyVaultRequestTimeoutSeconds
+    }
+    {
+      name: 'SECRET_PROVIDER_MAX_RETRIES'
+      value: string(keyVaultMaxRetries)
+    }
+    {
+      name: 'SECRET_PROVIDER_RETRY_BACKOFF_SECONDS'
+      value: keyVaultRetryBackoffSeconds
+    }
+    {
+      name: 'SECRET_PROVIDER_MAX_STALE_SECONDS'
+      value: keyVaultMaxStaleSeconds
+    }
   ],
-  !empty(appSessionSecretKeyValue)
-    ? [
-        {
-          name: 'APP_SESSION_SECRET_KEY'
-          secretRef: 'app-session-secret-key'
-        }
-      ]
-    : [],
   !empty(entraClientId)
     ? [
         {
           name: 'ENTRA_CLIENT_ID'
           value: entraClientId
-        }
-      ]
-    : [],
-  !empty(entraClientSecretValue)
-    ? [
-        {
-          name: 'ENTRA_CLIENT_SECRET'
-          secretRef: 'entra-client-secret'
         }
       ]
     : [],
