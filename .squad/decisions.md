@@ -161,3 +161,38 @@ Card generation now accepts a saved photo as an alternative reference source. `P
 **What:** Proposed a documentation-first architecture that keeps the FastAPI Container App as the public surface, adds a Foundry-hosted `card-orchestrator` agent built with Microsoft Agent Framework for creative orchestration, and records the full design in `docs/architecture-agents-foundry.md`.
 **Why:** Requested by Benoit as a cross-team architecture/specification effort so future agent work uses Microsoft Foundry and the Microsoft Agent Framework without forcing a risky big-bang rewrite.
 **Impacts:** Aragorn (backend integration boundary, project-endpoint invocation, fallback path), Gimli (Bicep/RBAC/env-var/`azure.yaml` topology changes), Legolas (possible future UI states for agent-backed generation and fallbacks), Samwise (golden prompts, shadow-eval strategy, contract and safety regression coverage)
+
+### 2026-09-04: Secret provider foundation lives in `app/secrets.py`
+**By:** Aragorn
+**What:** Added the runtime secret-provider abstraction in `app/secrets.py`, with logical app secret names (`APP_SESSION_SECRET_KEY`, `ENTRA_CLIENT_SECRET`) mapped to the deployed Key Vault secret names and exposed on `app.state.secret_provider` via FastAPI lifespan.
+**Why:** The remaining Key Vault rotation issues (#85/#86/#87) now have a single stable import path and app-level lifecycle hook for reuse without forcing auth/session consumers to know the vault naming details.
+
+### 2026-09-04: Retain the previous Entra OAuth client secret briefly after rotation
+**By:** Aragorn
+**What:** When the app observes a newer `ENTRA_CLIENT_SECRET` version from the secret provider, it switches new logins to that version immediately but retains the previous OAuth client in memory for a 15-minute overlap window for callback fallback.
+**Why:** Key Vault version changes do not create or retire Microsoft Entra application credentials. Keeping the prior secret briefly lets in-flight authorization-code callbacks finish safely while operators roll the new credential across replicas before deleting the old Entra credential.
+
+### 2026-09-04: Secret provider now supports bounded stale fallback
+**By:** Aragorn
+**What:** Extended `app/secrets.py` with `AzureSecretProvider(max_stale=...)`, `SecretProviderConfig.max_stale_seconds`, and the `SECRET_PROVIDER_MAX_STALE_SECONDS` environment setting so Key Vault refresh failures can serve the last known-good value only within a bounded stale window.
+**Why:** Parallel secret-rotation work (#85/#86) builds on the same provider foundation from #84, so this records the new additive config surface and fail-closed behavior before those branches merge.
+
+### 2026-09-04: Issue 71 saved-photo persistence logging
+**By:** Aragorn
+**What:** Added server-side exception logging in `app/photos.py` for saved-photo persistence and delete failures, including stage (`blob upload`, `thumbnail upload`, `cosmos save`, and delete/cleanup stages), `owner_id`, and `photo_id`, while keeping client-facing `ProblemDetails` responses generic. Added regression coverage that asserts the error logs are emitted for upload, Cosmos-save, and delete failures.
+**Why:** Production photo-library 503s were swallowing the root exception, making Azure log diagnostics impossible. Structured exception logging restores diagnosability without exposing photo bytes or secrets to clients, and the regression tests lock that behavior in.
+
+### 2026-09-03: Issue 9 deletion flows use minimal Cosmos TTL audits plus background blob cleanup
+**By:** Aragorn
+**What:** Added authenticated card and account deletion flows, preserving only minimal deletion-audit records in Cosmos (`requestId`, timestamp fields, moderation outcome, optional cost estimate) with item-level TTL set from `AUDIT_RETENTION_DAYS`, while blob cleanup runs in FastAPI background tasks after the HTTP response.
+**Why:** The existing shared Cosmos container already has TTL enabled per item, so a dedicated minimal audit document type satisfies the 30-day retention requirement without new infrastructure. Deleting app-owned cards, saved photos, and same-card generation audits before clearing the session keeps account removal aligned with the MVP privacy scope while avoiding blocking user requests on blob deletions.
+
+### 2026-09-04: Issue 37 closed as superseded by existing Cosmos Private Endpoint
+**By:** Coordinator (decision from Benoit Moussaud)
+**What:** Closed #37 ("Harden ACA-to-Cosmos networking with subnet-scoped access, Option B") without implementing subnet-scoped service endpoints/`virtualNetworkRules`. The repo already implements and has validated a stronger design: Cosmos DB Private Endpoint with `publicNetworkAccess: 'Disabled'` (`infra/modules/cosmos-db.bicep`, `infra/modules/cosmos-private-endpoint.bicep`), smoke-tested 2026-09-02.
+**Why:** Private Endpoint fully removes Cosmos DB's public network path, a stronger guarantee than subnet-scoped service endpoints. Since the deployed design already exceeds #37's acceptance criteria, implementing Option B on top would be redundant. Gimli should not pick up #37-style subnet/service-endpoint work for Cosmos going forward — the Private Endpoint approach is the team's standing decision for this data path.
+
+### 2026-09-04: Key Vault runtime access uses the ACA app identity
+**By:** Gimli
+**What:** Runtime Key Vault secret-value access now targets the Azure Container App's managed identity via Key Vault Secrets User at vault scope, and the app no longer mirrors APP_SESSION_SECRET_KEY or ENTRA_CLIENT_SECRET into ACA-native secrets.
+**Why:** The Python runtime already fetches both secrets directly from Key Vault using managed identity. Keeping copied ACA secret values would duplicate sensitive material and continue the old workaround beyond its shelf life.
