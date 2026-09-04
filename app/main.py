@@ -17,7 +17,6 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
 from starlette.datastructures import UploadFile
-from starlette.middleware.sessions import SessionMiddleware
 
 from app.auth import (
     AUTH_NONCE_SESSION_KEY,
@@ -50,6 +49,11 @@ from app.library import CardLibraryService
 from app.photos import SavedPhotoListResponseModel, SavedPhotoResponseModel, SavedPhotoService
 from app.problems import ProblemDetails
 from app.secrets import SecretProvider, build_secret_provider_from_environment
+from app.session_middleware import (
+    RotatingSessionMiddleware,
+    load_session_cookie_settings,
+    load_session_signing_keys,
+)
 from app.settings import SettingsError, load_app_settings
 from app.telemetry import (
     enrich_request_span,
@@ -83,6 +87,8 @@ def create_app(
     secret_provider: SecretProvider | None = None,
 ) -> FastAPI:
     auth_settings = load_auth_settings()
+    session_cookie_settings = load_session_cookie_settings()
+    runtime_secret_provider = secret_provider or build_secret_provider_from_environment()
     app_settings = load_app_settings()
     app_services = services or create_services(app_settings)
     card_service = CardGenerationService(app_services)
@@ -106,26 +112,29 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        runtime_secret_provider = secret_provider or build_secret_provider_from_environment()
-        app.state.secret_provider = runtime_secret_provider
         try:
+            await load_session_signing_keys(
+                runtime_secret_provider,
+                overlap_window=session_cookie_settings.signing_key_overlap,
+            )
             yield
         finally:
             await runtime_secret_provider.aclose()
 
     app = FastAPI(title="Fantasy Cards Generator", lifespan=lifespan)
     app.state.services = app_services
+    app.state.secret_provider = runtime_secret_provider
     app.mount(
         "/static",
         StaticFiles(directory=str(Path(__file__).parent / "static")),
         name="static",
     )
     app.add_middleware(
-        SessionMiddleware,
-        secret_key=auth_settings.session_secret_key,
+        RotatingSessionMiddleware,
         session_cookie="fantasy_cards_session",
         same_site="lax",
         https_only=True,
+        signing_key_overlap=session_cookie_settings.signing_key_overlap,
     )
 
     @app.middleware("http")

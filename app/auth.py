@@ -10,6 +10,7 @@ from authlib.integrations.starlette_client import OAuth, StarletteOAuth2App
 from fastapi import HTTPException, Request, status
 
 from app.generation import AuthenticatedOwner
+from app.secrets import load_secret_provider_config
 
 AUTH_SESSION_KEY = "user"
 AUTH_NONCE_SESSION_KEY = "auth_nonce"
@@ -33,7 +34,7 @@ class AuthSettings:
     authority: str | None
     redirect_uri: str | None
     post_logout_redirect_uri: str | None
-    session_secret_key: str
+    session_secret_key: str | None
     scopes: tuple[str, ...]
 
     @property
@@ -80,9 +81,7 @@ class AuthSettings:
 
 
 def load_auth_settings() -> AuthSettings:
-    session_secret_key = os.getenv("APP_SESSION_SECRET_KEY")
-    if not session_secret_key:
-        raise RuntimeError("APP_SESSION_SECRET_KEY must be set before starting the application.")
+    session_secret_key = _load_required_session_secret_key()
 
     configured_scopes = _first_env(
         "ENTRA_SCOPES", "ENTRA_EXTERNAL_ID_SCOPES", default="openid profile email"
@@ -108,6 +107,20 @@ def load_auth_settings() -> AuthSettings:
         session_secret_key=session_secret_key,
         scopes=scopes,
     )
+
+
+def _load_required_session_secret_key() -> str | None:
+    secret_provider_config = load_secret_provider_config()
+    if secret_provider_config.backend == "azure" or (
+        secret_provider_config.backend == "auto"
+        and secret_provider_config.key_vault_uri is not None
+    ):
+        return None
+
+    session_secret_key = os.getenv("APP_SESSION_SECRET_KEY")
+    if not session_secret_key:
+        raise RuntimeError("APP_SESSION_SECRET_KEY must be set before starting the application.")
+    return session_secret_key
 
 
 def ensure_auth_configured(settings: AuthSettings) -> None:

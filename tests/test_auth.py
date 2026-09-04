@@ -109,6 +109,18 @@ def test_create_app_fails_closed_when_session_secret_is_missing(
         create_app()
 
 
+def test_load_auth_settings_allows_key_vault_backed_session_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("APP_SESSION_SECRET_KEY", raising=False)
+    monkeypatch.setenv("SECRET_PROVIDER_BACKEND", "azure")
+    monkeypatch.setenv("KEY_VAULT_URI", "https://vault.example")
+
+    settings = load_auth_settings()
+
+    assert settings.session_secret_key is None
+
+
 def test_login_redirects_to_entra_and_sets_secure_session_cookie(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
