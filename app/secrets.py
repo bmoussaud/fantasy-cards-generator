@@ -43,6 +43,20 @@ class SecretValue:
 
 
 @dataclass(frozen=True, slots=True)
+class SecretVersion:
+    name: str
+    version: str | None
+    enabled: bool
+    created_on: datetime | None
+    updated_on: datetime | None
+    source: SecretSource
+
+    @property
+    def activated_on(self) -> datetime | None:
+        return self.updated_on or self.created_on
+
+
+@dataclass(frozen=True, slots=True)
 class SecretProviderConfig:
     backend: str = DEFAULT_SECRET_PROVIDER_BACKEND
     key_vault_uri: str | None = None
@@ -126,6 +140,27 @@ class EnvSecretProvider:
                 )
         searched = ", ".join(reference.env_names)
         raise SecretNotFoundError(f"Secret '{reference.logical_name}' was not found in {searched}.")
+
+    async def get_secret_version(self, name: str, *, version: str | None = None) -> SecretValue:
+        secret = await self.get_secret(name)
+        if version not in (None, secret.version):
+            raise SecretVersionUnavailableError(
+                f"Secret '{secret.name}' version '{version}' is unavailable from environment."
+            )
+        return secret
+
+    async def list_secret_versions(self, name: str) -> list[SecretVersion]:
+        secret = await self.get_secret(name)
+        return [
+            SecretVersion(
+                name=secret.name,
+                version=secret.version,
+                enabled=True,
+                created_on=None,
+                updated_on=None,
+                source=secret.source,
+            )
+        ]
 
     async def aclose(self) -> None:
         return None
@@ -211,6 +246,53 @@ class AzureSecretProvider:
                 self._inflight[reference.logical_name] = refresh
 
         return await asyncio.shield(refresh)
+
+    async def get_secret_version(self, name: str, *, version: str | None = None) -> SecretValue:
+        if self._closed:
+            raise RuntimeError("Secret provider is already closed.")
+
+        if version is None:
+            return await self.get_secret(name)
+
+        reference = resolve_secret_reference(name, self._secret_references)
+        try:
+            secret = await self._run_with_timeout_and_retry(
+                lambda: self._client.get_secret(reference.key_vault_name, version=version),
+                timeout_context=(f"loading secret '{reference.logical_name}' version '{version}'"),
+            )
+        except ResourceNotFoundError as exc:
+            raise SecretVersionUnavailableError(
+                f"Secret '{reference.logical_name}' version '{version}' is unavailable."
+            ) from exc
+
+        properties = getattr(secret, "properties", None)
+        if getattr(properties, "enabled", True) is False:
+            raise SecretVersionUnavailableError(
+                f"Secret '{reference.logical_name}' version '{version}' is disabled."
+            )
+
+        return SecretValue(
+            name=reference.logical_name,
+            value=str(getattr(secret, "value", "")),
+            version=_optional_text(getattr(properties, "version", None)) or version,
+            fetched_at=self._clock(),
+            source="azure",
+        )
+
+    async def list_secret_versions(self, name: str) -> list[SecretVersion]:
+        if self._closed:
+            raise RuntimeError("Secret provider is already closed.")
+
+        reference = resolve_secret_reference(name, self._secret_references)
+        try:
+            return await self._run_with_timeout_and_retry(
+                lambda: self._collect_version_metadata(reference),
+                timeout_context=f"listing versions for secret '{reference.logical_name}'",
+            )
+        except ResourceNotFoundError as exc:
+            raise SecretNotFoundError(
+                f"Secret '{reference.logical_name}' does not exist in Key Vault."
+            ) from exc
 
     async def aclose(self) -> None:
         if self._closed:
@@ -305,40 +387,42 @@ class AzureSecretProvider:
         self,
         reference: SecretReference,
     ) -> list[_SecretVersionCandidate]:
-        try:
-            versions = await self._run_with_timeout_and_retry(
-                lambda: self._collect_versions(reference.key_vault_name),
-                timeout_context=f"listing versions for secret '{reference.logical_name}'",
+        versions = [
+            _SecretVersionCandidate(
+                version=version.version,
+                sort_key=version.activated_on,
             )
-        except ResourceNotFoundError as exc:
-            raise SecretNotFoundError(
-                f"Secret '{reference.logical_name}' does not exist in Key Vault."
-            ) from exc
-
+            for version in await self.list_secret_versions(reference.logical_name)
+            if version.enabled and version.version is not None
+        ]
         if not versions:
             raise SecretVersionUnavailableError(
                 f"Secret '{reference.logical_name}' has no enabled versions in Key Vault."
             )
         return versions
 
-    async def _collect_versions(self, key_vault_name: str) -> list[_SecretVersionCandidate]:
-        versions: list[_SecretVersionCandidate] = []
-        iterator = self._client.list_properties_of_secret_versions(key_vault_name)
+    async def _collect_version_metadata(
+        self,
+        reference: SecretReference,
+    ) -> list[SecretVersion]:
+        versions: list[SecretVersion] = []
+        iterator = self._client.list_properties_of_secret_versions(reference.key_vault_name)
         async for properties in iterator:
-            if getattr(properties, "enabled", True) is False:
-                continue
             version = _optional_text(getattr(properties, "version", None))
             if version is None:
                 continue
             versions.append(
-                _SecretVersionCandidate(
+                SecretVersion(
+                    name=reference.logical_name,
                     version=version,
-                    sort_key=getattr(properties, "updated_on", None)
-                    or getattr(properties, "created_on", None),
+                    enabled=getattr(properties, "enabled", True) is not False,
+                    created_on=getattr(properties, "created_on", None),
+                    updated_on=getattr(properties, "updated_on", None),
+                    source="azure",
                 )
             )
         versions.sort(
-            key=lambda candidate: candidate.sort_key or datetime.min.replace(tzinfo=UTC),
+            key=lambda candidate: candidate.activated_on or datetime.min.replace(tzinfo=UTC),
             reverse=True,
         )
         return versions
@@ -401,6 +485,40 @@ def build_secret_provider_from_environment(
         max_retries=config.max_retries,
         retry_backoff_seconds=config.retry_backoff_seconds,
     )
+
+
+async def get_secret_version(
+    provider: SecretProvider | Any,
+    name: str,
+    *,
+    version: str | None = None,
+) -> SecretValue:
+    getter = getattr(provider, "get_secret_version", None)
+    if callable(getter):
+        return await getter(name, version=version)
+
+    secret = await provider.get_secret(name)
+    if version not in (None, secret.version):
+        raise SecretVersionUnavailableError(f"Secret '{name}' version '{version}' is unavailable.")
+    return secret
+
+
+async def list_secret_versions(provider: SecretProvider | Any, name: str) -> list[SecretVersion]:
+    getter = getattr(provider, "list_secret_versions", None)
+    if callable(getter):
+        return await getter(name)
+
+    secret = await provider.get_secret(name)
+    return [
+        SecretVersion(
+            name=secret.name,
+            version=secret.version,
+            enabled=True,
+            created_on=None,
+            updated_on=None,
+            source=secret.source,
+        )
+    ]
 
 
 def load_secret_provider_config(
