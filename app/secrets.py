@@ -110,7 +110,9 @@ class SecretProvider(Protocol):
 
 
 class SecretProviderError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, error_category: str | None = None) -> None:
+        super().__init__(message)
+        self.error_category = error_category
 
 
 class SecretNotFoundError(SecretProviderError):
@@ -308,10 +310,11 @@ class AzureSecretProvider:
                 lambda: self._collect_version_metadata(reference),
                 timeout_context=f"listing versions for secret '{reference.logical_name}'",
             )
-        except ResourceNotFoundError as exc:
+        except ResourceNotFoundError:
             raise SecretNotFoundError(
-                f"Secret '{reference.logical_name}' does not exist in Key Vault."
-            ) from exc
+                f"Secret '{reference.logical_name}' does not exist in Key Vault.",
+                error_category="not_found",
+            ) from None
 
     async def aclose(self) -> None:
         if self._closed:
@@ -402,6 +405,27 @@ class AzureSecretProvider:
                 self._inflight.pop(reference.logical_name, None)
 
     async def _refresh_secret(self, reference: SecretReference) -> SecretValue:
+        try:
+            secret = await self._run_with_timeout_and_retry(
+                lambda: self._client.get_secret(reference.key_vault_name),
+                timeout_context=f"loading secret '{reference.logical_name}'",
+            )
+        except ResourceNotFoundError:
+            raise SecretNotFoundError(
+                f"Secret '{reference.logical_name}' does not exist in Key Vault.",
+                error_category="not_found",
+            ) from None
+
+        properties = getattr(secret, "properties", None)
+        candidate = _validated_secret_value(
+            reference.logical_name,
+            value=getattr(secret, "value", None),
+            version=_optional_text(getattr(properties, "version", None)),
+            fetched_at=self._clock(),
+        )
+        if getattr(properties, "enabled", True) is not False and candidate is not None:
+            return candidate
+
         versions = await self._load_latest_enabled_versions(reference)
         last_error: Exception | None = None
         for version in versions:
@@ -493,21 +517,33 @@ class AzureSecretProvider:
         while True:
             try:
                 return await asyncio.wait_for(operation(), timeout=self._request_timeout_seconds)
-            except asyncio.TimeoutError as exc:
+            except asyncio.TimeoutError:
                 if attempt >= self._max_retries:
-                    raise SecretRefreshTimeout(f"Timed out while {timeout_context}.") from exc
+                    raise _sanitized_secret_error(
+                        SecretRefreshTimeout,
+                        f"Timed out while {timeout_context}",
+                        error_category="timeout",
+                    ) from None
                 await self._backoff(attempt)
                 attempt += 1
             except ResourceNotFoundError:
                 raise
-            except ServiceRequestError as exc:
+            except ServiceRequestError:
                 if attempt >= self._max_retries:
-                    raise SecretProviderError(f"Failed while {timeout_context}.") from exc
+                    raise _sanitized_secret_error(
+                        SecretProviderError,
+                        f"Failed while {timeout_context}",
+                        error_category="network_error",
+                    ) from None
                 await self._backoff(attempt)
                 attempt += 1
             except AzureError as exc:
                 if not _is_retryable_azure_error(exc) or attempt >= self._max_retries:
-                    raise SecretProviderError(f"Failed while {timeout_context}.") from exc
+                    raise _sanitized_secret_error(
+                        SecretProviderError,
+                        f"Failed while {timeout_context}",
+                        error_category=_normalize_secret_refresh_error(exc),
+                    ) from None
                 await self._backoff(attempt)
                 attempt += 1
 
@@ -703,13 +739,32 @@ def _validated_secret_value(
     )
 
 
+def _sanitized_secret_error(
+    error_type: type[SecretProviderError],
+    message: str,
+    *,
+    error_category: str,
+) -> SecretProviderError:
+    return error_type(
+        f"{message} (error_category={error_category}).",
+        error_category=error_category,
+    )
+
+
 def _is_retryable_azure_error(error: AzureError) -> bool:
     status_code = getattr(error, "status_code", None)
     return status_code in {408, 429, 500, 502, 503, 504}
 
 
+def classify_secret_error(error: Exception) -> str:
+    return _normalize_secret_refresh_error(error)
+
+
 def _normalize_secret_refresh_error(error: Exception) -> str:
     root = _root_cause(error)
+    category = _optional_text(getattr(root, "error_category", None))
+    if category is not None:
+        return category
     if isinstance(root, (SecretRefreshTimeout, asyncio.TimeoutError)):
         return "timeout"
     if isinstance(
@@ -718,13 +773,13 @@ def _normalize_secret_refresh_error(error: Exception) -> str:
     ):
         return "not_found"
     if isinstance(root, ClientAuthenticationError):
-        return "auth_error"
+        return "access_denied"
     if isinstance(root, ServiceRequestError):
-        return "unavailable"
+        return "network_error"
     if isinstance(root, AzureError):
         status_code = getattr(root, "status_code", None)
         if status_code in {401, 403}:
-            return "auth_error"
+            return "access_denied"
         if status_code == 404:
             return "not_found"
         if status_code in {408, 504}:

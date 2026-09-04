@@ -1,17 +1,24 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from base64 import b64encode
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from itsdangerous import TimestampSigner
 
-from app.secrets import SecretValue, SecretVersion, SecretVersionUnavailableError
-from app.session_middleware import RotatingSessionMiddleware
+from app.secrets import (
+    SecretProviderError,
+    SecretValue,
+    SecretVersion,
+    SecretVersionUnavailableError,
+)
+from app.session_middleware import LOGGER, RotatingSessionMiddleware, load_session_signing_keys
 
 
 class FakeClock:
@@ -34,9 +41,16 @@ class FakeManagedSecretVersion:
 
 
 class FakeSessionSecretProvider:
-    def __init__(self, *, clock: FakeClock, versions: list[FakeManagedSecretVersion]) -> None:
+    def __init__(
+        self,
+        *,
+        clock: FakeClock,
+        versions: list[FakeManagedSecretVersion],
+        list_error: Exception | None = None,
+    ) -> None:
         self._clock = clock
         self._versions = list(versions)
+        self._list_error = list_error
 
     def replace_versions(self, versions: list[FakeManagedSecretVersion]) -> None:
         self._versions = list(versions)
@@ -82,6 +96,8 @@ class FakeSessionSecretProvider:
     async def list_secret_versions(self, name: str) -> list[SecretVersion]:
         if name != "APP_SESSION_SECRET_KEY":
             raise SecretVersionUnavailableError(f"Unsupported secret '{name}'.")
+        if self._list_error is not None:
+            raise self._list_error
         return [
             SecretVersion(
                 name=name,
@@ -256,6 +272,39 @@ def test_rotating_session_middleware_rejects_disabled_and_older_keys() -> None:
         response = client.get("/session")
         assert response.status_code == 200
         assert response.json() == {"user": None}
+
+
+def test_load_session_signing_keys_keeps_current_key_when_version_listing_is_denied(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    clock = FakeClock()
+    error = SecretProviderError(
+        (
+            "Failed while listing versions for secret 'APP_SESSION_SECRET_KEY' "
+            "(error_category=access_denied)."
+        ),
+        error_category="access_denied",
+    )
+    provider = FakeSessionSecretProvider(
+        clock=clock,
+        versions=[make_version(clock, "v2", "current-key")],
+        list_error=error,
+    )
+
+    with caplog.at_level("WARNING", logger=LOGGER.name):
+        signing_keys = asyncio.run(
+            load_session_signing_keys(
+                provider,
+                overlap_window=timedelta(seconds=3600),
+                clock=clock.now,
+            )
+        )
+
+    assert signing_keys.current.version == "v2"
+    assert signing_keys.current.value == "current-key"
+    assert signing_keys.previous is None
+    assert caplog.records[-1].message == "session.previous_key_resolution_degraded"
+    assert caplog.records[-1].error_category == "access_denied"
 
 
 def test_rotating_session_middleware_converges_across_replicas_after_rotation() -> None:
