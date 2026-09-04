@@ -24,3 +24,4 @@
 
 📌 Architecture spec (2026-09-04T13:10:31.843+00:00): Produced the Foundry + Microsoft Agent Framework design spec at `docs/architecture-agents-foundry.md`, recommending a hosted card-orchestrator agent while keeping auth, persistence, and image retry in the existing app.
 📌 Team update (2026-09-04T13:51:08+00:00): Hosted-agent region/runtime research for issue #96 landed in `docs/architecture-agents-foundry.md` and PR #105; eastus2 is the likely target region with medium-high confidence on Agent Service + `gpt-5.5`/`gpt-image-2` support, but quota remains unresolved and needs a live Azure check before implementation proceeds. — decided by Gimli
+📌 Team update (2026-09-04T14:11:00+00:00): Gimli clarified Foundry project-endpoint vs account-endpoint RBAC in docs and opened PR #110; recommended deferring Bicep/RBAC infra changes until the hosted-agent runtime contract is finalized. — noted by Scribe

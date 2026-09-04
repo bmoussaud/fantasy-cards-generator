@@ -20,3 +20,4 @@
 📌 Team update (2026-09-04T13:10:31.843+00:00): Gandalf published an architecture spec at docs/architecture-agents-foundry.md proposing a Foundry-hosted card-orchestrator agent (Microsoft Agent Framework); review for your domain's implications (backend integration / infra RBAC+Bicep / UI states / test strategy).
 
 📌 2026-09-04T14:01:32Z: Resolved issue #97 by documenting the current 225s request budget, proposing an 8.15s hosted-agent cap plus 30.15s degraded legacy-text fallback, and opening PR #108 (https://github.com/bmoussaud/fantasy-cards-generator/pull/108).
+📌 Team update (2026-09-04T14:11:00+00:00): Gimli clarified Foundry project-endpoint vs account-endpoint RBAC in docs and opened PR #110; recommended deferring Bicep/RBAC infra changes until the hosted-agent runtime contract is finalized. — noted by Scribe
