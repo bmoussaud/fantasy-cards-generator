@@ -22,7 +22,8 @@ from app.auth import (
     AUTH_NONCE_SESSION_KEY,
     AUTH_SESSION_KEY,
     AuthenticatedUser,
-    build_claims_options,
+    EntraOAuthClientManager,
+    build_auth_secret_error_response,
     build_logout_redirect_target,
     create_oauth_client,
     ensure_auth_configured,
@@ -48,7 +49,7 @@ from app.health import NotApplicableHealthProbe, build_healthz_payload, run_depe
 from app.library import CardLibraryService
 from app.photos import SavedPhotoListResponseModel, SavedPhotoResponseModel, SavedPhotoService
 from app.problems import ProblemDetails
-from app.secrets import SecretProvider, build_secret_provider_from_environment
+from app.secrets import SecretProvider, SecretProviderError, build_secret_provider_from_environment
 from app.session_middleware import (
     RotatingSessionMiddleware,
     load_session_cookie_settings,
@@ -124,6 +125,11 @@ def create_app(
     app = FastAPI(title="Fantasy Cards Generator", lifespan=lifespan)
     app.state.services = app_services
     app.state.secret_provider = runtime_secret_provider
+    app.state.entra_oauth_client_manager = EntraOAuthClientManager(
+        settings=auth_settings,
+        secret_provider=runtime_secret_provider,
+        client_factory=lambda settings: create_oauth_client(settings),
+    )
     app.mount(
         "/static",
         StaticFiles(directory=str(Path(__file__).parent / "static")),
@@ -191,7 +197,7 @@ def create_app(
         return {
             "request": request,
             "user": get_session_user(request),
-            "auth_configured": auth_settings.is_configured,
+            "auth_configured": not auth_settings.missing_required(include_client_secret=False),
             "csrf_token": csrf_token,
             "generate_idempotency_key": uuid4().hex,
             **context,
@@ -598,8 +604,12 @@ def create_app(
         if get_session_user(request) is not None:
             return RedirectResponse(url="/app", status_code=status.HTTP_303_SEE_OTHER)
 
-        ensure_auth_configured(auth_settings)
-        oauth_client = create_oauth_client(auth_settings)
+        ensure_auth_configured(auth_settings, include_client_secret=False)
+        oauth_client_manager: EntraOAuthClientManager = request.app.state.entra_oauth_client_manager
+        try:
+            oauth_client = await oauth_client_manager.get_client()
+        except SecretProviderError as exc:
+            raise build_auth_secret_error_response(exc) from exc
         nonce = secrets.token_urlsafe(32)
         request.session[AUTH_NONCE_SESSION_KEY] = nonce
 
@@ -611,7 +621,7 @@ def create_app(
 
     @app.get("/auth/callback")
     async def auth_callback(request: Request) -> RedirectResponse:
-        ensure_auth_configured(auth_settings)
+        ensure_auth_configured(auth_settings, include_client_secret=False)
         nonce = request.session.pop(AUTH_NONCE_SESSION_KEY, None)
         if not nonce:
             raise HTTPException(
@@ -619,15 +629,10 @@ def create_app(
                 detail="Missing login state. Start the sign-in flow again.",
             )
 
-        oauth_client = create_oauth_client(auth_settings)
+        oauth_client_manager: EntraOAuthClientManager = request.app.state.entra_oauth_client_manager
 
         try:
-            server_metadata = await oauth_client.load_server_metadata()
-            claims_options = build_claims_options(server_metadata.get("issuer"))
-            token = await oauth_client.authorize_access_token(
-                request,
-                claims_options=claims_options,
-            )
+            token = await oauth_client_manager.authorize_access_token(request)
             claims = token.get("userinfo")
             if claims is None:
                 raise RuntimeError("Authentication response did not include validated userinfo.")
@@ -637,6 +642,9 @@ def create_app(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Authentication failed: {exc.error}",
             ) from exc
+        except SecretProviderError as exc:
+            request.session.pop(AUTH_SESSION_KEY, None)
+            raise build_auth_secret_error_response(exc) from exc
         except Exception as exc:
             request.session.pop(AUTH_SESSION_KEY, None)
             safe_log(

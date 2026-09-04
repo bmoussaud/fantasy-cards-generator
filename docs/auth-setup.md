@@ -70,6 +70,11 @@ parameters. The deployment writes them to Key Vault and also into Azure
 Container Apps' secret store so the app does not depend on the platform's
 Key Vault `secretRef` resolution path during revision provisioning.
 
+At runtime, the app resolves `ENTRA_CLIENT_SECRET` via the secret-provider
+abstraction from `app/secrets.py`. In Azure that lets the auth flow adopt a
+new Key Vault secret version without restarting the application; in local
+development the same code path falls back to environment variables.
+
 If `APP_SESSION_SECRET_KEY` or `ENTRA_CLIENT_SECRET` are unset when
 `azd provision` runs, the corresponding Key Vault secret (and therefore the
 corresponding Container App env var) is simply not created — the app then
@@ -152,6 +157,31 @@ that exact host.
 >
 > Then store the secret securely, ideally in Azure Key Vault, before wiring it
 > into your runtime environment.
+
+## Rotating the Entra client secret
+
+This app can adopt a newer Key Vault version at runtime, but it does **not**
+create, register, or delete Microsoft Entra application credentials for you.
+Rotation therefore requires explicit operator steps:
+
+1. Create a **new client secret credential in Microsoft Entra ID** for the
+   existing app registration.
+2. Store that new secret value as a **new version** of the Key Vault secret
+   `entra-client-secret`.
+3. Keep the **previous Entra credential active** until every running app
+   replica has time to observe and use the new Key Vault version and the
+   overlap window has elapsed.
+4. Only then retire/delete the previous credential in Microsoft Entra ID.
+
+Changing Key Vault alone does **not** mint a new Entra credential. If the new
+Key Vault value is not already registered on the Entra app registration,
+authentication will fail.
+
+The app keeps the previously used OAuth client secret in memory for a short,
+bounded overlap window (currently 15 minutes). New login attempts use the
+latest Key Vault version as soon as it is observed, while callbacks may fall
+back to the previous credential during that overlap to support a controlled
+rotation.
 
 No External ID tenant, CIAM user flow, or tenant allow-list is required for the
 current MVP. Any partner organization's Entra work account can sign in as long

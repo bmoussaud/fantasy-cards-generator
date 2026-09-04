@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import time
 from base64 import b64decode
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -18,12 +20,16 @@ from joserfc.jwk import OctKey
 from app import main as main_module
 from app.auth import (
     DEFAULT_ENTRA_AUTHORITY,
+    DEFAULT_ENTRA_CLIENT_SECRET_OVERLAP,
+    AuthSettings,
+    EntraOAuthClientManager,
     build_claims_options,
     build_logout_redirect_target,
     extract_user_claims,
     load_auth_settings,
 )
 from app.main import create_app
+from app.secrets import SecretValue
 from tests.conftest import TEST_OBJECT_ID, TEST_OWNER_ID, TEST_TENANT_ID, FakeOAuthClient
 
 
@@ -41,10 +47,103 @@ class FakeAsyncOpenIDClient(AsyncOpenIDMixin):
         return self._jwks
 
 
+class FakeClock:
+    def __init__(self, start: datetime | None = None) -> None:
+        self._now = start or datetime(2026, 1, 1, tzinfo=UTC)
+
+    def now(self) -> datetime:
+        return self._now
+
+    def advance(self, delta: timedelta) -> None:
+        self._now += delta
+
+
+class FakeRuntimeSecretProvider:
+    def __init__(self, secret: SecretValue) -> None:
+        self.secret = secret
+        self.calls: list[str] = []
+
+    def set_secret(self, secret: SecretValue) -> None:
+        self.secret = secret
+
+    async def get_secret(self, name: str) -> SecretValue:
+        self.calls.append(name)
+        return self.secret
+
+    async def aclose(self) -> None:
+        return None
+
+
+class RecordingOAuthClient:
+    def __init__(
+        self,
+        client_secret: str | None,
+        *,
+        authorize_results: list[dict[str, Any] | OAuthError] | None = None,
+    ) -> None:
+        self.client_secret = client_secret
+        self.authorize_calls = 0
+        self._authorize_results = list(authorize_results or [default_token_payload()])
+
+    async def load_server_metadata(self) -> dict[str, str]:
+        return {"issuer": "https://login.microsoftonline.com/{tenantid}/v2.0"}
+
+    async def authorize_access_token(self, request, **_: object) -> dict[str, Any]:
+        self.authorize_calls += 1
+        result = self._authorize_results.pop(0)
+        if isinstance(result, OAuthError):
+            raise result
+        return result
+
+
+@dataclass
+class RecordingOAuthClientFactory:
+    def __init__(self) -> None:
+        self.created_secrets: list[str | None] = []
+        self.configured_clients: dict[str | None, list[RecordingOAuthClient]] = {}
+
+    def queue_client(self, client_secret: str | None, client: RecordingOAuthClient) -> None:
+        self.configured_clients.setdefault(client_secret, []).append(client)
+
+    def __call__(self, settings: AuthSettings) -> RecordingOAuthClient:
+        self.created_secrets.append(settings.client_secret)
+        queued = self.configured_clients.get(settings.client_secret, [])
+        if queued:
+            return queued.pop(0)
+        return RecordingOAuthClient(settings.client_secret)
+
+
 def decode_session_cookie(cookie_value: str, secret_key: str) -> dict[str, object]:
     signer = TimestampSigner(secret_key)
     unsigned = signer.unsign(cookie_value.encode("utf-8"))
     return json.loads(b64decode(unsigned))
+
+
+def make_runtime_secret(
+    clock: FakeClock,
+    *,
+    value: str,
+    version: str | None,
+) -> SecretValue:
+    return SecretValue(
+        name="ENTRA_CLIENT_SECRET",
+        value=value,
+        version=version,
+        fetched_at=clock.now(),
+        source="azure",
+    )
+
+
+def default_token_payload() -> dict[str, Any]:
+    return {
+        "userinfo": {
+            "sub": "user-123",
+            "name": "Aragorn",
+            "email": "aragorn@example.com",
+            "tid": TEST_TENANT_ID,
+            "oid": TEST_OBJECT_ID,
+        }
+    }
 
 
 def test_load_auth_settings_defaults_to_organizations_authority(
@@ -86,6 +185,115 @@ def test_load_auth_settings_accepts_legacy_external_id_env_names(
     assert settings.authority == DEFAULT_ENTRA_AUTHORITY
     assert settings.redirect_uri == "https://legacy.example/auth/callback"
     assert settings.post_logout_redirect_uri == "https://legacy.example/"
+
+
+def test_login_reloads_entra_secret_after_rotation_without_restarting_app(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = FakeClock()
+    provider = FakeRuntimeSecretProvider(
+        make_runtime_secret(clock, value="old-secret", version="v1")
+    )
+    seen_client_secrets: list[str | None] = []
+
+    def fake_create_oauth_client(settings: AuthSettings) -> FakeOAuthClient:
+        seen_client_secrets.append(settings.client_secret)
+        return FakeOAuthClient()
+
+    monkeypatch.setattr(main_module, "create_oauth_client", fake_create_oauth_client)
+
+    with TestClient(create_app(secret_provider=provider), base_url="https://testserver") as client:
+        first_response = client.get("/auth/login", follow_redirects=False)
+        provider.set_secret(make_runtime_secret(clock, value="new-secret", version="v2"))
+        second_response = client.get("/auth/login", follow_redirects=False)
+
+    assert first_response.status_code == 307
+    assert second_response.status_code == 307
+    assert seen_client_secrets == ["old-secret", "new-secret"]
+
+
+def test_entra_oauth_client_manager_rebuilds_client_when_secret_version_changes() -> None:
+    clock = FakeClock()
+    provider = FakeRuntimeSecretProvider(
+        make_runtime_secret(clock, value="old-secret", version="v1")
+    )
+    factory = RecordingOAuthClientFactory()
+    manager = EntraOAuthClientManager(
+        settings=load_auth_settings(),
+        secret_provider=provider,
+        client_factory=factory,
+        clock=clock.now,
+    )
+
+    first_client = asyncio_run(manager.get_client())
+    second_client = asyncio_run(manager.get_client())
+    provider.set_secret(make_runtime_secret(clock, value="new-secret", version="v2"))
+    rotated_client = asyncio_run(manager.get_client())
+
+    assert first_client is second_client
+    assert rotated_client is not first_client
+    assert factory.created_secrets == ["old-secret", "new-secret"]
+
+
+def test_entra_oauth_client_manager_uses_previous_secret_during_overlap() -> None:
+    clock = FakeClock()
+    provider = FakeRuntimeSecretProvider(
+        make_runtime_secret(clock, value="old-secret", version="v1")
+    )
+    factory = RecordingOAuthClientFactory()
+    previous_client = RecordingOAuthClient("old-secret")
+    current_client = RecordingOAuthClient(
+        "new-secret",
+        authorize_results=[OAuthError(error="invalid_client")],
+    )
+    factory.queue_client("old-secret", previous_client)
+    factory.queue_client("new-secret", current_client)
+    manager = EntraOAuthClientManager(
+        settings=load_auth_settings(),
+        secret_provider=provider,
+        client_factory=factory,
+        clock=clock.now,
+    )
+
+    asyncio_run(manager.get_client())
+    provider.set_secret(make_runtime_secret(clock, value="new-secret", version="v2"))
+    token = asyncio_run(manager.authorize_access_token(object()))
+
+    assert token["userinfo"]["email"] == "aragorn@example.com"
+    assert current_client.authorize_calls == 1
+    assert previous_client.authorize_calls == 1
+
+
+def test_entra_oauth_client_manager_expires_previous_secret_after_overlap_window() -> None:
+    clock = FakeClock()
+    provider = FakeRuntimeSecretProvider(
+        make_runtime_secret(clock, value="old-secret", version="v1")
+    )
+    factory = RecordingOAuthClientFactory()
+    previous_client = RecordingOAuthClient("old-secret")
+    current_client = RecordingOAuthClient(
+        "new-secret",
+        authorize_results=[OAuthError(error="invalid_client")],
+    )
+    factory.queue_client("old-secret", previous_client)
+    factory.queue_client("new-secret", current_client)
+    manager = EntraOAuthClientManager(
+        settings=load_auth_settings(),
+        secret_provider=provider,
+        client_factory=factory,
+        clock=clock.now,
+    )
+
+    asyncio_run(manager.get_client())
+    provider.set_secret(make_runtime_secret(clock, value="new-secret", version="v2"))
+    asyncio_run(manager.get_client())
+    clock.advance(DEFAULT_ENTRA_CLIENT_SECRET_OVERLAP + timedelta(seconds=1))
+
+    with pytest.raises(OAuthError, match="invalid_client"):
+        asyncio_run(manager.authorize_access_token(object()))
+
+    assert current_client.authorize_calls == 1
+    assert previous_client.authorize_calls == 0
 
 
 def test_protected_shell_redirects_anonymous_users_to_login() -> None:
