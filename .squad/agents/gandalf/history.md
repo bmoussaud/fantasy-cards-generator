@@ -21,3 +21,5 @@
 📌 Work update (2026-08-31T12:12:46.587+00:00): Reviewed least-privilege architecture and acceptance criteria for azd deployer read access to Cosmos DB and Blob Storage; confirmed this security-critical access-control work must route to Gimli rather than @copilot.
 📌 Team update (2026-09-02T14:10:23+0000): PR #57 for issue #52 shipped successfully against `main`, and the PR body notes this repo currently has no `dev` base branch despite the shared git-workflow skill assuming one — possible skill/doc drift to reconcile.
 📌 Team update (2026-09-02T16:31:07.441+00:00): Issue #8 established a fail-closed library access pattern: per-user Cosmos scoping plus 404 on cross-user card lookups, with short-lived user-delegation Blob SAS URLs for direct browser image reads.
+
+📌 Architecture spec (2026-09-04T13:10:31.843+00:00): Produced the Foundry + Microsoft Agent Framework design spec at `docs/architecture-agents-foundry.md`, recommending a hosted card-orchestrator agent while keeping auth, persistence, and image retry in the existing app.
