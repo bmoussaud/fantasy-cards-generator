@@ -23,6 +23,24 @@
     "entraClientSecretValue": {
       "value": "${ENTRA_CLIENT_SECRET=}"
     },
+    "keyVaultProviderBackend": {
+      "value": "${SECRET_PROVIDER_BACKEND=azure}"
+    },
+    "keyVaultCacheTtlSeconds": {
+      "value": "${SECRET_PROVIDER_CACHE_TTL_SECONDS=60}"
+    },
+    "keyVaultRequestTimeoutSeconds": {
+      "value": "${SECRET_PROVIDER_REQUEST_TIMEOUT_SECONDS=2}"
+    },
+    "keyVaultMaxRetries": {
+      "value": "${SECRET_PROVIDER_MAX_RETRIES=2}"
+    },
+    "keyVaultRetryBackoffSeconds": {
+      "value": "${SECRET_PROVIDER_RETRY_BACKOFF_SECONDS=0.25}"
+    },
+    "keyVaultMaxStaleSeconds": {
+      "value": "${SECRET_PROVIDER_MAX_STALE_SECONDS=300}"
+    },
     "healthzCosmosTimeoutMs": {
       "value": "${HEALTHZ_COSMOS_TIMEOUT_MS=1500}"
     },

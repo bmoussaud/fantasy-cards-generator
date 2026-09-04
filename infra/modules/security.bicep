@@ -4,9 +4,6 @@ param location string
 @description('Key Vault resource name. Must be globally unique.')
 param keyVaultName string
 
-@description('Principal ID of the managed identity granted read access to Key Vault secrets (the Container App\'s ACR-pull identity).')
-param keyVaultAccessPrincipalId string
-
 @description('Microsoft Entra object ID of the azd/ARM deployment caller that needs metadata-only browse access to Key Vault objects.')
 param deployerPrincipalId string
 
@@ -28,7 +25,6 @@ param entraClientSecretValue string = ''
 @description('Optional tags shared by security resources.')
 param tags object = {}
 
-var keyVaultSecretsUserRoleDefinitionId = '4633458b-17de-408a-b874-0445c86b69e6'
 var keyVaultReaderRoleDefinitionId = '21090545-7ca7-4776-b22c-e363652d74d2'
 var hasAppSessionSecretKeyValue = !empty(appSessionSecretKeyValue)
 var hasEntraClientSecretValue = !empty(entraClientSecretValue)
@@ -50,16 +46,6 @@ resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
       name: 'standard'
     }
     tenantId: tenant().tenantId
-  }
-}
-
-resource keyVaultSecretsUserRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(keyVault.id, keyVaultAccessPrincipalId, keyVaultSecretsUserRoleDefinitionId)
-  scope: keyVault
-  properties: {
-    principalId: keyVaultAccessPrincipalId
-    principalType: 'ServicePrincipal'
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', keyVaultSecretsUserRoleDefinitionId)
   }
 }
 
@@ -90,6 +76,7 @@ resource entraClientSecretSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' 
 }
 
 output keyVaultName string = keyVault.name
+output keyVaultResourceId string = keyVault.id
 output keyVaultUri string = keyVault.properties.vaultUri
 output appSessionSecretKeySecretUri string = hasAppSessionSecretKeyValue ? appSessionSecretKeySecret!.properties.secretUri : ''
 output entraClientSecretSecretUri string = hasEntraClientSecretValue ? entraClientSecretSecret!.properties.secretUri : ''
