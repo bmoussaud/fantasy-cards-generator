@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from base64 import b64decode, b64encode
 from dataclasses import dataclass
@@ -17,9 +18,11 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from app.secrets import (
     Clock,
     SecretProvider,
+    SecretProviderError,
     SecretValue,
     SecretVersion,
     SecretVersionUnavailableError,
+    classify_secret_error,
     get_secret_version,
     list_secret_versions,
     utc_now,
@@ -27,6 +30,7 @@ from app.secrets import (
 
 SESSION_SECRET_NAME = "APP_SESSION_SECRET_KEY"
 DEFAULT_SESSION_SIGNING_KEY_OVERLAP_SECONDS = 3600.0
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,30 +63,33 @@ async def load_session_signing_keys(
     overlap_window: timedelta,
     clock: Clock = utc_now,
 ) -> SessionSigningKeys:
-    versions = await list_secret_versions(provider, SESSION_SECRET_NAME)
+    current_secret = await provider.get_secret(SESSION_SECRET_NAME)
+    if overlap_window <= timedelta(0) or current_secret.version is None:
+        return SessionSigningKeys(current=current_secret)
+
+    try:
+        versions = await list_secret_versions(provider, SESSION_SECRET_NAME)
+    except SecretProviderError as exc:
+        LOGGER.warning(
+            "session.previous_key_resolution_degraded",
+            extra={"error_category": classify_secret_error(exc)},
+        )
+        return SessionSigningKeys(current=current_secret)
 
     current_metadata: SecretVersion | None = None
     current_index: int | None = None
-    current_secret: SecretValue | None = None
     for index, version in enumerate(versions):
-        if not version.enabled:
-            continue
-        try:
-            current_secret = await get_secret_version(
-                provider,
-                SESSION_SECRET_NAME,
-                version=version.version,
-            )
-        except SecretVersionUnavailableError:
-            continue
-        current_metadata = version
-        current_index = index
-        break
+        if version.enabled and version.version == current_secret.version:
+            current_metadata = version
+            current_index = index
+            break
 
-    if current_metadata is None or current_index is None or current_secret is None:
-        raise SecretVersionUnavailableError(
-            f"Secret '{SESSION_SECRET_NAME}' has no readable enabled version."
+    if current_metadata is None or current_index is None:
+        LOGGER.warning(
+            "session.previous_key_resolution_degraded",
+            extra={"error_category": "version_metadata_missing"},
         )
+        return SessionSigningKeys(current=current_secret)
 
     previous_secret: SecretValue | None = None
     previous_metadata = versions[current_index + 1] if current_index + 1 < len(versions) else None
