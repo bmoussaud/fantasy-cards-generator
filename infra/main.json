@@ -6,7 +6,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.46.1.21595",
-      "templateHash": "5764471614278944518"
+      "templateHash": "16363778215704328310"
     }
   },
   "parameters": {
@@ -982,7 +982,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.46.1.21595",
-              "templateHash": "120795706429035663"
+              "templateHash": "13260436190669707920"
             }
           },
           "parameters": {
@@ -1051,11 +1051,7 @@
               "properties": {
                 "enablePurgeProtection": true,
                 "enableRbacAuthorization": true,
-                "networkAcls": {
-                  "bypass": "AzureServices",
-                  "defaultAction": "Allow"
-                },
-                "publicNetworkAccess": "Enabled",
+                "publicNetworkAccess": "Disabled",
                 "sku": {
                   "family": "A",
                   "name": "standard"

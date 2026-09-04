@@ -36,11 +36,7 @@ resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
   properties: {
     enablePurgeProtection: true
     enableRbacAuthorization: true
-    networkAcls: {
-      bypass: 'AzureServices'
-      defaultAction: 'Allow'
-    }
-    publicNetworkAccess: 'Enabled'
+    publicNetworkAccess: 'Disabled'
     sku: {
       family: 'A'
       name: 'standard'
