@@ -839,6 +839,12 @@ code {
   border: 1px solid var(--color-border-subtle);
 }
 
+.notice--success {
+  background: rgba(217, 178, 106, 0.12);
+  border-color: var(--color-accent-strong);
+  color: var(--color-parchment);
+}
+
 .notice--error {
   background: var(--color-danger-surface);
   border-color: var(--color-danger-border);

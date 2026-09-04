@@ -584,7 +584,7 @@
     form.addEventListener("submit", function (event) {
       if (countSelected() === 0) {
         event.preventDefault();
-        event.stopPropagation();
+        event.stopImmediatePropagation();
       }
     });
 

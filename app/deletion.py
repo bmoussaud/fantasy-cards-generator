@@ -17,7 +17,7 @@ from app.generation import (
 from app.photos import AbstractSavedPhotoRepository, StoredSavedPhoto
 from app.problems import ProblemDetails
 from app.settings import AppSettings
-from app.telemetry import normalize_error_code, record_persistence, telemetry_span
+from app.telemetry import normalize_error_code, record_persistence, safe_log, telemetry_span
 
 DELETION_AUDIT_DOCUMENT_TYPE = "deletion-audit"
 DELETION_AUDIT_DOCUMENT_ID_PREFIX = "deletion-audit:"
@@ -298,10 +298,19 @@ class DeletionService:
                     )
                 )
             except Exception as exc:
+                error_code = normalize_error_code(type(exc).__name__)
+                safe_log(
+                    "request.failed",
+                    request_id=request_id,
+                    attributes={
+                        "fcg.error_code": error_code,
+                        "fcg.outcome": "failed",
+                    },
+                )
                 failures.append(
                     CardDeletionFailure(
                         card_id=card_id,
-                        error_code=normalize_error_code(type(exc).__name__),
+                        error_code=error_code,
                         detail="The card could not be deleted.",
                     )
                 )

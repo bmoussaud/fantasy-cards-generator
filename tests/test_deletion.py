@@ -649,7 +649,7 @@ def test_batch_delete_reports_partial_failure_and_keeps_failed_cards(
 
     follow_up = client.get("/my/cards?deleted=1&failed=1")
     assert "1 card permanently deleted." in follow_up.text
-    assert "1 card could not be deleted" in follow_up.text
+    assert "1 card could not be deleted and remains unchanged." in follow_up.text
     assert "Partial Kept" in follow_up.text
 
 

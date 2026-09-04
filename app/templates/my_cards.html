@@ -14,7 +14,7 @@
     {% endif %}
     {% if failed_count %}
         <p class="notice notice--error" role="alert">
-            {{ failed_count }} card{{ "" if failed_count == 1 else "s" }} could not be deleted and {{ "is" if failed_count == 1 else "are" }} still in your library. Try again in a moment.
+            {{ failed_count }} card{{ "" if failed_count == 1 else "s" }} could not be deleted and {{ "remains" if failed_count == 1 else "remain" }} unchanged.
         </p>
     {% endif %}
 
