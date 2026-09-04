@@ -665,6 +665,62 @@ Any implementation should preserve:
 - Confirm live quota/capacity for `gpt-5.5` and `gpt-image-2` in the selected region and whether any increase request is needed before phase-1 agent rollout.
 - If the real deployment region is **not** `eastus2`, rerun the region/model support check against that specific region before implementation.
 
+### Project-endpoint and RBAC findings (issue #98)
+
+**Repo-verified current configuration**
+
+- The current runtime is still wired for **account-scoped direct model inference**, not project-scoped agent access:
+  - `infra/main.bicep` injects `FOUNDRY_ENDPOINT` as `https://${aiFoundryAccountName}.cognitiveservices.azure.com/` plus the text/image deployment aliases into the Container App (`infra/main.bicep:441-444`, `infra/modules/container-apps.bicep:279-292`).
+  - The app only loads those account-oriented settings today: `FOUNDRY_ENDPOINT`, `FOUNDRY_TEXT_DEPLOYMENT`, and `FOUNDRY_IMAGE_DEPLOYMENT` (`app/settings.py:132-146`, `.env.example:19-22`).
+  - Runtime calls use `DefaultAzureCredential` against the **Cognitive Services** audience (`https://cognitiveservices.azure.com/.default`) and then post straight to `/openai/deployments/...` on `self.settings.foundry_endpoint` (`app/generation.py:1271-1275`, `app/generation.py:1306-1310`, `app/generation.py:1369-1377`, `app/generation.py:1501-1508`, `app/generation.py:1548-1556`).
+- The IaC does already provision a **Foundry project** resource, but it currently exposes only the project name/resource ID and only grants:
+  - `Cognitive Services User` at **Foundry account scope** to the Container App identity for direct account access (`infra/modules/ai-foundry.bicep:62-64`, `infra/modules/ai-foundry.bicep:137-145`)
+  - `Foundry User` at **Foundry project scope** to the deployer principal (`infra/modules/ai-foundry.bicep:147-154`)
+- There is **no current app setting for a Foundry project endpoint**, no project-endpoint output from the Bicep module, and no project-scope runtime assignment for the Container App identity.
+
+**Externally sourced project-endpoint and RBAC requirements (Microsoft Learn, retrieved 2026-09-04)**
+
+- Microsoft Learn's Foundry SDK overview says Foundry project APIs use a **project endpoint** in this format:
+  `https://<resource-name>.services.ai.azure.com/api/projects/<project-name>`
+  and recommends the Foundry SDK / Agent Framework path for agents and other Foundry-specific features, rather than direct OpenAI-style deployment calls: <https://learn.microsoft.com/en-us/azure/foundry/how-to/develop/sdk-overview>
+- Microsoft Learn's Foundry authentication doc says project-endpoint callers using Microsoft Entra ID should request tokens for the **Foundry audience** `https://ai.azure.com/.default`, not the Cognitive Services audience used by the current direct-inference code: <https://learn.microsoft.com/en-us/azure/foundry/concepts/authentication-authorization-foundry>
+- Microsoft Learn's Foundry RBAC doc defines the relevant project/data-plane roles:
+  - **Foundry Agent Consumer** (`eed3b665-ab3a-47b6-8f48-c9382fb1dad6`) for principals that only need to **interact with agent endpoints**
+  - **Foundry User** (`53ca6127-db72-4b80-b1b0-d745d6d5456d`) for principals that need to **create agents, perform model inference, and interact with agents**
+  It also explicitly says **not** to use the `Cognitive Services*` roles or **Azure AI Developer** for Foundry project access: <https://learn.microsoft.com/en-us/azure/foundry/concepts/rbac-foundry>
+- Microsoft Learn's hosted-agent permissions reference adds the hosted-agent-specific split:
+  - the **project managed identity** needs **Foundry User on the Foundry account** so the project can access model deployments through the project endpoint
+  - the **calling application/service principal** should usually get **Foundry Agent Consumer at project scope** (or narrower **agent scope**) if it only invokes the deployed agent
+  - hosted-agent deployment later adds other project-identity requirements such as **Container Registry Repository Reader** on ACR and **Log Analytics Data Reader** when evaluations are enabled
+  - Microsoft also notes that the automatic Foundry User assignments happen when a project is created through the **portal UI** and do **not** automatically carry over to SDK/CLI/IaC provisioning flows
+  Source: <https://learn.microsoft.com/en-us/azure/foundry/agents/concepts/hosted-agent-permissions>
+
+**What this changes for this repo**
+
+- We should treat the future agent path as a **second Foundry configuration surface**, not a rename of the existing one:
+  - keep `FOUNDRY_ENDPOINT` + deployment aliases for the current direct `/openai/deployments/...` image/text calls
+  - add a separate app setting such as `FOUNDRY_PROJECT_ENDPOINT` (or equivalent) that resolves to `https://${aiFoundryAccountName}.services.ai.azure.com/api/projects/${aiFoundryProjectName}`
+  - switch the future agent client to Microsoft Entra tokens for `https://ai.azure.com/.default`
+- The minimum role-assignment plan for project-scoped agents is:
+  1. **Foundry project managed identity → Foundry User on the Foundry account scope** so the project itself can reach the underlying model deployments.
+  2. **Container App managed identity → Foundry Agent Consumer on the Foundry project scope** if the backend only invokes the hosted agent at runtime.
+  3. Escalate the Container App identity to **Foundry User** on the project only if the app is expected to create/update agents dynamically rather than just invoke an already-deployed agent.
+  4. When/if the hosted agent package is actually deployed, add the project-identity assignments and connections required for ACR/image pull and any evaluation telemetry.
+- The current `Cognitive Services User` assignment on the Container App identity is still correct for the **existing account-endpoint direct inference path**, but it is **not sufficient by itself** for project-scoped agent access.
+
+**Recommendation**
+
+- **Defer the actual Bicep/RBAC change to a follow-up implementation issue rather than landing speculative IaC now.** That implementation follow-up is tracked as **issue #109**.
+- Rationale:
+  - The repo does **not** yet contain the hosted agent resource/application, project-endpoint client wiring, or a stable runtime contract for whether the backend will merely **invoke** an agent (`Foundry Agent Consumer`) or also **manage** one (`Foundry User` / broader project permissions).
+  - The exact least-privilege scope also depends on whether the team uses a **project-wide agent endpoint** assignment or a narrower **agent-scope** assignment after the first agent exists.
+  - Adding RBAC alone right now would not create an end-to-end validated path, because the application still authenticates to `https://cognitiveservices.azure.com/.default` and still posts to the account endpoint.
+- Once the agent runtime contract is finalized, the implementation work should be small and explicit:
+  - emit a project-endpoint output from `infra/modules/ai-foundry.bicep`
+  - inject a new project-endpoint app setting into `infra/main.bicep` / `infra/modules/container-apps.bicep`
+  - add the required project/account role assignments for the project managed identity and the Container App managed identity
+  - validate against the real hosted-agent deployment path in the same PR
+
 1. **Region/runtime availability**  
    Hosted-agent support, model availability, and quota must be checked against the actual deployment region strategy before implementation.
 
