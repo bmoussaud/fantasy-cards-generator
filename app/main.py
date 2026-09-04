@@ -3,6 +3,7 @@ from __future__ import annotations
 import secrets
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlencode
 from uuid import uuid4
 
 from authlib.integrations.base_client.errors import OAuthError
@@ -278,6 +279,8 @@ def create_app(services: AppServices | None = None) -> FastAPI:
                 page_title="My Cards",
                 user=user,
                 cards=cards,
+                deleted_count=_query_count(request, "deleted"),
+                failed_count=_query_count(request, "failed"),
             ),
         )
 
@@ -496,6 +499,43 @@ def create_app(services: AppServices | None = None) -> FastAPI:
         )
         return RedirectResponse(
             url="/my/cards", status_code=status.HTTP_303_SEE_OTHER, background=background_tasks
+        )
+
+    @app.post("/my/cards/batch-delete", status_code=303)
+    async def batch_delete_my_cards(
+        request: Request,
+        background_tasks: BackgroundTasks,
+        _: AuthenticatedUser = Depends(require_api_user),
+    ) -> Response:
+        form = await request.form()
+        app_services.csrf_protector.validate(
+            request,
+            _form_string(form, "csrf_token", "csrfToken"),
+        )
+        owner = get_authenticated_owner(request)
+        if owner is None:
+            raise ProblemDetails(
+                status_code=401,
+                title="Unauthorized",
+                detail="Authentication required.",
+                type="/problems/unauthorized",
+                error_code="unauthorized",
+                headers={"WWW-Authenticate": "Session"},
+            )
+        card_ids = [str(value).strip() for value in form.getlist("card_ids") if str(value).strip()]
+        if not card_ids:
+            return RedirectResponse(url="/my/cards", status_code=status.HTTP_303_SEE_OTHER)
+        result = await deletion_service.delete_cards(
+            owner=owner,
+            card_ids=card_ids,
+            request_id=request.state.request_id,
+            schedule_cleanup=background_tasks.add_task,
+        )
+        query = urlencode({"deleted": result.deleted_count, "failed": result.failed_count})
+        return RedirectResponse(
+            url=f"/my/cards?{query}",
+            status_code=status.HTTP_303_SEE_OTHER,
+            background=background_tasks,
         )
 
     @app.post("/my/account/delete", status_code=303)
@@ -941,6 +981,17 @@ async def _parse_form_payload(request: Request) -> dict[str, str]:
     return {
         key: value for key, value in form.items() if isinstance(key, str) and isinstance(value, str)
     }
+
+
+def _query_count(request: Request, key: str) -> int:
+    raw_value = request.query_params.get(key)
+    if raw_value is None:
+        return 0
+    try:
+        value = int(raw_value)
+    except ValueError:
+        return 0
+    return value if value > 0 else 0
 
 
 def _form_string(form, *keys: str) -> str | None:

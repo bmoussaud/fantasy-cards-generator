@@ -17,7 +17,7 @@ from app.generation import (
 from app.photos import AbstractSavedPhotoRepository, StoredSavedPhoto
 from app.problems import ProblemDetails
 from app.settings import AppSettings
-from app.telemetry import normalize_error_code, record_persistence, telemetry_span
+from app.telemetry import normalize_error_code, record_persistence, safe_log, telemetry_span
 
 DELETION_AUDIT_DOCUMENT_TYPE = "deletion-audit"
 DELETION_AUDIT_DOCUMENT_ID_PREFIX = "deletion-audit:"
@@ -99,6 +99,27 @@ class DeletionAuditRecord:
             cost_estimate=cost_estimate,
             ttl_seconds=int(document.get("ttl") or 0),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class CardDeletionFailure:
+    card_id: str
+    error_code: str
+    detail: str
+
+
+@dataclass(frozen=True, slots=True)
+class BatchCardDeletionResult:
+    deleted_card_ids: list[str]
+    failures: list[CardDeletionFailure]
+
+    @property
+    def deleted_count(self) -> int:
+        return len(self.deleted_card_ids)
+
+    @property
+    def failed_count(self) -> int:
+        return len(self.failures)
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,6 +269,54 @@ class DeletionService:
         await self._deletion_audit_repository.save(audit)
         if blob_targets:
             schedule_cleanup(self._cleanup_assets, audit, blob_targets, request_id=request_id)
+
+    async def delete_cards(
+        self,
+        *,
+        owner: AuthenticatedOwner,
+        card_ids: list[str],
+        request_id: str,
+        schedule_cleanup,
+    ) -> BatchCardDeletionResult:
+        unique_card_ids = list(dict.fromkeys(card_id for card_id in card_ids if card_id))
+        deleted_card_ids: list[str] = []
+        failures: list[CardDeletionFailure] = []
+        for card_id in unique_card_ids:
+            try:
+                await self.delete_card(
+                    owner=owner,
+                    card_id=card_id,
+                    request_id=request_id,
+                    schedule_cleanup=schedule_cleanup,
+                )
+            except ProblemDetails as exc:
+                failures.append(
+                    CardDeletionFailure(
+                        card_id=card_id,
+                        error_code=exc.error_code,
+                        detail=exc.detail,
+                    )
+                )
+            except Exception as exc:
+                error_code = normalize_error_code(type(exc).__name__)
+                safe_log(
+                    "request.failed",
+                    request_id=request_id,
+                    attributes={
+                        "fcg.error_code": error_code,
+                        "fcg.outcome": "failed",
+                    },
+                )
+                failures.append(
+                    CardDeletionFailure(
+                        card_id=card_id,
+                        error_code=error_code,
+                        detail="The card could not be deleted.",
+                    )
+                )
+            else:
+                deleted_card_ids.append(card_id)
+        return BatchCardDeletionResult(deleted_card_ids=deleted_card_ids, failures=failures)
 
     async def delete_account(
         self,

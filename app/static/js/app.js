@@ -501,6 +501,96 @@
     manager.dataset.photoLibraryBound = "true";
   }
 
+  function bindCardSelectionManager() {
+    var form = document.querySelector("[data-card-selection]");
+    if (!form || form.dataset.cardSelectionBound === "true") {
+      return;
+    }
+
+    var toggle = form.querySelector("[data-card-selection-toggle]");
+    var controls = form.querySelector("[data-card-selection-controls]");
+    var selectAll = form.querySelector("[data-card-selection-all]");
+    var countRegion = form.querySelector("[data-card-selection-count]");
+    var deleteButton = form.querySelector("[data-card-selection-delete]");
+    var items = form.querySelectorAll("[data-card-selection-item]");
+    var checkboxes = form.querySelectorAll("[data-card-selection-checkbox]");
+
+    if (!toggle || !controls || !selectAll || !countRegion || !deleteButton) {
+      return;
+    }
+
+    function countSelected() {
+      var selected = 0;
+      checkboxes.forEach(function (checkbox) {
+        if (checkbox.checked) {
+          selected += 1;
+        }
+      });
+      return selected;
+    }
+
+    function syncState() {
+      var selected = countSelected();
+      var noun = selected === 1 ? "card" : "cards";
+      countRegion.textContent = selected + " " + noun + " selected";
+      deleteButton.disabled = selected === 0;
+      selectAll.checked = checkboxes.length > 0 && selected === checkboxes.length;
+      selectAll.indeterminate = selected > 0 && selected < checkboxes.length;
+      form.dataset.confirmMessage =
+        "This permanently deletes " +
+        selected +
+        " selected " +
+        noun +
+        ". Artwork cleanup will continue in the background.";
+    }
+
+    function setSelectionMode(active) {
+      toggle.setAttribute("aria-pressed", active ? "true" : "false");
+      toggle.textContent = active ? "Cancel selection" : "Select cards";
+      controls.hidden = !active;
+      items.forEach(function (item) {
+        item.hidden = !active;
+      });
+      if (!active) {
+        checkboxes.forEach(function (checkbox) {
+          checkbox.checked = false;
+        });
+      }
+      syncState();
+    }
+
+    toggle.hidden = false;
+    setSelectionMode(false);
+
+    toggle.addEventListener("click", function () {
+      setSelectionMode(toggle.getAttribute("aria-pressed") !== "true");
+    });
+
+    selectAll.addEventListener("change", function () {
+      checkboxes.forEach(function (checkbox) {
+        checkbox.checked = selectAll.checked;
+      });
+      syncState();
+    });
+
+    form.addEventListener("change", function (event) {
+      var target = event.target;
+      if (!target || !target.matches || !target.matches("[data-card-selection-checkbox]")) {
+        return;
+      }
+      syncState();
+    });
+
+    form.addEventListener("submit", function (event) {
+      if (countSelected() === 0) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      }
+    });
+
+    form.dataset.cardSelectionBound = "true";
+  }
+
   function bindConfirmModalForms() {
     var modal = document.querySelector("[data-confirm-modal]");
     if (!modal || modal.dataset.confirmModalBound === "true") {
@@ -618,6 +708,7 @@
 
   bindPhotoReferenceForm();
   bindPhotoLibraryManager();
+  bindCardSelectionManager();
   bindConfirmModalForms();
 
   /**
