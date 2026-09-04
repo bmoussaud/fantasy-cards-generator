@@ -665,11 +665,68 @@ Any implementation should preserve:
 - Confirm live quota/capacity for `gpt-5.5` and `gpt-image-2` in the selected region and whether any increase request is needed before phase-1 agent rollout.
 - If the real deployment region is **not** `eastus2`, rerun the region/model support check against that specific region before implementation.
 
+### Latency budget findings (issue #97)
+
+**Current backend timeout budget, from code**
+
+- Runtime defaults today are:
+  - `UPSTREAM_MAX_RETRIES=2`
+  - `IMAGE_MAX_RETRIES=0`
+  - `UPSTREAM_BASE_BACKOFF_SECONDS=0.15`
+  - `TEXT_TIMEOUT_SECONDS=20.0`
+  - `IMAGE_TIMEOUT_SECONDS=150.0`
+  - `OVERALL_TIMEOUT_SECONDS=225.0`
+  (`app/settings.py:187-212`; also documented for operators in `docs/card-generation-api.md:229-240`)
+- The public card-generation request is wrapped in `asyncio.wait_for(..., timeout=OVERALL_TIMEOUT_SECONDS)`, so the whole backend flow has a hard **225 second** ceiling (`app/generation.py:1722-1737`).
+- The text/card-design hop runs first, before any image generation, via `_retry_upstream(... service_name="foundry-text" ...)` (`app/generation.py:1972-1979`).
+- `_retry_upstream()` applies the **text timeout + generic retry count** to every non-image dependency and the **image timeout + image retry count** only to `foundry-image` (`app/generation.py:2635-2778`).
+- That means the current direct text path can consume at most **60.45 seconds** before failing:
+  - three `20.0s` attempts (`UPSTREAM_MAX_RETRIES=2` means initial try + 2 retries)
+  - plus `0.15s + 0.30s = 0.45s` exponential backoff
+- The normal image path then gets **one 150.0 second attempt** (`IMAGE_MAX_RETRIES=0`) (`app/settings.py:188-205`, `app/generation.py:2078-2103`, `app/generation.py:2774-2778`).
+- In the worst case, the current text + image envelope is therefore **210.45 seconds**, leaving only about **14.55 seconds** inside the existing 225-second request budget for local moderation, persistence, and response serialization.
+- If image generation times out or fails **after** validated text/art prompt exist, the backend persists a partial record with `status="awaiting_artwork_retry"` instead of failing the whole request (`app/generation.py:1740-1761`, `app/generation.py:2103-2129`, `app/generation.py:2293-2310`). The retry endpoint then reuses the persisted validated payload and derived art prompt and retries **only** artwork generation (`app/generation.py:1793-1879`, `app/generation.py:2183-2232`). The public API contract documents that `200 OK` partial-response behavior (`docs/card-generation-api.md:99-100`).
+
+**Decision: max acceptable added latency for the agent hop**
+
+- Keep the external request ceiling at **225.0 seconds**. Do **not** grow the public timeout just to accommodate the hosted-agent hop.
+- Keep the existing **150.0 second image budget** and the existing `awaiting_artwork_retry` semantics unchanged.
+- Therefore the hosted `card-orchestrator` hop must fit inside the current card-design envelope instead of being added on top of it.
+- **Max acceptable added latency for the agent hop: 8.15 seconds total**
+  - first agent attempt: **5.0s**
+  - one retry only for retryable outcomes (timeout, `429`, or `5xx`): **3.0s**
+  - existing backoff between those attempts: **0.15s**
+- Rationale: 8.15 seconds is only ~13.5% of the current 60.45-second text budget, so it is small enough to fail fast when the agent runtime is degraded while still allowing a short transient retry before falling back.
+
+**Decision: fallback behavior**
+
+1. **Try the hosted agent first** for card design only (no image bytes, no persistence side effects) with the 5.0-second timeout.
+2. If the agent times out or returns a retryable `429`/`5xx`, **retry once** with the 3.0-second timeout.
+3. If the agent still does not produce a valid structured card payload, **degrade in-process to the current legacy non-agent text path** instead of surfacing an agent-specific error immediately.
+4. That degraded direct-text fallback should run with a **reduced emergency budget** so the request still preserves headroom for image generation and persistence:
+   - per-attempt timeout: **15.0s**
+   - retry count: **1 retry** (2 total attempts)
+   - existing `0.15s` backoff
+   - total degraded text fallback budget: **30.15s**
+5. If the fallback text path succeeds, continue with the existing moderation, image generation, persistence, and response logic unchanged.
+6. If image generation then times out/fails on the normal non-reference-image path, keep today's behavior: persist the partial card and return `status="awaiting_artwork_retry"` with the `retry_artwork` action.
+7. If neither the agent nor the degraded legacy text path produces validated card text before the request budget is exhausted, return the existing upstream `ProblemDetails` error (`502`/`504`). `awaiting_artwork_retry` is **not** used before validated card text and derived art prompt exist.
+8. For the **reference-image edit** flow, keep phase 2 on the legacy path only for now. That path already has its own tighter semantics (for example the 30.0-second Content Safety HTTP timeout and hard timeout/error behavior for image edit failures) and does not currently degrade to `awaiting_artwork_retry` on image-edit failure (`app/photos.py:436-443`, `app/generation.py:2090-2120`, `app/generation.py:2685-2724`).
+
+**Why this fits the current budget**
+
+- Agent hop worst case before fallback: **8.15s**
+- Degraded legacy text fallback worst case: **30.15s**
+- Existing image call worst case: **150.0s**
+- Combined worst case before local persistence overhead: **188.30s**
+
+That leaves roughly **36.70 seconds** inside the current 225-second request ceiling for moderation, Blob/Cosmos persistence, audit writes, and response serialization, which is materially safer than trying to bolt the agent hop onto the current 210.45-second text+image envelope.
+
 1. **Region/runtime availability**  
    Hosted-agent support, model availability, and quota must be checked against the actual deployment region strategy before implementation.
 
 2. **Latency budget**  
-   The current request timeout budget is finite. Adding an agent hop may require a tighter internal timeout and explicit fallback behavior.
+   **Resolved in issue #97 for phase 2 rollout:** cap the hosted-agent hop at **8.15s total** (5.0s + one 3.0s retry + 0.15s backoff), then degrade to the legacy text path with a **30.15s** emergency budget (15.0s + one retry + 0.15s backoff), while preserving the existing **150.0s** image budget and `awaiting_artwork_retry` behavior.
 
 3. **Project endpoint vs account endpoint confusion**  
    The current app uses the account endpoint for model inference. Agent operations need project-aware configuration and RBAC.
