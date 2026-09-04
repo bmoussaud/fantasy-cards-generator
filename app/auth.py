@@ -1,20 +1,33 @@
 from __future__ import annotations
 
+import asyncio
 import os
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta
 from typing import Any, TypedDict
 from urllib.parse import urlencode, urlsplit, urlunsplit
 from uuid import UUID
 
+from authlib.integrations.base_client.errors import OAuthError
 from authlib.integrations.starlette_client import OAuth, StarletteOAuth2App
 from fastapi import HTTPException, Request, status
 
 from app.generation import AuthenticatedOwner
-from app.secrets import load_secret_provider_config
+from app.secrets import (
+    SecretNotFoundError,
+    SecretProvider,
+    SecretProviderError,
+    SecretValue,
+    SecretVersionUnavailableError,
+    load_secret_provider_config,
+    utc_now,
+)
 
 AUTH_SESSION_KEY = "user"
 AUTH_NONCE_SESSION_KEY = "auth_nonce"
 DEFAULT_ENTRA_AUTHORITY = "https://login.microsoftonline.com/organizations/v2.0"
+DEFAULT_ENTRA_CLIENT_SECRET_OVERLAP = timedelta(minutes=15)
 ENTRA_TENANT_ID_PLACEHOLDER = "{tenantid}"
 
 
@@ -69,15 +82,30 @@ class AuthSettings:
     def is_configured(self) -> bool:
         return not self.missing_required()
 
-    def missing_required(self) -> tuple[str, ...]:
+    def missing_required(self, *, include_client_secret: bool = True) -> tuple[str, ...]:
         missing: list[str] = []
         if not self.client_id:
             missing.append("ENTRA_CLIENT_ID")
-        if not self.client_secret:
+        if include_client_secret and not self.client_secret:
             missing.append("ENTRA_CLIENT_SECRET")
         if not self.redirect_uri:
             missing.append("ENTRA_REDIRECT_URI")
         return tuple(missing)
+
+    def with_client_secret(self, client_secret: str | None) -> AuthSettings:
+        return replace(self, client_secret=client_secret)
+
+
+@dataclass(frozen=True)
+class _OAuthClientBinding:
+    secret: SecretValue
+    client: StarletteOAuth2App
+
+
+@dataclass(frozen=True)
+class _RetainedOAuthClientBinding:
+    binding: _OAuthClientBinding
+    expires_at: datetime
 
 
 def load_auth_settings() -> AuthSettings:
@@ -123,8 +151,8 @@ def _load_required_session_secret_key() -> str | None:
     return session_secret_key
 
 
-def ensure_auth_configured(settings: AuthSettings) -> None:
-    missing = settings.missing_required()
+def ensure_auth_configured(settings: AuthSettings, *, include_client_secret: bool = True) -> None:
+    missing = settings.missing_required(include_client_secret=include_client_secret)
     if missing:
         missing_text = ", ".join(missing)
         raise HTTPException(
@@ -150,6 +178,100 @@ def create_oauth_client(settings: AuthSettings) -> StarletteOAuth2App:
     if client is None:
         raise RuntimeError("Failed to create the Entra ID OAuth client.")
     return client
+
+
+class EntraOAuthClientManager:
+    def __init__(
+        self,
+        *,
+        settings: AuthSettings,
+        secret_provider: SecretProvider,
+        client_factory: Callable[[AuthSettings], StarletteOAuth2App] = create_oauth_client,
+        previous_secret_overlap: timedelta = DEFAULT_ENTRA_CLIENT_SECRET_OVERLAP,
+        clock: Callable[[], datetime] = utc_now,
+    ) -> None:
+        if previous_secret_overlap < timedelta(0):
+            raise ValueError("previous_secret_overlap must be >= 0.")
+        self._settings = settings
+        self._secret_provider = secret_provider
+        self._client_factory = client_factory
+        self._previous_secret_overlap = previous_secret_overlap
+        self._clock = clock
+        self._lock = asyncio.Lock()
+        self._current_binding: _OAuthClientBinding | None = None
+        self._previous_binding: _RetainedOAuthClientBinding | None = None
+
+    async def get_client(self) -> StarletteOAuth2App:
+        binding = await self._refresh_current_binding()
+        return binding.client
+
+    async def authorize_access_token(self, request: Request) -> dict[str, Any]:
+        last_error: OAuthError | None = None
+        for binding in await self._candidate_bindings():
+            server_metadata = await binding.client.load_server_metadata()
+            claims_options = build_claims_options(server_metadata.get("issuer"))
+            try:
+                return await binding.client.authorize_access_token(
+                    request,
+                    claims_options=claims_options,
+                )
+            except OAuthError as exc:
+                if not _should_retry_with_previous_secret(exc) or last_error is not None:
+                    raise
+                last_error = exc
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("No Entra OAuth client is available.")
+
+    async def _candidate_bindings(self) -> tuple[_OAuthClientBinding, ...]:
+        current_binding = await self._refresh_current_binding()
+        async with self._lock:
+            previous = self._previous_binding
+            if previous is not None and previous.expires_at <= self._clock():
+                self._previous_binding = None
+                previous = None
+
+            if previous is None:
+                return (current_binding,)
+            return (current_binding, previous.binding)
+
+    async def _refresh_current_binding(self) -> _OAuthClientBinding:
+        secret = await self._secret_provider.get_secret("ENTRA_CLIENT_SECRET")
+        secret_key = _secret_cache_key(secret)
+
+        async with self._lock:
+            current = self._current_binding
+            if current is not None and _secret_cache_key(current.secret) == secret_key:
+                return current
+
+            new_binding = _OAuthClientBinding(
+                secret=secret,
+                client=self._client_factory(self._settings.with_client_secret(secret.value)),
+            )
+            if current is not None:
+                # Updating Key Vault to a new value does not create or retire the corresponding
+                # Entra application credential. Keep the previous OAuth client around briefly so
+                # active replicas can overlap old/new credentials during rotation, and only remove
+                # the old credential in Entra after the rollout window has elapsed everywhere.
+                self._previous_binding = _RetainedOAuthClientBinding(
+                    binding=current,
+                    expires_at=self._clock() + self._previous_secret_overlap,
+                )
+            self._current_binding = new_binding
+            return new_binding
+
+
+def build_auth_secret_error_response(exc: SecretProviderError) -> HTTPException:
+    if isinstance(exc, (SecretNotFoundError, SecretVersionUnavailableError)):
+        return HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authentication is not configured. Missing: ENTRA_CLIENT_SECRET",
+        )
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail="Authentication is temporarily unavailable while loading the Entra client secret.",
+    )
 
 
 def build_claims_options(server_metadata_issuer: str | None) -> dict[str, dict[str, Any]] | None:
@@ -317,3 +439,11 @@ def _first_env(*names: str, default: str | None = None) -> str | None:
         if value:
             return value
     return default
+
+
+def _secret_cache_key(secret: SecretValue) -> tuple[str | None, str]:
+    return (secret.version, secret.value)
+
+
+def _should_retry_with_previous_secret(error: OAuthError) -> bool:
+    return _optional_string(getattr(error, "error", None)) == "invalid_client"
