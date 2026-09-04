@@ -489,3 +489,214 @@ def test_my_account_page_renders_deletion_copy(monkeypatch: pytest.MonkeyPatch) 
         "I understand this permanently deletes my account and all generated content."
         in response.text
     )
+
+
+def test_my_cards_page_renders_multi_select_controls(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = make_authenticated_client(monkeypatch)
+    store_card(
+        client,
+        make_card(
+            owner_id=TEST_OWNER_ID,
+            card_id="selectable-card",
+            name="Selectable Card",
+            blob_name="cards/selectable-card.png",
+        ),
+    )
+
+    response = client.get("/my/cards")
+
+    assert response.status_code == 200
+    assert 'action="/my/cards/batch-delete"' in response.text
+    assert "data-card-selection-toggle" in response.text
+    assert "data-card-selection-all" in response.text
+    assert "data-card-selection-count" in response.text
+    assert "data-card-selection-delete" in response.text
+    assert 'name="card_ids"' in response.text
+    assert 'value="selectable-card"' in response.text
+    assert 'aria-label="Select Selectable Card"' in response.text
+    assert 'data-confirm-title="Delete selected cards?"' in response.text
+
+
+def test_batch_delete_removes_every_selected_card_and_reports_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = make_authenticated_client(monkeypatch)
+    token = csrf_token(client)
+    for card_id in ("batch-one", "batch-two", "batch-three"):
+        store_card(
+            client,
+            make_card(
+                owner_id=TEST_OWNER_ID,
+                card_id=card_id,
+                name=card_id.replace("-", " ").title(),
+                blob_name=f"cards/{card_id}.png",
+            ),
+        )
+        store_asset(client, f"cards/{card_id}.png", b"bytes", "image/png")
+
+    response = client.post(
+        "/my/cards/batch-delete",
+        data={
+            "csrf_token": token,
+            "card_ids": ["batch-one", "batch-two", "batch-three"],
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/my/cards?deleted=3&failed=0"
+    for card_id in ("batch-one", "batch-two", "batch-three"):
+        assert (
+            asyncio.run(client.app.state.services.card_repository.get(TEST_OWNER_ID, card_id))
+            is None
+        )
+        with pytest.raises(FileNotFoundError):
+            asyncio.run(client.app.state.services.asset_store.download(f"cards/{card_id}.png"))
+    assert len(list_deletion_audits(client, TEST_OWNER_ID)) == 3
+
+    follow_up = client.get("/my/cards?deleted=3&failed=0")
+    assert "3 cards permanently deleted." in follow_up.text
+    assert "batch-one" not in follow_up.text
+
+
+def test_batch_delete_select_all_deletes_every_displayed_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = make_authenticated_client(monkeypatch)
+    token = csrf_token(client)
+    store_card(
+        client,
+        make_card(owner_id=TEST_OWNER_ID, card_id="all-one", name="All One"),
+    )
+    store_card(
+        client,
+        make_card(owner_id=TEST_OWNER_ID, card_id="all-two", name="All Two"),
+    )
+    listing = client.get("/my/cards")
+    displayed_card_ids = [
+        card_id for card_id in ("all-one", "all-two") if f'value="{card_id}"' in listing.text
+    ]
+    assert displayed_card_ids == ["all-one", "all-two"]
+
+    response = client.post(
+        "/my/cards/batch-delete",
+        data={"csrf_token": token, "card_ids": displayed_card_ids},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/my/cards?deleted=2&failed=0"
+    assert asyncio.run(client.app.state.services.card_repository.list_by_owner(TEST_OWNER_ID)) == []
+
+
+def test_batch_delete_without_selection_keeps_every_card(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = make_authenticated_client(monkeypatch)
+    token = csrf_token(client)
+    store_card(
+        client,
+        make_card(owner_id=TEST_OWNER_ID, card_id="untouched-card", name="Untouched Card"),
+    )
+
+    response = client.post(
+        "/my/cards/batch-delete",
+        data={"csrf_token": token},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/my/cards"
+    assert (
+        asyncio.run(client.app.state.services.card_repository.get(TEST_OWNER_ID, "untouched-card"))
+        is not None
+    )
+    assert list_deletion_audits(client, TEST_OWNER_ID) == []
+
+
+def test_batch_delete_reports_partial_failure_and_keeps_failed_cards(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = make_authenticated_client(monkeypatch)
+    token = csrf_token(client)
+    store_card(
+        client,
+        make_card(owner_id=TEST_OWNER_ID, card_id="partial-ok", name="Partial Ok"),
+    )
+    store_card(
+        client,
+        make_card(owner_id=TEST_OWNER_ID, card_id="partial-kept", name="Partial Kept"),
+    )
+
+    response = client.post(
+        "/my/cards/batch-delete",
+        data={
+            "csrf_token": token,
+            "card_ids": ["partial-ok", "partial-missing", "partial-ok"],
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/my/cards?deleted=1&failed=1"
+    assert (
+        asyncio.run(client.app.state.services.card_repository.get(TEST_OWNER_ID, "partial-ok"))
+        is None
+    )
+    assert (
+        asyncio.run(client.app.state.services.card_repository.get(TEST_OWNER_ID, "partial-kept"))
+        is not None
+    )
+    assert len(list_deletion_audits(client, TEST_OWNER_ID)) == 1
+
+    follow_up = client.get("/my/cards?deleted=1&failed=1")
+    assert "1 card permanently deleted." in follow_up.text
+    assert "1 card could not be deleted" in follow_up.text
+    assert "Partial Kept" in follow_up.text
+
+
+def test_batch_delete_ignores_cards_owned_by_other_users(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = make_authenticated_client(monkeypatch)
+    token = csrf_token(client)
+    store_card(
+        client,
+        make_card(owner_id=TEST_OWNER_ID, card_id="mine", name="Mine"),
+    )
+    store_card(
+        client,
+        make_card(owner_id=OTHER_OWNER_ID, card_id="not-mine", name="Not Mine"),
+    )
+
+    response = client.post(
+        "/my/cards/batch-delete",
+        data={"csrf_token": token, "card_ids": ["mine", "not-mine"]},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/my/cards?deleted=1&failed=1"
+    assert (
+        asyncio.run(client.app.state.services.card_repository.get(OTHER_OWNER_ID, "not-mine"))
+        is not None
+    )
+    assert asyncio.run(client.app.state.services.card_repository.get(TEST_OWNER_ID, "mine")) is None
+
+
+def test_batch_delete_rejects_missing_csrf_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = make_authenticated_client(monkeypatch)
+    store_card(
+        client,
+        make_card(owner_id=TEST_OWNER_ID, card_id="csrf-card", name="Csrf Card"),
+    )
+
+    response = client.post(
+        "/my/cards/batch-delete",
+        data={"card_ids": ["csrf-card"]},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 403
+    assert (
+        asyncio.run(client.app.state.services.card_repository.get(TEST_OWNER_ID, "csrf-card"))
+        is not None
+    )

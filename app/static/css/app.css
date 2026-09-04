@@ -786,6 +786,65 @@ code {
   text-decoration: none;
 }
 
+.card-selection {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.card-selection__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.card-selection__controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-4);
+}
+
+.card-selection__controls[hidden] {
+  display: none;
+}
+
+.card-selection__all {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.card-selection__count {
+  margin: 0;
+  color: var(--color-parchment-dim);
+}
+
+.card-summary__select {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4) 0;
+}
+
+.card-summary__select[hidden] {
+  display: none;
+}
+
+.notice {
+  border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-4);
+  margin-bottom: var(--space-4);
+  border: 1px solid var(--color-border-subtle);
+}
+
+.notice--error {
+  background: var(--color-danger-surface);
+  border-color: var(--color-danger-border);
+  color: var(--color-danger-text);
+}
+
 .card-summary-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr));

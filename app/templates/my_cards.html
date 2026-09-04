@@ -7,38 +7,83 @@
         <p>Browse the cards forged for your account. Artwork streams through your account's private image endpoint.</p>
     </section>
 
+    {% if deleted_count %}
+        <p class="notice notice--success" role="status">
+            {{ deleted_count }} card{{ "" if deleted_count == 1 else "s" }} permanently deleted.
+        </p>
+    {% endif %}
+    {% if failed_count %}
+        <p class="notice notice--error" role="alert">
+            {{ failed_count }} card{{ "" if failed_count == 1 else "s" }} could not be deleted and {{ "is" if failed_count == 1 else "are" }} still in your library. Try again in a moment.
+        </p>
+    {% endif %}
+
     {% if cards %}
-        <section class="card-summary-grid" aria-label="Your generated cards">
-            {% for card in cards %}
-                <article class="card-summary" data-rarity="{{ card.rarity }}">
-                    <a class="card-summary__media{% if not card.image_url %} is-broken{% endif %}" href="/my/cards/{{ card.card_id }}">
-                        {% if card.image_url %}
-                            <img src="{{ card.image_url }}" alt="Generated artwork for {{ card.name }}" loading="lazy" />
-                        {% endif %}
-                        <span class="card-summary__placeholder">
-                            <span class="visually-hidden">Artwork unavailable</span>
-                        </span>
-                    </a>
-                    <div class="card-summary__body">
-                        <div class="card-summary__header">
-                            <div>
-                                <h2><a href="/my/cards/{{ card.card_id }}">{{ card.name }}</a></h2>
-                                <p>{{ card.card_type | capitalize }} &middot; {{ card.rarity | capitalize }}</p>
+        <form
+            class="card-selection"
+            method="post"
+            action="/my/cards/batch-delete"
+            data-card-selection
+            data-confirm-modal-form
+            data-confirm-title="Delete selected cards?"
+            data-confirm-message="This permanently deletes the selected cards. Artwork cleanup will continue in the background."
+            data-confirm-confirm-label="Delete cards"
+        >
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+            <div class="card-selection__toolbar">
+                <button class="btn btn-ghost" type="button" data-card-selection-toggle aria-pressed="false" hidden>Select cards</button>
+                <div class="card-selection__controls" data-card-selection-controls>
+                    <label class="card-selection__all">
+                        <input type="checkbox" data-card-selection-all />
+                        Select all
+                    </label>
+                    <p class="card-selection__count" data-card-selection-count role="status" aria-live="polite">0 cards selected</p>
+                    <button class="btn btn-secondary" type="submit" data-card-selection-delete>Delete selected</button>
+                </div>
+            </div>
+
+            <section class="card-summary-grid" aria-label="Your generated cards">
+                {% for card in cards %}
+                    <article class="card-summary" data-rarity="{{ card.rarity }}">
+                        <label class="card-summary__select" data-card-selection-item>
+                            <input
+                                type="checkbox"
+                                name="card_ids"
+                                value="{{ card.card_id }}"
+                                data-card-selection-checkbox
+                                aria-label="Select {{ card.name }}"
+                            />
+                            <span>Select</span>
+                        </label>
+                        <a class="card-summary__media{% if not card.image_url %} is-broken{% endif %}" href="/my/cards/{{ card.card_id }}">
+                            {% if card.image_url %}
+                                <img src="{{ card.image_url }}" alt="Generated artwork for {{ card.name }}" loading="lazy" />
+                            {% endif %}
+                            <span class="card-summary__placeholder">
+                                <span class="visually-hidden">Artwork unavailable</span>
+                            </span>
+                        </a>
+                        <div class="card-summary__body">
+                            <div class="card-summary__header">
+                                <div>
+                                    <h2><a href="/my/cards/{{ card.card_id }}">{{ card.name }}</a></h2>
+                                    <p>{{ card.card_type | capitalize }} &middot; {{ card.rarity | capitalize }}</p>
+                                </div>
+                                <span class="badge">{{ card.status.replace("_", " ") | title }}</span>
                             </div>
-                            <span class="badge">{{ card.status.replace("_", " ") | title }}</span>
+                            <dl class="card-summary__stats">
+                                <div><dt>Mana</dt><dd>{{ card.mana_cost }}</dd></div>
+                                <div><dt>Attack</dt><dd>{{ card.attack }}</dd></div>
+                                <div><dt>Health</dt><dd>{{ card.health }}</dd></div>
+                            </dl>
+                            <p class="card-summary__meta">
+                                Created <time datetime="{{ card.created_at }}">{{ card.created_at_display }}</time>
+                            </p>
                         </div>
-                        <dl class="card-summary__stats">
-                            <div><dt>Mana</dt><dd>{{ card.mana_cost }}</dd></div>
-                            <div><dt>Attack</dt><dd>{{ card.attack }}</dd></div>
-                            <div><dt>Health</dt><dd>{{ card.health }}</dd></div>
-                        </dl>
-                        <p class="card-summary__meta">
-                            Created <time datetime="{{ card.created_at }}">{{ card.created_at_display }}</time>
-                        </p>
-                    </div>
-                </article>
-            {% endfor %}
-        </section>
+                    </article>
+                {% endfor %}
+            </section>
+        </form>
     {% else %}
         <div class="empty-state">
             <svg class="empty-state__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 5.5h16v13H4z"/><path d="M8 9.5h8M8 13h5" stroke-linecap="round"/></svg>
