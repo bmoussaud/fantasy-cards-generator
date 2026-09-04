@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import logging
 import os
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, Protocol
 
-from azure.core.exceptions import AzureError, ResourceNotFoundError, ServiceRequestError
+from azure.core.exceptions import (
+    AzureError,
+    ClientAuthenticationError,
+    ResourceNotFoundError,
+    ServiceRequestError,
+)
 from azure.identity.aio import DefaultAzureCredential
 from azure.keyvault.secrets.aio import SecretClient
 
@@ -20,6 +27,9 @@ DEFAULT_SECRET_CACHE_TTL_SECONDS = 60.0
 DEFAULT_SECRET_REQUEST_TIMEOUT_SECONDS = 2.0
 DEFAULT_SECRET_MAX_RETRIES = 2
 DEFAULT_SECRET_RETRY_BACKOFF_SECONDS = 0.25
+DEFAULT_SECRET_MAX_STALE_SECONDS = 300.0
+
+LOGGER = logging.getLogger(__name__)
 
 
 def utc_now() -> datetime:
@@ -64,6 +74,7 @@ class SecretProviderConfig:
     request_timeout_seconds: float = DEFAULT_SECRET_REQUEST_TIMEOUT_SECONDS
     max_retries: int = DEFAULT_SECRET_MAX_RETRIES
     retry_backoff_seconds: float = DEFAULT_SECRET_RETRY_BACKOFF_SECONDS
+    max_stale_seconds: float = DEFAULT_SECRET_MAX_STALE_SECONDS
 
 
 @dataclass(slots=True)
@@ -111,6 +122,10 @@ class SecretRefreshTimeout(SecretProviderError):
 
 
 class SecretVersionUnavailableError(SecretProviderError):
+    pass
+
+
+class SecretStaleValueExpiredError(SecretProviderError):
     pass
 
 
@@ -180,6 +195,7 @@ class AzureSecretProvider:
         request_timeout_seconds: float = DEFAULT_SECRET_REQUEST_TIMEOUT_SECONDS,
         max_retries: int = DEFAULT_SECRET_MAX_RETRIES,
         retry_backoff_seconds: float = DEFAULT_SECRET_RETRY_BACKOFF_SECONDS,
+        max_stale: timedelta | float = DEFAULT_SECRET_MAX_STALE_SECONDS,
         clock: Clock = utc_now,
         sleep: Sleep = asyncio.sleep,
     ) -> None:
@@ -188,6 +204,7 @@ class AzureSecretProvider:
         self._request_timeout_seconds = request_timeout_seconds
         self._max_retries = max_retries
         self._retry_backoff_seconds = retry_backoff_seconds
+        self._max_stale = _coerce_timedelta(max_stale)
         self._clock = clock
         self._sleep = sleep
         self._cache: dict[str, _CachedSecret] = {}
@@ -222,6 +239,8 @@ class AzureSecretProvider:
             raise ValueError("max_retries must be >= 0.")
         if self._retry_backoff_seconds < 0:
             raise ValueError("retry_backoff_seconds must be >= 0.")
+        if self._max_stale.total_seconds() < 0:
+            raise ValueError("max_stale must be >= 0.")
 
     async def get_secret(self, name: str) -> SecretValue:
         if self._closed:
@@ -326,9 +345,12 @@ class AzureSecretProvider:
             if cached is None:
                 return None
             if cached.expires_at <= self._clock():
-                self._cache.pop(name, None)
                 return None
             return cached.secret
+
+    async def _get_cached_entry(self, name: str) -> _CachedSecret | None:
+        async with self._lock:
+            return self._cache.get(name)
 
     async def _set_cached(self, secret: SecretValue) -> None:
         async with self._lock:
@@ -338,10 +360,43 @@ class AzureSecretProvider:
             )
 
     async def _refresh_and_cache(self, reference: SecretReference) -> SecretValue:
+        cached = await self._get_cached_entry(reference.logical_name)
         try:
             secret = await self._refresh_secret(reference)
             await self._set_cached(secret)
+            self._log_refresh_outcome("success", secret=secret)
             return secret
+        except Exception as exc:
+            error_category = _normalize_secret_refresh_error(exc)
+            stale_secret = self._get_stale_secret(cached)
+            if stale_secret is not None:
+                self._log_refresh_outcome(
+                    "stale",
+                    secret=stale_secret,
+                    error_category=error_category,
+                )
+                return stale_secret
+
+            self._log_refresh_outcome(
+                "failed",
+                secret=cached.secret if cached is not None else None,
+                error_category=error_category,
+            )
+            if cached is None and isinstance(
+                exc,
+                (SecretNotFoundError, SecretRefreshTimeout, SecretVersionUnavailableError),
+            ):
+                raise type(exc)(str(exc)) from None
+            if cached is None:
+                raise SecretProviderError(
+                    f"Secret '{reference.logical_name}' refresh failed without a known-good cached "
+                    f"value (error_category={error_category})."
+                ) from None
+            raise SecretStaleValueExpiredError(
+                f"Secret '{reference.logical_name}' refresh failed after cached value exceeded "
+                f"max stale (age_seconds={_secret_age_seconds(cached.secret, self._clock())}, "
+                f"error_category={error_category})."
+            ) from None
         finally:
             async with self._lock:
                 self._inflight.pop(reference.logical_name, None)
@@ -366,13 +421,14 @@ class AzureSecretProvider:
             if getattr(properties, "enabled", True) is False:
                 continue
 
-            return SecretValue(
-                name=reference.logical_name,
-                value=str(getattr(secret, "value", "")),
+            candidate = _validated_secret_value(
+                reference.logical_name,
+                value=getattr(secret, "value", None),
                 version=_optional_text(getattr(properties, "version", None)) or version.version,
                 fetched_at=self._clock(),
-                source="azure",
             )
+            if candidate is not None:
+                return candidate
 
         if last_error is not None:
             raise SecretVersionUnavailableError(
@@ -460,6 +516,37 @@ class AzureSecretProvider:
         if delay > 0:
             await self._sleep(delay)
 
+    def _get_stale_secret(self, cached: _CachedSecret | None) -> SecretValue | None:
+        if cached is None or self._max_stale.total_seconds() <= 0:
+            return None
+        if self._clock() > cached.expires_at + self._max_stale:
+            return None
+        return cached.secret
+
+    def _log_refresh_outcome(
+        self,
+        outcome: Literal["success", "stale", "failed"],
+        *,
+        secret: SecretValue | None,
+        error_category: str = "none",
+    ) -> None:
+        LOGGER.log(
+            {
+                "success": logging.INFO,
+                "stale": logging.WARNING,
+                "failed": logging.ERROR,
+            }[outcome],
+            f"secret.refresh_{outcome}",
+            extra={
+                "refresh_outcome": outcome,
+                "secret_age_seconds": (
+                    _secret_age_seconds(secret, self._clock()) if secret is not None else None
+                ),
+                "secret_version_hash": _secret_version_hash(secret.version if secret else None),
+                "error_category": error_category,
+            },
+        )
+
 
 def build_secret_provider_from_environment(
     *,
@@ -484,6 +571,7 @@ def build_secret_provider_from_environment(
         request_timeout_seconds=config.request_timeout_seconds,
         max_retries=config.max_retries,
         retry_backoff_seconds=config.retry_backoff_seconds,
+        max_stale=config.max_stale_seconds,
     )
 
 
@@ -558,6 +646,12 @@ def load_secret_provider_config(
             default=DEFAULT_SECRET_RETRY_BACKOFF_SECONDS,
             minimum=0.0,
         ),
+        max_stale_seconds=_float_env(
+            values,
+            "SECRET_PROVIDER_MAX_STALE_SECONDS",
+            default=DEFAULT_SECRET_MAX_STALE_SECONDS,
+            minimum=0.0,
+        ),
     )
 
 
@@ -589,9 +683,72 @@ def _optional_text(value: object) -> str | None:
     return text or None
 
 
+def _validated_secret_value(
+    name: str,
+    *,
+    value: object,
+    version: str | None,
+    fetched_at: datetime,
+) -> SecretValue | None:
+    normalized_value = _optional_text(value)
+    normalized_version = _optional_text(version)
+    if normalized_value is None or normalized_version is None:
+        return None
+    return SecretValue(
+        name=name,
+        value=normalized_value,
+        version=normalized_version,
+        fetched_at=fetched_at,
+        source="azure",
+    )
+
+
 def _is_retryable_azure_error(error: AzureError) -> bool:
     status_code = getattr(error, "status_code", None)
     return status_code in {408, 429, 500, 502, 503, 504}
+
+
+def _normalize_secret_refresh_error(error: Exception) -> str:
+    root = _root_cause(error)
+    if isinstance(root, (SecretRefreshTimeout, asyncio.TimeoutError)):
+        return "timeout"
+    if isinstance(
+        root,
+        (SecretNotFoundError, SecretVersionUnavailableError, ResourceNotFoundError),
+    ):
+        return "not_found"
+    if isinstance(root, ClientAuthenticationError):
+        return "auth_error"
+    if isinstance(root, ServiceRequestError):
+        return "unavailable"
+    if isinstance(root, AzureError):
+        status_code = getattr(root, "status_code", None)
+        if status_code in {401, 403}:
+            return "auth_error"
+        if status_code == 404:
+            return "not_found"
+        if status_code in {408, 504}:
+            return "timeout"
+        if status_code in {429, 500, 502, 503}:
+            return "unavailable"
+    return "unknown"
+
+
+def _root_cause(error: Exception) -> Exception:
+    current = error
+    while isinstance(getattr(current, "__cause__", None), Exception):
+        current = current.__cause__
+    return current
+
+
+def _secret_age_seconds(secret: SecretValue, now: datetime) -> int:
+    return max(0, int((now - secret.fetched_at).total_seconds()))
+
+
+def _secret_version_hash(version: str | None) -> str:
+    if version is None:
+        return "none"
+    return hashlib.sha256(version.encode("utf-8")).hexdigest()[:12]
 
 
 def _optional_env(values: Mapping[str, str], name: str) -> str | None:

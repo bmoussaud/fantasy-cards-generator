@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -11,13 +12,17 @@ from fastapi.testclient import TestClient
 
 from app.main import create_app
 from app.secrets import (
+    LOGGER,
     AzureSecretProvider,
     EnvSecretProvider,
     SecretNotFoundError,
+    SecretProviderError,
     SecretRefreshTimeout,
+    SecretStaleValueExpiredError,
     SecretValue,
     SecretVersionUnavailableError,
     build_secret_provider_from_environment,
+    load_secret_provider_config,
 )
 
 
@@ -306,6 +311,44 @@ def test_azure_secret_provider_retries_transient_errors_without_sleeping_for_rea
     assert delays == [0.5]
 
 
+def test_azure_secret_provider_serves_stale_value_with_sanitized_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    clock = FakeClock()
+    version = make_version(clock, "v1")
+    client = FakeSecretClient(versions={"app-session-secret-key": [version]})
+    client.set_response("app-session-secret-key", "v1", FakeSecretBundle("known-good", version))
+    provider = AzureSecretProvider(
+        key_vault_uri="https://vault.example",
+        client=client,
+        cache_ttl=60,
+        max_stale=120,
+        clock=clock.now,
+        sleep=fake_sleep,
+        max_retries=0,
+    )
+
+    expected = run_async(provider.get_secret("APP_SESSION_SECRET_KEY"))
+    clock.advance(61)
+    client.set_response(
+        "app-session-secret-key",
+        "v1",
+        ServiceRequestError("known-good raw-sdk-detail"),
+    )
+
+    with caplog.at_level(logging.WARNING, logger=LOGGER.name):
+        secret = run_async(provider.get_secret("APP_SESSION_SECRET_KEY"))
+
+    assert secret == expected
+    assert caplog.records[-1].message == "secret.refresh_stale"
+    assert caplog.records[-1].refresh_outcome == "stale"
+    assert caplog.records[-1].secret_age_seconds == 61
+    assert caplog.records[-1].error_category == "unavailable"
+    assert caplog.records[-1].secret_version_hash != "v1"
+    assert "known-good" not in caplog.text
+    assert "raw-sdk-detail" not in caplog.text
+
+
 def test_azure_secret_provider_times_out_with_bounded_calls() -> None:
     clock = FakeClock()
     version = make_version(clock, "v1")
@@ -329,6 +372,79 @@ def test_azure_secret_provider_times_out_with_bounded_calls() -> None:
         run_async(provider.get_secret("APP_SESSION_SECRET_KEY"))
 
 
+def test_azure_secret_provider_fails_closed_once_stale_period_expires(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    clock = FakeClock()
+    version = make_version(clock, "v1")
+    client = FakeSecretClient(versions={"app-session-secret-key": [version]})
+    client.set_response("app-session-secret-key", "v1", FakeSecretBundle("known-good", version))
+    provider = AzureSecretProvider(
+        key_vault_uri="https://vault.example",
+        client=client,
+        cache_ttl=60,
+        max_stale=120,
+        clock=clock.now,
+        sleep=fake_sleep,
+        max_retries=0,
+    )
+
+    run_async(provider.get_secret("APP_SESSION_SECRET_KEY"))
+    clock.advance(181)
+    client.set_response(
+        "app-session-secret-key",
+        "v1",
+        ServiceRequestError("known-good raw-sdk-detail"),
+    )
+
+    with caplog.at_level(logging.ERROR, logger=LOGGER.name):
+        with pytest.raises(SecretStaleValueExpiredError, match="error_category=unavailable"):
+            run_async(provider.get_secret("APP_SESSION_SECRET_KEY"))
+
+    assert caplog.records[-1].message == "secret.refresh_failed"
+    assert caplog.records[-1].refresh_outcome == "failed"
+    assert caplog.records[-1].secret_age_seconds == 181
+    assert caplog.records[-1].error_category == "unavailable"
+    assert "known-good" not in caplog.text
+    assert "raw-sdk-detail" not in caplog.text
+
+
+def test_azure_secret_provider_fails_closed_on_cold_start_without_cached_secret(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    clock = FakeClock()
+    version = make_version(clock, "v1")
+    client = FakeSecretClient(versions={"app-session-secret-key": [version]})
+    client.set_response(
+        "app-session-secret-key",
+        "v1",
+        ServiceRequestError("cold-start raw-sdk-detail"),
+    )
+    provider = AzureSecretProvider(
+        key_vault_uri="https://vault.example",
+        client=client,
+        cache_ttl=60,
+        max_stale=120,
+        clock=clock.now,
+        sleep=fake_sleep,
+        max_retries=0,
+    )
+
+    with caplog.at_level(logging.ERROR, logger=LOGGER.name):
+        with pytest.raises(
+            SecretProviderError,
+            match="without a known-good cached value \\(error_category=unavailable\\)",
+        ):
+            run_async(provider.get_secret("APP_SESSION_SECRET_KEY"))
+
+    assert caplog.records[-1].message == "secret.refresh_failed"
+    assert caplog.records[-1].refresh_outcome == "failed"
+    assert caplog.records[-1].secret_age_seconds is None
+    assert caplog.records[-1].secret_version_hash == "none"
+    assert caplog.records[-1].error_category == "unavailable"
+    assert "raw-sdk-detail" not in caplog.text
+
+
 def test_azure_secret_provider_raises_when_no_enabled_version_exists() -> None:
     clock = FakeClock()
     disabled = make_version(clock, "v2", enabled=False)
@@ -343,6 +459,47 @@ def test_azure_secret_provider_raises_when_no_enabled_version_exists() -> None:
 
     with pytest.raises(SecretVersionUnavailableError, match="APP_SESSION_SECRET_KEY"):
         run_async(provider.get_secret("APP_SESSION_SECRET_KEY"))
+
+
+def test_azure_secret_provider_does_not_replace_known_good_value_with_empty_secret() -> None:
+    clock = FakeClock()
+    good_version = make_version(clock, "v1", age_seconds=10)
+    empty_version = make_version(clock, "v2")
+    client = FakeSecretClient(versions={"app-session-secret-key": [good_version]})
+    client.set_response(
+        "app-session-secret-key",
+        "v1",
+        FakeSecretBundle("known-good", good_version),
+    )
+    provider = AzureSecretProvider(
+        key_vault_uri="https://vault.example",
+        client=client,
+        cache_ttl=60,
+        max_stale=120,
+        clock=clock.now,
+        sleep=fake_sleep,
+    )
+
+    initial = run_async(provider.get_secret("APP_SESSION_SECRET_KEY"))
+    clock.advance(61)
+    client._versions["app-session-secret-key"] = [empty_version, good_version]
+    client.set_response("app-session-secret-key", "v2", FakeSecretBundle("   ", empty_version))
+    client.set_response(
+        "app-session-secret-key",
+        "v1",
+        FakeSecretBundle("known-good", good_version),
+    )
+
+    refreshed = run_async(provider.get_secret("APP_SESSION_SECRET_KEY"))
+
+    assert initial.value == "known-good"
+    assert refreshed.value == "known-good"
+    assert refreshed.version == "v1"
+    assert client.get_calls == [
+        ("app-session-secret-key", "v1"),
+        ("app-session-secret-key", "v2"),
+        ("app-session-secret-key", "v1"),
+    ]
 
 
 def test_azure_secret_provider_closes_owned_resources() -> None:
@@ -372,6 +529,17 @@ def test_build_secret_provider_from_environment_defaults_to_env_backend() -> Non
     )
 
     assert isinstance(provider, EnvSecretProvider)
+
+
+def test_load_secret_provider_config_reads_max_stale_seconds() -> None:
+    config = load_secret_provider_config(
+        environ={
+            "KEY_VAULT_URI": "https://vault.example",
+            "SECRET_PROVIDER_MAX_STALE_SECONDS": "90",
+        },
+    )
+
+    assert config.max_stale_seconds == 90.0
 
 
 def test_create_app_closes_injected_secret_provider_on_shutdown() -> None:

@@ -113,6 +113,7 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        app.state.secret_provider = runtime_secret_provider
         try:
             await load_session_signing_keys(
                 runtime_secret_provider,
