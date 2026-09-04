@@ -130,7 +130,7 @@ To use it:
 5. If you use `azd provision`, the `postprovision` hook automatically runs
    `./hooks/gen_client_secret.sh ENTRA_CLIENT_ID ENTRA_CLIENT_SECRET`. That
    hook uses `az ad app credential reset` to mint a short-lived client secret
-   (21-day expiry) and stores it in the active azd environment as
+   (3-month expiry) and stores it in the active azd environment as
    `ENTRA_CLIENT_SECRET`.
 6. If `deployEntraAppRegistration=false`, the hook detects that
    `ENTRA_CLIENT_ID` is absent and exits without error.

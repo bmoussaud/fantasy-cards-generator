@@ -17,7 +17,7 @@ if [[ -z "${APP_ID}" ]]; then
   exit 0
 fi
 
-end_date=$(date -u -d '+21 days' '+%Y-%m-%dT%H:%M:%SZ')
+end_date=$(date -u -d '+3 months' '+%Y-%m-%dT%H:%M:%SZ')
 
 client_secret=$(az ad app credential reset \
   --id "${APP_ID}" \
