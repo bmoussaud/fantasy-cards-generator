@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import replace
 from io import BytesIO
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -11,6 +13,7 @@ from PIL import Image
 from starlette.responses import RedirectResponse
 
 from app import main as main_module
+from app import photos as photos_module
 from app.generation import (
     AppServices,
     MockAIClient,
@@ -226,6 +229,103 @@ def test_save_photo_enforces_per_user_cap(monkeypatch: pytest.MonkeyPatch) -> No
     assert first.status_code == 201
     assert second.status_code == 409
     assert second.json()["errorCode"] == "saved_photo_limit_reached"
+
+
+@pytest.mark.parametrize(
+    ("failure_stage", "expected_stage"),
+    [
+        ("blob-upload", "blob upload"),
+        ("thumbnail-upload", "thumbnail upload"),
+        ("cosmos-save", "cosmos save"),
+    ],
+)
+def test_save_photo_logs_persistence_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    failure_stage: str,
+    expected_stage: str,
+) -> None:
+    services = build_services(monkeypatch)
+    monkeypatch.setattr(photos_module, "uuid4", lambda: SimpleNamespace(hex="photo-log-123"))
+
+    original_upload = services.photo_asset_store.upload
+    original_save = services.saved_photo_repository.save
+    upload_calls = 0
+
+    async def failing_upload(blob_name: str, payload: bytes, content_type: str):
+        nonlocal upload_calls
+        upload_calls += 1
+        if failure_stage == "blob-upload":
+            raise RuntimeError("blob upload exploded")
+        if failure_stage == "thumbnail-upload" and upload_calls == 2:
+            raise RuntimeError("thumbnail upload exploded")
+        return await original_upload(blob_name, payload, content_type)
+
+    async def failing_save(record):
+        if failure_stage == "cosmos-save":
+            raise RuntimeError("cosmos save exploded")
+        return await original_save(record)
+
+    monkeypatch.setattr(services.photo_asset_store, "upload", failing_upload)
+    monkeypatch.setattr(services.saved_photo_repository, "save", failing_save)
+
+    client = make_authenticated_client(monkeypatch, services=services)
+    token = csrf_token(client)
+
+    with caplog.at_level(logging.ERROR, logger="app.photos"):
+        response = client.post(
+            "/my/photos",
+            data={"label": "Fails", "csrf_token": token},
+            files={"photo": ("fails.png", make_png_bytes(color="gray"), "image/png")},
+        )
+
+    assert response.status_code == 503
+    assert response.json()["errorCode"] == "saved_photo_persistence_failure"
+    assert any(
+        record.levelno == logging.ERROR
+        and f"during {expected_stage}" in record.getMessage()
+        and f"owner_id={TEST_OWNER_ID}" in record.getMessage()
+        and "photo_id=photo-log-123" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_delete_photo_logs_delete_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    services = build_services(monkeypatch)
+    monkeypatch.setattr(photos_module, "uuid4", lambda: SimpleNamespace(hex="photo-delete-123"))
+    client = make_authenticated_client(monkeypatch, services=services)
+    token = csrf_token(client)
+
+    created = client.post(
+        "/my/photos",
+        data={"label": "Delete fails", "csrf_token": token},
+        files={"photo": ("delete-fails.png", make_png_bytes(color="maroon"), "image/png")},
+    )
+    assert created.status_code == 201
+
+    async def failing_delete(blob_name: str) -> None:
+        raise RuntimeError("delete exploded")
+
+    monkeypatch.setattr(services.photo_asset_store, "delete", failing_delete)
+
+    with caplog.at_level(logging.ERROR, logger="app.photos"):
+        response = client.delete(
+            "/my/photos/photo-delete-123",
+            headers={"x-csrf-token": token},
+        )
+
+    assert response.status_code == 503
+    assert response.json()["errorCode"] == "saved_photo_delete_failure"
+    assert any(
+        record.levelno == logging.ERROR
+        and "during blob delete" in record.getMessage()
+        and f"owner_id={TEST_OWNER_ID}" in record.getMessage()
+        and "photo_id=photo-delete-123" in record.getMessage()
+        for record in caplog.records
+    )
 
 
 def test_saved_photos_are_owner_scoped_for_listing_image_and_delete(
