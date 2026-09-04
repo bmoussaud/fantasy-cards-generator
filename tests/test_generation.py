@@ -82,6 +82,8 @@ def test_app_shell_renders_generation_form(authenticated_client: TestClient) -> 
     assert 'enctype="multipart/form-data"' in response.text
     assert 'name="csrf_token"' in response.text
     assert 'name="idempotency_key"' in response.text
+    assert "Image quality" not in response.text
+    assert 'name="quality"' not in response.text
     assert 'name="photo"' in response.text
     assert 'name="saved_photo_id"' in response.text
     assert "data-saved-photo-id-input" in response.text
