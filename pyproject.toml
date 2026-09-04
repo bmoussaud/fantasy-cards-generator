@@ -20,6 +20,7 @@ dependencies = [
     "opentelemetry-instrumentation-httpx>=0.64b0",
     "python-multipart>=0.0.32",
     "pillow>=12.3.0",
+    "azure-keyvault-secrets>=4.11.2",
 ]
 
 [dependency-groups]

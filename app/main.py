@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import secrets
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlencode
@@ -48,6 +49,7 @@ from app.health import NotApplicableHealthProbe, build_healthz_payload, run_depe
 from app.library import CardLibraryService
 from app.photos import SavedPhotoListResponseModel, SavedPhotoResponseModel, SavedPhotoService
 from app.problems import ProblemDetails
+from app.secrets import SecretProvider, build_secret_provider_from_environment
 from app.settings import SettingsError, load_app_settings
 from app.telemetry import (
     enrich_request_span,
@@ -75,7 +77,11 @@ class ParsedCardGenerateRequest:
     photo_label: str | None = None
 
 
-def create_app(services: AppServices | None = None) -> FastAPI:
+def create_app(
+    services: AppServices | None = None,
+    *,
+    secret_provider: SecretProvider | None = None,
+) -> FastAPI:
     auth_settings = load_auth_settings()
     app_settings = load_app_settings()
     app_services = services or create_services(app_settings)
@@ -98,7 +104,16 @@ def create_app(services: AppServices | None = None) -> FastAPI:
     )
     templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
-    app = FastAPI(title="Fantasy Cards Generator")
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        runtime_secret_provider = secret_provider or build_secret_provider_from_environment()
+        app.state.secret_provider = runtime_secret_provider
+        try:
+            yield
+        finally:
+            await runtime_secret_provider.aclose()
+
+    app = FastAPI(title="Fantasy Cards Generator", lifespan=lifespan)
     app.state.services = app_services
     app.mount(
         "/static",
