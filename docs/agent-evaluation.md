@@ -52,11 +52,16 @@ copyrighted characters, or living-artist imitations.
 
 ## Corpus: card-orchestrator-eval-seed-v1
 
-**File:** `tests/fixtures/eval/card-orchestrator-eval-seed-v1.jsonl`  
-**Format:** JSONL — one JSON object per line  
-**Version:** `v1`  
-**Source:** `synthetic` (manually authored; no real user traces)  
-**Count:** 20 entries  
+**File:** `tests/fixtures/eval/card-orchestrator-eval-seed-v1.jsonl`
+
+**Format:** JSONL — one JSON object per line
+
+**Version:** `v1`
+
+**Source:** `synthetic` (manually authored; no real user traces)
+
+**Count:** 20 entries
+
 **Categories:** 9
 
 | Category | Count | Description |
@@ -358,7 +363,8 @@ uv run black --check tests/test_agent_eval.py
 2. Assign a new stable `id` using the pattern `seed-v1-NNN` (three-digit zero-padded).
 3. Do not reuse existing IDs.
 4. Set `version: "v1"`, `source: "synthetic"`, and a dated `provenance` string.
-5. Run `uv run pytest tests/test_agent_eval.py -v` to confirm all checks pass before committing.
+5. Update the exact corpus count assertions and this document's count/category table.
+6. Run `uv run pytest tests/test_agent_eval.py -v` to confirm all checks pass before committing.
 
 ### Creating a new corpus version
 
@@ -454,7 +460,7 @@ deployment to production.
    budget, 150 s image budget, 8.15 s hosted agent budget, and 30.15 s legacy fallback budget.
    These cannot be asserted from static fixtures. Measure them only against a live deployment.
 
-7. **This evaluation is independent of issue #101.** Rai owns `docs/architecture-agents-safety.md`
-   for the safety architecture (#101). This document covers evaluation methodology only.
-   Refer to the safety architecture document for the authoritative policy definitions that
-   future guardrails must implement.
+7. **This evaluation is independent of issue #101.** This document covers evaluation
+   methodology only. The moderation policy is tracked in #101 and its separate PR #115;
+   see the existing [Foundry architecture](./architecture-agents-foundry.md) for integration
+   boundaries.
