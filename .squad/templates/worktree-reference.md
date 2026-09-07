@@ -36,8 +36,8 @@ Squad and all spawned agents may be running inside a **git worktree** rather tha
 
 **Cross-worktree considerations (worktree-local strategy — recommended for concurrent work):**
 - `.squad/` files are **branch-local**. Each worktree works independently — no locking, no shared-state races.
-- When branches merge into main, `.squad/` state merges with them. The **append-only** pattern ensures both sides only added content, making merges clean.
-- A `merge=union` driver in `.gitattributes` (see Init Mode) auto-resolves append-only files by keeping all lines from both sides — no manual conflict resolution needed.
+- When branches merge into main, tracked `.squad/` state merges with them. Append-only changes reduce textual conflicts, but the result still needs review.
+- A `merge=union` driver in `.gitattributes` preserves competing lines, not semantic correctness. Review duplicates and contradictory decisions before accepting the merge.
 - The Scribe commits `.squad/` changes to the worktree's branch. State flows to other branches through normal git merge / PR workflow.
 
 **Cross-worktree considerations (main-checkout strategy):**
@@ -62,7 +62,7 @@ Squad and all spawned agents may be running inside a **git worktree** rather tha
 **Creating worktrees:**
 - One worktree per independent writing workstream (a single issue may need multiple worktrees if it has multiple concurrent writers)
 - Multiple agents on the same issue and same workstream share a worktree only when they do **not** write concurrently
-- Path convention: `{repo-parent}/{repo-name}-{issue-number}` (or `-{slug}` for non-issue work)
+- Path convention: `{repo-parent}/{repo-name}-{issue-number}-{workstream-slug}` (or `-{slug}` for non-issue work); give parallel writers distinct paths
   - Example: Working on issue #42 in `/workspaces/fantasy-cards-generator` → worktree at `/workspaces/fantasy-cards-generator-42`
 - Branch: `squad/{issue-number}-{kebab-case-slug}` (created from `main`)
 
@@ -79,31 +79,31 @@ Squad and all spawned agents may be running inside a **git worktree** rather tha
   1. The path exists and the branch matches the intended workstream
   2. `git status --short` is empty — no uncommitted work from a prior session
   3. No other active agent currently owns that worktree
-  4. The local branch has not diverged from origin (check `git status -sb` before syncing)
-- To sync an eligible worktree: `git pull --ff-only origin {branch}` — if this fails, the branch has diverged; do not force.
+  4. If an upstream exists, fetch it and inspect ahead/behind status; preserve local-only branches without inventing an upstream
+- To sync an eligible worktree with an existing upstream: `git pull --ff-only origin {branch}`. On failure, inspect the reported cause; do not force or assume every failure means divergence.
 - **Do not share a worktree across concurrent independent writing agents.** Even modifying different files is not parallel-safe: a global stash, reset, or clean from one agent can destroy another agent's uncommitted work. Independent parallel writers require separate branches and separate worktrees with explicit ownership assignment.
 
 **Cleanup:**
 - After a PR is merged, follow the full safe cleanup steps from the git-workflow skill (`SKILL.md`) — including headRefOid comparison, `--force-with-lease` for remote deletion, ancestry check, and archive tag if the original head is not reachable from main.
 - **Preflight:** Confirm no active agent owns the worktree and there is no uncommitted work before removing.
 - `git worktree remove {path}` removes the working directory only — the branch and stash are not affected.
-- Run `git worktree prune --dry-run` before `git worktree prune` to confirm only stale/unmounted paths will be removed.
+- Normal removal unregisters the worktree. For stale metadata, inspect `git worktree prune --dry-run` and confirm every candidate is permanently gone, not merely on an unmounted disk, before pruning.
 - Ralph heartbeat can trigger cleanup checks for merged branches.
 
 ### Pre-Spawn: Worktree Setup
 
-When spawning an agent for issue-based work (user request references an issue number, or agent is working on a GitHub issue):
+Before dispatching any writing workstream, including non-issue housekeeping:
 
-**1. Check worktree mode:**
-- Is `SQUAD_WORKTREES=1` set in the environment?
-- Or does the project config have `worktrees: true`?
-- If neither: skip worktree setup → agent works in the main repo (existing behavior)
+**1. Check isolation requirements:**
+- Independent parallel writers always require separate branches and worktrees under this project's policy.
+- Runtime flags may request automatic creation, but the coordinator must verify the actual registered worktree before dispatch.
+- Only a single writer with exclusive ownership may use the existing checkout without a new worktree.
 
-**2. If worktrees enabled:**
+**2. If isolation is required or requested:**
 
 a. **Determine the worktree path:**
    - Parse issue number from context (e.g., `#42`, `issue 42`, GitHub issue assignment)
-   - Calculate path: `{repo-parent}/{repo-name}-{issue-number}`
+   - Calculate a unique path: `{repo-parent}/{repo-name}-{issue-number}-{workstream-slug}` (omit the number for non-issue work)
    - Example: Main repo at `C:\src\squad`, issue #42 → `C:\src\squad-42`
 
 b. **Check if worktree already exists:**
@@ -111,14 +111,13 @@ b. **Check if worktree already exists:**
    - If the worktree path already exists → **check before reusing**:
      - Verify the branch is correct (should be `squad/{issue-number}-*`)
      - Verify `git status --short` is empty and no other active agent owns this path
-     - If clean and unowned: `git pull --ff-only origin {branch}` (fail if diverged — do not force)
+     - Apply the full reuse preflight above; sync only an existing upstream with `--ff-only`
      - Skip to step (e)
 
 c. **Create the worktree:**
    - Determine branch name: `squad/{issue-number}-{kebab-case-slug}` (derive slug from issue title if available)
-   - Determine base branch (typically `main`, check default branch if needed)
-   - Run: `git worktree add {path} -b {branch} {baseBranch}`
-   - Example: `git worktree add C:\src\squad-42 -b squad/42-fix-login main`
+   - Fetch `origin/main`; do not change the branch checked out in the root clone
+   - Run: `git worktree add {path} -b {branch} origin/main`
 
 d. **Set up dependencies (Python/uv):**
    - This is a Python application — do not link or install `node_modules`.
@@ -130,7 +129,7 @@ e. **Include worktree context in spawn:**
    - Set `WORKTREE_MODE` to `true`
    - Add worktree instructions to the spawn prompt (see template below)
 
-**3. If worktrees disabled:**
-- Set `WORKTREE_PATH` to `"n/a"`
+**3. For a single writer using an exclusively owned existing checkout:**
+- Set `WORKTREE_PATH` to its actual absolute path
 - Set `WORKTREE_MODE` to `false`
-- Use existing `git checkout -b` flow (no changes to current behavior)
+- Use the git-workflow skill's clean-state branch setup; this exception must not be used for independent parallel writers
