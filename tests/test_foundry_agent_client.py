@@ -248,6 +248,48 @@ def test_top_level_output_text_is_not_required_when_raw_output_array_is_present(
     assert result.schema_valid is True
 
 
+@pytest.mark.parametrize(
+    "output",
+    [
+        None,
+        "malformed",
+        [],
+        [None],
+        [{"type": "message", "content": "malformed"}],
+        [{"type": "message", "content": [None]}],
+        [{"type": "message", "content": [{"type": "output_text", "text": 123}]}],
+    ],
+)
+def test_top_level_output_text_cannot_rescue_malformed_raw_output(output: Any) -> None:
+    result, _ = invoke_with_transport(
+        configured_settings(),
+        lambda request: httpx.Response(
+            200,
+            json=responses_envelope(
+                completed_agent_payload(),
+                output=output,
+                output_text=json.dumps(completed_agent_payload()),
+            ),
+        ),
+    )
+
+    assert result.status == "invalid_response"
+    assert result.success is False
+    assert result.schema_valid is False
+
+
+def test_malformed_message_cannot_be_hidden_by_valid_output_text() -> None:
+    envelope = responses_envelope(completed_agent_payload())
+    envelope["output"].append({"type": "message", "content": "malformed"})
+    result, _ = invoke_with_transport(
+        configured_settings(),
+        lambda request: httpx.Response(200, json=envelope),
+    )
+
+    assert result.status == "invalid_response"
+    assert result.success is False
+
+
 @pytest.mark.parametrize("status_code", [429, 500, 503])
 def test_transient_http_statuses_are_retryable(status_code: int) -> None:
     result, _ = invoke_with_transport(
@@ -435,6 +477,30 @@ def test_errors_do_not_leak_prompt_token_or_response_body() -> None:
     assert "fake-token" not in result.message
     assert "fire drake" not in result.message
     assert result.error_code == "Unauthorized"
+
+
+def test_invalid_query_diagnostics_do_not_include_input() -> None:
+    credential = FakeCredential()
+    query = "private-query-marker-" * 21
+
+    def unexpected_request(request: httpx.Request) -> httpx.Response:
+        pytest.fail("Invalid query must not trigger an HTTP request")
+
+    async def invoke_invalid_query():
+        async with FoundryAgentClient(
+            configured_settings(),
+            credential=credential,
+            transport=httpx.MockTransport(unexpected_request),
+        ) as client:
+            return await client.invoke(query)
+
+    result = asyncio.run(invoke_invalid_query())
+
+    assert result.status == "configuration_error"
+    assert result.success is False
+    assert credential.scopes == []
+    assert result.message == "Foundry agent configuration or query is invalid."
+    assert "private-query-marker" not in repr(result)
 
 
 def test_owned_resources_are_closed_but_injected_client_is_not_closed() -> None:

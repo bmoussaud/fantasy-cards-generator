@@ -121,11 +121,11 @@ class FoundryAgentClient:
                 self._settings.foundry_agent_api_version,
             )
             request = GenerateCardAgentRequest(query=query)
-        except (SettingsError, ValidationError, ValueError) as exc:
+        except (SettingsError, ValidationError, ValueError):
             return FoundryAgentInvocationResult(
                 status="configuration_error",
                 error_code="invalid_configuration",
-                message=_safe_message(exc),
+                message="Foundry agent configuration or query is invalid.",
             )
 
         try:
@@ -475,21 +475,25 @@ def _contains_refusal(body: Mapping[str, Any]) -> bool:
 
 def _extract_output_text(body: Mapping[str, Any]) -> str | None:
     output = body.get("output")
-    if isinstance(output, list):
-        chunks: list[str] = []
-        for item in output:
-            if not isinstance(item, dict):
-                continue
-            content = item.get("content")
-            if isinstance(content, list):
-                for part in content:
-                    if isinstance(part, dict) and part.get("type") in {"output_text", "text"}:
-                        text = part.get("text")
-                        if isinstance(text, str):
-                            chunks.append(text)
-        if chunks:
-            return "".join(chunks)
-    return _string_or_none(body.get("output_text"))
+    if not isinstance(output, list):
+        return None
+    chunks: list[str] = []
+    for item in output:
+        if not isinstance(item, dict):
+            return None
+        if item.get("type") != "message":
+            continue
+        content = item.get("content")
+        if not isinstance(content, list):
+            return None
+        for part in content:
+            if not isinstance(part, dict) or part.get("type") != "output_text":
+                return None
+            text = part.get("text")
+            if not isinstance(text, str):
+                return None
+            chunks.append(text)
+    return "".join(chunks) or None
 
 
 def _metadata_version(metadata: Mapping[str, Any]) -> str | None:
@@ -521,11 +525,6 @@ def _safe_identifier_or_none(value: object) -> str | None:
     if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,79}", stripped):
         return stripped
     return None
-
-
-def _safe_message(exc: Exception) -> str:
-    message = str(exc)
-    return message if len(message) <= 200 else f"{message[:197]}..."
 
 
 def _parser() -> argparse.ArgumentParser:
