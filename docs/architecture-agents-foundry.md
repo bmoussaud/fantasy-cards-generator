@@ -804,3 +804,83 @@ That leaves roughly **36.70 seconds** inside the current 225-second request ceil
 Proceed with a **single Foundry hosted orchestrator agent built with Microsoft Agent Framework**, integrated into the existing backend as a new upstream dependency for card-design reasoning only.
 
 Do **not** move auth, persistence, or image-retry control into the agent layer. Do **not** start with a broad toolbox. Keep the current FastAPI + Container Apps application as the stable shell, and let the agent layer evolve behind that boundary.
+
+---
+
+## Moderation and safety contract (issue #101)
+
+The full contract — active layers, stages, conflict precedence, error
+classification, retry/fallback rules, and open gaps — lives in
+`docs/architecture-agents-safety.md`.
+
+The key points relevant to the agent integration proposed here are:
+
+### Active layers today (backend-only)
+
+Two authoritative moderation layers are active:
+
+1. **Heuristic moderation** (`app/generation.py:459–528`,
+   `HeuristicModerationService`) — applies to card text and generated images
+   at four deterministic stages in the card-generation pipeline
+   (`pre_prompt`, `post_text`, `post_art_prompt`, `post_image`). Pure Python,
+   no external calls, always produces a decision.
+
+2. **Azure AI Content Safety** (`app/photos.py:355–468`,
+   `ContentSafetyPhotoModerationService`) — applies to reference photos at
+   upload time only. External HTTP call to the Content Safety endpoint.
+   Categories: Hate, SelfHarm, Sexual, Violence. Thresholds configured via
+   `CONTENT_SAFETY_MAX_*_SEVERITY` (default 2 each; valid values 0/2/4/6).
+   If the endpoint is absent or unreachable, the upload is **blocked** (503),
+   not passed.
+
+Azure Content Safety is **not** used for card text or generated images today.
+`MODERATION_SERVICE` is locked to `"heuristic"` (`app/settings.py:231`).
+
+### Precedence rules summary
+
+- **Authoritative BLOCK wins** — no agent allow, fallback, or retry can
+  reverse a BLOCK from an authoritative layer.
+- **Required layer unavailable → INDETERMINATE, not pass** — a missing or
+  unreachable required moderation layer blocks the request; it is never
+  treated as an implicit allow.
+- **Allow requires explicit allow from all required active layers.**
+- **Inactive/not-yet-deployed layer is not an outage** — an intentionally
+  inactive Foundry guardrail layer is "not applicable", not a transient
+  failure.
+- **Agent refusal ≠ authoritative BLOCK** — the hosted agent may signal
+  policy concern, but enforcement authority stays with backend moderation.
+- **Rejection does not fall back to a less-moderated path** — the proposed
+  agent-fallback to the legacy text path (§Latency budget findings) runs
+  with all existing moderation checkpoints intact.
+
+### Conflict and precedence table
+
+| Scenario | Current behavior | [FUTURE] behavior |
+|----------|-----------------|------------------|
+| Heuristic BLOCK + (no other layer) | Block (422 or 200 partial) | Same |
+| Heuristic ALLOW + Foundry guardrail BLOCK | N/A (guardrails not active) | Block — guardrail wins |
+| Heuristic BLOCK + Foundry guardrail ALLOW | N/A (guardrails not active) | Block — heuristic wins |
+| Content Safety unconfigured | Upload blocked (503) | Same |
+| Content Safety unreachable | Upload blocked (503) | Same |
+| Foundry guardrails inactive/not deployed | N/A | Not applicable; heuristic remains sole authority |
+| Agent refusal + heuristic ALLOW | N/A (agent not active) | Request continues; agent is advisory-only for refusals |
+| Agent refusal + heuristic BLOCK | N/A (agent not active) | Block — heuristic is authoritative regardless |
+| Image generation timeout (no reference) | Partial persist `awaiting_artwork_retry`, 200 | Same |
+| Image generation timeout (reference image) | Hard error (504) | Same |
+| Post-image heuristic BLOCK | Partial persist `awaiting_artwork_retry`, 200 | Same |
+| Idempotency replay of prior content block | Replays as 422 (not 503) | Same |
+
+### Open gaps relevant to agent integration
+
+1. **Inline reference photos without `save_photo=true` bypass Content
+   Safety.** An inline photo used directly for image-edit is not checked
+   before the model call. See `docs/architecture-agents-safety.md §8`.
+
+2. **Foundry guardrails not yet integrated.** When the hosted agent is
+   deployed (issue #109), guardrails must be added as an authoritative layer
+   before the integration goes live. See
+   `docs/architecture-agents-safety.md §9`.
+
+3. **`MODERATION_SERVICE` lock.** Extending Content Safety to cover card
+   text requires removing the single-value validation guard in
+   `app/settings.py:231`.
