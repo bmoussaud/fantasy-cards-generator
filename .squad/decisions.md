@@ -196,3 +196,8 @@ Card generation now accepts a saved photo as an alternative reference source. `P
 **By:** Gimli
 **What:** Runtime Key Vault secret-value access now targets the Azure Container App's managed identity via Key Vault Secrets User at vault scope, and the app no longer mirrors APP_SESSION_SECRET_KEY or ENTRA_CLIENT_SECRET into ACA-native secrets.
 **Why:** The Python runtime already fetches both secrets directly from Key Vault using managed identity. Keeping copied ACA secret values would duplicate sensitive material and continue the old workaround beyond its shelf life.
+
+### 2026-09-04: Preserve Key Vault network posture
+**By:** Gimli
+**What:** PR #106 set Key Vault `publicNetworkAccess` to `Disabled` in `infra/modules/security.bicep` and removed the permissive `networkAcls` block.
+**Why:** The PR records that the previous declaration caused deployment-preview drift toward public exposure. Keep the private-network declaration rather than reintroducing permissive defaults. This note was recovered on 2026-09-07 from local WIP and checked against merged commit `2683457`; it does not assert the current live Azure configuration.
