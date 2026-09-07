@@ -6,11 +6,11 @@ how failures are classified, and the explicit precedence rules that govern
 conflicts between layers.
 
 It is scoped to the **current implementation** and the **agreed future
-contract** for when the proposed Foundry agent layer is added (issue #109).
+contract** for any future Foundry agent/guardrail integration work.
 Sections that describe future behavior are clearly marked **[FUTURE]**.
 
-> Cross-reference: see `docs/architecture-agents-foundry.md §Moderation and
-> safety contract (issue #101)` for the summary and integration context.
+> Cross-reference: see [the Foundry architecture summary](architecture-agents-foundry.md#moderation-and-safety-contract-issue-101)
+> for the integration-facing view of this contract.
 
 ---
 
@@ -19,7 +19,7 @@ Sections that describe future behavior are clearly marked **[FUTURE]**.
 | # | Layer | Scope | Status | Authority |
 |---|-------|-------|--------|-----------|
 | 1 | Heuristic moderation | Card text + generated image | **Active** | Authoritative |
-| 2 | Azure AI Content Safety | Saved/inline reference photos | **Active** | Authoritative |
+| 2 | Azure AI Content Safety | Saved-photo uploads only (library uploads and `save_photo=true` inline uploads) | **Active** | Authoritative |
 | 3 | Foundry hosted-agent guardrails | Agent-generated card text | **[FUTURE]** | Authoritative |
 | 4 | Advisory safety skill | Card concept (pre-image budget) | **[FUTURE — optional]** | Advisory only |
 
@@ -28,8 +28,9 @@ any agent, fallback, or retry path. "Advisory only" means the layer may
 flag risk but the final enforcement decision remains with an authoritative
 layer.
 
-An inactive or not-yet-deployed layer is **not** an implicit pass. Missing
-required moderation evidence is classified as INDETERMINATE (see §6).
+An inactive or not-yet-deployed layer is **not** an implicit pass. Under
+the future contract, missing required moderation evidence is
+INDETERMINATE rather than allow (see §6).
 
 ---
 
@@ -38,8 +39,9 @@ required moderation evidence is classified as INDETERMINATE (see §6).
 ### What it is
 
 `HeuristicModerationService` (`app/generation.py:459–528`). A pure-Python,
-in-process, deterministic service. No external API calls. Cannot throw an
-exception that bypasses its decision; it always returns a `ModerationDecision`.
+in-process, deterministic service. No external API calls. For the current
+call sites and validated inputs, it returns a `ModerationDecision` rather
+than using an external failure path.
 
 ### Configuration
 
@@ -101,9 +103,9 @@ class ModerationDecision(BaseModel):          # app/generation.py:201
     details: str
 ```
 
-Every call returns exactly one `ModerationDecision`. The service never
-raises an exception; if a pattern matches or a check fails it returns
-`allowed=False`, otherwise `allowed=True`.
+Every current call returns exactly one `ModerationDecision`. If a pattern
+matches or a check fails it returns `allowed=False`; otherwise it returns
+`allowed=True`.
 
 ### Effect of a BLOCK per stage
 
@@ -121,23 +123,31 @@ must be preserved for any future layers that run post-image.
 
 ### Moderation decisions stored in Cosmos
 
-Every `ModerationDecision` is appended to `StoredCard.moderation`
-(`app/generation.py:256, 1951, 2026, 2053, 2134`) and persisted to Cosmos
-as part of the card document. All four per-request decisions are stored.
+Every moderation stage that is actually reached appends its
+`ModerationDecision` to the in-memory `moderation` list
+(`app/generation.py:1947–2135`). Completed cards and partial
+`awaiting_artwork_retry` cards persist only the decisions reached before
+persistence (`_persist_completed()` / `_persist_partial()`).
+
+Early text-stage denials do **not** leave behind a completed/partial card with
+"all four" decisions. Those paths delete the card document, save an
+`audit_failed` record via `_save_audit_failure()`, and stop before later
+stages run.
 
 ### Idempotency replay for content blocks
 
-When a new request reuses an idempotency key that previously hit an audit
-failure, `_problem_from_audit()` (`app/generation.py:2596–2634`) replays
-the original refusal. If the stored `error_code` is one of:
+When an idempotency replay finds an `audit_failed` record,
+`_problem_from_audit()` first rehydrates the stored structured failure fields
+(`failure_status_code`, `failure_title`, `failure_detail`, `failure_type`,
+optional headers) when they are present (`app/generation.py:2595–2610`).
+That is the normal path for current audit records written by
+`_save_audit_failure()`.
 
-- `"prompt_rejected"`
-- `"living-artist-imitation"`
-- `"copyrighted-character"`
-
-the replay returns `422 Prompt Rejected`, not `503`. Other audit failures
-replay as `503 Service Unavailable`. Content blocks are therefore **not
-silently retried** through an idempotency replay.
+Only when those structured fields are absent does `_problem_from_audit()` fall
+back to a narrow legacy/incomplete-record heuristic: three older moderation
+reason codes replay as `422 Prompt Rejected`, and other legacy failures replay
+as `503 Service Unavailable`. Content denials are therefore not silently
+retried, but the fallback set is **not** the primary replay mechanism.
 
 ---
 
@@ -147,14 +157,16 @@ silently retried** through an idempotency replay.
 
 `ContentSafetyPhotoModerationService` (`app/photos.py:355–468`). An async
 HTTP client that calls the Azure AI Content Safety image-analysis endpoint.
-Applies **only to reference photos** (saved and inline). It does **not**
-run on card text or generated images.
+Today it runs **only on the saved-photo write path**: direct library uploads
+and generation requests that use `save_photo=true` (because those requests
+call `SavedPhotoService.save_photo()` first). It does **not** run on card
+text, generated images, or unsaved inline reference-image uploads.
 
 ### Configuration
 
 | Environment variable | Default | Notes |
 |----------------------|---------|-------|
-| `CONTENT_SAFETY_ENDPOINT` | `FOUNDRY_ENDPOINT` fallback | If absent, upload is **blocked** (503) |
+| `CONTENT_SAFETY_ENDPOINT` | `FOUNDRY_ENDPOINT` fallback | If absent, saved-photo upload is **blocked** (503) |
 | `CONTENT_SAFETY_API_VERSION` | `2024-09-01` | Azure Content Safety API version |
 | `CONTENT_SAFETY_MAX_HATE_SEVERITY` | `2` | Must be 0, 2, 4, or 6 |
 | `CONTENT_SAFETY_MAX_SELF_HARM_SEVERITY` | `2` | Must be 0, 2, 4, or 6 |
@@ -169,22 +181,25 @@ HTTP timeout: 30 seconds (`app/photos.py:443`).
 ### When triggered
 
 `ContentSafetyPhotoModerationService.assert_allowed()` is called from
-`SavedPhotoService.save_photo()` (`app/photos.py:514`) before the photo is
+`SavedPhotoService.save_photo()` (`app/photos.py:483–524`) before the photo is
 written to Blob Storage. It is called:
 
 1. When a user uploads a photo to the library (`POST /my/photos`,
-   `app/main.py:408–424`).
+   `app/main.py:419`).
 2. When a user submits a card-generation request with `save_photo=true` and
-   an inline photo upload (`app/main.py:732–735`, `app/main.py:863–866`).
+   an inline photo upload (`app/main.py:732–735`, `app/main.py:864–866`).
 
 Photos loaded from the library for use in card generation (via
-`photo_service.load_reference_image()`) were already safety-checked at
-upload time; they are **not** re-checked at generation time.
+`photo_service.load_reference_image()`) were already safety-checked at upload
+time; they are **not** re-checked at generation time.
+
+**Current gap:** inline uploads used directly for reference-image generation
+with `save_photo=false` bypass this layer entirely.
 
 ### Pre-safety size gate
 
 Before calling Content Safety, `save_photo()` checks that the photo does
-not exceed `SAVED_PHOTO_MAX_BYTES` (default 4 MB, `app/photos.py:500–510`).
+not exceed `SAVED_PHOTO_MAX_BYTES` (default 4 MB, `app/photos.py:491–500`).
 Oversized photos return `413 saved_photo_too_large` before any Content
 Safety call is made.
 
@@ -194,7 +209,7 @@ Safety call is made.
 POST {CONTENT_SAFETY_ENDPOINT}/contentsafety/image:analyze
      ?api-version={CONTENT_SAFETY_API_VERSION}
 Content-Type: application/json
-Authorization: Bearer <managed-identity-token>
+Authorization: ******
 
 {
   "image": {"content": "<base64-encoded bytes>"},
@@ -206,12 +221,14 @@ Authorization: Bearer <managed-identity-token>
 Categories constant: `CONTENT_SAFETY_CATEGORIES = ("Hate", "SelfHarm", "Sexual", "Violence")`
 (`app/photos.py:28`).
 
-`FourSeverityLevels` produces integer severity scores in `{0, 2, 4, 6}`.
+`FourSeverityLevels` is requested so the response is expected to carry integer
+severity scores in `{0, 2, 4, 6}`.
 
 ### Decision logic
 
 ```python
-# app/photos.py:394–415
+# app/photos.py:386–398
+analysis = response.get("categoriesAnalysis") or []
 rejected = [r for r in results if r.severity > threshold_for_category(r.category)]
 ```
 
@@ -219,28 +236,43 @@ Severity **strictly greater than** the configured threshold triggers a
 rejection. At the default threshold of `2`, severities `4` and `6` are
 blocked; severities `0` and `2` are allowed.
 
+**Current gap:** the implementation does **not** require explicit evidence for
+all requested categories. `categoriesAnalysis` missing or empty becomes `[]`;
+missing `severity` becomes `0`; missing/unknown `category` becomes `""` and
+uses threshold `0`. If no parsed result exceeds a threshold, the photo is
+allowed. The current service therefore does **not** enforce “all categories
+explicitly allowed” yet. The future contract should treat missing required
+category evidence as INDETERMINATE / block, not as allow.
+
 ### Output
 
-| Condition | `error_code` | HTTP status |
-|-----------|-------------|------------|
-| Endpoint not configured (`CONTENT_SAFETY_ENDPOINT` absent) | `photo_moderation_unconfigured` | `503` |
-| Azure API returned HTTP `4xx`/`5xx` | From `error.code` or `"content_safety_failed"` | `503` |
-| Network/timeout error (`UpstreamServiceError`) | `photo_moderation_unavailable` | `503` |
-| Any category severity > threshold | `saved_photo_rejected` | `422` |
-| All categories within threshold | *(list of `ContentSafetyCategoryResult`)* | — (no exception) |
+| Condition | External result | HTTP status |
+|-----------|-----------------|------------|
+| Endpoint not configured (`CONTENT_SAFETY_ENDPOINT`/fallback absent) | `photo_moderation_unconfigured` | `503` |
+| Azure API returned HTTP `4xx`/`5xx` | `photo_moderation_unavailable` | `503` |
+| Any parsed category severity > threshold | `saved_photo_rejected` | `422` |
+| No parsed result exceeds threshold | Returns `list[ContentSafetyCategoryResult]` | — (no exception) |
+| `httpx.RequestError`, credential acquisition failure, malformed success JSON, or malformed success response shape | **Not normalized by this service** | Service-level behavior undefined here; outer exception handling decides |
 
-Retryable upstream errors from `_post()` use the status set
-`{408, 429, 500, 502, 503, 504}` (`app/photos.py:452–456`). The
-`assert_allowed()` wrapper does **not** retry; it converts any
-`UpstreamServiceError` into a single `503 photo_moderation_unavailable`
-response.
+`_post()` wraps only HTTP error responses in `UpstreamServiceError`
+(`app/photos.py:445–456`). `assert_allowed()` then converts that wrapped
+error into a single `503 photo_moderation_unavailable` response. Upstream
+status codes and Azure `error.code` values are therefore kept for internal
+classification/logging only; they are not exposed as distinct public problem
+codes by this service.
+
+The service does **not** promise that every failure becomes a named `503`.
+Transport errors, token failures, `response.json()` parsing failures, and
+success-payload shape errors currently escape the `UpstreamServiceError` catch
+and are not normalized here.
 
 ### Critical: unconfigured endpoint is a BLOCK, not a pass
 
 If `CONTENT_SAFETY_ENDPOINT` is absent (and `FOUNDRY_ENDPOINT` is also
 absent), `assert_allowed()` raises `503 photo_moderation_unconfigured` and
-the photo is rejected. The system **never** silently skips Content Safety
-to allow an upload through. This is intentional and must be preserved.
+the saved-photo write is rejected. The system does not silently skip Content
+Safety on that saved-photo path. This must remain true for any future agent
+or fallback path as well.
 
 ---
 
@@ -264,65 +296,67 @@ in the moderation audit trail.
 
 ## 5. Conflict precedence — current implementation
 
-Because heuristic moderation (Layer 1) and Azure Content Safety (Layer 2)
-operate on **different inputs at different stages**, there are no conflicts
-between them today. The rules below express the implemented behavior in
-contract form so they can be preserved when new layers are added.
+Today's shipped layers are mostly disjoint rather than comprehensive:
+heuristic moderation handles card text and generated-image payload checks,
+while Content Safety handles only the saved-photo write path. There is
+therefore little true multi-layer arbitration on the same payload today — and
+there are also known bypass/missing-evidence gaps that must not be described
+as stronger than they are.
 
 ### 5.1 Text pipeline — heuristic only
 
-No second layer exists for card text. The rules are:
+No second layer exists for card text today. The rules are:
 
 1. Heuristic decision at `pre_prompt` runs first. BLOCK → abort immediately;
    no further stages run.
-2. Heuristic decision at `post_text`, then `post_art_prompt` run in
+2. Heuristic decisions at `post_text`, then `post_art_prompt`, run in
    sequence. Each BLOCK aborts the pipeline.
-3. Heuristic decision at `post_image` runs last. BLOCK → partial persist
-   (no abort, no HTTP error).
+3. Heuristic decision at `post_image` runs only after image generation/edit
+   succeeds. BLOCK → partial persist (no abort, no HTTP error).
 
-### 5.2 Reference photo pipeline — Content Safety only
+### 5.2 Reference photo pipeline — saved-photo gate only
 
-No heuristic layer applies to photos. Content Safety is the sole
-authoritative gate.
+No heuristic layer applies to uploaded reference photos. Content Safety is
+currently the sole authoritative gate **only when the request actually goes
+through `save_photo()`**. Unsaved inline reference-image uploads do not hit
+Content Safety today.
 
-### 5.3 General precedence rules (current + future contract)
+### 5.3 General precedence rules (current behavior vs future policy)
 
-These rules apply when multiple layers evaluate the same input.
-
-| Rule | Statement |
-|------|-----------|
-| **Authoritative BLOCK wins** | If any authoritative layer returns a BLOCK, the request is rejected. No subsequent allow from any other layer or agent can reverse it. |
-| **Required layer unavailable → INDETERMINATE, not pass** | If a required active moderation layer cannot be reached (network failure, unconfigured endpoint), the request is blocked or held, not silently passed. |
-| **Allow requires explicit allow from all required layers** | A request is only considered allowed when every required active layer has returned an explicit allow. Absence of a decision from a layer that should have run is not an allow. |
-| **Inactive/not-yet-deployed layer is not an outage** | A layer that is intentionally inactive (e.g., Foundry guardrails before agent integration) is treated as "not applicable" for this configuration, not as a transient outage. It does not cause an INDETERMINATE result. |
-| **Agent refusal ≠ authoritative BLOCK** | A refusal from the Foundry hosted agent (proposed) is a creative or policy guidance signal, not an authoritative safety decision. The backend's deterministic moderation layers remain the authority for enforcement. |
-| **Transient errors ≠ content denial** | A 503 from a required moderation service (timeout, API error) must not be treated as a pass. It must surface as a distinct technical failure. Content denials (422) and technical failures (503) must not be conflated in client responses or audit records. |
-| **Rejection does not fall back to a less-moderated path** | If the moderation-enabled path is unavailable, the request fails with an appropriate error. The system never degrades to a path with fewer safety gates to serve the request. |
+| Rule | Current implementation | Required future contract |
+|------|------------------------|--------------------------|
+| **Authoritative deny wins** | Heuristic text denials abort; saved-photo Content Safety denials reject the save; post-image heuristic denial preserves safe text and marks artwork retryable. | Any authoritative deny — including a managed guardrail denial — must stop the protected path. No later allow may reverse it. |
+| **Optional advisory signals are not authoritative** | No advisory agent layer exists today. | An optional safety-review skill may advise only. That does **not** apply to the orchestrator's own structured refusal/failure payload or to managed guardrail denials. |
+| **Structured refusal/failure is not permission** | N/A today. | If the hosted orchestrator cannot safely continue and returns a structured refusal/failure payload, the backend must map that outcome to an error response. Ambiguous or unclassified refusal is not an allow and must not trigger a fail-open retry/direct path. |
+| **Required layer unavailable or indeterminate → not pass** | Saved-photo Content Safety unconfigured/HTTP-error cases block. But missing category evidence is a current gap that can still allow. | Required active layers must either return sufficient evidence or block/hold as INDETERMINATE. Missing evidence must not be treated as allow. |
+| **Inactive is not outage** | Foundry guardrails are not integrated, so they are simply not applicable today. | A layer intentionally not adopted/configured as required is inactive; a layer configured as required but unreachable is an outage. |
+| **Fallback cannot weaken safety** | Current code does not fall back from saved-photo moderation to a lighter path, but unsaved inline reference images already bypass Content Safety as a known gap. | Any future direct fallback may run only after an eligible technical failure and must rerun every required active safety layer on the replacement output, or fail/hold if that cannot be done. |
 
 ---
 
 ## 6. Decision classification
 
-This table consolidates the possible outcomes across both active layers plus
-the proposed future layer, distinguishing content decisions from technical
-errors.
+This table distinguishes current enforced outcomes, current gaps, and future
+agent-layer outcomes without inventing an agent status schema that does not
+yet exist.
 
-| Outcome | Classification | Current producer | HTTP |
-|---------|---------------|-----------------|------|
-| Heuristic BLOCK (text stage) | Content denial | `HeuristicModerationService` | `422` |
-| Heuristic BLOCK (image stage) | Content denial (partial) | `HeuristicModerationService` | `200` (awaiting retry) |
-| Content Safety BLOCK (severity > threshold) | Content denial | `ContentSafetyPhotoModerationService` | `422` |
-| Content Safety endpoint unconfigured | Configuration error (BLOCK) | `ContentSafetyPhotoModerationService` | `503` |
-| Content Safety API failure | Transient technical failure (BLOCK) | `ContentSafetyPhotoModerationService` | `503` |
-| Text model timeout/5xx (retryable, retries exhausted) | Transient technical failure | `_retry_upstream` | `504` |
-| Text model non-retryable error | Upstream failure | `_retry_upstream` | `502`/`503` |
-| Image model timeout/failure (no reference image) | Transient technical failure (partial) | `_retry_upstream` | `200` (awaiting retry) |
-| Image model timeout/failure (reference image) | Transient technical failure | `_retry_upstream` | `504`/`422` |
-| Overall request timeout at image stage | Transient technical failure (partial) | `asyncio.wait_for` | `200` (awaiting retry) |
-| Overall request timeout before text stage | Transient technical failure | `asyncio.wait_for` | `504` |
-| **[FUTURE]** Foundry guardrail BLOCK | Content denial (authoritative) | Foundry agent layer | `422` |
-| **[FUTURE]** Foundry guardrail unavailable | Configuration/transient failure (BLOCK) | Foundry agent layer | `503` |
-| **[FUTURE]** Advisory safety skill flag | Advisory signal only | Safety Review Specialist | *(agent-internal)* |
+| Outcome | Classification | Current producer | HTTP / external effect |
+|---------|---------------|-----------------|------------------------|
+| Heuristic BLOCK (`pre_prompt`, `post_text`, `post_art_prompt`) | Content denial | `HeuristicModerationService` | `422` |
+| Heuristic BLOCK (`post_image`) | Content denial on artwork; safe text preserved | `HeuristicModerationService` | `200` + `awaiting_artwork_retry` |
+| Content Safety threshold exceedance | Content denial | `ContentSafetyPhotoModerationService` | `422 saved_photo_rejected` |
+| Content Safety endpoint unconfigured on saved-photo path | Configuration failure (BLOCK) | `ContentSafetyPhotoModerationService` | `503 photo_moderation_unconfigured` |
+| Content Safety HTTP `4xx`/`5xx` from Azure | Technical failure (BLOCK) | `_post()` → `assert_allowed()` | `503 photo_moderation_unavailable` |
+| Content Safety transport/credential/malformed-success-response exception | Unhandled service exception | `_post()` / `assert_allowed()` | Not normalized here; outer exception handling decides (typically generic `500` if uncaught) |
+| Content Safety missing/empty category evidence | **Current gap** | `assert_allowed()` parsing defaults | May incorrectly allow |
+| Text model timeout/5xx (retries exhausted) | Transient technical failure | `_retry_upstream` | `504` |
+| Text model non-retryable error or invalid structured output | Upstream / technical failure | `_retry_upstream` / model validation | `502` |
+| Image model timeout/failure (no reference image) | Transient technical failure (partial) | `_retry_upstream` | `200` + `awaiting_artwork_retry` |
+| Image edit timeout/failure (reference image) before any image exists | Upstream / technical failure | `_retry_upstream` / `_reference_image_problem()` | `502` or `504` |
+| Successful image/edit followed by post-image heuristic BLOCK | Content denial on artwork only | `HeuristicModerationService` | `200` + `awaiting_artwork_retry` on both reference and non-reference paths |
+| **[FUTURE]** Managed guardrail denial | Authoritative denial | Foundry runtime + backend mapping | Backend-mapped `ProblemDetails`; no fallback around the deny |
+| **[FUTURE]** Hosted orchestrator structured refusal/failure payload | Authoritative refusal/failure input for backend | Hosted orchestrator + backend mapping | Backend-mapped `ProblemDetails`; no fail-open continuation |
+| **[FUTURE]** Optional advisory safety-skill flag | Advisory signal only | Safety Review Specialist | Agent-internal/advisory only |
 
 ---
 
@@ -332,17 +366,18 @@ errors.
 
 Not applicable. The service is in-process and deterministic. Identical input
 always produces identical output. The idempotency-replay behavior described
-in §2 ensures past blocks are replayed, not silently retried.
+in §2 ensures prior denials replay as denials rather than being silently
+retried.
 
 ### 7.2 Content Safety retries
 
 `assert_allowed()` does not retry internally. A single attempt is made; any
-upstream error raises `503 photo_moderation_unavailable` immediately. The
+wrapped upstream HTTP error becomes `503 photo_moderation_unavailable`. The
 caller (the photo save endpoint) does not retry.
 
-Retryable status codes for telemetry purposes: `{408, 429, 500, 502, 503, 504}`
-(`app/photos.py:452`). These affect how the error is classified in telemetry
-but do not change the HTTP response.
+Retryable status codes for telemetry/classification purposes remain
+`{408, 429, 500, 502, 503, 504}` (`app/photos.py:451–456`). Those codes do
+not change the external problem shape.
 
 ### 7.3 Image generation and `awaiting_artwork_retry`
 
@@ -353,21 +388,36 @@ persists a partial record and returns `status="awaiting_artwork_retry"`. A
 later explicit retry call (`POST /api/v1/cards/{card_id}/artwork/retry`) can
 attempt image generation again for that persisted card.
 
-Post-image heuristic moderation also runs on the retried image. A second
-BLOCK appends another `ModerationDecision` to the stored list and leaves the
-record as `awaiting_artwork_retry` again.
+For the reference-image edit path, **upstream edit failure** remains a hard
+error (`502`/`504`) and does not create an `awaiting_artwork_retry` record.
 
-For the **reference-image path**, `awaiting_artwork_retry` is **not** used.
-Image-edit failure returns a hard error (`504` or `422`).
+However, once either image path has successfully produced image bytes, the
+post-image heuristic moderation stage behaves the same on both paths: a BLOCK
+quarantines/rejects the artwork, preserves the already-validated text/art
+prompt, persists `awaiting_artwork_retry`, and returns `200`. `BLOCK wins` at
+that stage applies to the generated image output; it does not require deleting
+otherwise safe validated text.
 
 ### 7.4 [FUTURE] Agent hop retries
 
-Per the latency budget decision (`docs/architecture-agents-foundry.md §Latency
-budget findings`): the agent hop gets one 5 s attempt and one 3 s retry
-(8.15 s total). If the agent fails, the backend **degrades in-process to the
-current heuristic-only text path** (30.15 s emergency budget). This fallback
-runs **with** all existing moderation checkpoints intact; it is not a less-
-moderated path.
+Per the latency budget decision in
+[the Foundry architecture doc](architecture-agents-foundry.md#latency-budget-findings-issue-97),
+the agent hop keeps its agreed budgets unchanged: one 5 s attempt, one 3 s
+retry, and 0.15 s backoff (**8.15 s total**). The degraded legacy direct-text
+path likewise keeps its emergency budget unchanged (**30.15 s total**).
+
+That future direct fallback is eligible **only for technical failure modes**
+(such as timeout, retryable overload, transport failure, or invalid technical
+output) where no authoritative deny has already occurred. It must **not** run
+after a managed guardrail denial, after an orchestrator structured
+refusal/failure that the backend interprets as a safety/policy stop, or when a
+required active safety layer is unavailable/indeterminate for the replacement
+path.
+
+If fallback is used, the replacement path must still run every required active
+safety layer that applies to its own output. If a required active layer cannot
+run or does not return sufficient evidence, the result is fail/hold — not a
+heuristic-only escape hatch.
 
 ---
 
@@ -383,9 +433,15 @@ A reference photo may enter a card-generation request in two ways:
    to the image-edit endpoint.
 
 2. **Pre-saved library photo.** The photo was already checked by Content
-   Safety when it was uploaded to the library. `load_reference_image()`
+   Safety when it was uploaded through `save_photo()`. `load_reference_image()`
    retrieves the saved bytes from Blob and constructs a `ReferenceImageUpload`
    without a second Content Safety call.
+
+3. **Post-image moderation after generation/edit.** If the image generation or
+   image-edit call succeeds, the backend still runs heuristic `post_image`
+   checks on the generated output. A BLOCK there preserves valid text and
+   leaves the card in `awaiting_artwork_retry`; it is not a full-pipeline hard
+   failure.
 
 **Gap (current implementation):** An inline photo used with `save_photo=false`
 bypasses Content Safety. Only the post-image heuristic moderation (which
@@ -397,56 +453,60 @@ in a future issue; it is not addressed in this issue.
 
 ## 9. [FUTURE] Foundry guardrails integration contract
 
-This section describes the agreed contract for when Foundry guardrails are
-integrated (issue #109). **Nothing in this section is currently
-implemented.**
+This section describes the policy/runtime contract for any future Foundry
+guardrail adoption. It is **not** current behavior, and issue #109 by itself
+is only the endpoint/config/RBAC invocation integration follow-up — not proof
+that a full hosted runtime plus guardrail implementation is already enforced.
 
 ### Guardrail scope
 
-Foundry guardrails would apply at the hosted `card-orchestrator` agent
-boundary, covering agent-generated card text and art-prompt output.
+If adopted and configured as required, Foundry guardrails would apply at the
+hosted `card-orchestrator` boundary, covering agent-generated card text and
+art-prompt output.
 
 ### Precedence
 
-Foundry guardrails are authoritative. A BLOCK from Foundry guardrails has
-the same force as a heuristic BLOCK: the generation pipeline must not
-continue and the request must not fall back to a less-moderated path.
+Managed guardrail denials are authoritative. A denial from an adopted required
+guardrail must stop the protected path, and the request must not continue via
+a weaker retry/direct fallback. The backend still owns interpretation and
+client error mapping; this document does not define a concrete shipped agent
+status schema.
 
 ### Outage vs inactive
 
 | State | Classification | Behavior |
 |-------|----------------|---------|
-| Guardrails configured and reachable | Active | Normal enforcement |
-| Guardrails configured but endpoint unreachable | Transient outage (BLOCK) | Return 503; do not continue |
-| Guardrails not yet deployed / intentionally inactive | Inactive (not applicable) | Not an outage; existing heuristic layers remain the sole authority |
+| Guardrails adopted/configured as required and reachable | Active | Normal enforcement |
+| Guardrails adopted/configured as required but unreachable | Required-layer outage | Return failure/hold; do not continue |
+| Guardrails not yet adopted or intentionally optional in this deployment | Inactive (not applicable) | Not an outage; existing authoritative layers remain in force |
 
-An intentionally inactive Foundry guardrail layer must not cause an
-INDETERMINATE result or surface as a 503. The backend should have an explicit
-configuration flag that distinguishes "guardrails not configured yet" from
-"guardrails expected but unreachable".
+An intentionally inactive Foundry guardrail layer must not surface as a false
+`503`. Conversely, a required guardrail outage must not be downgraded into a
+heuristic-only pass.
 
 ### Layer ordering post-integration
 
-When guardrails are active, the intended order is:
+When guardrails are active, the intended ordering remains:
 
 1. Heuristic `pre_prompt` (before agent call)
-2. Foundry guardrails (inside or immediately after agent call)
-3. Heuristic `post_text` + `post_art_prompt` (after agent output is received)
-4. Image generation
+2. Foundry guardrails at/around the hosted orchestrator boundary
+3. Heuristic `post_text` + `post_art_prompt` on the received text output
+4. Image generation/edit
 5. Heuristic `post_image`
 
-All layers run. A BLOCK at any authoritative stage terminates the pipeline
-with an appropriate error. No layer's allow can override a prior authoritative
-BLOCK.
+This does **not** mean every later stage runs after an earlier authoritative
+block. Early denies still short-circuit later work. It does mean that every
+required active layer applicable to the chosen successful path must run on that
+path's output before the result is treated as allowed.
 
 ### Advisory safety skill
 
 If a MAF safety-review skill is added (see
-`docs/architecture-agents-foundry.md §Safety Review Specialist`), its output
-is advisory. It may flag content for increased scrutiny or generate guidance
-for the orchestrator, but it does **not** replace any authoritative layer.
-A flag from the advisory skill without a corresponding authoritative BLOCK
-does not block the request.
+[the Foundry architecture doc](architecture-agents-foundry.md#5-safety-review-specialist--optional-advisory-only)),
+its output remains advisory. It may flag risk or suggest extra scrutiny, but
+it does **not** replace deterministic/backend-managed enforcement and does not
+turn an orchestrator refusal or managed guardrail denial into something
+optional.
 
 ---
 
@@ -455,6 +515,8 @@ does not block the request.
 | Gap | Detail | Tracking |
 |-----|--------|---------|
 | Inline reference photo Content Safety bypass | Photos submitted inline with `save_photo=false` are not checked by Content Safety before the image-edit call. | Open — future issue |
-| Foundry guardrails not integrated | No guardrail layer exists for agent-generated text. The heuristic service is the only text-moderation authority. | Open — issue #109 |
-| `MODERATION_SERVICE` single-value lock | `app/settings.py:231` enforces `MODERATION_SERVICE == "heuristic"`. Adding Azure Content Safety to card text or image paths requires removing this validation guard first. | Open — scope of future runtime integration issue |
+| Content Safety missing-evidence gap | `categoriesAnalysis` may be absent/empty, categories may be missing, and severities may default to `0`; the current parser can still allow without complete required evidence. | Open — policy/runtime follow-up |
+| Content Safety exception-normalization gap | `assert_allowed()` normalizes only `UpstreamServiceError` (HTTP error responses). Transport errors, credential failures, malformed JSON, and malformed success payload shapes are not normalized here. | Open — backend hardening follow-up |
+| Foundry guardrails not integrated | No guardrail layer exists for agent-generated text. If guardrails are later adopted as required, their runtime/policy enforcement is a follow-up beyond #109's endpoint/config/RBAC integration scope. | Open — future runtime/policy follow-up |
+| `MODERATION_SERVICE` single-value lock | `app/settings.py:231` enforces `MODERATION_SERVICE == "heuristic"`. Extending additional moderation engines into text/image paths requires revisiting that validation guard. | Open — scope of future runtime integration issue |
 | Advisory safety skill not implemented | The optional MAF safety-review skill described in the architecture is not built. | Open — proposed phase 2+ |
