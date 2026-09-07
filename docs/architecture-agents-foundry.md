@@ -804,3 +804,85 @@ That leaves roughly **36.70 seconds** inside the current 225-second request ceil
 Proceed with a **single Foundry hosted orchestrator agent built with Microsoft Agent Framework**, integrated into the existing backend as a new upstream dependency for card-design reasoning only.
 
 Do **not** move auth, persistence, or image-retry control into the agent layer. Do **not** start with a broad toolbox. Keep the current FastAPI + Container Apps application as the stable shell, and let the agent layer evolve behind that boundary.
+
+---
+
+## Moderation and safety contract (issue #101)
+
+The full contract — active layers, stages, conflict precedence, error
+classification, retry/fallback rules, and current gaps — lives in
+[architecture-agents-safety.md](architecture-agents-safety.md).
+
+The integration-relevant summary is:
+
+### Active layers today (backend-only)
+
+Two backend moderation layers are active today, but they do **not** cover the
+same inputs:
+
+1. **Heuristic moderation** (`app/generation.py`,
+   `HeuristicModerationService`) applies to card text and generated-image
+   payload checks at `pre_prompt`, `post_text`, `post_art_prompt`, and
+   `post_image`. It is deterministic and authoritative for those stages.
+
+2. **Azure AI Content Safety** (`app/photos.py`,
+   `ContentSafetyPhotoModerationService`) applies only on the saved-photo
+   write path: library uploads and generation requests that use
+   `save_photo=true` before persistence. Unsaved inline reference-image
+   uploads still bypass this layer today.
+
+Azure Content Safety is not used for card text or generated images today, and
+`MODERATION_SERVICE` remains locked to `"heuristic"`.
+
+### Precedence rules summary
+
+- **Authoritative backend deny wins.** No agent allow, retry, or fallback may
+  reverse an authoritative backend denial.
+- **Optional advisory safety signals stay advisory.** The proposed Safety
+  Review Specialist remains optional/advisory only.
+- **Hosted-orchestrator structured refusal/failure is not optional advice.**
+  The original architecture already requires the app to map a structured
+  refusal/failure payload into `ProblemDetails`; that outcome must not be
+  bypassed by direct fallback as though it were merely advisory.
+- **Managed guardrail denial is likewise authoritative if guardrails are later
+  adopted/configured as required.**
+- **The future 8.15 s agent budget and 30.15 s degraded direct-path budget do
+  not authorize a safety bypass.** Direct fallback is a technical-failure
+  policy only and must still run every required active safety layer that
+  applies to the replacement output.
+- **Required-layer outage or missing required evidence is not allow.** Inactive
+  means “not applicable”; unavailable or indeterminate required safety means
+  fail/hold.
+
+### Conflict and precedence table
+
+| Scenario | Current behavior | [FUTURE] behavior |
+|----------|------------------|------------------|
+| Heuristic BLOCK on text stage | `422`; later stages do not run | Same |
+| Heuristic BLOCK on `post_image` after image/image-edit success | `200` + `awaiting_artwork_retry`; safe text stays persisted | Same |
+| Saved-photo Content Safety threshold exceedance | `422 saved_photo_rejected` | Same |
+| Saved-photo Content Safety endpoint missing or Azure HTTP error | `503`; upload blocked | Same |
+| Saved-photo Content Safety missing category evidence | **Current gap:** parser may still allow | Treat as INDETERMINATE / block if that layer is required |
+| Hosted orchestrator structured refusal/failure + heuristic ALLOW | N/A | Backend maps refusal/failure to `ProblemDetails`; no fail-open direct fallback |
+| Optional advisory safety-skill concern + no authoritative deny | N/A | Advisory only; backend/managed authoritative layers still decide |
+| Managed guardrail denial + heuristic ALLOW | N/A | Deny; no fallback around the guardrail |
+| Agent technical failure with no authoritative deny | N/A | Eligible for direct fallback only if the replacement path still runs all required active safety layers |
+| Upstream image-edit failure on reference-image path | Hard error (`502`/`504`) | Same unless future policy explicitly changes it |
+| Successful reference-image edit followed by `post_image` heuristic BLOCK | `200` + `awaiting_artwork_retry` | Same |
+| Idempotency replay of current `audit_failed` record | Replays stored structured failure fields first; legacy reason-code fallback is secondary | Same |
+
+### Open gaps relevant to agent integration
+
+1. **Unsaved inline reference photos still bypass Content Safety.** See
+   [architecture-agents-safety.md §8](architecture-agents-safety.md#8-photo-moderation-and-card-generation--interaction).
+2. **Content Safety still has missing-evidence and exception-normalization
+   gaps.** Today, absent/empty `categoriesAnalysis` can still allow, and not
+   every service failure becomes a named `503`. See
+   [architecture-agents-safety.md §3](architecture-agents-safety.md#3-layer-2--azure-ai-content-safety-reference-photo-uploads).
+3. **Foundry guardrails are not yet integrated.** Issue #109 is the
+   endpoint/config/RBAC invocation follow-up, not automatic proof that the
+   full hosted runtime plus guardrail enforcement exists. If the team later
+   adopts guardrails as required, follow
+   [architecture-agents-safety.md §9](architecture-agents-safety.md#9-future-foundry-guardrails-integration-contract).
+4. **`MODERATION_SERVICE` is still single-engine.** Extending additional
+   moderation engines into card-text paths requires revisiting that lock.
