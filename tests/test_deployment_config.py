@@ -571,78 +571,39 @@ def test_blob_storage_uses_private_endpoint_for_container_app_access() -> None:
 
 
 def test_key_vault_private_endpoint_enables_container_app_vault_access() -> None:
-    """Assert Private Endpoint posture for Key Vault (issue #103 fix, 2026-09-07).
-
-    Root cause (established 2026-09-07 by Gimli live diagnosis):
-    Key Vault is deployed with publicNetworkAccess: 'Disabled' but had no private
-    endpoint. ACA containers egress via NAT Gateway (public IP); requests to
-    kvfcagdev*.vault.azure.net resolved to the vault's public IP and were rejected
-    with HTTP 403 by the vault network firewall, causing startup failure with
-    SecretProviderError(error_category=access_denied) at session_middleware.py:66.
-
-    RBAC is correct and unchanged — Key Vault Secrets User (role ID
-    4633458b-17de-408a-b874-0445c86b69e6) grants:
-      - Microsoft.KeyVault/vaults/secrets/getSecret/action   (read current value)
-      - Microsoft.KeyVault/vaults/secrets/readMetadata/action (list versions)
-    readMetadata covers secret version enumeration, so no additional RBAC is needed.
-    The prior claim in issue #103 that Key Vault Secrets User lacks list-versions
-    permission was incorrect; the sole blocker was network connectivity.
-
-    Fix: keyvault-private-endpoint.bicep provisions a PE in the private-endpoints
-    subnet, privatelink.vaultcore.azure.net DNS zone, and VNet link so the ACA
-    container resolves the vault FQDN to a private IP within the VNet.
-
-    Module uses AVM avm/res/network/private-endpoint:0.12.1 (verified available via
-    MCR tags list; resolves cleanly with az bicep build). DNS zone and VNet link use
-    native resources, consistent with the existing cosmos and storage PE pattern.
-    """
     kv_pe_bicep = (REPO_ROOT / "infra" / "modules" / "keyvault-private-endpoint.bicep").read_text()
     main_bicep = (REPO_ROOT / "infra" / "main.bicep").read_text()
     security_bicep = (REPO_ROOT / "infra" / "modules" / "security.bicep").read_text()
+    dns_module = _bicep_block(kv_pe_bicep, "module kvPrivateDnsZone ")
+    endpoint_module = _bicep_block(kv_pe_bicep, "module kvPrivateEndpoint ")
+    root_module = _bicep_block(main_bicep, "module keyVaultPrivateEndpoint ")
 
-    # Module must exist and reference the correct Key Vault group ID
-    assert "keyvault-private-endpoint.bicep" in kv_pe_bicep or True  # existence verified by read
-    assert "'vault'" in kv_pe_bicep
-
-    # Private DNS zone for Key Vault data plane
+    assert "br/public:avm/res/network/private-dns-zone:" in dns_module
+    assert "br/public:avm/res/network/private-endpoint:" in endpoint_module
     assert "privatelink.vaultcore.azure.net" in kv_pe_bicep
+    assert "name: kvPrivateDnsZoneName" in dns_module
+    assert "virtualNetworkLinks:" in dns_module
+    assert "virtualNetworkResourceId: virtualNetworkResourceId" in dns_module
+    assert "registrationEnabled: false" in dns_module
+    assert "groupIds: [\n            'vault'\n          ]" in endpoint_module
+    assert "privateLinkServiceId: keyVaultResourceId" in endpoint_module
+    assert "subnetResourceId: privateEndpointSubnetResourceId" in endpoint_module
+    assert "privateDnsZoneGroup:" in endpoint_module
+    assert "privateDnsZoneResourceId: kvPrivateDnsZone.outputs.resourceId" in endpoint_module
+    assert "enableTelemetry: false" in dns_module
+    assert "enableTelemetry: false" in endpoint_module
 
-    # All four required resource types present in module
-    assert "Microsoft.Network/privateDnsZones@" in kv_pe_bicep
-    assert "Microsoft.Network/privateDnsZones/virtualNetworkLinks@" in kv_pe_bicep
-    # AVM module handles the PE and DNS zone group (verified by br/public: reference)
-    assert "br/public:avm/res/network/private-endpoint:" in kv_pe_bicep
-    assert "privateDnsZoneGroup:" in kv_pe_bicep
-
-    # VNet link must not enable auto-registration (vault is not a VM/DNS registrant)
-    assert "registrationEnabled: false" in kv_pe_bicep
-
-    # Telemetry disabled — no anonymous usage reporting from this deployment
-    assert "enableTelemetry: false" in kv_pe_bicep
-
-    # Module wired into main.bicep with correct output references
-    assert "modules/keyvault-private-endpoint.bicep" in main_bicep
-    assert "keyVaultResourceId: security.outputs.keyVaultResourceId" in main_bicep
-    assert "keyVaultName: security.outputs.keyVaultName" in main_bicep
+    assert "modules/keyvault-private-endpoint.bicep" in root_module
+    assert "keyVaultResourceId: security.outputs.keyVaultResourceId" in root_module
+    assert "keyVaultName: security.outputs.keyVaultName" in root_module
     assert (
         "privateEndpointSubnetResourceId: network.outputs.privateEndpointSubnetResourceId"
-        in main_bicep
+        in root_module
     )
-    assert "virtualNetworkResourceId: network.outputs.virtualNetworkResourceId" in main_bicep
-
-    # security.bicep must output keyVaultResourceId so main.bicep can pass it to the PE module
+    assert "virtualNetworkResourceId: network.outputs.virtualNetworkResourceId" in root_module
     assert "output keyVaultResourceId string" in security_bicep
-
-    # Key Vault publicNetworkAccess remains Disabled — PE is the only access path
     assert "publicNetworkAccess: 'Disabled'" in security_bicep
-
-    # No Container App dependency on the PE module — avoids a startup cycle with RBAC
-    kv_pe_block_start = main_bicep.find("module keyVaultPrivateEndpoint")
-    kv_pe_block_end = main_bicep.find("\n}", kv_pe_block_start) + 2
-    kv_pe_block = main_bicep[kv_pe_block_start:kv_pe_block_end]
-    assert "containerApps" not in kv_pe_block
-
-    # Key Vault Secrets User RBAC remains unchanged — readMetadata covers listing
+    assert "containerApps" not in root_module
     assert "keyVaultSecretsUserRoleDefinitionId" in main_bicep
     assert "'4633458b-17de-408a-b874-0445c86b69e6'" in main_bicep
 

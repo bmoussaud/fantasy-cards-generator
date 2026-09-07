@@ -126,14 +126,24 @@ to propagate, so post-provision access checks should retry.
 
 RBAC does not bypass network controls. Blob reads still require a
 VNet-connected environment with working private DNS because Storage keeps
-`publicNetworkAccess: Disabled` and its private endpoint. Cosmos reads must
-originate from the configured NAT or temporary legacy firewall path. Key Vault
+`publicNetworkAccess: Disabled` and its private endpoint. Cosmos reads likewise
+use its private endpoint and VNet-linked private DNS zone. Key Vault
 data-plane calls also require the private endpoint path — the vault is deployed
 with `publicNetworkAccess: 'Disabled'` and no network ACLs; without the private
 endpoint the ACA container's egress (via NAT Gateway, public IP) is rejected
 with HTTP 403 by the vault firewall. The `keyvault-private-endpoint.bicep` module
 provisions the private endpoint, `privatelink.vaultcore.azure.net` private DNS
-zone, and VNet link as part of every `azd provision`.
+zone, and VNet link as part of every `azd provision`. It uses pinned AVM modules
+for both the private endpoint and the DNS zone with its VNet link.
+
+For a targeted repair of an existing environment, this module can be applied
+independently with `az deployment group what-if` followed by
+`az deployment group create`, supplying only the existing vault, subnet and VNet
+resource IDs plus the vault name and location. Review the incremental change set
+before applying it. This avoids unrelated full-provision effects: the current
+`postprovision` hook creates a new Entra client credential, and provisioning
+without `containerImage` selects the bootstrap image. Normal full-environment
+orchestration remains `azd`.
 
 Why the extra env var:
 
