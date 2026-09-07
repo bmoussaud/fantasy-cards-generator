@@ -47,6 +47,9 @@
     "healthzBlobTimeoutMs": {
       "value": "${HEALTHZ_BLOB_TIMEOUT_MS=1500}"
     },
+    "enableFoundryAgentAccess": {
+      "value": "${ENABLE_FOUNDRY_AGENT_ACCESS=false}"
+    },
     "contentSafetyEndpoint": {
       "value": "${CONTENT_SAFETY_ENDPOINT=}"
     },

@@ -87,6 +87,9 @@ param persistenceMode string = 'azure'
 @description('Azure AI Foundry endpoint injected as FOUNDRY_ENDPOINT.')
 param foundryEndpoint string = ''
 
+@description('Azure AI Foundry project endpoint injected as FOUNDRY_PROJECT_ENDPOINT.')
+param foundryProjectEndpoint string = ''
+
 @description('Azure AI Foundry API version injected as FOUNDRY_API_VERSION.')
 param foundryApiVersion string = '2025-03-01-preview'
 
@@ -278,6 +281,10 @@ var containerAppEnv = concat(
     {
       name: 'FOUNDRY_ENDPOINT'
       value: foundryEndpoint
+    }
+    {
+      name: 'FOUNDRY_PROJECT_ENDPOINT'
+      value: foundryProjectEndpoint
     }
     {
       name: 'FOUNDRY_API_VERSION'
