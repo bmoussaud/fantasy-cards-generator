@@ -47,36 +47,48 @@ Squad and all spawned agents may be running inside a **git worktree** rather tha
 
 ### Worktree Lifecycle Management
 
-When worktree mode is enabled, the coordinator creates dedicated worktrees for issue-based work. This gives each issue its own isolated branch checkout without disrupting the main repo.
+**Project Policy (overrides runtime defaults):** In this repository, the coordinator MUST explicitly create or reuse an isolated worktree for each independent parallel writing workstream, regardless of whether `SQUAD_WORKTREES` is set or any runtime worktree-auto-creation flag is enabled. This is a manual enforcement procedure, not an automatic tool hook.
 
-**Worktree mode activation:**
+- One issue may require **multiple independent writers** — each must have its own dedicated branch and worktree, or work must be explicitly serialized (one writer active at a time).
+- The same shared checkout is **not parallel-safe** for concurrent writers, even when they appear to modify different files.
+- Each worktree's `TEAM_ROOT` resolves to its own worktree root by default; all `.squad/` writes go there.
+
+**Worktree mode activation (runtime options — project policy above takes precedence):**
 - Explicit: `worktrees: true` in project config (squad.config.ts or package.json `squad` section)
 - Environment: `SQUAD_WORKTREES=1` set in environment variables
 - Default: `false` (backward compatibility — agents work in the main repo)
+- These runtime flags affect auto-creation behavior but do not change the project enforcement requirement above.
 
 **Creating worktrees:**
-- One worktree per issue number
-- Multiple agents on the same issue share a worktree
-- Path convention: `{repo-parent}/{repo-name}-{issue-number}`
-  - Example: Working on issue #42 in `C:\src\squad` → worktree at `C:\src\squad-42`
-- Branch: `squad/{issue-number}-{kebab-case-slug}` (created from base branch, typically `main`)
+- One worktree per independent writing workstream (a single issue may need multiple worktrees if it has multiple concurrent writers)
+- Multiple agents on the same issue and same workstream share a worktree only when they do **not** write concurrently
+- Path convention: `{repo-parent}/{repo-name}-{issue-number}` (or `-{slug}` for non-issue work)
+  - Example: Working on issue #42 in `/workspaces/fantasy-cards-generator` → worktree at `/workspaces/fantasy-cards-generator-42`
+- Branch: `squad/{issue-number}-{kebab-case-slug}` (created from `main`)
 
-**Dependency management:**
-- After creating a worktree, link `node_modules` from the main repo to avoid reinstalling
-- Windows: `cmd /c "mklink /J {worktree}\node_modules {main-repo}\node_modules"`
-- Unix: `ln -s {main-repo}/node_modules {worktree}/node_modules`
-- If linking fails (permissions, cross-device), fall back to `npm install` in the worktree
+**Dependency management (Python/uv):**
+- This is a Python application — do not link or install `node_modules`.
+- Each worktree uses its own uv environment. Only restore/install dependencies if:
+  - The chosen command fails due to missing dependencies, OR
+  - `pyproject.toml` or `uv.lock` changed since the last install.
+- The existing uv runner handles dependency restoration automatically when needed; do not install proactively.
 
 **Reusing worktrees:**
-- Before creating a new worktree, check if one exists for the same issue
-- `git worktree list` shows all active worktrees
-- If found, reuse it (cd to the path, verify branch is correct, `git pull` to sync)
-- Multiple agents can work in the same worktree concurrently if they modify different files. Untracked files are still at risk: a global `git stash` / `git clean` from one agent can delete another agent's not-yet-committed files — prefer per-issue worktrees for parallel background work
+- Before creating a new worktree, check if one exists: `git worktree list`
+- **Only reuse after all of the following are confirmed:**
+  1. The path exists and the branch matches the intended workstream
+  2. `git status --short` is empty — no uncommitted work from a prior session
+  3. No other active agent currently owns that worktree
+  4. The local branch has not diverged from origin (check `git status -sb` before syncing)
+- To sync an eligible worktree: `git pull --ff-only origin {branch}` — if this fails, the branch has diverged; do not force.
+- **Do not share a worktree across concurrent independent writing agents.** Even modifying different files is not parallel-safe: a global stash, reset, or clean from one agent can destroy another agent's uncommitted work. Independent parallel writers require separate branches and separate worktrees with explicit ownership assignment.
 
 **Cleanup:**
-- After a PR is merged, the worktree should be removed
-- `git worktree remove {path}` + `git branch -d {branch}`
-- Ralph heartbeat can trigger cleanup checks for merged branches
+- After a PR is merged, follow the full safe cleanup steps from the git-workflow skill (`SKILL.md`) — including headRefOid comparison, `--force-with-lease` for remote deletion, ancestry check, and archive tag if the original head is not reachable from main.
+- **Preflight:** Confirm no active agent owns the worktree and there is no uncommitted work before removing.
+- `git worktree remove {path}` removes the working directory only — the branch and stash are not affected.
+- Run `git worktree prune --dry-run` before `git worktree prune` to confirm only stale/unmounted paths will be removed.
+- Ralph heartbeat can trigger cleanup checks for merged branches.
 
 ### Pre-Spawn: Worktree Setup
 
@@ -96,10 +108,10 @@ a. **Determine the worktree path:**
 
 b. **Check if worktree already exists:**
    - Run `git worktree list` to see all active worktrees
-   - If the worktree path already exists → **reuse it**:
+   - If the worktree path already exists → **check before reusing**:
      - Verify the branch is correct (should be `squad/{issue-number}-*`)
-     - `cd` to the worktree path
-     - `git pull` to sync latest changes
+     - Verify `git status --short` is empty and no other active agent owns this path
+     - If clean and unowned: `git pull --ff-only origin {branch}` (fail if diverged — do not force)
      - Skip to step (e)
 
 c. **Create the worktree:**
@@ -108,12 +120,10 @@ c. **Create the worktree:**
    - Run: `git worktree add {path} -b {branch} {baseBranch}`
    - Example: `git worktree add C:\src\squad-42 -b squad/42-fix-login main`
 
-d. **Set up dependencies:**
-   - Link `node_modules` from main repo to avoid reinstalling:
-     - Windows: `cmd /c "mklink /J {worktree}\node_modules {main-repo}\node_modules"`
-     - Unix: `ln -s {main-repo}/node_modules {worktree}/node_modules`
-   - If linking fails (error), fall back: `cd {worktree} && npm install`
-   - Verify the worktree is ready: check build tools are accessible
+d. **Set up dependencies (Python/uv):**
+   - This is a Python application — do not link or install `node_modules`.
+   - Only restore uv dependencies if the chosen command fails with a missing-dependency error or if `pyproject.toml`/`uv.lock` changed since last install.
+   - The existing uv runner handles restoration automatically; do not install proactively.
 
 e. **Include worktree context in spawn:**
    - Set `WORKTREE_PATH` to the resolved worktree path

@@ -47,6 +47,24 @@ squad/{issue-number}-{kebab-case-slug}
 ```
 Example: `squad/42-fix-login-validation`
 
+## Git and Worktree Safety
+
+All branches and PRs target `main` directly — no `dev` or `insiders` base.
+
+**Independent parallel writing workstreams MUST use explicit dedicated worktrees and branches.** Each assigned workstream gets its own path and `TEAM_ROOT`. The coordinator creates these explicitly via `git worktree add`; worktrees are **not** auto-enabled by any runtime flag.
+
+Before any branch operation, mutation, stash, or cleanup:
+- Confirm your working tree is clean (`git status --short` must be empty).
+- Do not blindly `git stash`, `git add -A`, `git reset --hard`, or `git clean` — preserve existing changes and identify ownership first.
+- Do not switch branches in the root clone while another active workstream owns it.
+- Pull with `--ff-only` only; never force-update if main has diverged unexpectedly.
+
+Before deleting a remote branch, compare the live remote tip to the PR's `headRefOid` (not `mergeCommit`). State=MERGED alone is not sufficient — new commits may have been pushed after the merge.
+
+> See `.github/skills/git-workflow/SKILL.md` for exact safe commands and `.squad/templates/worktree-reference.md` for worktree lifecycle policy.
+>
+> **Note:** This policy takes effect once this branch is integrated into main. It does not apply retroactively to the current root state.
+
 ## PR Guidelines
 
 When opening a PR:

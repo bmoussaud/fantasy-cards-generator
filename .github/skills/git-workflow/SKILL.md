@@ -69,20 +69,47 @@ Examples:
    ```
 
 6. **After PR is merged — safe cleanup only:**
-   ```bash
-   # Verify the remote branch's exact tip SHA matches the PR head before deleting
-   REMOTE_SHA=$(git ls-remote origin refs/heads/squad/{issue-number}-{slug} | awk '{print $1}')
-   PR_SHA=$(gh pr view {pr-number} --json mergeCommit -q .mergeCommit.oid)
-   # For squash merges the branch tip != merge commit; confirm PR state=MERGED is sufficient
-   gh pr view {pr-number} --json state -q .state   # must be MERGED
 
-   git checkout main
-   git pull origin main
-   git branch -d squad/{issue-number}-{slug}
-   git push origin --delete squad/{issue-number}-{slug}
+   **Preflight:** Confirm your working tree and index are clean (`git status --short` must be empty), and no other active agent currently owns the root checkout you intend to switch into.
+
+   ```bash
+   BRANCH=squad/{issue-number}-{slug}
+
+   # 1. Confirm merged state
+   STATE=$(gh pr view {pr-number} --json state -q .state)
+   [ "$STATE" = "MERGED" ] || { echo "PR not merged — aborting"; exit 1; }
+
+   # 2. Fetch the exact tip SHA that was on the branch at PR submission/merge time
+   #    Use headRefOid, NOT mergeCommit — for squash/rebase merges those are always different SHAs:
+   #    mergeCommit is the landing commit on main; headRefOid is the original branch tip
+   PR_HEAD=$(gh pr view {pr-number} --json headRefOid -q .headRefOid)
+
+   # 3. Compare the live remote tip to the recorded PR head
+   #    If they differ, new commits were pushed to the branch after the merge — do not delete
+   REMOTE_SHA=$(git ls-remote origin "refs/heads/$BRANCH" | awk '{print $1}')
+   [ -z "$REMOTE_SHA" ] || [ "$REMOTE_SHA" = "$PR_HEAD" ] \
+     || { echo "Remote tip ($REMOTE_SHA) != PR head ($PR_HEAD) — inspect before deleting"; exit 1; }
+
+   # 4. Delete remote branch only when tip still matches (lease prevents a TOCTOU race)
+   [ -n "$REMOTE_SHA" ] && \
+     git push origin --delete "$BRANCH" --force-with-lease="$BRANCH:$PR_HEAD"
+
+   # 5. Squash/rebase integration means the original branch tip is NOT an ancestor of main
+   #    Never use -D (force-delete) to bypass the ancestry check — that permanently discards commits
+   #    Create an archive tag first if the head is not reachable from main
+   git merge-base --is-ancestor "$BRANCH" origin/main 2>/dev/null \
+     || git tag "archive/pr-{pr-number}-head" "$BRANCH"
+   git branch -d "$BRANCH"
+   # If -d still fails: the branch has commits not reachable from main beyond the archive tag.
+   # Confirm the tag was created and captures everything needed before considering -D.
    ```
 
-   **Never delete a remote branch without confirming PR state = MERGED.**
+   To update main in your own clean worktree — only after confirming this worktree is on `main`, is clean, and no other workstream owns root:
+   ```bash
+   git pull --ff-only origin main   # --ff-only: refuses to proceed if main diverged unexpectedly
+   ```
+
+   **Never delete a remote branch on state=MERGED alone — always compare the live remote tip to `headRefOid` first.**
 
 ## Parallel Multi-Issue Work (Worktrees)
 
@@ -140,7 +167,18 @@ gh pr create --base main --title "fix: description" --body "Closes #195" --draft
 The `.squad/` directory exists in each worktree as checked-out content:
 - `.gitattributes` declares `merge=union` on append-only files (history.md, decisions.md, logs)
 - **Rule:** append only — never rewrite or reorder `.squad/` files in a worktree
+- `merge=union` preserves every line from both sides but does **not** verify semantic correctness — duplicate entries or contradictory state are possible; review `.squad/` merge results before committing
 - Resolve TEAM_ROOT from your worktree root, not the original clone
+
+### Shared vs. Isolated State Across Worktrees
+
+Each worktree has its **own** working directory and index — file edits and staged changes in one worktree are invisible to others. However, the following are **shared** across all worktrees that reference the same `.git` directory:
+
+- Git refs (branches, tags) — a branch delete or tag create in one worktree is immediately visible in all others
+- The stash — `git stash`, `git stash pop`, or `git stash drop` in any worktree affects every worktree
+- Config (`git config`) and hooks
+
+Do not stash, drop stashes, delete branches, or modify tags from one worktree on behalf of work that originated in another.
 
 ### Reuse Check Before Pull
 
@@ -150,25 +188,33 @@ Before pulling or re-fetching, confirm the worktree is still registered:
 git worktree list
 ```
 
-A missing worktree path (stale reference) must be pruned before re-adding:
+A missing worktree path (stale reference) must be pruned before re-adding. Use `--dry-run` first to confirm only truly-gone paths will be removed — never prune to fix a missing directory that may still be mounted or owned by another active session:
 
 ```bash
-git worktree prune
+git worktree prune --dry-run   # inspect; confirm the listed path is truly unmounted/gone
+git worktree prune             # only after verifying dry-run output is correct
 ```
 
 ### Cleanup After Merge
 
-Only after confirming PR state = MERGED:
+**Preflight:** Confirm no active agent owns the worktree, the working directory is clean, and no uncommitted work or stash entries remain from the session before removing.
+
+Only after performing the full branch-safety checks from "After PR is merged — safe cleanup only" above (state=MERGED, headRefOid comparison, lease, ancestry check, archive tag if needed):
 
 ```bash
-# From the root clone
+# From the root clone — remove the worktree working directory
 git worktree remove /workspaces/fantasy-cards-generator-{slug}
+
+# Dry-run prune first to confirm only truly-gone paths will be affected
+git worktree prune --dry-run   # inspect output before proceeding
 git worktree prune
-git branch -d squad/{issue-number}-{slug}
-git push origin --delete squad/{issue-number}-{slug}
+
+# For remote and local branch deletion, follow the steps in
+# "After PR is merged — safe cleanup only" — do not delete branches
+# here without the headRefOid comparison and archive-tag guard.
 ```
 
-If a worktree directory was deleted manually (e.g., `rm -rf`), `git worktree prune` cleans the stale metadata — safe to run then re-add.
+If a worktree directory was deleted manually (e.g., `rm -rf`), run `git worktree prune --dry-run` first to confirm the stale entry is the one you intend to remove before running without `--dry-run`.
 
 ---
 
@@ -197,3 +243,7 @@ Each repo follows its own branching convention. Coordinate via linked PRs.
 - ❌ Applying, dropping, or clearing stashes that belong to another agent or workstream
 - ❌ Running `git reset --hard`, `git checkout -- .`, or `git clean -fd` when there is unverified uncommitted work
 - ❌ Claiming worktrees are "auto-enabled" — they require explicit `git worktree add` per workstream
+- ❌ Using `mergeCommit` OID instead of `headRefOid` when verifying branch tip identity before deletion
+- ❌ Force-deleting a local branch (`-D`) to bypass an ancestry failure without first creating an archive tag
+- ❌ Running `git pull` without `--ff-only` or without a clean correct-branch preflight
+- ❌ Running `git worktree prune` without `--dry-run` first to confirm only stale/unmounted paths are affected
