@@ -545,6 +545,23 @@ module cosmosPrivateEndpoint './modules/cosmos-private-endpoint.bicep' = {
   }
 }
 
+// Key Vault private endpoint — required for ACA container to reach Key Vault data plane.
+// Key Vault publicNetworkAccess is 'Disabled'; without a PE the container's egress via
+// NAT Gateway (public IP) is rejected with HTTP 403 by the vault network firewall.
+// NOTE: no Container App dependency here to avoid a startup cycle with the RBAC
+// role assignment; the PE and DNS zone are infra-level resources independent of ACA.
+module keyVaultPrivateEndpoint './modules/keyvault-private-endpoint.bicep' = {
+  name: 'keyvault-private-endpoint'
+  params: {
+    keyVaultName: security.outputs.keyVaultName
+    keyVaultResourceId: security.outputs.keyVaultResourceId
+    location: location
+    privateEndpointSubnetResourceId: network.outputs.privateEndpointSubnetResourceId
+    tags: tags
+    virtualNetworkResourceId: network.outputs.virtualNetworkResourceId
+  }
+}
+
 module storage './modules/storage.bicep' = {
   name: 'storage'
   params: {

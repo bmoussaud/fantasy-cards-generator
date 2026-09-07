@@ -127,7 +127,13 @@ to propagate, so post-provision access checks should retry.
 RBAC does not bypass network controls. Blob reads still require a
 VNet-connected environment with working private DNS because Storage keeps
 `publicNetworkAccess: Disabled` and its private endpoint. Cosmos reads must
-originate from the configured NAT or temporary legacy firewall path.
+originate from the configured NAT or temporary legacy firewall path. Key Vault
+data-plane calls also require the private endpoint path — the vault is deployed
+with `publicNetworkAccess: 'Disabled'` and no network ACLs; without the private
+endpoint the ACA container's egress (via NAT Gateway, public IP) is rejected
+with HTTP 403 by the vault firewall. The `keyvault-private-endpoint.bicep` module
+provisions the private endpoint, `privatelink.vaultcore.azure.net` private DNS
+zone, and VNet link as part of every `azd provision`.
 
 Why the extra env var:
 
@@ -184,11 +190,18 @@ After a live deploy, verify:
 9. From a VNet-connected host with private DNS, use Microsoft Entra
    authentication to enumerate Blob containers and list/read a blob. Confirm
    upload and delete operations remain unavailable to the deployer.
-10. Using the deployment identity, confirm the Key Vault data plane allows
-    listing secrets, keys, and certificates plus reading only their metadata.
-    Also confirm representative forbidden operations stay denied: reading a
-    secret value, exporting certificate private key material, key crypto
-    operations, and any create/update/delete/recover/purge action.
+10. Using the deployment identity (Key Vault Reader), confirm the Key Vault data
+    plane allows listing secrets, keys, and certificates plus reading only their
+    metadata. Also confirm representative forbidden operations stay denied:
+    reading a secret value, exporting certificate private key material, key
+    crypto operations, and any create/update/delete/recover/purge action.
+    Note: the runtime Container App identity holds **Key Vault Secrets User**
+    (role ID `4633458b-17de-408a-b874-0445c86b69e6`), which grants
+    `getSecret/action` (read current secret value) **and**
+    `readMetadata/action` (list secret versions, read metadata) — no additional
+    role is needed for version enumeration. All Key Vault data-plane access
+    requires the `privatelink.vaultcore.azure.net` private endpoint path;
+    requests from outside the VNet are rejected with HTTP 403.
 
 The key live-network assertion — ACA outbound traffic actually using the NAT
 public IP — requires an Azure deployment and cannot be proven from source alone.
