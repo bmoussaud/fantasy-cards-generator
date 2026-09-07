@@ -7,6 +7,7 @@ from typing import Any
 
 import httpx
 import pytest
+from azure.core.exceptions import ClientAuthenticationError, ServiceRequestError
 
 from app.foundry_agent_client import (
     FOUNDRY_AGENT_TOKEN_SCOPE,
@@ -501,6 +502,48 @@ def test_invalid_query_diagnostics_do_not_include_input() -> None:
     assert credential.scopes == []
     assert result.message == "Foundry agent configuration or query is invalid."
     assert "private-query-marker" not in repr(result)
+
+
+@pytest.mark.parametrize("failure", [ClientAuthenticationError, ServiceRequestError])
+def test_expected_credential_failures_are_sanitized(failure) -> None:
+    class FailingCredential(FakeCredential):
+        def get_token(self, *scopes: str) -> FakeAccessToken:
+            raise failure("private-credential-diagnostic")
+
+    def unexpected_request(request: httpx.Request) -> httpx.Response:
+        pytest.fail("Failed authentication must not trigger an HTTP request")
+
+    result, _ = invoke_with_transport(
+        configured_settings(), unexpected_request, credential=FailingCredential()
+    )
+
+    assert result.status == "auth_error"
+    assert result.retryable is False
+    assert "private-credential-diagnostic" not in repr(result)
+
+
+def test_empty_credential_token_is_non_success() -> None:
+    result, _ = invoke_with_transport(
+        configured_settings(),
+        lambda request: pytest.fail("Empty token must not trigger an HTTP request"),
+        credential=FakeCredential(token=""),
+    )
+
+    assert result.status == "auth_error"
+    assert result.success is False
+
+
+def test_unexpected_credential_programming_errors_are_not_swallowed() -> None:
+    class BrokenCredential(FakeCredential):
+        def get_token(self, *scopes: str) -> FakeAccessToken:
+            raise RuntimeError("unexpected implementation error")
+
+    with pytest.raises(RuntimeError, match="unexpected implementation error"):
+        invoke_with_transport(
+            configured_settings(),
+            lambda request: pytest.fail("Broken credential must not trigger an HTTP request"),
+            credential=BrokenCredential(),
+        )
 
 
 def test_owned_resources_are_closed_but_injected_client_is_not_closed() -> None:

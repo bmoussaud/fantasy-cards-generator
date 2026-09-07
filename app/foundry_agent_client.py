@@ -12,6 +12,11 @@ from typing import Any, Literal, Protocol
 from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
+from azure.core.exceptions import (
+    ClientAuthenticationError,
+    ServiceRequestError,
+    ServiceResponseError,
+)
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from app.generation import GeneratedCardModel
@@ -130,7 +135,7 @@ class FoundryAgentClient:
 
         try:
             token = await self._get_token()
-        except Exception:
+        except (ClientAuthenticationError, ServiceRequestError, ServiceResponseError):
             return FoundryAgentInvocationResult(
                 status="auth_error",
                 error_code="credential_unavailable",
@@ -214,7 +219,7 @@ class FoundryAgentClient:
             token_result = await token_result
         token = getattr(token_result, "token", token_result)
         if not isinstance(token, str) or not token:
-            raise RuntimeError("credential returned an empty token")
+            raise ClientAuthenticationError("Credential returned an empty token.")
         return token
 
     def _client(self) -> httpx.AsyncClient:
