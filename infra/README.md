@@ -115,6 +115,11 @@ opt-in. This gate controls only the new hosted-agent RBAC assignments; it does
 not switch generation modes, create agents, deploy hosted runtimes, or remove
 the existing direct model path.
 
+Setting the gate back to `false` does not revoke assignments already created:
+incremental ARM deployments do not delete resources omitted by a condition.
+Permission revocation requires a separate, explicitly reviewed cleanup; this
+parameter is not a runtime kill switch.
+
 Provisioning grants the deployment caller only:
 
 - **Key Vault Reader** at Key Vault scope, allowing metadata-only list/browse
