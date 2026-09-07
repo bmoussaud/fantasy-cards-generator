@@ -21,3 +21,4 @@
 
 📌 2026-09-04T14:01:32Z: Resolved issue #97 by documenting the current 225s request budget, proposing an 8.15s hosted-agent cap plus 30.15s degraded legacy-text fallback, and opening PR #108 (https://github.com/bmoussaud/fantasy-cards-generator/pull/108).
 📌 Team update (2026-09-04T14:11:00+00:00): Gimli clarified Foundry project-endpoint vs account-endpoint RBAC in docs and opened PR #110; recommended deferring Bicep/RBAC infra changes until the hosted-agent runtime contract is finalized. — noted by Scribe
+📌 Recovered note (2026-09-07): Issue #51 was completed in PR #56 (`6375922`): `/healthz` gained bounded Cosmos/Blob dependency probes, request-ID propagation, no-store caching, and sanitized telemetry. Recovered from the archived issue-51 stash without applying its obsolete decisions-file pruning.
