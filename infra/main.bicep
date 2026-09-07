@@ -545,6 +545,19 @@ module cosmosPrivateEndpoint './modules/cosmos-private-endpoint.bicep' = {
   }
 }
 
+// Connect the private vault to the application VNet without depending on the app identity.
+module keyVaultPrivateEndpoint './modules/keyvault-private-endpoint.bicep' = {
+  name: 'keyvault-private-endpoint'
+  params: {
+    keyVaultName: security.outputs.keyVaultName
+    keyVaultResourceId: security.outputs.keyVaultResourceId
+    location: location
+    privateEndpointSubnetResourceId: network.outputs.privateEndpointSubnetResourceId
+    tags: tags
+    virtualNetworkResourceId: network.outputs.virtualNetworkResourceId
+  }
+}
+
 module storage './modules/storage.bicep' = {
   name: 'storage'
   params: {

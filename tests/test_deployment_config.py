@@ -570,6 +570,44 @@ def test_blob_storage_uses_private_endpoint_for_container_app_access() -> None:
     assert "virtualNetworkResourceId: network.outputs.virtualNetworkResourceId" in main_bicep
 
 
+def test_key_vault_private_endpoint_enables_container_app_vault_access() -> None:
+    kv_pe_bicep = (REPO_ROOT / "infra" / "modules" / "keyvault-private-endpoint.bicep").read_text()
+    main_bicep = (REPO_ROOT / "infra" / "main.bicep").read_text()
+    security_bicep = (REPO_ROOT / "infra" / "modules" / "security.bicep").read_text()
+    dns_module = _bicep_block(kv_pe_bicep, "module kvPrivateDnsZone ")
+    endpoint_module = _bicep_block(kv_pe_bicep, "module kvPrivateEndpoint ")
+    root_module = _bicep_block(main_bicep, "module keyVaultPrivateEndpoint ")
+
+    assert "br/public:avm/res/network/private-dns-zone:" in dns_module
+    assert "br/public:avm/res/network/private-endpoint:" in endpoint_module
+    assert "privatelink.vaultcore.azure.net" in kv_pe_bicep
+    assert "name: kvPrivateDnsZoneName" in dns_module
+    assert "virtualNetworkLinks:" in dns_module
+    assert "virtualNetworkResourceId: virtualNetworkResourceId" in dns_module
+    assert "registrationEnabled: false" in dns_module
+    assert "groupIds: [\n            'vault'\n          ]" in endpoint_module
+    assert "privateLinkServiceId: keyVaultResourceId" in endpoint_module
+    assert "subnetResourceId: privateEndpointSubnetResourceId" in endpoint_module
+    assert "privateDnsZoneGroup:" in endpoint_module
+    assert "privateDnsZoneResourceId: kvPrivateDnsZone.outputs.resourceId" in endpoint_module
+    assert "enableTelemetry: false" in dns_module
+    assert "enableTelemetry: false" in endpoint_module
+
+    assert "modules/keyvault-private-endpoint.bicep" in root_module
+    assert "keyVaultResourceId: security.outputs.keyVaultResourceId" in root_module
+    assert "keyVaultName: security.outputs.keyVaultName" in root_module
+    assert (
+        "privateEndpointSubnetResourceId: network.outputs.privateEndpointSubnetResourceId"
+        in root_module
+    )
+    assert "virtualNetworkResourceId: network.outputs.virtualNetworkResourceId" in root_module
+    assert "output keyVaultResourceId string" in security_bicep
+    assert "publicNetworkAccess: 'Disabled'" in security_bicep
+    assert "containerApps" not in root_module
+    assert "keyVaultSecretsUserRoleDefinitionId" in main_bicep
+    assert "'4633458b-17de-408a-b874-0445c86b69e6'" in main_bicep
+
+
 def test_telemetry_reuses_single_workspace_app_insights_and_secret_wiring() -> None:
     bicep_files = {
         path.relative_to(REPO_ROOT).as_posix(): path.read_text()
