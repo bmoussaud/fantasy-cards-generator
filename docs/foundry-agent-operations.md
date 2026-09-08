@@ -19,10 +19,10 @@ new Foundry account/project, or monitoring resource.
 | Model | Existing text deployment; three bounded concept/lore/art-direction specialists |
 | Excluded | Image generation, persistence, web activation, scheduled evaluation/probes |
 
-The container expects the integrated `hosted-agent` optional extra and runtime
-module. Packaging-only tests do not prove the server starts. The container build,
-readiness test, and adapter/runtime integration must pass after combining the
-runtime and deployment commits; do not create placeholder modules to pass them.
+The real runtime and `hosted-agent` optional extra are integrated with the
+dedicated container/deployment package in PR #119. Packaging-only tests are not
+startup evidence; the integrated validation below includes the correct agent
+Dockerfile, real entrypoint and credential-free readiness check.
 
 The platform supplies `FOUNDRY_PROJECT_ENDPOINT`, `FOUNDRY_AGENT_NAME`,
 `FOUNDRY_AGENT_VERSION`, and the Application Insights connection configuration.
@@ -32,6 +32,14 @@ by this manifest. The latter is the full immutable application Git commit, not a
 Foundry version number. Runtime timeout/policy defaults belong to the runtime;
 inspect their bounded values during integration rather than adding guessed SDK
 settings here.
+
+The implemented defaults/maxima are 20 seconds per specialist and 65 seconds
+overall. These are **offline candidate budgets**, not compliance with the
+proposed production budgets of 8.15 seconds per stage and 30.15 seconds overall.
+Narrow local safety heuristics are not comprehensive safety or prompt-injection
+protection; unobserved hosted guardrails remain unavailable and post-image checks
+are not applicable. Application nonpersistence does not guarantee zero platform
+telemetry.
 
 The same `FOUNDRY_PROJECT_ENDPOINT` name is also an **azd deployment-context**
 value consumed by the extension. Bicep outputs both that name and
@@ -76,7 +84,34 @@ added by this package.
 
 ## Offline integration gate
 
-From the repository root, after integrating the real runtime and lockfile:
+### Completed integrated evidence — 2026-09-08
+
+Application build `39278a3f0f80c735ed52235a7d5e21026f10ecfb` combines runtime
+`941dc39` and packaging `f17ff4c` (cherry-picked as `39278a3`). The coordinator
+directly verified:
+
+- **202 tests passed** in one invocation: `test_card_orchestrator`,
+  `test_card_orchestrator_models`, `test_foundry_agent_client`,
+  `test_hosted_agent_deployment_config`, and `test_deployment_config`.
+  Earlier backend-only results are separate evidence, not an additive total.
+- Dedicated Bicep compiled; the exact Linux amd64 agent Dockerfile built as
+  `card-orchestrator-agent:39278a3`. A root web-image build is not agent evidence.
+- Image entrypoint `python -m hosted_agents.card_orchestrator`, port 8088,
+  non-root user `agent`. With synthetic endpoint/model settings, build version
+  `39278a3`, and **no credentials, secrets or mounts**, `/readiness` returned
+  HTTP 200 with `{"status":"ready","cloudProbe":false}`. A request to `/responses`
+  with `store:true,input:[]` returned HTTP 400, sanitized `invalid_request`.
+  An initial cold-start probe reset before startup (approximately 14 seconds);
+  later probes succeeded. The test container was stopped and removed.
+- Independent Samwise review of `origin/main..39278a3` found no significant
+  defects. This is code-review evidence, not live authorization or model-quality
+  acceptance.
+
+No billable calls or Azure resource mutations occurred in those checks.
+The subsequent publication update changes this runbook only, not that tested
+application source.
+
+For repeatable infrastructure checks from the repository root:
 
 ```bash
 python -m pytest -q --noconftest tests/test_hosted_agent_deployment_config.py tests/test_deployment_config.py
@@ -203,6 +238,53 @@ Only after separate approval:
 ```bash
 AZURE_DEV_USER_AGENT=microsoft_foundry_skill python deploy.py provision --execute --approve-change
 ```
+
+### Actual dev preview result — 2026-09-08
+
+Gimli verified the existing dev account/project identities and endpoint, ACA
+identity, existing text deployment, registry ID/login server and classic
+`LegacyRegistryPermissions` mode using allowlisted management-plane queries.
+No project or account connections were returned (no continuation page).
+The target identities have none of the three proposed prerequisite grants;
+the existing ACA direct-inference grant is separate and remains untouched.
+
+A fresh, ignored `deployments/card-orchestrator/.azure/dev` state was configured
+with only verified nonsecret inputs and the immutable application build above;
+the root `.azure` state was not copied or read. The dedicated manifest and
+service contain no hooks. Both prerequisite booleans were set to `true` **only
+locally for preview**, including the proposed new registry connection.
+
+The real `python deploy.py preview --execute` ran
+`azd provision --preview --environment dev --no-prompt` from the dedicated
+project with `AZURE_DEV_USER_AGENT=microsoft_foundry_skill`. azd 1.32.0 reported
+**success in 31 seconds**, but emitted **no resource changes or candidate plan**.
+One targeted recovery used the documented `--output json` on the same dedicated
+read-only command: success in 30 seconds, only `consoleMessage` records (including
+a null data record), still no resource-level what-if.
+
+**Apply is blocked:** the expected three `Microsoft.Authorization/roleAssignments`
+and optional `Microsoft.CognitiveServices/accounts/projects/connections` cannot
+be checked against an observable ARM candidate plan. CLI success is not
+scope approval, nor evidence that the plan is empty. Stop here; obtain a
+reviewable resource-level what-if through a separately reviewed tool/output
+path before requesting prerequisite apply. No source fixes or further preview
+workarounds were attempted in this turn.
+
+The local booleans were returned to `false` after preview. **Cloud resource
+writes: none**; local ignored azd configuration was written. No provision apply,
+registry upload, hosted version/compute start, paid model call, endpoint injection,
+role/credential/network mutation or root provisioning was executed. No tools
+were installed or upgraded.
+
+Further deployment gates also remain: verify publisher push authorization;
+confirm the project/platform Application Insights binding (the queried linkage
+fields were null and connection inventories empty, so injection is **unproven**);
+review runtime-identity model authorization, region/quota, privacy and explicit
+compute/model spend. The prerequisite proposal creates no compute or model
+capacity; a later separately approved hosted deploy can incur 0.5 CPU / 1GiB
+compute, registry storage and telemetry ingestion costs, and a remote smoke
+request can incur model charges. This runbook is partial #99 operations scope,
+not installed dashboards, alerts or production readiness.
 
 Verify only the expected assignments/connection via safe projections; allow RBAC
 propagation. Then build/readiness/runtime tests, privacy review, region/quota
