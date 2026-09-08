@@ -84,6 +84,21 @@ is now also consumed, with no retry authorized. The earlier
 App Insights deployment gate was incorrect (linkage is needed for tracing only),
 as corrected in the operations runbook.
 
+Un **troisième smoke, nouvellement autorisé**, a depuis déployé la correction
+à identité unique depuis `dc1925942c42756690f7dd5321cbdbf892cf7182`.
+Sa préparation ACA a réussi (MI attendue, HTTP 200, imports/contrat/fixture prêts,
+zéro POST), mais l'unique dispatch `--invoke-once` a renvoyé le diagnostic local
+`exec_setup_timeout` sans marqueur distant. Le nombre de créations/Responses
+effectivement arrivés est **inconnu**, pas zéro ou un confirmé ;
+`invocationAllowanceConsumed:true`, aucune relance. Aucun HTTP ni code service
+n'a été observé pour cette tentative. La nouvelle version a été supprimée et
+les GET exacts version/session ont confirmé 404. L'image ACR reste conservée ;
+le web est inchangé et `endpointPersisted:false`.
+Les [preuves horodatées et la divergence d'horloges](foundry-agent-operations.md#smoke-corrigé-à-identité-unique--2026-09-08)
+distinguent cette panne de transport du HTTP 403 historique. La création de
+session par la MI et le résultat métier restent non démontrés ; aucune nouvelle
+tentative facturable n'est autorisée.
+
 ### Nonbillable invocation preparation
 
 Use the same pinned target arguments above with `--prepare-invocation --execute`.

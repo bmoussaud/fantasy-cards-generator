@@ -24,16 +24,98 @@ dedicated container/deployment package in PR #119. Packaging-only tests are not
 startup evidence; the integrated validation below includes the correct agent
 Dockerfile, real entrypoint and credential-free readiness check.
 
-Latest live result: the [newly authorized smoke](#newly-authorized-dev-smoke--2026-09-08)
-deployed successfully and sent exactly one actual ACA-MI Responses request, which
-returned **HTTP 403**. Its session and version were deleted; exact-resource GETs
-confirmed HTTP 404. This is not successful end-to-end card generation.
+Dernier résultat réel : le [smoke corrigé à identité unique](#smoke-corrigé-à-identité-unique--2026-09-08)
+a déployé la nouvelle image, mais son unique dispatch a échoué localement avec
+`exec_setup_timeout`. Aucun marqueur distant ne permet de compter les POST :
+leur nombre reste **inconnu**, et la nouvelle autorisation est consommée.
+La nouvelle version a été supprimée ; les GET exacts de version/session ont
+confirmé HTTP 404. L'invocation de bout en bout reste non démontrée. Le HTTP 403
+documenté plus bas appartient à la tentative précédente, pas à celle-ci.
+
+### Smoke corrigé à identité unique — 2026-09-08
+
+Exécution Gimli sur PR #121, après la **nouvelle** approbation explicite et la
+revue indépendante du contrat par Samwise. La préparation non facturable dans
+la réplique ACA existante a réellement renvoyé `invocation_prepared`, HTTP 200,
+`principalMatched:true`, `parserImportReady:true`, `requestSchemaReady:true`,
+`localFixtureParseReady:true` et `invocationsAttempted:0`. Elle n'a créé aucune
+session et sa fixture locale ne prouve aucune génération par le service.
+
+| Preuve | Résultat réel (UTC) |
+| --- | --- |
+| Source application, image et requête | `dc1925942c42756690f7dd5321cbdbf892cf7182` ; les commits documentaires ultérieurs ne sont pas cette image |
+| Image ACR | `fcagdevqhg3qc4rlbt4gacr.azurecr.io/card-orchestrator:dc1925942c42756690f7dd5321cbdbf892cf7182` |
+| Digest vérifié dans ACR | `sha256:1c15ec813aa47991d59f8dba42ec50062130e10a878c4f4e9551751ab6eb5f94` |
+| Session préenregistrée | `smoke-109-46f9af78e7ef4129b961f4d80ef16b00`, GET exact **404** à `13:15:23.040602Z`, avant tout déploiement/création |
+| Soumission / début du plafond de 30 minutes | `13:15:23.568639Z`, **0,5 CPU / 1GiB**, une seule soumission |
+| Déploiement azd dédié | Exit 0 à `13:16:44.523033Z` ; aucun provisionnement/hook racine |
+| Nouvelle version détenue | `card-orchestrator:1`, `created_at:1788873361`, image et SHA applicatif vérifiés à `13:16:46.797699Z` |
+| Cible ACA inchangée | Révision `fcag-dev-app--azd-1788775203`, réplique `fcag-dev-app--azd-1788775203-69f9dc897b-c97p9`, conteneur `web` |
+| MI attendue, confirmée par la préparation | `946d8701-48f2-4fa5-8efd-bf053c7b4e4c` ; aucune identité développeur de substitution dans la sonde |
+| Unique dispatch de sonde / résultat local | `13:16:54.671713Z` / `13:17:05.120162Z`, exit 1, **zéro relance** |
+| Marqueur local exact | `status:failed`, `reason:exec_setup_timeout`, `invocationAllowanceConsumed:true`, `sessionCreationUnknown:true`, `sessionCleanupRequired:true` |
+| Compteurs distants | `sessionCreateAttempted`, `sessionCreated`, `sessionReady`, `invocationsAttempted` **non observés** : ne pas les remplacer par 0 ou 1 |
+| HTTP / code de service / schéma / résultat métier | **Non observés** ; aucun HTTP 403/200 d'invocation, aucun `serviceCode`, aucune validation de versions dans une réponse réelle |
+| Entrée dans le `finally` | `13:17:05.121148Z` |
+| Réconciliation avant suppression | GET session **404** à `13:17:06.878569Z` ; inventaire sessions HTTP **200**, zéro session liée à cette version à `13:17:07.820645Z` |
+| Suppression de la seule nouvelle version | `azd ai agent delete card-orchestrator --version 1 --force`, exit 0 à `13:17:11.618497Z` |
+| Première vérification indépendante après suppression | GET exacts version/session **404** à `13:17:14.738093Z` ; liste sessions **404**, donc endpoint absent, pas une page HTTP-200 vide |
+| Réconciliation répétée | GET exacts toujours **404** jusqu'à `13:18:07.892724Z`, puis au contrôle final horodaté `13:54:04.740514Z` |
+| Comparaison web finale | Identique : image, identités, révisions, trafic, ingress et mode ; `endpointPersisted:false` |
+
+Le numéro de plateforme `1` a été réattribué après suppression des anciennes
+versions ; l'inventaire initial de versions était absent. L'image, le SHA et
+`created_at` identifient la **nouvelle** version, sans confusion avec les versions
+historiques également numérotées `1`.
+
+**Échec réel et limite de preuve.** Le délai local de dix secondes pour la
+connexion et l'envoi complet du payload a expiré. Le wrapper n'a reçu aucun
+marqueur distant validé. Une seule sonde a été dispatchée ; le nombre exact de
+POST de création/Responses arrivés au service est inconnu, et non « un appel
+Responses confirmé » ou « zéro appel ». L'autorisation est donc consommée par
+prudence, sans nouvelle tentative. La préparation réussie utilisait son propre
+budget local de 30 secondes et ne prouvait pas le budget de dix secondes.
+Ce résultat ne teste ni ne réfute les permissions de création par la MI ; il
+n'établit pas non plus la cause du HTTP 403 historique.
+
+**Nettoyage et horloges.** Aucune session n'a été observée : aucun `sessions stop`
+ou `sessions delete` n'a donc été envoyé sans preuve de propriété. La version
+nouvellement détenue a été supprimée avec `--version 1 --force`, puis le contrôleur
+a poursuivi uniquement les GET bornés de réconciliation d'une création inconnue.
+Suppression et premiers GET exacts 404 sont enregistrés moins de deux minutes
+après soumission, donc avant le plafond de 30 minutes. L'horodatage UTC saute
+ensuite de `13:18:07` à `13:54:04`, alors que le contrôleur mesure **193,6 secondes
+monotones** de la soumission à la comparaison web finale. Cette divergence est
+conservée, sans en inventer la cause : le dernier contrôle UTC est après la
+fenêtre, mais la suppression et plusieurs preuves 404 précèdent ce saut.
+Ne pas présenter toute la vérification finale comme achevée avant 30 minutes UTC.
+
+**Périmètre et coûts.** Les trois grants préexistants ont été revérifiés à leurs
+scopes exacts : MI ACA → Consumer projet ; MI projet → Foundry User compte et
+AcrPull registre. Aucun grant, réseau, secret, capacité modèle ou ressource web
+n'a été modifié. Les seules écritures cloud demandées étaient l'image ACR et la
+nouvelle version agent, puis sa suppression ciblée ; la création de session
+demandée par la sonde reste inconnue. L'état azd isolé a enregistré le nouveau SHA
+et les métadonnées de déploiement. Pas d'évaluation, de télémétrie optionnelle
+activée, d'images utilisateur ou de génération d'image. Les bornes source restent
+trois appels maximum à `gpt-5-5`, 1800 tokens de sortie par étape, sans retry ;
+l'usage effectif modèle/tokens n'est pas observé. La nouvelle image et les images
+historiques sont conservées dans ACR, avec coût de stockage possible.
+
+**Écarts ouverts.** Création effective par la MI, readiness de sa session,
+Responses réel, schéma métier terminé, versions retournées et autorisation du
+runtime vers le modèle restent non démontrés. Endpoint ACA toujours non persisté ;
+son éventuelle injection, l'intégration web et l'acceptation production restent
+séparées. #109 reste ouvert et PR #121 n'est pas fusionnée automatiquement.
 
 ### Next separately approved window: same-identity session contract
 
-**Offline correction only; no new allowance, deployment, session or inference.**
-The last deployed image was application source
+**Historical correction gate.** At its offline review, no new allowance,
+deployment, session or inference had occurred. The then-last deployed image was
+application source
 `2bdbf9967d8c397f7d88914bac06285b3b477297`; it did not include this correction.
+The separately approved corrected execution is recorded above; it did not obtain
+live same-identity session/invocation evidence and does not authorize another run.
 The documented caller-Entra session scope and current Responses
 `agent_session_id` field are verified contract facts. Cross-identity ownership
 is a plausible explanation of the historical 403, **not a proven diagnosis**
