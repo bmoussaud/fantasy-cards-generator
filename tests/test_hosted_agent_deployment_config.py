@@ -38,7 +38,7 @@ def test_agent_service_is_isolated_and_has_no_hooks_or_model_provisioning() -> N
 def test_dedicated_azd_folder_resolves_root_context_and_agent_dockerfile() -> None:
     service = _manifest()["services"]["card-orchestrator"]
     service_root = (DEPLOYMENT / service["project"]).resolve()
-    assert service_root == ROOT
+    assert service_root == DEPLOYMENT
     assert (service_root / service["docker"]["context"]).resolve() == ROOT
     assert (service_root / service["docker"]["path"]).resolve() == AGENT / "Dockerfile"
     assert service["docker"]["platform"] == "linux/amd64"

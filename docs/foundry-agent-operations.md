@@ -127,9 +127,10 @@ Run the runtime owner's targeted tests separately, with fake model clients and
 telemetry disabled. Validate readiness in that offline harness without a model
 call; don't expose a cloud credential to a local container just to test health.
 
-azd's service `project: ../..` resolves to the repository root from the dedicated
-folder. Docker `path` and `context` are relative to that service root, not to the
-manifest folder. `remoteBuild: false` avoids uploading a broad ACR build archive.
+The extension requires service `project: "."` inside the dedicated manifest
+folder; `project: "../.."` fails its service-path validation. Docker `path` and
+`context` are relative to that service root and explicitly select the repository
+build context and agent Dockerfile. `remoteBuild: false` avoids uploading an ACR build archive.
 The Dockerfile-specific ignore file takes precedence over root `.dockerignore`.
 Only Python source, dependency metadata, README and this Dockerfile are allowed;
 azd state, histories, dotenv files, credentials and assets are excluded. Runtime
