@@ -1,7 +1,7 @@
-# Dev endpoint persistence — guarded candidate, application still blocked
+# Dev endpoint persistence — guarded scope-only deployment
 
-Refs #109; PR #121 merged at `0cf7acc`. **The endpoint remains absent. No app
-deployment or model invocation was performed by this candidate.**
+Refs #109; PR #121 merged at `0cf7acc`. Application requires independent execution
+review, a fresh fingerprint, and successful real resource-free guard diagnostics.
 
 ## Revised secret preservation contract
 
@@ -22,7 +22,8 @@ selects a deliberately invalid JSON expression containing only a constant
 marker and a zero-length resource-group-ID slice. It is evaluated in
 `resource.properties`, **before the app PUT**, never in a deployment output.
 The literal resource-ID lookup does not add a self-dependency. There are no
-outputs, deployment scripts, secret parameters, or local secret-value files.
+outputs in the app template, deployment scripts, native-secret parameters, or
+local secret-value files.
 
 The helper pins the entire compiled executable ARM contract by SHA-256,
 excluding only compiler provenance, schema URL and content version. A compiler
@@ -35,17 +36,29 @@ metadata; no native credential value is reconstructed locally.
 Target: existing `fcag-dev-app` in `rg-fcag-dev`, subscription
 `b8ff3e15-7e2d-4fac-a773-992fb59ccedd`.
 
+**Current corrected-gate evidence:** the real preview returned the exact app
+`Deploy` plus 40 `Ignore`, without payloads or diagnostics. Azure CLI also
+includes documented optional `deploymentId`, `identifiers`, and `symbolicName`
+fields set to null; these are accepted only when null. Both resource-free ARM
+diagnostic deployments succeeded: valid inventory **true**, synthetic duplicate
+inventory **false**. The full baseline fingerprint below remained identical
+before and after each diagnostic. Azure-side list evaluation is now empirically
+confirmed without returning secrets to the operator or issuing an app PUT.
+
+The following paragraphs retain the historical failed-gate evidence:
+
 Two `ResourceIdOnly` what-if calls returned `Succeeded`: **one existing target
 `Deploy`, 40 unrelated `Ignore` resources**. They did not return `Modify`.
 The helper therefore stopped before application. This is not an unevaluated
 full-payload comparison masquerading as a clean diff.
 
-Microsoft documents that `ResourceIdOnly` returns `Deploy` for an existing
-resource; `Modify` belongs to `FullResourcePayloads`. The current authorization
-requires `Modify` while prohibiting full-payload preview with runtime secrets.
-Those two requirements cannot be met together. **The gate has not been
-weakened to accept `Deploy`.** A revised scope-only authorization would need
-independent review; it must not claim cloud validation of property equality.
+This was an incorrect historical gate, now corrected under explicit scope-only
+authorization: Microsoft's REST `Deploy` definition says the resource exists
+in current and desired state and will be redeployed; its properties may or may
+not change. The helper accepts `Deploy` or `Modify` only for the exact existing
+app, returns the actual classification, and rejects all other active changes,
+payloads and diagnostics. **Neither accepted classification proves a cloud
+property diff in a `ResourceIdOnly` response.**
 
 A third read-only attempt submitted deliberately mismatched secret metadata
 to deployment validation. The CLI exited unsuccessfully, but neither an
@@ -65,14 +78,33 @@ blocked-baseline evidence, **not an approved application fingerprint**.
 Samwise's actual read-only `code-review` task inspected the whole PR against
 `origin/main` at `4f4293a307ad8deba003f4b9cd21b890a2263ea8` and returned:
 **APPROVE — code only; no significant issues found.** This is explicitly **not
-approval to apply**: the required `Modify` gate is unsatisfied and Azure
-resource-input guard evaluation remains unproven. No application followed.
+approval to apply**: that historical review preceded the corrected scope gate
+and resource-free diagnostic implementation. New independent review is required.
+
+### Resource-free Azure guard proof
+
+`--validate-guard` derives two diagnostics from the verified compiled app
+template. Bicep inlines runtime expressions, so the helper extracts the exact
+first argument of the resource-input `if`, preserves parameters and variables,
+removes **all resources**, and permits only one boolean `inventoryValid` output.
+The snapshot remains `secureObject`. A current metadata snapshot must return
+`true`; a deliberately duplicated metadata name must return `false`. Neither
+diagnostic can issue a Container App PUT. Only deployment records are created.
+The original invalid-JSON branch remains in the actual app resource input.
+
+Azure evaluates `listSecrets` internally; no values, names, arrays, raw errors,
+or arbitrary outputs are exported. Strict boolean checks and unchanged baseline
+fingerprints are required around each diagnostic. `--apply` repeats these
+checks before its final fresh GET and app deployment. These runtime booleans
+plus the pinned input guard prove the guard path without an unsafe trial PUT.
 
 ## Proof boundaries and operator path
 
 ```bash
-# Read-only by default; currently rejects the live Deploy classification.
+# Read-only scope preview.
 python deployments/dev-endpoint/persist_endpoint.py
+# Writes resource-free deployment records, never application resources.
+python deployments/dev-endpoint/persist_endpoint.py --validate-guard
 ```
 
 Preview transmits the compiled template through stdin with metadata as a
@@ -89,7 +121,7 @@ Images/digests, other env and secret references, sidecars/init containers,
 identity maps, configuration, traffic, ingress, scale, mounts and volumes must
 remain equal. Unknown GET fields fail closed.
 
-Application is currently blocked. Once all gates are genuinely satisfied,
+Once independent review and all gates are genuinely satisfied,
 the existing `--apply --expect-fingerprint <reviewed-sha256>` path uses the
 secure compiled Bicep deployment, never root `azd` hooks. It checks a fresh GET
 after preview and immediately before application. API 2025-01-01 returned no
@@ -116,7 +148,7 @@ python -m black --check deployments/dev-endpoint/persist_endpoint.py tests/test_
 az bicep build --file deployments/dev-endpoint/infra/main.bicep --stdout >/dev/null
 ```
 
-89 tests pass; Ruff and Black pass. Bicep 0.46.1 compiles. The symbol-reference
+Bicep 0.46.1 compiles. The symbol-reference
 linter recommendation is deliberately not followed because it would create
 a self-dependency. The concat recommendation does not affect correctness.
 Tests interpret the actual compiled expression against synthetic native/KV
@@ -127,6 +159,7 @@ small offline interpreter is **not a substitute for actual Azure guard proof**.
 ## Authoritative references
 
 - [What-if change types and result formats](https://learn.microsoft.com/azure/azure-resource-manager/templates/deploy-what-if#change-types)
+- [REST what-if Deploy definition](https://learn.microsoft.com/rest/api/resources/deployments/what-if?view=rest-resources-2025-04-01#changetype)
 - [Resource-ID list functions and dependencies](https://learn.microsoft.com/azure/azure-resource-manager/templates/resource-dependency#reference-and-list-functions)
 - [Container Apps List Secrets 2025-01-01](https://learn.microsoft.com/rest/api/resource-manager/containerapps/container-apps/list-secrets?view=rest-resource-manager-containerapps-2025-01-01)
 - [Container Apps writable contract](https://learn.microsoft.com/azure/templates/microsoft.app/2025-01-01/containerapps)

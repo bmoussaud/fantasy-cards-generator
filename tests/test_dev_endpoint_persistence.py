@@ -224,10 +224,13 @@ def plan(current, expected):
     }
 
 
-def test_scope_only_plan_with_local_preservation_and_ignored_resource(raw):
+@pytest.mark.parametrize("kind", ["Deploy", "Modify"])
+def test_scope_only_plan_with_local_preservation_and_ignored_resource(raw, kind):
     current = endpoint.snapshot(raw)
     expected = endpoint.desired(current, "new")
     actual = plan(current, expected)
+    actual["changes"][0]["changeType"] = kind
+    actual["changes"][0].update(deploymentId=None, identifiers=None, symbolicName=None)
     actual["changes"].append(
         {
             "resourceId": endpoint.GROUP + "/providers/Microsoft.Network/virtualNetworks/existing",
@@ -238,6 +241,7 @@ def test_scope_only_plan_with_local_preservation_and_ignored_resource(raw):
     assert report["cloudScopeOnly"] and report["localMetadataPreservationMatched"]
     assert "fullBeforeAfterMatched" not in report
     assert report["ignoredResources"] == 1
+    assert report["operation"] == kind
     assert "unchanged" not in json.dumps(report)
 
 
@@ -264,7 +268,7 @@ def test_whatif_rejects_image_network_secrets_scale_identity(raw, path, value):
         endpoint.inspect_plan(plan(current, altered), current, altered)
 
 
-@pytest.mark.parametrize("kind", ["Create", "Delete", "Unsupported", "Deploy", "NoChange"])
+@pytest.mark.parametrize("kind", ["Create", "Delete", "Unsupported", "NoChange", None, "Ignore"])
 def test_whatif_rejects_non_modification(raw, kind):
     current = endpoint.snapshot(raw)
     expected = endpoint.desired(current, "new")
@@ -292,6 +296,46 @@ def test_whatif_rejects_role_creation_and_unexpanded_secure_parameter(raw):
         endpoint.inspect_plan(actual, current, expected)
 
 
+@pytest.mark.parametrize(
+    "field",
+    [
+        "before",
+        "after",
+        "delta",
+        "unsupportedReason",
+        "deploymentId",
+        "extension",
+        "identifiers",
+        "symbolicName",
+        "unknown",
+    ],
+)
+def test_scope_preview_rejects_non_null_optional_fields(raw, field):
+    current = endpoint.snapshot(raw)
+    expected = endpoint.desired(current, "new")
+    actual = plan(current, expected)
+    actual["changes"][0][field] = "unreviewed"
+    with pytest.raises(endpoint.GateError):
+        endpoint.inspect_plan(actual, current, expected)
+
+
+@pytest.mark.parametrize(
+    "mutation", ["error", "diagnostics", "potentialChanges", "missing", "empty"]
+)
+def test_scope_preview_rejects_diagnostics_and_missing_data(raw, mutation):
+    current = endpoint.snapshot(raw)
+    expected = endpoint.desired(current, "new")
+    actual = plan(current, expected)
+    if mutation == "missing":
+        del actual["changes"]
+    elif mutation == "empty":
+        actual["changes"] = []
+    else:
+        actual[mutation] = ["unreviewed"]
+    with pytest.raises(endpoint.GateError):
+        endpoint.inspect_plan(actual, current, expected)
+
+
 def test_drift_stops_before_any_put(raw, monkeypatch):
     reads = iter([raw, {**raw, "systemData": {"lastModifiedAt": "later"}}])
     monkeypatch.setattr(endpoint, "verify_project", lambda: None)
@@ -304,6 +348,29 @@ def test_drift_stops_before_any_put(raw, monkeypatch):
         endpoint.run(
             argparse.Namespace(
                 expect_fingerprint=endpoint.fingerprint(raw), remove=False, apply=True
+            )
+        )
+
+
+def test_failed_real_guard_stops_before_app_deployment(raw, monkeypatch):
+    monkeypatch.setattr(endpoint, "verify_project", lambda: None)
+    monkeypatch.setattr(endpoint, "get_app", lambda: raw)
+    monkeypatch.setattr(endpoint, "deployment_body", lambda *a: {})
+    monkeypatch.setattr(endpoint, "preview", lambda *a: {})
+    monkeypatch.setattr(endpoint, "inspect_plan", lambda *a: {})
+    monkeypatch.setattr(endpoint, "rest", lambda *a: pytest.fail("No app deployment allowed"))
+
+    def failed_guard(*args):
+        raise endpoint.GateError("Real guard failed")
+
+    monkeypatch.setattr(endpoint, "validate_guard", failed_guard)
+    with pytest.raises(endpoint.GateError, match="Real guard failed"):
+        endpoint.run(
+            argparse.Namespace(
+                expect_fingerprint=endpoint.fingerprint(raw),
+                remove=False,
+                apply=True,
+                validate_guard=False,
             )
         )
 
@@ -393,6 +460,85 @@ def test_scope_preview_never_requests_payloads(raw, monkeypatch, compiled):
     endpoint.preview(body)
     assert calls[0][0][calls[0][0].index("--result-format") + 1] == "ResourceIdOnly"
     assert "FullResourcePayloads" not in json.dumps(calls)
+
+
+def test_resource_free_diagnostic_uses_actual_compiled_predicate(raw, monkeypatch, compiled):
+    monkeypatch.setattr(endpoint, "command", lambda *a: copy.deepcopy(compiled))
+    body = endpoint.deployment_body(endpoint.snapshot(raw), "new", "persist")
+    original = copy.deepcopy(body)
+    for invalid in (False, True):
+        probe = endpoint.guard_diagnostic_body(body, invalid)
+        template = probe["properties"]["template"]
+        assert template["resources"] == []
+        assert template["variables"] == compiled["variables"]
+        assert template["parameters"] == compiled["parameters"]
+        assert list(template["outputs"]) == ["inventoryValid"]
+        output = template["outputs"]["inventoryValid"]
+        assert output["type"] == "bool"
+        predicate = output["value"][1:-1]
+        assert compiled["resources"][0]["properties"].startswith(f"[if({predicate}, ")
+        assert "listSecrets(" in predicate
+        secrets = probe["properties"]["parameters"]["snapshot"]["value"]["properties"][
+            "configuration"
+        ]["secrets"]
+        assert (len(secrets) != len({s["name"] for s in secrets})) is invalid
+    assert body == original
+
+
+@pytest.mark.parametrize(
+    "bad_output",
+    [
+        None,
+        {},
+        {"extra": True},
+        {"inventoryValid": {"type": "Bool", "value": 1}},
+        {"inventoryValid": {"type": "String", "value": "true"}},
+        {"inventoryValid": {"type": "Bool", "value": False}},
+        {"inventoryValid": {"type": "Bool", "value": True, "metadata": "no"}},
+    ],
+)
+def test_guard_diagnostic_rejects_non_boolean_or_unexpected_outputs(
+    raw, monkeypatch, compiled, bad_output
+):
+    monkeypatch.setattr(endpoint, "command", lambda *a: copy.deepcopy(compiled))
+    body = endpoint.deployment_body(endpoint.snapshot(raw), "new", "persist")
+    monkeypatch.setattr(endpoint, "get_app", lambda: raw)
+    monkeypatch.setattr(
+        endpoint,
+        "rest",
+        lambda *a: {"properties": {"provisioningState": "Succeeded", "outputs": bad_output}},
+    )
+    with pytest.raises(endpoint.GateError, match="strict boolean"):
+        endpoint.validate_guard(body, endpoint.fingerprint(raw))
+
+
+def test_guard_diagnostic_valid_invalid_and_baseline(raw, monkeypatch, compiled, capsys):
+    monkeypatch.setattr(endpoint, "command", lambda *a: copy.deepcopy(compiled))
+    body = endpoint.deployment_body(endpoint.snapshot(raw), "new", "persist")
+    monkeypatch.setattr(endpoint, "get_app", lambda: raw)
+    calls = []
+
+    def rest(method, path, payload):
+        calls.append(payload)
+        assert method == "put"
+        assert payload["properties"]["template"]["resources"] == []
+        return {
+            "properties": {
+                "provisioningState": "Succeeded",
+                "outputs": {"inventoryValid": {"type": "Bool", "value": len(calls) == 1}},
+            }
+        }
+
+    monkeypatch.setattr(endpoint, "rest", rest)
+    endpoint.validate_guard(body, endpoint.fingerprint(raw))
+    assert len(calls) == 2
+    evidence = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [e["inventoryValid"] for e in evidence] == [True, False]
+    assert all(e["resources"] == 0 for e in evidence)
+    monkeypatch.setattr(endpoint, "get_app", lambda: {**raw, "etag": "changed"})
+    with pytest.raises(endpoint.GateError, match="Baseline changed"):
+        endpoint.validate_guard(body, endpoint.fingerprint(raw))
+    assert len(calls) == 2
 
 
 def evaluate_guarded_properties(compiled, snapshot, live):

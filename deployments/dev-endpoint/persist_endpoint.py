@@ -371,6 +371,10 @@ def comparable(resource):
 
 def inspect_plan(plan, current, expected):
     require(plan.get("status") == "Succeeded", "What-if did not succeed")
+    require(
+        not any(plan.get(k) for k in ("error", "diagnostics", "potentialChanges")),
+        "What-if contains diagnostics or unconfirmed changes",
+    )
     changes = plan.get("changes")
     require(isinstance(changes, list), "What-if lacks changes")
     require(
@@ -389,13 +393,37 @@ def inspect_plan(plan, current, expected):
     change = changes[0]
     require(change.get("resourceId", "").lower() == APP.lower(), "What-if has unrelated resource")
     require(
-        change.get("changeType") == "Modify",
-        "ResourceIdOnly returned no Modify proof; Deploy is not authorized by the current gate",
+        change.get("changeType") in ("Deploy", "Modify"),
+        "ResourceIdOnly must redeploy or modify the exact existing app",
     )
     require(
         all(
-            set(c) <= {"resourceId", "changeType", "before", "after", "delta", "unsupportedReason"}
-            and all(c.get(k) is None for k in ("before", "after", "delta", "unsupportedReason"))
+            set(c)
+            <= {
+                "resourceId",
+                "changeType",
+                "before",
+                "after",
+                "delta",
+                "unsupportedReason",
+                "deploymentId",
+                "extension",
+                "identifiers",
+                "symbolicName",
+            }
+            and all(
+                c.get(k) is None
+                for k in (
+                    "before",
+                    "after",
+                    "delta",
+                    "unsupportedReason",
+                    "deploymentId",
+                    "extension",
+                    "identifiers",
+                    "symbolicName",
+                )
+            )
             for c in plan["changes"]
         ),
         "ResourceIdOnly preview unexpectedly contains payloads or diagnostics",
@@ -418,7 +446,7 @@ def inspect_plan(plan, current, expected):
     require(local == old, "Local transform changes unowned configuration")
     return {
         "resource": APP,
-        "operation": "Modify",
+        "operation": change["changeType"],
         "allowedChanges": [
             "properties.template.containers[web].env.FOUNDRY_PROJECT_ENDPOINT",
             "properties.template.revisionSuffix",
@@ -476,6 +504,86 @@ def preview(body):
     )
 
 
+def guard_diagnostic_body(body, invalid=False):
+    """Derive a resource-free boolean probe from the pinned resource-input guard."""
+    result = copy.deepcopy(body)
+    template = result["properties"]["template"]
+    verify_compiled(template)
+    expression = template["resources"][0]["properties"]
+    require(expression.startswith("[if("), "Missing compiled input guard")
+    # Bicep inlines runtime list calls. Extract the first if argument, respecting
+    # nested calls and ARM string literals (including doubled quote escapes).
+    depth, quoted = 0, False
+    predicate = None
+    for index, char in enumerate(expression[4:], 4):
+        if char == "'":
+            quoted = not quoted
+        elif not quoted:
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+            elif char == "," and depth == 0:
+                predicate = expression[4:index]
+                break
+    require(predicate is not None, "Unable to extract compiled input guard")
+    template["resources"] = []
+    template["outputs"] = {"inventoryValid": {"type": "bool", "value": f"[{predicate}]"}}
+    if invalid:
+        secrets = result["properties"]["parameters"]["snapshot"]["value"]["properties"][
+            "configuration"
+        ]["secrets"]
+        # A duplicate guarantees failure independent of the real inventory.
+        if secrets:
+            secrets.append(copy.deepcopy(secrets[0]))
+        else:
+            secrets.extend([{"name": "diagnostic-invalid"}, {"name": "diagnostic-invalid"}])
+    require(
+        template["resources"] == []
+        and set(template["outputs"]) == {"inventoryValid"}
+        and template["outputs"]["inventoryValid"] == {"type": "bool", "value": f"[{predicate}]"}
+        and set(template["parameters"]) == {"snapshot"}
+        and template["parameters"]["snapshot"]["type"] == "secureObject",
+        "Unsafe diagnostic resource or output scope",
+    )
+    return result
+
+
+def validate_guard(body, baseline):
+    for invalid in (False, True):
+        diagnostic = guard_diagnostic_body(body, invalid)
+        variant = "invalid" if invalid else "valid"
+        path = (
+            f"{GROUP}/providers/Microsoft.Resources/deployments/"
+            f"dev-endpoint-guard-{variant}-{baseline[:12]}?api-version=2025-04-01"
+        )
+        require(fingerprint(get_app()) == baseline, "Baseline changed before guard diagnostic")
+        result = rest("put", path, diagnostic)
+        deadline = time.monotonic() + 180
+        while result["properties"]["provisioningState"] in ("Accepted", "Running"):
+            require(time.monotonic() < deadline, "Guard diagnostic timed out")
+            time.sleep(3)
+            result = rest("get", path)
+        require(
+            result["properties"]["provisioningState"] == "Succeeded",
+            "Guard diagnostic failed; raw diagnostics suppressed",
+        )
+        outputs = result["properties"].get("outputs")
+        require(
+            isinstance(outputs, dict)
+            and set(outputs) == {"inventoryValid"}
+            and isinstance(outputs["inventoryValid"], dict)
+            and set(outputs["inventoryValid"]) == {"type", "value"}
+            and outputs["inventoryValid"]["type"] in ("Bool", "bool")
+            and outputs["inventoryValid"]["value"] is (not invalid),
+            "Guard diagnostic did not return the expected strict boolean",
+        )
+        require(fingerprint(get_app()) == baseline, "Baseline changed during guard diagnostic")
+        print(
+            json.dumps({"guardDiagnostic": variant, "inventoryValid": not invalid, "resources": 0})
+        )
+
+
 def healthy(raw):
     properties = raw["properties"]
     return (
@@ -516,8 +624,11 @@ def run(args):
     report.update(baselineFingerprint=baseline, endpoint=ENDPOINT, action=operation, applied=False)
     print(json.dumps(report), flush=True)
     if not args.apply:
+        if args.validate_guard:
+            validate_guard(body, baseline)
         return
     require(bool(args.expect_fingerprint), "Apply requires the independently reviewed fingerprint")
+    validate_guard(body, baseline)
     verify_project()
     require(fingerprint(get_app()) == baseline, "Baseline changed immediately before apply")
     # No ETag is returned by this ACA API. Immediate re-read is an optimistic
@@ -530,6 +641,7 @@ def run(args):
         if (
             comparable(snapshot(after)) == comparable(expected)
             and healthy(after)
+            and after["properties"]["latestRevisionName"] == f"fcag-dev-app--{suffix}"
             and healthz(after)
         ):
             print(
@@ -554,6 +666,11 @@ def run(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument(
+        "--validate-guard",
+        action="store_true",
+        help="Run resource-free Azure guard diagnostics (deployment records only)",
+    )
     parser.add_argument("--expect-fingerprint")
     parser.add_argument(
         "--remove", action="store_true", help="Rollback only this endpoint; preview by default"
