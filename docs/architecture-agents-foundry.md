@@ -767,6 +767,15 @@ That leaves roughly **36.70 seconds** inside the current 225-second request ceil
 
 **Recommendation**
 
+**Implementation update (PR #117, merged 2026-09-08):** the project-endpoint
+output/injection, opt-in least-privilege roles and invoke-only smoke client below
+are now implemented. The backend is an invoker, not an agent manager. The
+recommendation below records the original #98 assessment; the outstanding #109
+gate is real hosted-runtime invocation using the target managed identity, not
+another speculative endpoint/RBAC implementation. Follow the
+[dev acceptance runbook](foundry-agent-invocation.md#dev-acceptance-gates-for-109);
+generation remains on direct inference.
+
 - **Defer the actual Bicep/RBAC change to a follow-up implementation issue rather than landing speculative IaC now.** That implementation follow-up is tracked as **issue #109**.
 - Rationale:
   - The repo does **not** yet contain the hosted agent resource/application, project-endpoint client wiring, or a stable runtime contract for whether the backend will merely **invoke** an agent (`Foundry Agent Consumer`) or also **manage** one (`Foundry User` / broader project permissions).
