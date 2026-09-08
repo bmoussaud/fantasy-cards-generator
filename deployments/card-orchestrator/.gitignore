@@ -1,0 +1,3 @@
+.azure/
+infra/main.json
+infra/modules/*.json
