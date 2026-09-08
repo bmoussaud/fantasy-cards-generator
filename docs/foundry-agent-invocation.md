@@ -77,9 +77,36 @@ relaxing network policy. No hosted agent is needed to test MI token/access.
 
 The dev run on 2026-09-08 succeeded with the actual serving ACA system identity:
 token acquired, expected principal matched, HTTP 200, zero agents. Full hosted
-invocation was not proven by that access check. The subsequent smoke is
-cost-approved; the earlier App Insights deployment gate was incorrect (linkage
-is needed for tracing only), as corrected in the operations runbook.
+invocation was not proven by that access check. The subsequent smoke consumed its
+single approved allowance; no further paid attempt is authorized. The earlier
+App Insights deployment gate was incorrect (linkage is needed for tracing only),
+as corrected in the operations runbook.
+
+### Nonbillable invocation preparation
+
+Use the same pinned target arguments above with `--prepare-invocation --execute`.
+Do **not** supply `--invoke-once`, versions or a session: conflicting/unused
+invocation arguments fail locally before ACA exec. No hosted version, session or
+server is required.
+
+This explicit mode uses the **same** owned parser/request-model bundle,
+`app.generation.GeneratedCardModel` import, chunked stdin transport and phased
+deadlines as invocation. It builds the same `GenerateCardAgentRequest`/Responses
+body in memory with a clearly local placeholder session, exercises the parser
+against a labelled local valid card fixture and an invalid empty envelope, then
+acquires the actual explicit `ManagedIdentityCredential`, checks principal,
+audience and expiry, and sends **one GET agents only**. It never sends a
+Responses POST or calls a model, including when invocation arguments are malformed.
+Bytecode writes are disabled in the remote process; no remote files, packages,
+mounts, app settings or cloud resources are created or modified.
+
+`invocation_prepared` requires `parserImportReady`, `requestSchemaReady`,
+`localFixtureParseReady`, and real MI `accessVerified` with HTTP 200.
+`preparationOnly` is true; `invocationsAttempted` is zero;
+`invocationVerified` and service `schemaValid` remain **false**. No fixture content,
+service body, token or raw CLI output is exported. The local fixture is **not
+hosted-service acceptance evidence**, and this mode neither consumes nor grants
+a paid invocation allowance.
 
 The explicit `--invoke-once --hosted-version <version> --expected-version <full-sha>
 --session-id <version-pinned-session>` mode sends exactly one synthetic Responses
@@ -95,16 +122,25 @@ reconstructed in memory to respect canonical terminal limits.
 generation success; inspect `outcome`. Invocation mode allows 30 seconds from CLI
 launch for connection, terminal settling and complete payload delivery, followed
 by 80 seconds for a result, with a hard 110-second local transport cap. The result
-budget covers up to 5 seconds of remote parser imports after input, the unchanged
-70-second remote probe deadline (65-second request timeout), and 5 seconds for
-emission/transport. The pre-input remote alarm remains 75 seconds; after input it
-is reset to 5 seconds until the probe installs its 70-second alarm. PTY writes are
+budget covers a shared 70-second remote parser/import + MI + request deadline
+(request timeout at most 65 seconds), with transport/emission headroom. A diagnostic
+SIGALRM handler is installed **before** chunked input, bounded at 30 seconds.
+After input, a shared 70-second guard protects decoding/source entry, parser
+imports and the probe. The payload preserves the remaining bootstrap budget
+**before importing the parser**, rather than resetting it after imports.
+Cold imports therefore consume the request budget instead of
+silently dying under a separate five-second default signal. Parser setup failures
+emit sanitized `parser_setup_failed`/`parser_setup_timeout`; early transport/source
+failures emit `bootstrap_failed`/`bootstrap_timeout`. PTY writes are
 nonblocking and remain within setup/total deadlines, including partial transfers.
 Repeated connection messages never retransmit the payload. Local failures are
 sanitized as `exec_setup_timeout`, `exec_timeout` (result), or `exec_total_timeout`;
 process termination/reaping has a separate bounded cleanup wait. Access-only mode
 retains its 75-second launch-to-result budget. These offline deadline corrections
-do not establish the cause of the live `exec_no_evidence` result or permit a retry.
+do not establish the cause of the historical `exec_no_evidence` result or permit
+a retry. An offline subprocess regression demonstrates that the former default
+five-second SIGALRM kills a 5.2-second simulated cold import with no marker;
+the new path survives that delay and emits a structured diagnostic.
 
 ```bash
 python -m pytest -q --noconftest tests/test_aca_identity_probe.py \
@@ -161,6 +197,17 @@ not successful. The allowance was consumed and no retry occurred. Exact version,
 session and agent GETs subsequently returned 404; the web baseline was unchanged.
 See the [actual run evidence](foundry-agent-operations.md#executed-approved-dev-smoke--2026-09-08).
 Passing unit tests or mock transports is not evidence of live end-to-end success.
+
+On 2026-09-08, nonbillable preparation on the existing serving revision
+`fcag-dev-app--azd-1788775203`, container `web`, image
+`azd-deploy-1788775195`, returned the strict `invocation_prepared` marker:
+parser import, generated request schema and local fixture parsing all ready;
+actual system principal matched; GET agents HTTP 200, empty page; **zero
+invocations**, `invocationVerified:false`, `schemaValid:false`. This verifies
+the deployed web image's parser/import compatibility and the complete preparation
+collection path, not delivery to or generation by a hosted service. No Responses
+POST, deployment, hosted session creation or model call was made. The previous
+single paid allowance remains consumed.
 
 The earlier 2026-09-08 checkpoint stopped without attempting deployment.
 Missing Application Insights linkage was incorrectly called a deployment blocker;

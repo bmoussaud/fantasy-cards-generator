@@ -4,6 +4,8 @@ import base64
 import importlib
 import json
 import logging
+import signal
+import subprocess
 import sys
 import time
 import urllib.error
@@ -465,7 +467,7 @@ def test_execution_pins_target_and_bounds_remote_input_wait(modules, monkeypatch
         )
         assert command[command.index("--replica") + 1] == "synthetic"
         assert command[command.index("--revision") + 1] == "synthetic"
-        assert input_line.startswith("exec(__import__('zlib').decompress(")
+        assert input_line.startswith("__import__('sys').dont_write_bytecode=True;exec(")
         return {"status": "failed", "reason": "exec_no_evidence"}
 
     monkeypatch.setattr(wrapper, "execute", execute)
@@ -478,9 +480,12 @@ def test_invocation_selects_phased_deadlines_and_consumes_allowance(modules, mon
 
     def execute(command, **kwargs):
         calls.append(kwargs)
-        assert command[command.index("--command") + 1].endswith(
-            "source=''.join(iter(input,'END'));__import__('signal').alarm(5);exec(source)"
-        )
+        startup = command[command.index("--command") + 1]
+        encoded = startup.split("b64decode('")[1].split("'")[0]
+        bootstrap = zlib.decompress(base64.b64decode(encoded)).decode()
+        assert "signal.signal(signal.SIGALRM,deadline)" in bootstrap
+        assert "signal.alarm(30)" in bootstrap and "signal.alarm(70)" in bootstrap
+        assert "alarm(5)" not in bootstrap
         return {"status": "failed", "reason": "exec_setup_timeout"}
 
     monkeypatch.setattr(wrapper, "execute", execute)
@@ -537,7 +542,7 @@ def test_plan_only_and_prod_rejection(modules, capsys):
 def invocation_parser(payload, wrapper, monkeypatch):
     namespace = {"__name__": "aca_identity_payload"}
     exec(wrapper.parser_source(), namespace)
-    for name in ("_parse_success_envelope", "_extract_output_text"):
+    for name in ("GenerateCardAgentRequest", "_parse_success_envelope", "_extract_output_text"):
         monkeypatch.setattr(payload, name, namespace[name], raising=False)
 
 
@@ -655,3 +660,197 @@ def test_large_invocation_payload_survives_canonical_terminal(modules):
     )
     # Deliberately keep canonical mode (unlike ACA's local CLI PTY test above).
     assert wrapper.execute([sys.executable, "-c", program], input_line=input_line) == result
+
+
+def test_preparation_checks_real_schema_and_local_fixture_but_only_gets(modules, monkeypatch):
+    payload, wrapper = modules
+    invocation_parser(payload, wrapper, monkeypatch)
+    credential, opener = Credential(), Opener()
+    result = payload.probe(ENDPOINT, PRINCIPAL, credential.factory, opener, prepare=True)
+    assert result == {
+        **payload.initial_result(True),
+        "status": "invocation_prepared",
+        "parserImportReady": True,
+        "requestSchemaReady": True,
+        "localFixtureParseReady": True,
+        "tokenAcquired": True,
+        "principalMatched": True,
+        "accessVerified": True,
+        "httpStatus": 200,
+        "agentCountOnPage": 0,
+    }
+    assert opener.request.method == "GET" and opener.request.data is None
+    assert result["schemaValid"] is False and result["invocationVerified"] is False
+    assert wrapper.extract_result(payload.MARKER + json.dumps(result)) == result
+
+
+@pytest.mark.parametrize("invocation", [("1", "a" * 40, "session"), (), ("bad",), "bad"])
+def test_preparation_rejects_even_malformed_invocation_without_network(modules, invocation):
+    payload, wrapper = modules
+    credential, opener = Credential(), Opener()
+    result = payload.probe(
+        ENDPOINT, PRINCIPAL, credential.factory, opener, invocation, prepare=True
+    )
+    assert result["reason"] == "invalid_configuration"
+    assert result["invocationsAttempted"] == 0
+    assert credential.options is None and opener.request is None
+    with pytest.raises(ValueError):
+        wrapper.remote_command(ENDPOINT, PRINCIPAL, invocation, prepare=True)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"invocationVerified": True},
+        {"invocationsAttempted": 1},
+        {"schemaValid": True},
+        {"localFixtureParseReady": False},
+        {"requestSchemaReady": "true"},
+        {"parserImportReady": 1},
+        {"status": "invocation_verified"},
+        {"responseId": "fixture"},
+        {"outcome": "completed"},
+        {"card": "private"},
+    ],
+)
+def test_preparation_marker_cannot_be_invocation_evidence(modules, monkeypatch, change):
+    payload, wrapper = modules
+    invocation_parser(payload, wrapper, monkeypatch)
+    result = payload.probe(ENDPOINT, PRINCIPAL, Credential().factory, Opener(), prepare=True)
+    result.update(change)
+    assert wrapper.extract_result(payload.MARKER + json.dumps(result)) is None
+
+
+def preparation_args():
+    args = [
+        "--environment",
+        "dev",
+        "--project-endpoint",
+        ENDPOINT,
+        "--expected-principal",
+        PRINCIPAL,
+        "--prepare-invocation",
+        "--execute",
+    ]
+    for name in ("subscription", "resource-group", "app", "revision", "replica", "container"):
+        args.extend(["--" + name, "synthetic"])
+    return args
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--invoke-once"],
+        ["--hosted-version", "1"],
+        ["--expected-version", "bad"],
+        ["--session-id", "session"],
+        ["--invoke-once", "--session-id", "bad"],
+    ],
+)
+def test_preparation_cli_malformed_args_never_launch_exec(modules, monkeypatch, extra):
+    _, wrapper = modules
+    monkeypatch.setattr(wrapper, "execute", lambda *a, **kw: pytest.fail("exec forbidden"))
+    with pytest.raises(SystemExit):
+        wrapper.main(preparation_args() + extra)
+
+
+def test_preparation_cli_uses_invocation_transport_without_allowance(modules, monkeypatch, capsys):
+    _, wrapper = modules
+    calls = []
+
+    def execute(command, **kwargs):
+        calls.append(kwargs)
+        assert len(command[command.index("--command") + 1]) < 2000
+        assert max(map(len, kwargs["input_line"].splitlines())) <= 1024
+        return {"status": "failed", "reason": "exec_no_evidence"}
+
+    monkeypatch.setattr(wrapper, "execute", execute)
+    assert wrapper.main(preparation_args()) == 1
+    assert len(calls) == 1
+    assert {key: calls[0][key] for key in ("timeout", "setup_timeout", "total_timeout")} == {
+        "timeout": 80,
+        "setup_timeout": 30,
+        "total_timeout": 110,
+    }
+    assert "invocationAllowanceConsumed" not in json.loads(capsys.readouterr().out)
+
+
+@pytest.mark.parametrize(
+    "bundle,reason",
+    [
+        ("raise ImportError('private-import-details')", "parser_setup_failed"),
+        ("raise TimeoutError('private-timeout-details')", "parser_setup_timeout"),
+    ],
+)
+def test_parser_setup_failure_always_emits_sanitized_marker(
+    modules, monkeypatch, capsys, bundle, reason
+):
+    payload, wrapper = modules
+    monkeypatch.setattr(payload, "probe", lambda *a, **kw: pytest.fail("network forbidden"))
+    payload.emit(ENDPOINT, PRINCIPAL, prepare=True, parser_bundle=bundle)
+    result = wrapper.extract_result(capsys.readouterr().out)
+    assert result == {**payload.initial_result(True), "reason": reason}
+
+
+def test_parser_setup_preserves_remote_remaining_budget(modules, monkeypatch, capsys):
+    payload, wrapper = modules
+    budgets = []
+    monkeypatch.setattr(payload.signal, "getitimer", lambda timer: (12.5, 0))
+    monkeypatch.setattr(payload.signal, "setitimer", lambda timer, value: budgets.append(value))
+    payload.emit(ENDPOINT, PRINCIPAL, prepare=True, parser_bundle="raise TimeoutError('private')")
+    assert budgets == [12.5]
+    assert wrapper.extract_result(capsys.readouterr().out)["reason"] == "parser_setup_timeout"
+
+
+def test_preparation_real_bundle_full_canonical_transport(modules):
+    payload, wrapper = modules
+    startup, input_line = wrapper.stdin_payload(
+        wrapper.remote_command(ENDPOINT, PRINCIPAL, prepare=True), prepare=True
+    )
+    # Only the identity and HTTP boundary are mocked; parser/import/request/PTY are real.
+    program = (
+        "import azure.identity,urllib.request;"
+        "from tests.test_aca_identity_probe import Credential,Opener;"
+        "azure.identity.ManagedIdentityCredential=Credential().factory;"
+        "urllib.request.build_opener=lambda *a:Opener();"
+        "print('INFO: Successfully connected to container:',flush=True);" + startup.split(" ", 2)[2]
+    )
+    result = wrapper.execute(
+        [sys.executable, "-c", program],
+        input_line=input_line,
+        timeout=80,
+        setup_timeout=30,
+        total_timeout=110,
+    )
+    assert result["status"] == "invocation_prepared"
+    assert result["localFixtureParseReady"] is True
+    assert result["invocationsAttempted"] == 0 and result["invocationVerified"] is False
+
+
+def test_cold_import_exceeding_old_five_second_alarm_now_completes(modules):
+    _, wrapper = modules
+    # Reproduce the latent default-SIGALRM failure locally, not its historical occurrence.
+    old = subprocess.run(
+        [sys.executable, "-c", "import signal,time;signal.alarm(5);time.sleep(5.2)"],
+        capture_output=True,
+        timeout=8,
+    )
+    assert old.returncode == -signal.SIGALRM and old.stdout == b""
+    source = (PROJECT / "aca_identity_payload.py").read_text()
+    source += (
+        f"\nemit({ENDPOINT!r},{PRINCIPAL!r},prepare=True,"
+        "parser_bundle='import time;time.sleep(5.2);raise ImportError()')"
+    )
+    # Encode multiline source exactly as the production remote command does.
+    encoded = base64.b64encode(zlib.compress(source.encode())).decode()
+    startup, input_line = wrapper.stdin_payload(
+        "/app/.venv/bin/python -c "
+        + f"exec(__import__('zlib').decompress(__import__('base64').b64decode('{encoded}')))",
+        prepare=True,
+    )
+    program = (
+        "print('INFO: Successfully connected to container:',flush=True);" + startup.split(" ", 2)[2]
+    )
+    result = wrapper.execute([sys.executable, "-c", program], input_line=input_line, timeout=12)
+    assert result["reason"] == "parser_setup_failed"
+    assert result["invocationsAttempted"] == 0

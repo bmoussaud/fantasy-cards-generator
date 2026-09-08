@@ -18,6 +18,79 @@ MAX_BODY = 65536
 SYNTHETIC_QUERY = "Create an original gentle woodland guardian with a lantern and protective magic."
 
 
+def initial_result(prepare=False):
+    result = {
+        "status": "failed",
+        "tokenAcquired": False,
+        "principalMatched": False,
+        "accessVerified": False,
+        "invocationVerified": False,
+        "endpointPersisted": False,
+    }
+    if prepare:
+        result.update(
+            preparationOnly=True,
+            parserImportReady=False,
+            requestSchemaReady=False,
+            localFixtureParseReady=False,
+            invocationsAttempted=0,
+            schemaValid=False,
+        )
+    return result
+
+
+def invocation_body(session):
+    request = globals()["GenerateCardAgentRequest"](query=SYNTHETIC_QUERY)
+    return {
+        "store": False,
+        "stream": False,
+        "session_id": session,
+        "input": [
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": request.model_dump_json()}],
+            }
+        ],
+    }
+
+
+def check_local_fixture():
+    """Offline parser exercise only: this document did not come from Foundry."""
+    domain = {
+        "schemaVersion": 1,
+        "status": "completed",
+        "card": {
+            "schemaVersion": 1,
+            "name": "Local fixture guardian",
+            "cardType": "creature",
+            "rarity": "common",
+            "manaCost": 2,
+            "attack": 1,
+            "health": 3,
+            "rulesText": "Protect one friendly creature.",
+            "flavorText": "",
+            "artBrief": "A local fixture guardian with a lantern.",
+        },
+        "artPrompt": "Local fixture, not generated service content.",
+        "metadata": {"agentVersion": "local-fixture"},
+    }
+    document = {
+        "status": "completed",
+        "output": [
+            {"type": "message", "content": [{"type": "output_text", "text": json.dumps(domain)}]}
+        ],
+    }
+    parsed = globals()["_parse_success_envelope"](
+        document, request_id=None, expected_version="local-fixture"
+    )
+    invalid = globals()["_parse_success_envelope"](
+        {"status": "completed", "output": []},
+        request_id=None,
+        expected_version="local-fixture",
+    )
+    return parsed.success and parsed.schema_valid and not invalid.schema_valid
+
+
 def validate_invocation(version, build, session):
     if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", version):
         raise ValueError("invalid_version")
@@ -54,17 +127,14 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def probe(endpoint, principal, credential_factory=None, opener=None, invocation=None):
-    result = {
-        "status": "failed",
-        "tokenAcquired": False,
-        "principalMatched": False,
-        "accessVerified": False,
-        "invocationVerified": False,
-        "endpointPersisted": False,
-    }
+def probe(
+    endpoint, principal, credential_factory=None, opener=None, invocation=None, *, prepare=False
+):
+    result = initial_result(prepare)
     try:
         validate_inputs(endpoint, principal)
+        if prepare and invocation is not None:
+            raise ValueError("conflicting_modes")
         if invocation is not None:
             validate_invocation(*invocation)
             result.update(invocationsAttempted=0, schemaValid=False)
@@ -75,6 +145,13 @@ def probe(endpoint, principal, credential_factory=None, opener=None, invocation=
     logging.disable(logging.CRITICAL)
     credential = None
     try:
+        if prepare:
+            result["parserImportReady"] = True
+            invocation_body("local-preparation-only")
+            result["requestSchemaReady"] = True
+            result["localFixtureParseReady"] = check_local_fixture()
+            if not result["localFixtureParseReady"]:
+                return {**result, "reason": "local_fixture_failed"}
         if credential_factory is None:
             from azure.identity import ManagedIdentityCredential
 
@@ -95,22 +172,7 @@ def probe(endpoint, principal, credential_factory=None, opener=None, invocation=
         if invocation is not None:
             version, build, session = invocation
             # The platform consumes session_id, pinning routing to the version-ref session.
-            body = {
-                "store": False,
-                "stream": False,
-                "session_id": session,
-                "input": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "input_text",
-                                "text": json.dumps({"schemaVersion": 1, "query": SYNTHETIC_QUERY}),
-                            }
-                        ],
-                    }
-                ],
-            }
+            body = invocation_body(session)
             request = urllib.request.Request(
                 endpoint
                 + "/agents/card-orchestrator/endpoint/protocols/openai/responses?api-version=v1",
@@ -176,7 +238,7 @@ def probe(endpoint, principal, credential_factory=None, opener=None, invocation=
             return {**result, "reason": "invalid_list_response"}
         return {
             **result,
-            "status": "access_verified",
+            "status": "invocation_prepared" if prepare else "access_verified",
             "accessVerified": True,
             "agentCountOnPage": len(document["data"]),
         }
@@ -198,14 +260,26 @@ def probe(endpoint, principal, credential_factory=None, opener=None, invocation=
                 pass
 
 
-def emit(endpoint, principal, invocation=None):
+def emit(endpoint, principal, invocation=None, *, prepare=False, parser_bundle=None):
     def deadline(signum, frame):
         raise TimeoutError()
 
     signal.signal(signal.SIGALRM, deadline)
-    signal.alarm(70 if invocation else 45)
+    budget = 70 if invocation or prepare else 45
+    remaining = signal.getitimer(signal.ITIMER_REAL)[0]
+    if parser_bundle is not None and remaining:
+        budget = min(budget, remaining)
+    signal.setitimer(signal.ITIMER_REAL, budget)
+    result = initial_result(prepare)
+    logging.disable(logging.CRITICAL)
     try:
-        result = probe(endpoint, principal, invocation=invocation)
+        if parser_bundle is not None:
+            exec(parser_bundle, globals())
+        result = probe(endpoint, principal, invocation=invocation, prepare=prepare)
+    except TimeoutError:
+        result["reason"] = "parser_setup_timeout"
+    except Exception:
+        result["reason"] = "parser_setup_failed"
     finally:
         signal.alarm(0)
     print(MARKER + json.dumps(result, sort_keys=True), flush=True)
