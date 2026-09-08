@@ -77,7 +77,9 @@ relaxing network policy. No hosted agent is needed to test MI token/access.
 
 The dev run on 2026-09-08 succeeded with the actual serving ACA system identity:
 token acquired, expected principal matched, HTTP 200, zero agents. Full hosted
-invocation remains unproven and separately cost-gated.
+invocation remains unproven. The subsequent bounded smoke was cost-approved,
+but stopped before publication because the required project Application Insights
+binding is absent; see the [approved-smoke checkpoint](foundry-agent-operations.md#approved-temporary-smoke-blocked-before-publication--2026-09-08).
 
 ```bash
 python -m pytest -q --noconftest tests/test_aca_identity_probe.py \
@@ -128,6 +130,13 @@ The response parser reads the raw Responses wire envelope `output[]/content[]/ou
 ## Current live gap
 
 No hosted `card-orchestrator` agent is deployed by this branch. Passing unit tests or mock transports is not evidence of live end-to-end success; a real smoke test requires Gimli's infra/RBAC work and an existing configured agent endpoint.
+
+On 2026-09-08 the authorized temporary live smoke reached a real readiness
+blocker: neither project nor account inventory included an Application Insights
+connection. The existing Insights resource alone does not establish platform
+injection. No image publication, hosted compute, or invocation attempt occurred.
+The earlier actual ACA-MI access probe is not an invocation result. Do not
+reinterpret this as denied cost authorization or retry with developer credentials.
 
 ## Opt-in runtime (offline candidate, issue #109)
 

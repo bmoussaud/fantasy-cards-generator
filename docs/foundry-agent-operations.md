@@ -295,15 +295,71 @@ model call, production change or root provision/hook. No tools/dependencies
 were installed. The isolated ignored azd opt-in booleans were reset to `false`.
 Targeted offline probe/infrastructure validation: **100 tests passed**.
 
-Further hosted-deployment gates remain: verify publisher push authorization;
-confirm the project/platform Application Insights binding (the queried linkage
-fields were null and connection inventories empty, so injection is **unproven**);
-review runtime-identity model authorization, region/quota, privacy and explicit
-compute/model spend. The prerequisite proposal creates no compute or model
+Further hosted-deployment gates are tracked in the approved-smoke checkpoint
+below. The prerequisite proposal creates no compute or model
 capacity; a later separately approved hosted deploy can incur 0.5 CPU / 1GiB
 compute, registry storage and telemetry ingestion costs, and a remote smoke
 request can incur model charges. This runbook is partial #99 operations scope,
 not installed dashboards, alerts or production readiness.
+
+### Approved temporary smoke: blocked before publication — 2026-09-08
+
+At requester approval, the allowed live test was **one** synthetic ACA-MI
+invocation, at most three existing-model calls (1800 output tokens per stage,
+no retry), with 0.5 CPU / 1GiB hosting for at most 30 minutes and explicit
+cleanup. Registry storage, compute, telemetry and model costs were approved.
+**Missing spend approval is no longer the blocker.**
+
+Read-only checks against source `f927b2c0bc23c615eecc95919a37a9c4686c0ff0`
+completed at **2026-09-08T11:43:40Z**:
+
+- Existing ACR `fcagdevqhg3qc4rlbt4gacr` uses
+  `LegacyRegistryPermissions`; the publisher has an existing inherited Owner
+  role. No publisher grant or registry/network change is necessary.
+- Existing project `fantasy-cards-dev` is in `eastus2`, a currently supported
+  hosted-agent region. The Cognitive Services location-usage response contained
+  no hosted-agent quota entries; this is **unknown capacity**, not zero usage or
+  verified available quota.
+- The project and account connection inventories each returned only
+  `fcagdevqhg3qc4rlbt4gacr-conn` (`ContainerRegistry`, `ManagedIdentity`).
+  No Application Insights connection or project telemetry property was present.
+  Existing Insights component `fcag-dev-appi` exists in `rg-fcag-dev`, but its
+  existence is **not** a project binding.
+- The [official hosted-agent permissions reference](https://learn.microsoft.com/azure/foundry/agents/concepts/hosted-agent-permissions#required-azure-resources)
+  requires an Application Insights project connection for telemetry emission.
+  Platform connection-string injection does not prove that a missing connection
+  exists. This is the concrete unresolved prerequisite; deployment was not
+  attempted. Repair would require a separately reviewed connection to the
+  existing component and its credential/telemetry handling, outside this smoke's
+  no-new-telemetry-resource/no-secret-change scope. No connection string was read.
+- The platform creates the agent's runtime identity on deployment and provides
+  project model access by default; absence of a pre-created runtime identity
+  was **not** treated as a blocker. No extra identity grant was requested.
+- `GET /agents?api-version=v1` returned zero agents. No image was built/pushed,
+  no hosted version/session was created, and **zero invocation attempts / zero
+  model calls** occurred. Deployment/start/stop timestamps and image digest /
+  hosted version are **not applicable**, rather than a claimed successful stop.
+
+Installed `azure.ai.agents` beta.13 has **no `azd ai agent stop` command**.
+The supported command is `azd ai agent sessions stop <session-id>`, which
+terminates session compute and retains its filesystem; a later invocation can
+resume it. Current platform documentation describes per-session sandboxes,
+not configurable replicas. [Agent endpoint disable](https://learn.microsoft.com/azure/foundry/agents/how-to/manage-hosted-agent#disable-or-enable-an-agent)
+uses the documented `POST /agents/{name}:disable?api-version=v1` REST operation;
+disable is not evidence of stopped compute. A resumed smoke must establish a
+bounded session-stop/verification `finally` path and endpoint isolation before
+starting, rather than inventing a version-stop command or relying on azd's
+deployment timeout (which does not cancel server-side deployment).
+
+Before/after ACA projections were identical: container `web`, image
+`fcagdevqhg3qc4rlbt4gacr.azurecr.io/fantasy-cards-generator/web-nat-dev:azd-deploy-1788775195`,
+latest/ready revision `fcag-dev-app--azd-1788775203`, `Single`, latest traffic
+100%, principal `946d8701-48f2-4fa5-8efd-bf053c7b4e4c`.
+No Azure mutation command ran during this checkpoint, and no root hook,
+production change, evaluation or dependency installation ran. The previously
+verified actual ACA-MI access evidence remains valid but **invocation remains
+unproven**. #109 stays open; PR #120 is not merged. The ACA endpoint-injection
+gap and production latency/privacy acceptance remain separate.
 
 Verify only the expected assignments/connection via safe projections; allow RBAC
 propagation. Then build/readiness/runtime tests, privacy review, region/quota
