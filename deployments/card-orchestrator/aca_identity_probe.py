@@ -21,9 +21,9 @@ from aca_identity_payload import (
     validate_invocation,
 )
 
-INVOCATION_SETUP_TIMEOUT = 10
+INVOCATION_SETUP_TIMEOUT = 30
 INVOCATION_RESULT_TIMEOUT = 100
-INVOCATION_TOTAL_TIMEOUT = 110
+INVOCATION_TOTAL_TIMEOUT = INVOCATION_SETUP_TIMEOUT + INVOCATION_RESULT_TIMEOUT
 
 
 def parser_source():
@@ -529,7 +529,7 @@ def main(argv=None):
             input_line=input_line,
             timeout=INVOCATION_RESULT_TIMEOUT if invocation else 80,
             setup_timeout=INVOCATION_SETUP_TIMEOUT if invocation else 30,
-            total_timeout=INVOCATION_TOTAL_TIMEOUT,
+            total_timeout=INVOCATION_TOTAL_TIMEOUT if invocation else 110,
         )
     else:
         result = execute(command, input_line=input_line)

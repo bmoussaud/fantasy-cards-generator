@@ -349,6 +349,29 @@ def test_delayed_split_connection_gets_full_result_budget(modules, fake_pty):
     assert fake_pty.launches == 1
 
 
+def test_invocation_transport_keeps_setup_and_remote_result_budgets(modules, fake_pty):
+    payload, wrapper = modules
+    result = payload.probe(ENDPOINT, PRINCIPAL, Credential().factory, Opener())
+    fake_pty.events = [
+        (12, b"INFO: Successfully connec"),
+        (13, b"ted to container:\n"),
+        (108, (payload.MARKER + json.dumps(result) + "\n").encode()),
+    ]
+    assert (
+        wrapper.execute(
+            ["offline"],
+            input_line="reviewed-source",
+            timeout=wrapper.INVOCATION_RESULT_TIMEOUT,
+            setup_timeout=wrapper.INVOCATION_SETUP_TIMEOUT,
+            total_timeout=wrapper.INVOCATION_TOTAL_TIMEOUT,
+        )
+        == result
+    )
+    assert fake_pty.writes == [(13.2, b"reviewed-source\n")]
+    assert fake_pty.now == 108
+    assert fake_pty.launches == 1
+
+
 @pytest.mark.parametrize("phase", ["connect", "settle", "transfer"])
 def test_setup_deadline_covers_connection_settling_and_blocked_transfer(modules, fake_pty, phase):
     _, wrapper = modules
@@ -516,8 +539,8 @@ def test_invocation_selects_phased_deadlines_and_consumes_allowance(modules, mon
     assert wrapper.main(args) == 1
     assert len(calls) == 1
     assert calls[0]["timeout"] == 100
-    assert calls[0]["setup_timeout"] == 10
-    assert calls[0]["total_timeout"] == 110
+    assert calls[0]["setup_timeout"] == 30
+    assert calls[0]["total_timeout"] == 130
     assert calls[0]["input_line"].endswith("\nEND")
     assert json.loads(capsys.readouterr().out) == {
         "status": "failed",

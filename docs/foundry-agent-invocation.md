@@ -174,9 +174,13 @@ unknown creation completion. See the [cleanup contract](foundry-agent-operations
 Large invocation payloads are sent in lines of at most 1024 characters and
 reconstructed in memory to respect canonical terminal limits.
 `invocation_verified` can mean a validated `held` or `refused` result, not card
-generation success; inspect `outcome`. Invocation mode allows **10 seconds** from CLI
+generation success; inspect `outcome`. Invocation mode allows **30 seconds** from CLI
 launch for connection, terminal settling and complete payload delivery, followed
-by **100 seconds** for a result, with a hard **110-second** local transport cap.
+by **100 seconds** for a result, with a hard **130-second** local transport cap.
+The earlier 10-second setup cap produced `exec_setup_timeout` during the latest
+live attempt. Setup now matches the successful preparation path without reducing
+the result budget. This correction has only been exercised offline; no further
+live invocation is implied.
 Its remote budget is **95 seconds**: at most **30 seconds** for decoding,
 parser/import, MI, session creation and readiness, separately reserving the
 **65-second** invocation guard (including response parsing). Setup failure never
