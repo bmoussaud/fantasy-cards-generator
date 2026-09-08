@@ -24,9 +24,14 @@ def parser_source():
     """Bundle the owned parser/model definitions, not a substitute client or response."""
     root = Path(__file__).resolve().parents[2]
     names = {
-        "GenerateCardAgentResponse", "FoundryAgentInvocationResult",
-        "_parse_success_envelope", "_contains_refusal", "_extract_output_text",
-        "_metadata_version", "_incomplete_reason", "_string_or_none",
+        "GenerateCardAgentResponse",
+        "FoundryAgentInvocationResult",
+        "_parse_success_envelope",
+        "_contains_refusal",
+        "_extract_output_text",
+        "_metadata_version",
+        "_incomplete_reason",
+        "_string_or_none",
         "_safe_identifier_or_none",
     }
     source = (root / "app/foundry_agent_client.py").read_text()
@@ -41,12 +46,19 @@ def parser_source():
         "from app.generation import GeneratedCardModel\n"
     )
     lines = source.splitlines()
-    return imports + "\n\n".join(
-        "\n".join(lines[
-            min([node.lineno] + [d.lineno for d in node.decorator_list]) - 1:node.end_lineno
-        ])
-        for node in nodes
-    ) + "\nGenerateCardAgentResponse.model_rebuild(_types_namespace=globals())\n"
+    return (
+        imports
+        + "\n\n".join(
+            "\n".join(
+                lines[
+                    min([node.lineno] + [d.lineno for d in node.decorator_list])
+                    - 1 : node.end_lineno
+                ]
+            )
+            for node in nodes
+        )
+        + "\nGenerateCardAgentResponse.model_rebuild(_types_namespace=globals())\n"
+    )
 
 
 def remote_command(endpoint, principal, invocation=None):
@@ -75,9 +87,11 @@ def stdin_payload(payload, *, invocation=False):
         "/app/.venv/bin/python -c __import__('signal').alarm(75);"
         "source=''.join(iter(input,'END'));__import__('signal').alarm(5);exec(source)"
     )
-    return command, "\n".join(
-        expression[offset:offset + 1024] for offset in range(0, len(expression), 1024)
-    ) + "\nEND"
+    return (
+        command,
+        "\n".join(expression[offset : offset + 1024] for offset in range(0, len(expression), 1024))
+        + "\nEND",
+    )
 
 
 def extract_result(output):
@@ -98,9 +112,15 @@ def extract_result(output):
             "reason",
             "httpStatus",
             "agentCountOnPage",
-            "invocationsAttempted", "schemaValid", "outcome", "hostedVersion",
-            "applicationVersion", "responseId", "requestId",
-            "hostedVersionMatched", "applicationVersionMatched",
+            "invocationsAttempted",
+            "schemaValid",
+            "outcome",
+            "hostedVersion",
+            "applicationVersion",
+            "responseId",
+            "requestId",
+            "hostedVersionMatched",
+            "applicationVersionMatched",
         }
         if not isinstance(result, dict) or set(result) - allowed:
             continue
@@ -133,24 +153,33 @@ def extract_result(output):
         if result["endpointPersisted"]:
             continue
         if "invocationsAttempted" in result:
-            if (
-                type(result["invocationsAttempted"]) is not int
-                or result["invocationsAttempted"] not in (0, 1)
-            ):
+            if type(result["invocationsAttempted"]) is not int or result[
+                "invocationsAttempted"
+            ] not in (0, 1):
                 continue
             if type(result.get("schemaValid")) is not bool:
                 continue
-            if any(key in result and type(result[key]) is not bool for key in (
-                "hostedVersionMatched", "applicationVersionMatched"
-            )):
+            if any(
+                key in result and type(result[key]) is not bool
+                for key in ("hostedVersionMatched", "applicationVersionMatched")
+            ):
                 continue
             if result.get("outcome") not in (
-                None, "completed", "refused", "held", "routing_defer", "policy_refusal",
-                "incomplete", "failed", "invalid_response", "version_mismatch",
+                None,
+                "completed",
+                "refused",
+                "held",
+                "routing_defer",
+                "policy_refusal",
+                "incomplete",
+                "failed",
+                "invalid_response",
+                "version_mismatch",
             ):
                 continue
             if any(
-                key in result and (
+                key in result
+                and (
                     not isinstance(result[key], str)
                     or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,79}", result[key])
                 )
@@ -160,10 +189,15 @@ def extract_result(output):
         elif result["invocationVerified"]:
             continue
         if result["status"] == "invocation_verified" and not (
-            result["invocationVerified"] and result.get("schemaValid")
-            and result.get("hostedVersionMatched") and result.get("applicationVersionMatched")
-            and result["principalMatched"] and result["tokenAcquired"] and result["accessVerified"]
-            and result.get("httpStatus") == 200 and result.get("invocationsAttempted") == 1
+            result["invocationVerified"]
+            and result.get("schemaValid")
+            and result.get("hostedVersionMatched")
+            and result.get("applicationVersionMatched")
+            and result["principalMatched"]
+            and result["tokenAcquired"]
+            and result["accessVerified"]
+            and result.get("httpStatus") == 200
+            and result.get("invocationsAttempted") == 1
         ):
             continue
         if any(
@@ -213,7 +247,8 @@ def execute(command, timeout=75, input_line=None, *, setup_timeout=None, total_t
                 if now >= deadline:
                     reason = (
                         "exec_setup_timeout"
-                        if setup_timeout is not None and not sent else "exec_timeout"
+                        if setup_timeout is not None and not sent
+                        else "exec_timeout"
                     )
                     return {"status": "failed", "reason": reason}
                 wait = min(1, deadline - now, overall_deadline - now)
@@ -325,15 +360,20 @@ def main(argv=None):
         "--only-show-errors",
     ]
     if not args.execute:
-        print("PLAN ONLY: pinned ACA exec; explicit system MI; "
-              + ("ONE Responses request." if invocation else "one GET agents; no model call."))
+        print(
+            "PLAN ONLY: pinned ACA exec; explicit system MI; "
+            + ("ONE Responses request." if invocation else "one GET agents; no model call.")
+        )
         return 0
     # Long startup commands receive HTTP 404 from the exec WebSocket gateway.
     # Send only reviewed source (never credentials) over stdin to the bounded process.
     if invocation:
         result = execute(
-            command, input_line=input_line, timeout=INVOCATION_RESULT_TIMEOUT,
-            setup_timeout=INVOCATION_SETUP_TIMEOUT, total_timeout=INVOCATION_TOTAL_TIMEOUT,
+            command,
+            input_line=input_line,
+            timeout=INVOCATION_RESULT_TIMEOUT,
+            setup_timeout=INVOCATION_SETUP_TIMEOUT,
+            total_timeout=INVOCATION_TOTAL_TIMEOUT,
         )
     else:
         result = execute(command, input_line=input_line)

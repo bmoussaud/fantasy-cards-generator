@@ -99,10 +99,17 @@ def probe(endpoint, principal, credential_factory=None, opener=None, invocation=
                 "store": False,
                 "stream": False,
                 "session_id": session,
-                "input": [{"role": "user", "content": [{
-                    "type": "input_text",
-                    "text": json.dumps({"schemaVersion": 1, "query": SYNTHETIC_QUERY}),
-                }]}],
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": json.dumps({"schemaVersion": 1, "query": SYNTHETIC_QUERY}),
+                            }
+                        ],
+                    }
+                ],
             }
             request = urllib.request.Request(
                 endpoint
@@ -144,7 +151,8 @@ def probe(endpoint, principal, credential_factory=None, opener=None, invocation=
                 applicationVersion=build,
             )
             for key, value in (
-                ("responseId", parsed.response_id), ("requestId", parsed.request_id)
+                ("responseId", parsed.response_id),
+                ("requestId", parsed.request_id),
             ):
                 if value:
                     result[key] = value

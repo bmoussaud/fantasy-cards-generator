@@ -235,8 +235,16 @@ def test_exec_transmits_source_only_after_connection_over_pty(modules):
 def fake_pty(modules, monkeypatch):
     _, wrapper = modules
     state = SimpleNamespace(
-        now=0.0, events=[], writes=[], write_size=1024, blocked_until=0,
-        write_interval=0, next_write=0, block_once=False, launches=0, terminated=False,
+        now=0.0,
+        events=[],
+        writes=[],
+        write_size=1024,
+        blocked_until=0,
+        write_interval=0,
+        next_write=0,
+        block_once=False,
+        launches=0,
+        terminated=False,
     )
     process = SimpleNamespace(
         stdout=SimpleNamespace(close=lambda: None),
@@ -276,11 +284,15 @@ def fake_pty(modules, monkeypatch):
                 ready[11] = state.events[0][0]
             if 12 in self.registered:
                 ready[12] = max(state.blocked_until, state.next_write, state.now)
-            state.now = min(state.now + timeout, max(state.now, min(ready.values()))) \
-                if ready else state.now + timeout
+            state.now = (
+                min(state.now + timeout, max(state.now, min(ready.values())))
+                if ready
+                else state.now + timeout
+            )
             return [
                 (SimpleNamespace(fd=fd), self.registered[fd])
-                for fd, at in ready.items() if at <= state.now
+                for fd, at in ready.items()
+                if at <= state.now
             ]
 
     def read(fd, size):
@@ -293,7 +305,7 @@ def fake_pty(modules, monkeypatch):
         if state.block_once:
             state.block_once = False
             raise BlockingIOError()
-        part = bytes(pending[:state.write_size])
+        part = bytes(pending[: state.write_size])
         state.writes.append((state.now, part))
         return len(part)
 
@@ -317,19 +329,23 @@ def test_delayed_split_connection_gets_full_result_budget(modules, fake_pty):
         (14, b"INFO: Successfully connected to container:\n"),
         (92, (payload.MARKER + json.dumps(result) + "\n").encode()),
     ]
-    assert wrapper.execute(
-        ["offline"], input_line="reviewed-source", timeout=80,
-        setup_timeout=30, total_timeout=110,
-    ) == result
+    assert (
+        wrapper.execute(
+            ["offline"],
+            input_line="reviewed-source",
+            timeout=80,
+            setup_timeout=30,
+            total_timeout=110,
+        )
+        == result
+    )
     assert fake_pty.writes == [(13.2, b"reviewed-source\n")]
     assert fake_pty.now == 92
     assert fake_pty.launches == 1
 
 
 @pytest.mark.parametrize("phase", ["connect", "settle", "transfer"])
-def test_setup_deadline_covers_connection_settling_and_blocked_transfer(
-    modules, fake_pty, phase
-):
+def test_setup_deadline_covers_connection_settling_and_blocked_transfer(modules, fake_pty, phase):
     _, wrapper = modules
     if phase != "connect":
         fake_pty.events = [
@@ -337,8 +353,11 @@ def test_setup_deadline_covers_connection_settling_and_blocked_transfer(
         ]
     fake_pty.blocked_until = 31
     assert wrapper.execute(
-        ["offline"], input_line="reviewed-source", timeout=80,
-        setup_timeout=30, total_timeout=110,
+        ["offline"],
+        input_line="reviewed-source",
+        timeout=80,
+        setup_timeout=30,
+        total_timeout=110,
     ) == {"status": "failed", "reason": "exec_setup_timeout"}
     assert fake_pty.now == 30
     assert fake_pty.writes == []
@@ -355,8 +374,11 @@ def test_partial_transfer_is_bounded_without_retransmission(modules, fake_pty):
     fake_pty.write_interval = 10
     fake_pty.block_once = True
     assert wrapper.execute(
-        ["offline"], input_line="reviewed-source", timeout=80,
-        setup_timeout=30, total_timeout=110,
+        ["offline"],
+        input_line="reviewed-source",
+        timeout=80,
+        setup_timeout=30,
+        total_timeout=110,
     ) == {"status": "failed", "reason": "exec_setup_timeout"}
     assert b"".join(part for _, part in fake_pty.writes) == b"revi"
     assert fake_pty.now == 30 and fake_pty.launches == 1
@@ -372,10 +394,16 @@ def test_result_budget_starts_after_last_partial_write(modules, fake_pty):
     ]
     fake_pty.write_size = 4
     fake_pty.write_interval = 10
-    assert wrapper.execute(
-        ["offline"], input_line="abcdefghijk", timeout=80,
-        setup_timeout=30, total_timeout=110,
-    ) == result
+    assert (
+        wrapper.execute(
+            ["offline"],
+            input_line="abcdefghijk",
+            timeout=80,
+            setup_timeout=30,
+            total_timeout=110,
+        )
+        == result
+    )
     assert b"".join(part for _, part in fake_pty.writes) == b"abcdefghijk\n"
     assert fake_pty.writes[-1][0] == 21.2
     assert fake_pty.launches == 1
@@ -396,8 +424,11 @@ def test_result_and_overall_deadlines_do_not_retry(
     if connect is not None:
         fake_pty.events = [(connect, b"Successfully connected to container:\n")]
     assert wrapper.execute(
-        ["offline"], input_line="reviewed-source", timeout=80,
-        setup_timeout=setup, total_timeout=total,
+        ["offline"],
+        input_line="reviewed-source",
+        timeout=80,
+        setup_timeout=setup,
+        total_timeout=total,
     ) == {"status": "failed", "reason": reason}
     assert fake_pty.now == elapsed
     assert len(fake_pty.writes) == (0 if connect is None else 1)
@@ -408,7 +439,8 @@ def test_access_only_deadline_does_not_reset_after_delivery(modules, fake_pty):
     _, wrapper = modules
     fake_pty.events = [(60, b"Successfully connected to container:\n")]
     assert wrapper.execute(["offline"], input_line="reviewed-source") == {
-        "status": "failed", "reason": "exec_timeout",
+        "status": "failed",
+        "reason": "exec_timeout",
     }
     assert fake_pty.now == 75 and len(fake_pty.writes) == 1
 
@@ -453,9 +485,20 @@ def test_invocation_selects_phased_deadlines_and_consumes_allowance(modules, mon
 
     monkeypatch.setattr(wrapper, "execute", execute)
     args = [
-        "--environment", "dev", "--project-endpoint", ENDPOINT,
-        "--expected-principal", PRINCIPAL, "--execute", "--invoke-once",
-        "--hosted-version", "1", "--expected-version", "a" * 40, "--session-id", "session-1",
+        "--environment",
+        "dev",
+        "--project-endpoint",
+        ENDPOINT,
+        "--expected-principal",
+        PRINCIPAL,
+        "--execute",
+        "--invoke-once",
+        "--hosted-version",
+        "1",
+        "--expected-version",
+        "a" * 40,
+        "--session-id",
+        "session-1",
     ]
     for name in ("subscription", "resource-group", "app", "revision", "replica", "container"):
         args.extend(["--" + name, "synthetic"])
@@ -466,7 +509,9 @@ def test_invocation_selects_phased_deadlines_and_consumes_allowance(modules, mon
     assert calls[0]["total_timeout"] == 110
     assert calls[0]["input_line"].endswith("\nEND")
     assert json.loads(capsys.readouterr().out) == {
-        "status": "failed", "reason": "exec_setup_timeout", "invocationAllowanceConsumed": True,
+        "status": "failed",
+        "reason": "exec_setup_timeout",
+        "invocationAllowanceConsumed": True,
     }
 
 
@@ -502,23 +547,36 @@ def test_single_invocation_real_parser_and_versions(modules, monkeypatch, status
     invocation_parser(payload, wrapper, monkeypatch)
     build, version, session = "a" * 40, "1", "session-1"
     card = {
-        "schemaVersion": 1, "name": "Lantern Guardian", "cardType": "creature",
-        "rarity": "common", "manaCost": 2, "attack": 1, "health": 3,
-        "rulesText": "Protect one friendly creature.", "flavorText": "",
+        "schemaVersion": 1,
+        "name": "Lantern Guardian",
+        "cardType": "creature",
+        "rarity": "common",
+        "manaCost": 2,
+        "attack": 1,
+        "health": 3,
+        "rulesText": "Protect one friendly creature.",
+        "flavorText": "",
         "artBrief": "An original guardian with a lantern in a peaceful forest.",
     }
     domain = {
-        "schemaVersion": 1, "status": status,
+        "schemaVersion": 1,
+        "status": status,
         "card": card if status == "completed" else None,
         "artPrompt": "Original woodland guardian." if status == "completed" else None,
         "metadata": {"agentVersion": build, "hostedVersion": version},
     }
-    body = json.dumps({
-        "id": "resp-test", "status": "completed",
-        "output": [{"type": "message", "content": [
-            {"type": "output_text", "text": json.dumps(domain)}
-        ]}],
-    }).encode()
+    body = json.dumps(
+        {
+            "id": "resp-test",
+            "status": "completed",
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": json.dumps(domain)}],
+                }
+            ],
+        }
+    ).encode()
 
     class SingleOpener(Opener):
         calls = 0
@@ -582,16 +640,18 @@ def test_http_200_without_card_is_not_success(modules, monkeypatch):
 def test_large_invocation_payload_survives_canonical_terminal(modules):
     payload, wrapper = modules
     result = payload.probe(ENDPOINT, PRINCIPAL, Credential().factory, Opener())
-    expression = "padding=" + repr("x" * 6000) + ";" + (
-        f"print({payload.MARKER!r}+{json.dumps(result)!r},flush=True)"
+    expression = (
+        "padding="
+        + repr("x" * 6000)
+        + ";"
+        + (f"print({payload.MARKER!r}+{json.dumps(result)!r},flush=True)")
     )
     startup, input_line = wrapper.stdin_payload(
         "/app/.venv/bin/python -c " + expression, invocation=True
     )
     assert max(map(len, input_line.splitlines())) <= 1024
     program = (
-        "print('INFO: Successfully connected to container:',flush=True);"
-        + startup.split(" ", 2)[2]
+        "print('INFO: Successfully connected to container:',flush=True);" + startup.split(" ", 2)[2]
     )
     # Deliberately keep canonical mode (unlike ACA's local CLI PTY test above).
     assert wrapper.execute([sys.executable, "-c", program], input_line=input_line) == result
