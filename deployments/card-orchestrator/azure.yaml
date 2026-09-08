@@ -9,15 +9,15 @@
   "infra": {"provider": "bicep", "path": "infra"},
   "services": {
     "card-orchestrator": {
-      "project": "../..",
+      "project": ".",
       "host": "azure.ai.agent",
-      "language": "python",
+      "language": "docker",
       "kind": "hosted",
       "name": "card-orchestrator",
       "description": "Bounded text-only concept, lore and art-direction orchestration.",
       "docker": {
-        "path": "hosted_agents/card_orchestrator/Dockerfile",
-        "context": ".",
+        "path": "../../hosted_agents/card_orchestrator/Dockerfile",
+        "context": "../..",
         "platform": "linux/amd64",
         "remoteBuild": false,
         "registry": "${AZURE_CONTAINER_REGISTRY_ENDPOINT}",

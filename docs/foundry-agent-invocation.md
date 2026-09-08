@@ -26,6 +26,91 @@ python -m app.foundry_agent_client \
 
 The command refuses production and requires `--allow-nonprod-live` because it can incur model usage. It prints only a sanitized summary: status, schema validity, request IDs, retryability, and reported agent version. It does not print tokens, prompts, raw response bodies, generated card text, or art prompts.
 
+## Actual ACA managed-identity access probe
+
+The separate operator tool below runs **inside an existing ACA replica**, not
+with a developer's credential chain. It does not invoke an agent/model, install
+packages, mount secrets, write serving files, or change ACA configuration.
+First resolve the existing dev subscription, project endpoint, ACA system
+principal, ready revision and running replica using allowlisted ARM queries in
+the [operations runbook](foundry-agent-operations.md). Pin those exact values:
+
+```bash
+python deployments/card-orchestrator/aca_identity_probe.py \
+  --environment dev --subscription "<dev-subscription-id>" \
+  --resource-group "<dev-resource-group>" --app "<existing-app>" \
+  --revision "<ready-revision>" --replica "<running-replica>" --container web \
+  --project-endpoint "https://<account>.services.ai.azure.com/api/projects/<project>" \
+  --expected-principal "<ACA-system-principal-id>"
+# Add --execute after checking the plan and verified target arguments.
+```
+
+This is a dev-only operator guard, not an authorization boundary. It requires
+existing permission to `az containerapp exec`, a Linux local host with PTY
+support, and the image's existing `/app/.venv/bin/python` plus `azure-identity`.
+A replaced/scaled-down pinned replica must be inventoried again, not silently
+substituted. No fallback credential or package installation is attempted.
+
+The adjacent `aca_identity_payload.py` is transported as compressed source over
+stdin into a short, alarm-bounded Python command. Nothing is written into the
+container. The local PTY addresses CLI `Inappropriate ioctl for device`; stdin
+avoids the observed exec WebSocket HTTP 404 on long startup commands. No shell,
+user content, bearer token or secret is supplied as a command/input argument.
+The credential is explicit `ManagedIdentityCredential(client_id=None)`, guarded
+by ACA identity endpoint/header presence. Token `oid`, audience and expiry are
+compared **in memory**; only the expected-principal match boolean is returned.
+Claims inspection is not a replacement for Foundry's server-side validation.
+
+One bounded, no-retry GET goes to the verified project's
+`/agents?api-version=2025-11-15-preview`. Redirects and environment HTTP proxies
+are disabled. The response is size-bounded; only HTTP status and page count are
+exported, never agent names/content, token/JWT, auth headers or raw exceptions.
+Credential acquisition has bounded transport timeouts; payload alarm is 45s,
+pre-input remote alarm 60s, local exec deadline 75s. The wrapper suppresses CLI
+raw output and returns a fixed failure code when no valid evidence arrives.
+
+Success is `status: access_verified`, HTTP 200 and a valid `data` list, including
+an empty one. The default access-only mode reports `invocationVerified:false` and
+`endpointPersisted:false`. HTTP 400/404 never count as invocation. A 403 is a
+real authorization/network failure to investigate without broadening roles or
+relaxing network policy. No hosted agent is needed to test MI token/access.
+
+The dev run on 2026-09-08 succeeded with the actual serving ACA system identity:
+token acquired, expected principal matched, HTTP 200, zero agents. Full hosted
+invocation was not proven by that access check. The subsequent smoke is
+cost-approved; the earlier App Insights deployment gate was incorrect (linkage
+is needed for tracing only), as corrected in the operations runbook.
+
+The explicit `--invoke-once --hosted-version <version> --expected-version <full-sha>
+--session-id <version-pinned-session>` mode sends exactly one synthetic Responses
+request using the same actual ACA MI. The platform consumes `session_id` to route
+to the pre-created version-ref session. The owned response parser is bundled
+in memory from source, imports the existing `GeneratedCardModel`, and validates
+both build and hosted version metadata. No container files or settings are
+written. Output contains only allowlisted status/booleans/IDs/versions; no cards,
+model text or tokens. A timeout consumes the invocation allowance; never retry.
+Large invocation payloads are sent in lines of at most 1024 characters and
+reconstructed in memory to respect canonical terminal limits.
+`invocation_verified` can mean a validated `held` or `refused` result, not card
+generation success; inspect `outcome`. Invocation mode allows 30 seconds from CLI
+launch for connection, terminal settling and complete payload delivery, followed
+by 80 seconds for a result, with a hard 110-second local transport cap. The result
+budget covers up to 5 seconds of remote parser imports after input, the unchanged
+70-second remote probe deadline (65-second request timeout), and 5 seconds for
+emission/transport. The pre-input remote alarm remains 75 seconds; after input it
+is reset to 5 seconds until the probe installs its 70-second alarm. PTY writes are
+nonblocking and remain within setup/total deadlines, including partial transfers.
+Repeated connection messages never retransmit the payload. Local failures are
+sanitized as `exec_setup_timeout`, `exec_timeout` (result), or `exec_total_timeout`;
+process termination/reaping has a separate bounded cleanup wait. Access-only mode
+retains its 75-second launch-to-result budget. These offline deadline corrections
+do not establish the cause of the live `exec_no_evidence` result or permit a retry.
+
+```bash
+python -m pytest -q --noconftest tests/test_aca_identity_probe.py \
+  tests/test_hosted_agent_deployment_config.py tests/test_deployment_config.py
+```
+
 ## Wire contract
 
 The client uses Microsoft Entra ID with the `https://ai.azure.com/.default` token scope and posts to the documented hosted-agent Responses protocol endpoint:
@@ -69,7 +154,20 @@ The response parser reads the raw Responses wire envelope `output[]/content[]/ou
 
 ## Current live gap
 
-No hosted `card-orchestrator` agent is deployed by this branch. Passing unit tests or mock transports is not evidence of live end-to-end success; a real smoke test requires Gimli's infra/RBAC work and an existing configured agent endpoint.
+The approved smoke deployed `card-orchestrator` version `1`, then deleted it and
+its session in the cleanup path. Its single ACA invocation dispatch returned
+`exec_no_evidence`: Responses delivery, identity and card validation are unknown,
+not successful. The allowance was consumed and no retry occurred. Exact version,
+session and agent GETs subsequently returned 404; the web baseline was unchanged.
+See the [actual run evidence](foundry-agent-operations.md#executed-approved-dev-smoke--2026-09-08).
+Passing unit tests or mock transports is not evidence of live end-to-end success.
+
+The earlier 2026-09-08 checkpoint stopped without attempting deployment.
+Missing Application Insights linkage was incorrectly called a deployment blocker;
+it is not required for this instrumentation-disabled smoke. The earlier actual
+ACA-MI access probe is not an invocation result. The operations runbook records
+the subsequent actual deployment outcome separately. Never substitute developer
+credentials for the authorized ACA invocation.
 
 ## Opt-in runtime (offline candidate, issue #109)
 

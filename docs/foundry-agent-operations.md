@@ -127,9 +127,12 @@ Run the runtime owner's targeted tests separately, with fake model clients and
 telemetry disabled. Validate readiness in that offline harness without a model
 call; don't expose a cloud credential to a local container just to test health.
 
-azd's service `project: ../..` resolves to the repository root from the dedicated
-folder. Docker `path` and `context` are relative to that service root, not to the
-manifest folder. `remoteBuild: false` avoids uploading a broad ACR build archive.
+The extension requires service `project: "."` inside the dedicated manifest
+folder; `project: "../.."` fails its service-path validation. Docker `path` and
+`context` are relative to that service root and explicitly select the repository
+build context and agent Dockerfile. `remoteBuild: false` avoids uploading an ACR build archive.
+`language: docker` makes azd build the Dockerfile directly, rather than attempting
+a host-side Python/requirements.txt restore in the manifest directory.
 The Dockerfile-specific ignore file takes precedence over root `.dockerignore`.
 Only Python source, dependency metadata, README and this Dockerfile are allowed;
 azd state, histories, dotenv files, credentials and assets are excluded. Runtime
@@ -178,11 +181,11 @@ Require a separately reviewed repository-scoped ABAC policy, not a wider role or
 a registry mode change. Also stop if existing network restrictions prevent
 access; no public-access relaxation is authorized.
 
-Confirm the existing Foundry project is connected to the intended Application
-Insights resource and the platform will inject its connection configuration.
-This package neither creates an Insights resource nor guesses an undocumented
-connection shape. Missing telemetry binding is a deployment-readiness blocker;
-fix it through reviewed existing-resource IaC before declaring monitoring ready.
+Application Insights linkage is a prerequisite for end-to-end tracing, **not**
+hosted deployment. The existing-project template and deployment validation do
+not require it. This runtime disables instrumentation, host observability and
+SDK/access logging; proceed without telemetry IaC changes. This is not a promise
+about platform retention or evidence that monitoring is configured.
 
 ## Bounded prerequisite preview, then separate approvals
 
@@ -239,52 +242,126 @@ Only after separate approval:
 AZURE_DEV_USER_AGENT=microsoft_foundry_skill python deploy.py provision --execute --approve-change
 ```
 
-### Actual dev preview result — 2026-09-08
+### Actual dev prerequisite apply and ACA identity — 2026-09-08
 
-Gimli verified the existing dev account/project identities and endpoint, ACA
-identity, existing text deployment, registry ID/login server and classic
-`LegacyRegistryPermissions` mode using allowlisted management-plane queries.
-No project or account connections were returned (no continuation page).
-The target identities have none of the three proposed prerequisite grants;
-the existing ACA direct-inference grant is separate and remains untouched.
+PR #119 merged as `5f76207`. The earlier subscription/azd previews returned
+success without inspectable changes. A **resource-group leaf what-if** against
+`infra/modules/prerequisites.bicep`, with exact live ACA/project principals,
+resolved this: precisely three role-assignment Creates and one registry
+connection Create; every other resource was Ignore. Remaining `reference()`
+expressions pointed to the existing project principal and registry login server,
+independently verified through safe management-plane projections.
 
-A fresh, ignored `deployments/card-orchestrator/.azure/dev` state was configured
-with only verified nonsecret inputs and the immutable application build above;
-the root `.azure` state was not copied or read. The dedicated manifest and
-service contain no hooks. Both prerequisite booleans were set to `true` **only
-locally for preview**, including the proposed new registry connection.
+For this diagnostic use `az deployment group what-if --result-format
+FullResourcePayloads --no-pretty-print` with the leaf's explicit parameters.
+**Project the response before printing or persisting it**: retain change types,
+resource IDs and allowlisted role/connection fields only. FullResourcePayloads
+can include complete configuration for unrelated **Ignore** resources; never
+dump the unfiltered response. Diagnostic ARM what-if does not replace azd/Bicep
+for apply.
 
-The real `python deploy.py preview --execute` ran
-`azd provision --preview --environment dev --no-prompt` from the dedicated
-project with `AZURE_DEV_USER_AGENT=microsoft_foundry_skill`. azd 1.32.0 reported
-**success in 31 seconds**, but emitted **no resource changes or candidate plan**.
-One targeted recovery used the documented `--output json` on the same dedicated
-read-only command: success in 30 seconds, only `consoleMessage` records (including
-a null data record), still no resource-level what-if.
+After confirming all three exact grants and the connection were absent, and
+the registry used `LegacyRegistryPermissions`, the authorized dedicated
+`python deploy.py provision --execute --approve-change` ran **once**. Actual
+resource mutations, subsequently verified:
 
-**Apply is blocked:** the expected three `Microsoft.Authorization/roleAssignments`
-and optional `Microsoft.CognitiveServices/accounts/projects/connections` cannot
-be checked against an observable ARM candidate plan. CLI success is not
-scope approval, nor evidence that the plan is empty. Stop here; obtain a
-reviewable resource-level what-if through a separately reviewed tool/output
-path before requesting prerequisite apply. No source fixes or further preview
-workarounds were attempted in this turn.
+- Project MI → Foundry User, existing account scope.
+- ACA system MI → Foundry Agent Consumer, existing project scope.
+- Project MI → AcrPull, existing registry scope.
+- Existing project → `<registry>-conn`, ContainerRegistry / ManagedIdentity.
 
-The local booleans were returned to `false` after preview. **Cloud resource
-writes: none**; local ignored azd configuration was written. No provision apply,
-registry upload, hosted version/compute start, paid model call, endpoint injection,
-role/credential/network mutation or root provisioning was executed. No tools
-were installed or upgraded.
+The nested `card-orchestrator-dev-prerequisites` deployment **Succeeded**.
+The parent `dev-1788866608` deployment nevertheless failed **after** these writes:
+`DeploymentOutputEvaluationFailed`, because the old subscription-scope
+`resourceId(resourceGroupName, ...)` output interpreted the RG name as a
+subscription ID. This branch fixes the output to the existing `project.id`;
+ARM subscription validation **Succeeded** with prerequisites off. After
+independent review, the output fix was applied through isolated azd with both
+resource-mutation flags disabled. Deployment `dev-1788867445` **Succeeded** and
+returned the correct existing project ARM ID. Its operations were a registry
+read and deployment-output evaluation; no additional resource changes were made.
+Do not interpret the failed parent deployment as rollback or rerun blindly.
 
-Further deployment gates also remain: verify publisher push authorization;
-confirm the project/platform Application Insights binding (the queried linkage
-fields were null and connection inventories empty, so injection is **unproven**);
-review runtime-identity model authorization, region/quota, privacy and explicit
-compute/model spend. The prerequisite proposal creates no compute or model
+The new read-only [ACA identity probe](foundry-agent-invocation.md#actual-aca-managed-identity-access-probe)
+ran inside the existing serving `web` container, explicitly acquired an MI
+token for `https://ai.azure.com/.default`, and matched its `oid` to the live ACA
+system principal before sending it. `GET /agents?api-version=2025-11-15-preview`
+returned **HTTP 200, `data:[]`**. This proves target-MI project **access**, not
+agent invocation or hosted-runtime/model authorization.
+
+Safe ACA baseline comparison before apply and after the probe was identical:
+image, container, latest/ready revision, traffic, ingress, revision mode and
+identity. `FOUNDRY_PROJECT_ENDPOINT` remains **absent from ACA configuration**;
+the probe received the verified endpoint only as an argument. There was no
+serving image/file/secret/env/traffic mutation, registry upload, agent compute,
+model call, production change or root provision/hook. No tools/dependencies
+were installed. The isolated ignored azd opt-in booleans were reset to `false`.
+Targeted offline probe/infrastructure validation: **100 tests passed**.
+
+Further hosted-deployment gates are tracked in the approved-smoke checkpoint
+below. The prerequisite proposal creates no compute or model
 capacity; a later separately approved hosted deploy can incur 0.5 CPU / 1GiB
 compute, registry storage and telemetry ingestion costs, and a remote smoke
 request can incur model charges. This runbook is partial #99 operations scope,
 not installed dashboards, alerts or production readiness.
+
+### Earlier checkpoint: incorrect telemetry gate — 2026-09-08
+
+At requester approval, the allowed live test was **one** synthetic ACA-MI
+invocation, at most three existing-model calls (1800 output tokens per stage,
+no retry), with 0.5 CPU / 1GiB hosting for at most 30 minutes and explicit
+cleanup. Registry storage, compute, telemetry and model costs were approved.
+**Missing spend approval is no longer the blocker.**
+
+Read-only checks against source `f927b2c0bc23c615eecc95919a37a9c4686c0ff0`
+completed at **2026-09-08T11:43:40Z**:
+
+- Existing ACR `fcagdevqhg3qc4rlbt4gacr` uses
+  `LegacyRegistryPermissions`; the publisher has an existing inherited Owner
+  role. No publisher grant or registry/network change is necessary.
+- Existing project `fantasy-cards-dev` is in `eastus2`, a currently supported
+  hosted-agent region. The Cognitive Services location-usage response contained
+  no hosted-agent quota entries; this is **unknown capacity**, not zero usage or
+  verified available quota.
+- The project and account connection inventories each returned only
+  `fcagdevqhg3qc4rlbt4gacr-conn` (`ContainerRegistry`, `ManagedIdentity`).
+  No Application Insights connection or project telemetry property was present.
+  Existing Insights component `fcag-dev-appi` exists in `rg-fcag-dev`, but its
+  existence is **not** a project binding.
+- The earlier checkpoint incorrectly treated a missing Application Insights
+  link as a deployment blocker. Gandalf verified installed help and upstream
+  revision `16f49c2`: this is a tracing prerequisite only. The approved smoke
+  proceeds without a telemetry connection or credential changes. The earlier
+  checkpoint did not attempt deployment; no connection string was read.
+- The platform creates the agent's runtime identity on deployment and provides
+  project model access by default; absence of a pre-created runtime identity
+  was **not** treated as a blocker. No extra identity grant was requested.
+- `GET /agents?api-version=v1` returned zero agents. No image was built/pushed,
+  no hosted version/session was created, and **zero invocation attempts / zero
+  model calls** occurred. Deployment/start/stop timestamps and image digest /
+  hosted version are **not applicable**, rather than a claimed successful stop.
+
+Installed `azure.ai.agents` beta.13 has **no `azd ai agent stop` command**.
+The supported command is `azd ai agent sessions stop <session-id>`, which
+terminates session compute and retains its filesystem; a later invocation can
+resume it. Current platform documentation describes per-session sandboxes,
+not configurable replicas. There is no supported endpoint-disable field/command
+in the verified installed toolchain; the prior disable claim is withdrawn.
+Cleanup paginates sessions, selects exact `version_indicator.agent_version`,
+stops/deletes those sessions, and force-deletes **only the new version created
+this run**. Verify no active matching sessions and exact-version GET 404.
+Timeout/403 is not cleanup evidence. Start the 30-minute clock at deployment
+submission and use `finally`; a deploy timeout does not cancel server-side work.
+
+Before/after ACA projections were identical: container `web`, image
+`fcagdevqhg3qc4rlbt4gacr.azurecr.io/fantasy-cards-generator/web-nat-dev:azd-deploy-1788775195`,
+latest/ready revision `fcag-dev-app--azd-1788775203`, `Single`, latest traffic
+100%, principal `946d8701-48f2-4fa5-8efd-bf053c7b4e4c`.
+No Azure mutation command ran during this checkpoint, and no root hook,
+production change, evaluation or dependency installation ran. The previously
+verified actual ACA-MI access evidence remains valid but **invocation remains
+unproven**. #109 stays open; PR #120 is not merged. The ACA endpoint-injection
+gap and production latency/privacy acceptance remain separate.
 
 Verify only the expected assignments/connection via safe projections; allow RBAC
 propagation. Then build/readiness/runtime tests, privacy review, region/quota
@@ -301,9 +378,71 @@ before changing the allocation. No production deploy is supported by the launche
 
 ## ACA endpoint injection: a separate stop gate
 
-The prior preflight reported an empty agent inventory and missing dev ACA
-project endpoint plus two roles. Treat that as historical evidence, not a
-current live observation. The repair above does not write the ACA resource.
+### Executed approved DEV smoke — 2026-09-08
+
+The approved run **did execute** against the existing resources, without an
+Application Insights link, telemetry IaC, root hooks, evaluation, web activation,
+new model capacity, network changes or additional role assignments.
+
+| Evidence | Actual result |
+| --- | --- |
+| Application/image source | `0dfb3ef8e47c29f86d6936eaedcea17ab6871334` |
+| Registry image | `fcagdevqhg3qc4rlbt4gacr.azurecr.io/card-orchestrator:0dfb3ef8e47c29f86d6936eaedcea17ab6871334` |
+| Registry digest | `sha256:22c7b63b85ad90bf4a2513437660b2c9eccec6de5de3e06d22ed1a64847584c6` |
+| Deployment submission / clock start | `2026-09-08T11:57:15.473661Z` |
+| Dedicated azd deploy | Exit 0, `2026-09-08T11:58:35.608805Z` |
+| New hosted version | `card-orchestrator`, version **`1`**, observed `active` |
+| Version-ref session | `02ea88d182aae88700SxWkhpky6493MLlK0tvxy7EiFIyYXZUP`, observed `active` at `11:58:46.431496Z` |
+| ACA invocation dispatches | **1**, at `11:58:46.437594Z`; **0 retries** |
+| Invocation outcome | `exec_no_evidence`, at `11:58:56.224365Z`; no validated card/refusal/held response |
+| Session stop / delete | Exit 0 at `11:59:01.561745Z` / `11:59:03.373857Z` |
+| Exact new-version force deletion | Exit 0 at `11:59:07.138924Z` |
+| Independent cleanup checks | Exact version GET **404**, exact session GET **404**, agent GET **404**, session-list endpoint **404**, each `not_found` |
+| Web baseline | Unchanged image, container, latest/ready revision, Single/latest 100% traffic, ingress and identity |
+| Endpoint persisted in ACA | **false** |
+
+The control script's first cleanup summary conservatively reported failure
+because session listing returned 404 after deleting the sole version (the agent
+endpoint disappeared too). Independent exact-resource GETs then confirmed
+version/session/agent absence. This is **not** an HTTP-200 empty-list result:
+the absence evidence is successful explicit stop/delete plus exact-resource and
+endpoint 404s, not an ignored 403/timeout. Compute/session termination completed
+within two minutes of submission, well inside the approved 30-minute window.
+No unrelated version or shared resource was deleted. The image remains in ACR
+and can continue incurring storage charges.
+
+**One ACA exec invocation was dispatched; whether its Responses POST reached
+Foundry is unknown (0 or 1), and its allowance is consumed.** No retry, developer
+inference call or model repair was attempted. Model-call/token usage is
+unobserved, not zero; code limits remain three calls, 1800 output tokens/stage,
+20 seconds/stage and 65 seconds overall. The earlier explicit-MI access probe
+proved the expected ACA principal, but this invocation exported no new identity
+or schema evidence and must not be called an end-to-end success.
+
+Live preparation found and fixed two manifest defects: extension service paths
+cannot escape the isolated project; container builds need `language: docker`
+to avoid a host-side requirements.txt restore. The failed Python restore created
+a local virtual environment but installed no project dependencies; that local
+artifact was removed. Actual agent Dockerfile build, packaging and push then
+succeeded through the dedicated azd project.
+
+An offline reproduction produced an encoded invocation command over 5700
+characters. Canonical PTY line limits are a plausible transport failure, not a
+proven service/model diagnosis.
+The subsequent source-only fix splits it into lines of at most 1024 characters
+and reconstructs it in memory; a canonical-PTY regression test passes. This
+fix was **not** retried live and is not part of the published image source.
+Targeted offline probe/deployment validation after the fix: **107 tests passed**.
+
+#109 remains open. Actual invocation/schema/MI evidence, runtime model
+authorization, production latency/privacy acceptance and separately reviewed
+ACA endpoint injection remain unproven or out of scope. Approval for this
+single consumed smoke does not authorize another invocation.
+
+The latest actual ACA-MI probe returned an empty agent inventory; the project
+endpoint remains absent from ACA environment configuration. The three
+prerequisite grants now exist. The repair above does not write the ACA resource,
+and endpoint injection is **not a prerequisite for the one-off MI probe**.
 
 Before any endpoint injection, capture only this safe baseline:
 
