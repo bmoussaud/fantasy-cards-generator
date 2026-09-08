@@ -131,6 +131,8 @@ The extension requires service `project: "."` inside the dedicated manifest
 folder; `project: "../.."` fails its service-path validation. Docker `path` and
 `context` are relative to that service root and explicitly select the repository
 build context and agent Dockerfile. `remoteBuild: false` avoids uploading an ACR build archive.
+`language: docker` makes azd build the Dockerfile directly, rather than attempting
+a host-side Python/requirements.txt restore in the manifest directory.
 The Dockerfile-specific ignore file takes precedence over root `.dockerignore`.
 Only Python source, dependency metadata, README and this Dockerfile are allowed;
 azd state, histories, dotenv files, credentials and assets are excluded. Runtime

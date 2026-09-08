@@ -11,7 +11,7 @@
     "card-orchestrator": {
       "project": ".",
       "host": "azure.ai.agent",
-      "language": "python",
+      "language": "docker",
       "kind": "hosted",
       "name": "card-orchestrator",
       "description": "Bounded text-only concept, lore and art-direction orchestration.",
