@@ -24,6 +24,11 @@ dedicated container/deployment package in PR #119. Packaging-only tests are not
 startup evidence; the integrated validation below includes the correct agent
 Dockerfile, real entrypoint and credential-free readiness check.
 
+Latest live result: the [newly authorized smoke](#newly-authorized-dev-smoke--2026-09-08)
+deployed successfully and sent exactly one actual ACA-MI Responses request, which
+returned **HTTP 403**. Its session and version were deleted; exact-resource GETs
+confirmed HTTP 404. This is not successful end-to-end card generation.
+
 The platform supplies `FOUNDRY_PROJECT_ENDPOINT`, `FOUNDRY_AGENT_NAME`,
 `FOUNDRY_AGENT_VERSION`, and the Application Insights connection configuration.
 Do **not** redeclare reserved values in service `environmentVariables`.
@@ -76,8 +81,10 @@ Authoritative references (reviewed 2026-09-08; Azure/azure-dev source revision
 The connection API deliberately uses `2025-04-01-preview`: the official azd
 template records a GA `2025-06-01` connection-resolution failure. This is not a
 reason to change the account or project's existing API/resource configuration.
-The installed CLI help and upstream source were inspected; a live deployment
-against this package has **not** been verified.
+At that packaging checkpoint, installed CLI help and upstream source had been
+inspected but live deployment had not yet been verified. The executed-smoke
+sections below record the subsequent successful deployments and failed invocation
+outcomes separately.
 The hosted-agent observability documentation confirms platform injection of the
 Application Insights connection string; no speculative connection resource is
 added by this package.
@@ -438,6 +445,97 @@ Targeted offline probe/deployment validation after the fix: **107 tests passed**
 authorization, production latency/privacy acceptance and separately reviewed
 ACA endpoint injection remain unproven or out of scope. Approval for this
 single consumed smoke does not authorize another invocation.
+
+### Newly authorized DEV smoke — 2026-09-08
+
+Requester `@bmoussaud` explicitly approved a **new** temporary DEV runtime and
+one new synthetic request after the preceding allowance was consumed. This run
+used that new allowance, not a retry under the old one. Bounds were unchanged:
+0.5 CPU / 1GiB, at most 30 minutes from deployment submission, one Responses
+request, at most three existing `gpt-5-5` calls, no retry, immediate owned-resource
+cleanup. Instrumentation remained disabled; no Insights link was required or added.
+
+Before any deployment, the current whole-parser/chunk bundle completed
+`--prepare-invocation --execute` inside the pinned serving ACA replica:
+`invocation_prepared`, `parserImportReady:true`, `requestSchemaReady:true`,
+`localFixtureParseReady:true`, `tokenAcquired:true`, `principalMatched:true`,
+`accessVerified:true`, HTTP **200**, empty agents page, **zero** invocations.
+Its labelled local fixture is not real hosted-card evidence. Offline validation
+of this revision passed **149 targeted probe/deployment tests**, Ruff and Black.
+
+Fresh isolated azd `dev` state was initialized using verified nonsecret bindings
+only; no existing dotenv/state was copied or read. The agent manifest retained
+`project: "."`, `language: docker`, the repository build context and dedicated
+agent Dockerfile. No root hooks or provisioning ran. The immutable source
+remained unchanged through build, package, push and invocation.
+
+| Evidence | Actual result (UTC) |
+| --- | --- |
+| Application/image source | `2bdbf9967d8c397f7d88914bac06285b3b477297` |
+| Registry image | `fcagdevqhg3qc4rlbt4gacr.azurecr.io/card-orchestrator:2bdbf9967d8c397f7d88914bac06285b3b477297` |
+| Registry digest | `sha256:cd23ea7a8f782eb434659d3c774646599df93bcbbfdb3322c1313f158f1f3989` |
+| Deployment submission / clock start | `2026-09-08T12:45:17.427155Z` |
+| Dedicated azd deploy | Exit 0 at `12:46:40.547790Z` |
+| Newly created hosted version | `card-orchestrator`, **`1`**, observed `active` |
+| Exact version-ref session | `smoke-109-2bdbf9967d8c-1788871606`, observed `active` at `12:46:58.064908Z` |
+| Actual ACA target | `fcag-dev-app--azd-1788775203-69f9dc897b-c97p9`, container `web` |
+| Expected/actual principal match | `946d8701-48f2-4fa5-8efd-bf053c7b4e4c`; `tokenAcquired:true`, `principalMatched:true` |
+| Invocation dispatch / result | **1** at `12:46:58.065475Z`; HTTP **403** at `12:47:16.550685Z`; **0 retries** |
+| Sanitized invocation marker | `status:failed`, `reason:http_error`, `invocationsAttempted:1`, `accessVerified:false`, `invocationVerified:false`, `schemaValid:false` |
+| Domain/application/hosted-version validation | No validated domain result; both version-match checks **unobserved**, not successful |
+| Session stop / delete | Exit 0 at `12:47:26.266723Z` / `12:47:28.886497Z` |
+| Exact new-version force deletion | Exit 0 at `12:47:32.826264Z` |
+| Independent exact-resource checks | Version, session, agent and session-list GETs all HTTP **404**, completed `12:49:32.516169Z` |
+| Web/endpoint | Allowlisted baseline identical; `endpointPersisted:false` |
+
+The platform reused version number `1` after the prior sole version was deleted;
+this is a newly created version with a different immutable application SHA, image
+digest and session, not reuse of the previous runtime. Initial agent inventory
+was explicitly empty. Ownership was recorded before invocation, including the
+caller-assigned session ID before session creation.
+
+The control script entered `finally` immediately after the response. Successful
+stop/delete/version deletion completed **135.4 seconds** after submission. Its
+first verification conservatively failed because Azure CLI omitted the HTTP
+status from its `not_found` rendering and post-deletion azd lookups returned
+errors without usable absence evidence. Two further bounded cleanup attempts
+also returned errors; they did not recreate resources. Independent SDK GETs to the exact
+version and documented `/agents/{name}/endpoint/sessions/{id}` paths then
+observed HTTP 404 directly, without printing bodies, headers or credentials.
+The session-list endpoint also returned 404: this is endpoint absence, **not**
+a fabricated empty HTTP-200 page. Verification completed within 4m16s of
+submission; no runtime was left running.
+
+**403 diagnosis and limits:** the POST was made by the expected actual ACA MI,
+not a developer credential fallback. Its successful preparation GET proves
+project-list access only. Subsequent nonbillable ARM projections confirmed the
+existing project-scoped **Foundry Agent Consumer** assignment
+`ee5a9eb3-9011-50f0-851b-5ca98438c8b1` and inherited account-scoped Cognitive
+Services User assignment. The consumer role's current data action is
+`Microsoft.CognitiveServices/accounts/AIServices/endpoints/interact/action`.
+The account reported `publicNetworkAccess:Enabled`, `networkAcls:null`.
+No role or network setting was changed. The probe intentionally discarded the
+HTTP error body/headers; no more specific service error code or request ID was
+exported. Therefore neither a missing grant, session-owner restriction nor a
+runtime/model failure is established. HTTP 403 is not a domain policy refusal.
+Do not send another prompt to diagnose it without another explicit approval.
+
+The allowance is now consumed. Model-call and token usage are unobserved, not
+asserted zero; enforced source bounds remain three calls, 1800 output tokens per
+stage, 20 seconds per stage and 65 seconds overall. No evaluations, image
+generation, production changes, new capacity, manual roles, network relaxation,
+secret changes, app persistence or endpoint injection occurred. Agent-image
+dependencies remain governed by the existing frozen lockfile; no host dependency
+installation ran.
+Only this run's hosted version/session were deleted. Its new immutable ACR image
+and the prior image remain and can incur storage cost, in addition to already
+incurred build/compute and any platform telemetry/model charges.
+
+Issue #109 remains open: actual completed domain/schema/version evidence and
+runtime model authorization remain unproven; separately reviewed ACA endpoint
+injection, web integration and production latency/privacy acceptance remain out
+of scope. PR #121 publishes the reviewed probe and truthful run evidence only,
+not a claim that the acceptance criteria are complete.
 
 The latest actual ACA-MI probe returned an empty agent inventory; the project
 endpoint remains absent from ACA environment configuration. The three

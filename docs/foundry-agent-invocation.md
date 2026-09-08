@@ -77,8 +77,10 @@ relaxing network policy. No hosted agent is needed to test MI token/access.
 
 The dev run on 2026-09-08 succeeded with the actual serving ACA system identity:
 token acquired, expected principal matched, HTTP 200, zero agents. Full hosted
-invocation was not proven by that access check. The subsequent smoke consumed its
-single approved allowance; no further paid attempt is authorized. The earlier
+invocation was not proven by that access check. The first smoke consumed its
+single approved allowance. A **separately and newly authorized** second smoke
+subsequently sent one Responses request and received HTTP 403; that new allowance
+is now also consumed, with no retry authorized. The earlier
 App Insights deployment gate was incorrect (linkage is needed for tracing only),
 as corrected in the operations runbook.
 
@@ -190,7 +192,30 @@ The response parser reads the raw Responses wire envelope `output[]/content[]/ou
 
 ## Current live gap
 
-The approved smoke deployed `card-orchestrator` version `1`, then deleted it and
+The latest **newly authorized** smoke on 2026-09-08 used application build
+`2bdbf9967d8c397f7d88914bac06285b3b477297`. Before deployment, the complete current
+parser/chunk-transport preparation returned `invocation_prepared`: all three
+parser/request/fixture readiness booleans true, actual ACA principal matched,
+GET agents HTTP 200, zero invocations.
+
+The dedicated azd deployment created a new version `1` and an active exact-version
+session. The one actual ACA-MI Responses POST returned **HTTP 403**:
+`tokenAcquired:true`, `principalMatched:true`, `invocationsAttempted:1`,
+`reason:http_error`, `invocationVerified:false`, `schemaValid:false`.
+`accessVerified:false` belongs to this rejected POST, not the successful
+preparation GET. There is no validated domain outcome or application/hosted-version
+match; HTTP authorization failure is **not** a domain `refused` card response.
+No retry or developer-credential invocation occurred.
+
+Session stop/delete and exact-version deletion completed within **2m16s** of
+deployment submission. Independent exact session/version GETs returned HTTP 404.
+The web baseline remained identical; `endpointPersisted:false`. Both images may
+remain billable in ACR. The existing consumer role was verified, not widened;
+the precise service authorization reason was not exported by the privacy-bound
+probe and cannot be inferred from 403 alone. End-to-end generation remains
+unproven. See the [new run evidence](foundry-agent-operations.md#newly-authorized-dev-smoke--2026-09-08).
+
+The earlier approved smoke deployed `card-orchestrator` version `1`, then deleted it and
 its session in the cleanup path. Its single ACA invocation dispatch returned
 `exec_no_evidence`: Responses delivery, identity and card validation are unknown,
 not successful. The allowance was consumed and no retry occurred. Exact version,
@@ -207,7 +232,8 @@ invocations**, `invocationVerified:false`, `schemaValid:false`. This verifies
 the deployed web image's parser/import compatibility and the complete preparation
 collection path, not delivery to or generation by a hosted service. No Responses
 POST, deployment, hosted session creation or model call was made. The previous
-single paid allowance remains consumed.
+single paid allowance remained consumed at that checkpoint. The later, separately
+authorized attempt above is distinct and is also now consumed.
 
 The earlier 2026-09-08 checkpoint stopped without attempting deployment.
 Missing Application Insights linkage was incorrectly called a deployment blocker;
