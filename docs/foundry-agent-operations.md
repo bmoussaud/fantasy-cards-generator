@@ -1,5 +1,17 @@
 # Card-orchestrator operations
 
+## Endpoint persistence follow-up gate (2026-09-08)
+
+PR #121 is merged. The next endpoint-only Bicep candidate was tested against the
+actual dev ARM leaf: replaying native secret names without values fails provider
+validation (`ContainerAppSecretInvalid`); omitting them produces a forbidden
+`properties.configuration.secrets` deletion in what-if. **No app apply or new
+E2E invocation occurred.** Endpoint persistence remains blocked, not completed.
+See the [candidate and exact diagnostic evidence](../deployments/dev-endpoint/README.md).
+Do not run root provisioning, retrieve secret values, or treat a successful
+but secret-deleting preview as approval. Independent review must resolve this
+specific gate before application and the subsequently authorized bounded smoke.
+
 Related: #109 (hosting), #99 (operations), #117 (merged client/RBAC wiring),
 #118 (read-only preflight). This package does **not** deploy or enable the web
 generation path. It contains no web hooks, model deployment, new registry,
