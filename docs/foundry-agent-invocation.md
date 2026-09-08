@@ -1,6 +1,8 @@
 # Foundry hosted-agent invocation smoke test
 
-This project has a minimal invoke-only client for a future Foundry hosted agent. It is not wired into card generation startup or `/generate`; the existing direct Azure OpenAI flow remains unchanged.
+This project has an invoke-only client and an opt-in text-only `card-orchestrator`
+runtime. Neither is wired into card generation startup or `/generate`; the existing
+direct Azure OpenAI flow remains unchanged.
 
 ## Configuration
 
@@ -37,6 +39,7 @@ Request body:
 ```json
 {
   "store": false,
+  "stream": false,
   "input": [
     {
       "role": "user",
@@ -51,7 +54,9 @@ Request body:
 }
 ```
 
-No user ID, photo bytes, tool definitions, or tool executions are sent.
+The sole message contains `GenerateCardAgentRequest` JSON: `schemaVersion: 1` and
+a trimmed `query` of 1–400 characters. No user ID, photo bytes, tool definitions,
+or tool executions are sent.
 
 The response parser reads the raw Responses wire envelope `output[]/content[]/output_text`, detects refusals before schema validation, treats incomplete or malformed output as non-success, and validates the proposed agent payload:
 
@@ -65,3 +70,112 @@ The response parser reads the raw Responses wire envelope `output[]/content[]/ou
 ## Current live gap
 
 No hosted `card-orchestrator` agent is deployed by this branch. Passing unit tests or mock transports is not evidence of live end-to-end success; a real smoke test requires Gimli's infra/RBAC work and an existing configured agent endpoint.
+
+## Opt-in runtime (offline candidate, issue #109)
+
+Python 3.12 entrypoint and optional dependency installation:
+
+```bash
+uv sync --frozen --extra hosted-agent --group dev
+uv run --frozen --extra hosted-agent python -m hosted_agents.card_orchestrator
+```
+
+Ordinary web installs omit `--extra hosted-agent` and do not install the hosting
+stack. The lock pins `azure-ai-agentserver-responses==2.1.0`,
+`agent-framework-core==1.17.0`, and `agent-framework-foundry==1.12.0`.
+The explicit `hosted-sdk` PyPI source supplies SDK versions absent from the normal
+package proxy; the normal package source remains unchanged.
+
+The runtime reads **only environment configuration**, never `.env`, web settings,
+Key Vault, storage credentials, or the account-scoped `FOUNDRY_ENDPOINT`:
+
+| Variable | Contract |
+|---|---|
+| `FOUNDRY_PROJECT_ENDPOINT` | Required canonical HTTPS project endpoint |
+| `AZURE_AI_MODEL_DEPLOYMENT_NAME` | Required existing text deployment |
+| `CARD_ORCHESTRATOR_VERSION` | Required immutable application release ID (1–64 safe identifier characters) |
+| `CARD_ORCHESTRATOR_MODERATION_POLICY` | Optional; only `original-fantasy-v1` is supported; cannot disable local checks |
+| `CARD_ORCHESTRATOR_STAGE_TIMEOUT_SECONDS` | Default/max 20 seconds, positive and finite |
+| `CARD_ORCHESTRATOR_TIMEOUT_SECONDS` | Default/max 65 seconds, positive and finite |
+
+The host listens on **8088**, with `POST /responses` and `GET /readiness`.
+Imports, startup and readiness perform no cloud requests. Readiness reports
+process readiness, **not** identity, quota, model availability or deployment health.
+Model access is deferred until an allowed request, uses a project-scoped
+`AIProjectClient`/MAF `FoundryChatClient`, and authenticates through an owned
+noninteractive `DefaultAzureCredential`. No keys are required.
+
+`metadata.agentVersion` is `CARD_ORCHESTRATOR_VERSION` and must equal the operator's
+`FOUNDRY_AGENT_EXPECTED_VERSION` when configured. The platform-provided
+`FOUNDRY_AGENT_VERSION`, if present and a bounded identifier, is separately reported
+as `metadata.hostedVersion`; it is not the application-version check.
+
+### Bounded orchestration and safety
+
+1. Heuristically moderate the original input.
+2. A fresh MAF Concept agent produces `GeneratedCardModel`; validate and moderate it.
+3. A fresh Lore agent receives that validated card and returns **only** `name` and
+   `flavorText`; merge, revalidate and moderate before art direction.
+4. A fresh Art Direction agent receives the lore-refined validated card and returns
+   **only** `artBrief`; merge/revalidate without changing mechanics.
+5. Derive `artPrompt` using the existing `derive_art_prompt()` and moderate both the
+   final card text and the derived prompt.
+
+Maximum **three model requests**, with model retries and function-invocation loops
+disabled, no repair loops and no automatic fallback. All agents/sessions are fresh
+per stage and clients are owned/closed per invocation, including cancellation.
+The 20-second stage / 65-second orchestration budgets are an **OFFLINE CANDIDATE**:
+they do **not** meet, replace or provide evidence for the proposed production
+8.15-second agent-hop / 30.15-second degraded-direct-path latency budgets. The
+operator's default 5-second timeout is intentionally unchanged; any later approved
+nonproduction live trial needs its own explicit deadline.
+
+Completed domain JSON is returned in the SDK's `TextResponse`, inside a genuine
+Responses API envelope. `refused`, `held` and `routing_defer` always omit content
+(`card: null`, `artPrompt: null`). Reasons are bounded codes, not rejected content.
+Schema failures or invalid/missing local safety evidence are held. Observed model
+refusal/content-filter evidence takes precedence over generated JSON. Dependency
+errors and timeouts produce an outer `response.failed`/`server_error`, not a
+completed domain result. Malformed/unsupported requests return sanitized HTTP 400.
+
+`metadata.safetyEvidence` records bounded stage/policy/decision/reason codes for
+the local gates. Completion requires allowed evidence for pre-prompt, concept,
+lore, final-text and final-art-prompt checks. Hosted guardrails are recorded as
+**unavailable/not observed**, never falsely passed; post-image is **not applicable**.
+The reused heuristics are narrow pattern checks, **not comprehensive safety,
+copyright detection, or prompt-injection protection**. Live guardrail integration,
+quality evaluation and adversarial safety review remain release gates.
+
+### Nonpersistence and telemetry boundary
+
+Raw HTTP validation runs before SDK normalization/history dispatch. It requires
+explicit `store:false` and `stream:false`; rejects background, conversations,
+history references, caller instructions/tools/models, images/files and multiple
+messages/parts. Only optional bounded `request_id`/`trace_id` metadata identifiers
+are accepted, then discarded rather than passed to specialists. Unknown metadata
+keys and duplicate JSON keys are rejected. Request bodies are capped at 8192 bytes.
+
+Model calls also use `store:false`. An explicit fail-closed response provider
+replaces SDK 2.1.0's default file/Foundry-backed storage. Durable tasks, background
+recovery and steering are not enabled. Response retrieval/cancel/history routes
+are inaccessible; no application caches, file writes or conversation retrieval
+are used. HTTP disconnect and shutdown cancellation propagate to owned model work.
+
+The SDK host defaults can capture sensitive telemetry; this runtime explicitly
+disables host observability setup, MAF instrumentation and SDK/access logging.
+It does not export prompts, model outputs, tokens, raw exceptions or user content.
+This application-layer behavior is **not** a promise that the hosted platform or
+model provider retains no service telemetry.
+
+### Offline validation
+
+```bash
+uv run --frozen --extra hosted-agent pytest \
+  tests/test_card_orchestrator.py tests/test_card_orchestrator_models.py \
+  tests/test_foundry_agent_client.py -q
+```
+
+These tests exercise the installed stable SDK host through the existing operator
+parser and real MAF/Foundry/OpenAI clients over mocked model HTTP, plus moderation,
+refusal precedence, invariants, cancellation, timeouts and request isolation.
+They make no live Azure requests and are not deployment or creative-quality evidence.

@@ -4,6 +4,16 @@ This document proposes how `fantasy-cards-generator` can introduce agent-based c
 
 The direction is intentionally conservative: keep authentication, rate limiting, persistence, and HTTP/UI behavior in the existing web application, and add a Foundry-hosted agent layer only where agent reasoning adds value.
 
+> **Implementation status (issue #109, offline candidate):** the optional
+> `hosted_agents/card_orchestrator` runtime now implements three sequential MAF
+> specialists under one stable Responses host. The [runtime/invocation
+> contract](foundry-agent-invocation.md#opt-in-runtime-offline-candidate-issue-109)
+> is authoritative for its narrow text-only request, settings and safety evidence.
+> It has not been deployed or activated in the web app. Its bounded 20-second
+> stages / 65-second overall candidate deadline do not satisfy or supersede the
+> production latency proposal below. Earlier deployment inventories in this
+> document remain historical observations, not live verification.
+
 ## Executive summary
 
 The current application already has a clean generation pipeline: authenticate the user, validate the request, moderate the prompt, generate structured card text, derive an art prompt, generate or edit artwork, moderate the result, then persist metadata and image assets.
@@ -262,21 +272,7 @@ The current public API should remain unchanged. The **internal** app-to-agent co
 ```json
 {
   "schemaVersion": 1,
-  "requestId": "diagnostic-correlation-id",
-  "userPrompt": "Create a moonlit guardian with a shield of stars",
-  "constraints": {
-    "cardSchemaVersion": 1,
-    "imageQuality": "medium",
-    "allowReferenceImageFlow": true
-  },
-  "policy": {
-    "moderationPolicyName": "conservative-v1",
-    "disallowCopyrightedCharacters": true,
-    "disallowLivingArtistImitation": true
-  },
-  "referenceImage": {
-    "present": false
-  }
+  "query": "Create a moonlit guardian with a shield of stars"
 }
 ```
 
@@ -284,8 +280,10 @@ Notes:
 
 - do **not** send raw auth tokens, session cookies, or PII
 - do **not** send raw owner IDs unless the agent genuinely needs them
-- if correlation is needed, pass `requestId` and optionally an owner hash only
-- phase 1 does not require passing image bytes to the agent
+- serialize exactly this JSON in one user `input_text`, with `store:false` and
+  `stream:false`; query is trimmed and limited to 1–400 characters
+- caller-supplied policy, constraints, image/reference-image fields and owner
+  hashes are not supported by the current runtime
 
 #### `GenerateCardAgentResponse`
 

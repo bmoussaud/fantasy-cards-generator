@@ -152,6 +152,7 @@ class FoundryAgentClient:
                 },
                 json={
                     "store": False,
+                    "stream": False,
                     "input": [
                         {
                             "role": "user",
