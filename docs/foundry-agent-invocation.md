@@ -70,16 +70,28 @@ pre-input remote alarm 60s, local exec deadline 75s. The wrapper suppresses CLI
 raw output and returns a fixed failure code when no valid evidence arrives.
 
 Success is `status: access_verified`, HTTP 200 and a valid `data` list, including
-an empty one. It **always** reports `invocationVerified:false` and
+an empty one. The default access-only mode reports `invocationVerified:false` and
 `endpointPersisted:false`. HTTP 400/404 never count as invocation. A 403 is a
 real authorization/network failure to investigate without broadening roles or
 relaxing network policy. No hosted agent is needed to test MI token/access.
 
 The dev run on 2026-09-08 succeeded with the actual serving ACA system identity:
 token acquired, expected principal matched, HTTP 200, zero agents. Full hosted
-invocation remains unproven. The subsequent bounded smoke was cost-approved,
-but stopped before publication because the required project Application Insights
-binding is absent; see the [approved-smoke checkpoint](foundry-agent-operations.md#approved-temporary-smoke-blocked-before-publication--2026-09-08).
+invocation was not proven by that access check. The subsequent smoke is
+cost-approved; the earlier App Insights deployment gate was incorrect (linkage
+is needed for tracing only), as corrected in the operations runbook.
+
+The explicit `--invoke-once --hosted-version <version> --expected-version <full-sha>
+--session-id <version-pinned-session>` mode sends exactly one synthetic Responses
+request using the same actual ACA MI. The platform consumes `session_id` to route
+to the pre-created version-ref session. The owned response parser is bundled
+in memory from source, imports the existing `GeneratedCardModel`, and validates
+both build and hosted version metadata. No container files or settings are
+written. Output contains only allowlisted status/booleans/IDs/versions; no cards,
+model text or tokens. A timeout consumes the invocation allowance; never retry.
+`invocation_verified` can mean a validated `held` or `refused` result, not card
+generation success; inspect `outcome`. The remote deadline is 70 seconds and the
+local PTY deadline is 75 seconds.
 
 ```bash
 python -m pytest -q --noconftest tests/test_aca_identity_probe.py \
@@ -131,12 +143,12 @@ The response parser reads the raw Responses wire envelope `output[]/content[]/ou
 
 No hosted `card-orchestrator` agent is deployed by this branch. Passing unit tests or mock transports is not evidence of live end-to-end success; a real smoke test requires Gimli's infra/RBAC work and an existing configured agent endpoint.
 
-On 2026-09-08 the authorized temporary live smoke reached a real readiness
-blocker: neither project nor account inventory included an Application Insights
-connection. The existing Insights resource alone does not establish platform
-injection. No image publication, hosted compute, or invocation attempt occurred.
-The earlier actual ACA-MI access probe is not an invocation result. Do not
-reinterpret this as denied cost authorization or retry with developer credentials.
+The earlier 2026-09-08 checkpoint stopped without attempting deployment.
+Missing Application Insights linkage was incorrectly called a deployment blocker;
+it is not required for this instrumentation-disabled smoke. The earlier actual
+ACA-MI access probe is not an invocation result. The operations runbook records
+the subsequent actual deployment outcome separately. Never substitute developer
+credentials for the authorized ACA invocation.
 
 ## Opt-in runtime (offline candidate, issue #109)
 

@@ -186,7 +186,7 @@ def test_payload_is_exact_reviewable_source_without_container_writes(modules):
     assert command[:2] == ["/app/.venv/bin/python", "-c"]
     encoded = command[2].split("b64decode('")[1].split("'")[0]
     source = zlib.decompress(base64.b64decode(encoded)).decode()
-    assert len(wrapper.remote_command(ENDPOINT, PRINCIPAL)) < 4000
+    assert len(wrapper.remote_command(ENDPOINT, PRINCIPAL)) < 8000
     assert (
         source
         == (PROJECT / "aca_identity_payload.py").read_text()
@@ -275,3 +275,93 @@ def test_plan_only_and_prod_rejection(modules, capsys):
     args[1] = "prod"
     with pytest.raises(SystemExit):
         wrapper.main(args)
+
+
+def invocation_parser(payload, wrapper, monkeypatch):
+    namespace = {"__name__": "aca_identity_payload"}
+    exec(wrapper.parser_source(), namespace)
+    monkeypatch.setattr(payload, "_parse_success_envelope", namespace["_parse_success_envelope"], raising=False)
+    monkeypatch.setattr(payload, "_extract_output_text", namespace["_extract_output_text"], raising=False)
+
+
+@pytest.mark.parametrize("status", ["completed", "refused", "held", "routing_defer"])
+def test_single_invocation_real_parser_and_versions(modules, monkeypatch, status):
+    payload, wrapper = modules
+    invocation_parser(payload, wrapper, monkeypatch)
+    build, version, session = "a" * 40, "1", "session-1"
+    card = {
+        "schemaVersion": 1, "name": "Lantern Guardian", "cardType": "creature",
+        "rarity": "common", "manaCost": 2, "attack": 1, "health": 3,
+        "rulesText": "Protect one friendly creature.", "flavorText": "",
+        "artBrief": "An original guardian with a lantern in a peaceful forest.",
+    }
+    domain = {
+        "schemaVersion": 1, "status": status,
+        "card": card if status == "completed" else None,
+        "artPrompt": "Original woodland guardian." if status == "completed" else None,
+        "metadata": {"agentVersion": build, "hostedVersion": version},
+    }
+    body = json.dumps({
+        "id": "resp-test", "status": "completed",
+        "output": [{"type": "message", "content": [
+            {"type": "output_text", "text": json.dumps(domain)}
+        ]}],
+    }).encode()
+
+    class SingleOpener(Opener):
+        calls = 0
+
+        def open(self, request, timeout):
+            self.calls += 1
+            assert timeout == 65
+            assert request.method == "POST"
+            wire = json.loads(request.data)
+            assert wire["session_id"] == session
+            assert wire["store"] is False and wire["stream"] is False
+            assert len(wire["input"]) == 1
+            assert json.loads(wire["input"][0]["content"][0]["text"])["schemaVersion"] == 1
+            self.request = request
+            return self
+
+    opener = SingleOpener(body=body)
+    result = payload.probe(
+        ENDPOINT, PRINCIPAL, Credential().factory, opener, (version, build, session)
+    )
+    assert opener.calls == 1
+    assert result["invocationsAttempted"] == 1
+    assert result["invocationVerified"] and result["schemaValid"]
+    assert result["outcome"] == status
+    assert wrapper.extract_result(payload.MARKER + json.dumps(result)) == result
+    assert "Lantern Guardian" not in json.dumps(result)
+    assert "artPrompt" not in json.dumps(result)
+
+
+def test_invocation_timeout_consumes_attempt_without_retry(modules, monkeypatch):
+    payload, wrapper = modules
+    invocation_parser(payload, wrapper, monkeypatch)
+
+    class TimeoutOpener:
+        calls = 0
+
+        def open(self, request, timeout):
+            self.calls += 1
+            raise TimeoutError()
+
+    opener = TimeoutOpener()
+    result = payload.probe(
+        ENDPOINT, PRINCIPAL, Credential().factory, opener, ("1", "a" * 40, "session-1")
+    )
+    assert result["reason"] == "timeout"
+    assert result["invocationsAttempted"] == opener.calls == 1
+    assert not result["invocationVerified"]
+
+
+def test_http_200_without_card_is_not_success(modules, monkeypatch):
+    payload, wrapper = modules
+    invocation_parser(payload, wrapper, monkeypatch)
+    result = payload._parse_success_envelope(
+        {"status": "completed", "output": []}, request_id=None, expected_version="a" * 40
+    )
+    assert not result.success and not result.schema_valid
+    with pytest.raises(ValueError):
+        wrapper.remote_command(ENDPOINT, PRINCIPAL, ("1", "not-a-sha", "session-1"))

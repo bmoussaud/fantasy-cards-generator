@@ -178,11 +178,11 @@ Require a separately reviewed repository-scoped ABAC policy, not a wider role or
 a registry mode change. Also stop if existing network restrictions prevent
 access; no public-access relaxation is authorized.
 
-Confirm the existing Foundry project is connected to the intended Application
-Insights resource and the platform will inject its connection configuration.
-This package neither creates an Insights resource nor guesses an undocumented
-connection shape. Missing telemetry binding is a deployment-readiness blocker;
-fix it through reviewed existing-resource IaC before declaring monitoring ready.
+Application Insights linkage is a prerequisite for end-to-end tracing, **not**
+hosted deployment. The existing-project template and deployment validation do
+not require it. This runtime disables instrumentation, host observability and
+SDK/access logging; proceed without telemetry IaC changes. This is not a promise
+about platform retention or evidence that monitoring is configured.
 
 ## Bounded prerequisite preview, then separate approvals
 
@@ -302,7 +302,7 @@ compute, registry storage and telemetry ingestion costs, and a remote smoke
 request can incur model charges. This runbook is partial #99 operations scope,
 not installed dashboards, alerts or production readiness.
 
-### Approved temporary smoke: blocked before publication — 2026-09-08
+### Earlier checkpoint: incorrect telemetry gate — 2026-09-08
 
 At requester approval, the allowed live test was **one** synthetic ACA-MI
 invocation, at most three existing-model calls (1800 output tokens per stage,
@@ -325,13 +325,11 @@ completed at **2026-09-08T11:43:40Z**:
   No Application Insights connection or project telemetry property was present.
   Existing Insights component `fcag-dev-appi` exists in `rg-fcag-dev`, but its
   existence is **not** a project binding.
-- The [official hosted-agent permissions reference](https://learn.microsoft.com/azure/foundry/agents/concepts/hosted-agent-permissions#required-azure-resources)
-  requires an Application Insights project connection for telemetry emission.
-  Platform connection-string injection does not prove that a missing connection
-  exists. This is the concrete unresolved prerequisite; deployment was not
-  attempted. Repair would require a separately reviewed connection to the
-  existing component and its credential/telemetry handling, outside this smoke's
-  no-new-telemetry-resource/no-secret-change scope. No connection string was read.
+- The earlier checkpoint incorrectly treated a missing Application Insights
+  link as a deployment blocker. Gandalf verified installed help and upstream
+  revision `16f49c2`: this is a tracing prerequisite only. The approved smoke
+  proceeds without a telemetry connection or credential changes. The earlier
+  checkpoint did not attempt deployment; no connection string was read.
 - The platform creates the agent's runtime identity on deployment and provides
   project model access by default; absence of a pre-created runtime identity
   was **not** treated as a blocker. No extra identity grant was requested.
@@ -344,12 +342,13 @@ Installed `azure.ai.agents` beta.13 has **no `azd ai agent stop` command**.
 The supported command is `azd ai agent sessions stop <session-id>`, which
 terminates session compute and retains its filesystem; a later invocation can
 resume it. Current platform documentation describes per-session sandboxes,
-not configurable replicas. [Agent endpoint disable](https://learn.microsoft.com/azure/foundry/agents/how-to/manage-hosted-agent#disable-or-enable-an-agent)
-uses the documented `POST /agents/{name}:disable?api-version=v1` REST operation;
-disable is not evidence of stopped compute. A resumed smoke must establish a
-bounded session-stop/verification `finally` path and endpoint isolation before
-starting, rather than inventing a version-stop command or relying on azd's
-deployment timeout (which does not cancel server-side deployment).
+not configurable replicas. There is no supported endpoint-disable field/command
+in the verified installed toolchain; the prior disable claim is withdrawn.
+Cleanup paginates sessions, selects exact `version_indicator.agent_version`,
+stops/deletes those sessions, and force-deletes **only the new version created
+this run**. Verify no active matching sessions and exact-version GET 404.
+Timeout/403 is not cleanup evidence. Start the 30-minute clock at deployment
+submission and use `finally`; a deploy timeout does not cancel server-side work.
 
 Before/after ACA projections were identical: container `web`, image
 `fcagdevqhg3qc4rlbt4gacr.azurecr.io/fantasy-cards-generator/web-nat-dev:azd-deploy-1788775195`,

@@ -1,4 +1,4 @@
-"""In-memory ACA probe: no dotenv, developer credential chain, or model requests."""
+"""In-memory ACA MI probe, with a separately opted-in single Responses request."""
 
 import base64
 import json
@@ -15,6 +15,16 @@ SCOPE = "https://ai.azure.com/.default"
 API_VERSION = "2025-11-15-preview"
 MARKER = "ACA_IDENTITY_PROBE="
 MAX_BODY = 65536
+SYNTHETIC_QUERY = "Create an original gentle woodland guardian with a lantern and protective magic."
+
+
+def validate_invocation(version, build, session):
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", version):
+        raise ValueError("invalid_version")
+    if not re.fullmatch(r"[a-f0-9]{40}", build):
+        raise ValueError("invalid_build")
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", session):
+        raise ValueError("invalid_session")
 
 
 def validate_inputs(endpoint, principal):
@@ -44,7 +54,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def probe(endpoint, principal, credential_factory=None, opener=None):
+def probe(endpoint, principal, credential_factory=None, opener=None, invocation=None):
     result = {
         "status": "failed",
         "tokenAcquired": False,
@@ -55,6 +65,9 @@ def probe(endpoint, principal, credential_factory=None, opener=None):
     }
     try:
         validate_inputs(endpoint, principal)
+        if invocation is not None:
+            validate_invocation(*invocation)
+            result.update(invocationsAttempted=0, schemaValid=False)
     except (ValueError, TypeError):
         return {**result, "reason": "invalid_configuration"}
     if not os.environ.get("IDENTITY_ENDPOINT") or not os.environ.get("IDENTITY_HEADER"):
@@ -79,11 +92,35 @@ def probe(endpoint, principal, credential_factory=None, opener=None):
             headers={"Authorization": "Bearer " + token, "Accept": "application/json"},
             method="GET",
         )
+        if invocation is not None:
+            version, build, session = invocation
+            # The platform consumes session_id, pinning routing to the version-ref session.
+            body = {
+                "store": False,
+                "stream": False,
+                "session_id": session,
+                "input": [{"role": "user", "content": [{
+                    "type": "input_text",
+                    "text": json.dumps({"schemaVersion": 1, "query": SYNTHETIC_QUERY}),
+                }]}],
+            }
+            request = urllib.request.Request(
+                endpoint + "/agents/card-orchestrator/endpoint/protocols/openai/responses?api-version=v1",
+                data=json.dumps(body).encode(),
+                headers={
+                    "Authorization": "Bearer " + token,
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
         # Do not forward the bearer token to redirects or environment-configured proxies.
         opener = opener or urllib.request.build_opener(
             urllib.request.ProxyHandler({}), NoRedirect()
         )
-        with opener.open(request, timeout=10) as response:
+        if invocation is not None:
+            result["invocationsAttempted"] = 1
+        with opener.open(request, timeout=65 if invocation else 10) as response:
             result["httpStatus"] = response.status
             if response.status != 200:
                 return {**result, "reason": "unexpected_http_status"}
@@ -91,6 +128,38 @@ def probe(endpoint, principal, credential_factory=None, opener=None):
         if len(body) > MAX_BODY:
             return {**result, "reason": "response_too_large"}
         document = json.loads(body)
+        if invocation is not None:
+            if not isinstance(document, dict):
+                return {**result, "reason": "invalid_response"}
+            parsed = _parse_success_envelope(
+                document, request_id=None, expected_version=build
+            )
+            result.update(
+                accessVerified=True,
+                schemaValid=parsed.schema_valid,
+                outcome=parsed.status,
+                hostedVersion=version,
+                applicationVersion=build,
+            )
+            for key, value in (("responseId", parsed.response_id), ("requestId", parsed.request_id)):
+                if value:
+                    result[key] = value
+            if parsed.schema_valid:
+                domain = json.loads(_extract_output_text(document))
+                result["hostedVersionMatched"] = (
+                    domain.get("metadata", {}).get("hostedVersion") == version
+                )
+                result["applicationVersionMatched"] = parsed.agent_version == build
+            verified = (
+                parsed.schema_valid
+                and result.get("hostedVersionMatched") is True
+                and result.get("applicationVersionMatched") is True
+            )
+            return {
+                **result,
+                "status": "invocation_verified" if verified else "failed",
+                "invocationVerified": verified,
+            }
         if not isinstance(document, dict) or not isinstance(document.get("data"), list):
             return {**result, "reason": "invalid_list_response"}
         return {
@@ -117,14 +186,14 @@ def probe(endpoint, principal, credential_factory=None, opener=None):
                 pass
 
 
-def emit(endpoint, principal):
+def emit(endpoint, principal, invocation=None):
     def deadline(signum, frame):
         raise TimeoutError()
 
     signal.signal(signal.SIGALRM, deadline)
-    signal.alarm(45)
+    signal.alarm(70 if invocation else 45)
     try:
-        result = probe(endpoint, principal)
+        result = probe(endpoint, principal, invocation=invocation)
     finally:
         signal.alarm(0)
     print(MARKER + json.dumps(result, sort_keys=True), flush=True)
