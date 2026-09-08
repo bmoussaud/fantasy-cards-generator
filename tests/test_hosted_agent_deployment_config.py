@@ -150,6 +150,8 @@ def test_prerequisites_default_off_and_dev_only() -> None:
     assert "projectPrincipalId: project.identity.principalId" in main
     assert "output FOUNDRY_PROJECT_ENDPOINT string = projectEndpoint" in main
     assert "output AZURE_AI_PROJECT_ENDPOINT string = projectEndpoint" in main
+    assert "output AZURE_AI_PROJECT_ID string = project.id" in main
+    assert "resourceId(resourceGroupName," not in main
 
 
 def test_iac_only_writes_scoped_assignments_and_optional_registry_connection() -> None:

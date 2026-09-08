@@ -239,44 +239,60 @@ Only after separate approval:
 AZURE_DEV_USER_AGENT=microsoft_foundry_skill python deploy.py provision --execute --approve-change
 ```
 
-### Actual dev preview result — 2026-09-08
+### Actual dev prerequisite apply and ACA identity — 2026-09-08
 
-Gimli verified the existing dev account/project identities and endpoint, ACA
-identity, existing text deployment, registry ID/login server and classic
-`LegacyRegistryPermissions` mode using allowlisted management-plane queries.
-No project or account connections were returned (no continuation page).
-The target identities have none of the three proposed prerequisite grants;
-the existing ACA direct-inference grant is separate and remains untouched.
+PR #119 merged as `5f76207`. The earlier subscription/azd previews returned
+success without inspectable changes. A **resource-group leaf what-if** against
+`infra/modules/prerequisites.bicep`, with exact live ACA/project principals,
+resolved this: precisely three role-assignment Creates and one registry
+connection Create; every other resource was Ignore. Remaining `reference()`
+expressions pointed to the existing project principal and registry login server,
+independently verified through safe management-plane projections.
 
-A fresh, ignored `deployments/card-orchestrator/.azure/dev` state was configured
-with only verified nonsecret inputs and the immutable application build above;
-the root `.azure` state was not copied or read. The dedicated manifest and
-service contain no hooks. Both prerequisite booleans were set to `true` **only
-locally for preview**, including the proposed new registry connection.
+For this diagnostic use `az deployment group what-if --result-format
+FullResourcePayloads --no-pretty-print` with the leaf's explicit parameters.
+**Project the response before printing or persisting it**: retain change types,
+resource IDs and allowlisted role/connection fields only. FullResourcePayloads
+can include complete configuration for unrelated **Ignore** resources; never
+dump the unfiltered response. Diagnostic ARM what-if does not replace azd/Bicep
+for apply.
 
-The real `python deploy.py preview --execute` ran
-`azd provision --preview --environment dev --no-prompt` from the dedicated
-project with `AZURE_DEV_USER_AGENT=microsoft_foundry_skill`. azd 1.32.0 reported
-**success in 31 seconds**, but emitted **no resource changes or candidate plan**.
-One targeted recovery used the documented `--output json` on the same dedicated
-read-only command: success in 30 seconds, only `consoleMessage` records (including
-a null data record), still no resource-level what-if.
+After confirming all three exact grants and the connection were absent, and
+the registry used `LegacyRegistryPermissions`, the authorized dedicated
+`python deploy.py provision --execute --approve-change` ran **once**. Actual
+resource mutations, subsequently verified:
 
-**Apply is blocked:** the expected three `Microsoft.Authorization/roleAssignments`
-and optional `Microsoft.CognitiveServices/accounts/projects/connections` cannot
-be checked against an observable ARM candidate plan. CLI success is not
-scope approval, nor evidence that the plan is empty. Stop here; obtain a
-reviewable resource-level what-if through a separately reviewed tool/output
-path before requesting prerequisite apply. No source fixes or further preview
-workarounds were attempted in this turn.
+- Project MI → Foundry User, existing account scope.
+- ACA system MI → Foundry Agent Consumer, existing project scope.
+- Project MI → AcrPull, existing registry scope.
+- Existing project → `<registry>-conn`, ContainerRegistry / ManagedIdentity.
 
-The local booleans were returned to `false` after preview. **Cloud resource
-writes: none**; local ignored azd configuration was written. No provision apply,
-registry upload, hosted version/compute start, paid model call, endpoint injection,
-role/credential/network mutation or root provisioning was executed. No tools
-were installed or upgraded.
+The nested `card-orchestrator-dev-prerequisites` deployment **Succeeded**.
+The parent `dev-1788866608` deployment nevertheless failed **after** these writes:
+`DeploymentOutputEvaluationFailed`, because the old subscription-scope
+`resourceId(resourceGroupName, ...)` output interpreted the RG name as a
+subscription ID. This branch fixes the output to the existing `project.id`;
+ARM subscription validation **Succeeded** with prerequisites off. The fix has
+**not** been applied: independent review is required, and no second apply was run.
+Do not interpret the failed parent deployment as rollback or rerun blindly.
 
-Further deployment gates also remain: verify publisher push authorization;
+The new read-only [ACA identity probe](foundry-agent-invocation.md#actual-aca-managed-identity-access-probe)
+ran inside the existing serving `web` container, explicitly acquired an MI
+token for `https://ai.azure.com/.default`, and matched its `oid` to the live ACA
+system principal before sending it. `GET /agents?api-version=2025-11-15-preview`
+returned **HTTP 200, `data:[]`**. This proves target-MI project **access**, not
+agent invocation or hosted-runtime/model authorization.
+
+Safe ACA baseline comparison before apply and after the probe was identical:
+image, container, latest/ready revision, traffic, ingress, revision mode and
+identity. `FOUNDRY_PROJECT_ENDPOINT` remains **absent from ACA configuration**;
+the probe received the verified endpoint only as an argument. There was no
+serving image/file/secret/env/traffic mutation, registry upload, agent compute,
+model call, production change or root provision/hook. No tools/dependencies
+were installed. The isolated ignored azd opt-in booleans were reset to `false`.
+Targeted offline probe/infrastructure validation: **100 tests passed**.
+
+Further hosted-deployment gates remain: verify publisher push authorization;
 confirm the project/platform Application Insights binding (the queried linkage
 fields were null and connection inventories empty, so injection is **unproven**);
 review runtime-identity model authorization, region/quota, privacy and explicit
@@ -301,9 +317,10 @@ before changing the allocation. No production deploy is supported by the launche
 
 ## ACA endpoint injection: a separate stop gate
 
-The prior preflight reported an empty agent inventory and missing dev ACA
-project endpoint plus two roles. Treat that as historical evidence, not a
-current live observation. The repair above does not write the ACA resource.
+The latest actual ACA-MI probe returned an empty agent inventory; the project
+endpoint remains absent from ACA environment configuration. The three
+prerequisite grants now exist. The repair above does not write the ACA resource,
+and endpoint injection is **not a prerequisite for the one-off MI probe**.
 
 Before any endpoint injection, capture only this safe baseline:
 

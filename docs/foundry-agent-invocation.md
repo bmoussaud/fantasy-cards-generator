@@ -26,6 +26,64 @@ python -m app.foundry_agent_client \
 
 The command refuses production and requires `--allow-nonprod-live` because it can incur model usage. It prints only a sanitized summary: status, schema validity, request IDs, retryability, and reported agent version. It does not print tokens, prompts, raw response bodies, generated card text, or art prompts.
 
+## Actual ACA managed-identity access probe
+
+The separate operator tool below runs **inside an existing ACA replica**, not
+with a developer's credential chain. It does not invoke an agent/model, install
+packages, mount secrets, write serving files, or change ACA configuration.
+First resolve the existing dev subscription, project endpoint, ACA system
+principal, ready revision and running replica using allowlisted ARM queries in
+the [operations runbook](foundry-agent-operations.md). Pin those exact values:
+
+```bash
+python deployments/card-orchestrator/aca_identity_probe.py \
+  --environment dev --subscription "<dev-subscription-id>" \
+  --resource-group "<dev-resource-group>" --app "<existing-app>" \
+  --revision "<ready-revision>" --replica "<running-replica>" --container web \
+  --project-endpoint "https://<account>.services.ai.azure.com/api/projects/<project>" \
+  --expected-principal "<ACA-system-principal-id>"
+# Add --execute after checking the plan and verified target arguments.
+```
+
+This is a dev-only operator guard, not an authorization boundary. It requires
+existing permission to `az containerapp exec`, a Linux local host with PTY
+support, and the image's existing `/app/.venv/bin/python` plus `azure-identity`.
+A replaced/scaled-down pinned replica must be inventoried again, not silently
+substituted. No fallback credential or package installation is attempted.
+
+The adjacent `aca_identity_payload.py` is transported as compressed source over
+stdin into a short, alarm-bounded Python command. Nothing is written into the
+container. The local PTY addresses CLI `Inappropriate ioctl for device`; stdin
+avoids the observed exec WebSocket HTTP 404 on long startup commands. No shell,
+user content, bearer token or secret is supplied as a command/input argument.
+The credential is explicit `ManagedIdentityCredential(client_id=None)`, guarded
+by ACA identity endpoint/header presence. Token `oid`, audience and expiry are
+compared **in memory**; only the expected-principal match boolean is returned.
+Claims inspection is not a replacement for Foundry's server-side validation.
+
+One bounded, no-retry GET goes to the verified project's
+`/agents?api-version=2025-11-15-preview`. Redirects and environment HTTP proxies
+are disabled. The response is size-bounded; only HTTP status and page count are
+exported, never agent names/content, token/JWT, auth headers or raw exceptions.
+Credential acquisition has bounded transport timeouts; payload alarm is 45s,
+pre-input remote alarm 60s, local exec deadline 75s. The wrapper suppresses CLI
+raw output and returns a fixed failure code when no valid evidence arrives.
+
+Success is `status: access_verified`, HTTP 200 and a valid `data` list, including
+an empty one. It **always** reports `invocationVerified:false` and
+`endpointPersisted:false`. HTTP 400/404 never count as invocation. A 403 is a
+real authorization/network failure to investigate without broadening roles or
+relaxing network policy. No hosted agent is needed to test MI token/access.
+
+The dev run on 2026-09-08 succeeded with the actual serving ACA system identity:
+token acquired, expected principal matched, HTTP 200, zero agents. Full hosted
+invocation remains unproven and separately cost-gated.
+
+```bash
+python -m pytest -q --noconftest tests/test_aca_identity_probe.py \
+  tests/test_hosted_agent_deployment_config.py tests/test_deployment_config.py
+```
+
 ## Wire contract
 
 The client uses Microsoft Entra ID with the `https://ai.azure.com/.default` token scope and posts to the documented hosted-agent Responses protocol endpoint:

@@ -70,7 +70,7 @@ resource registry 'Microsoft.ContainerRegistry/registries@2023-07-01' existing =
   name: registryName
 }
 
-output AZURE_AI_PROJECT_ID string = resourceId(resourceGroupName, 'Microsoft.CognitiveServices/accounts/projects', accountName, projectName)
+output AZURE_AI_PROJECT_ID string = project.id
 output AZURE_AI_PROJECT_ENDPOINT string = projectEndpoint
 output FOUNDRY_PROJECT_ENDPOINT string = projectEndpoint
 output AZURE_AI_ACCOUNT_NAME string = accountName
