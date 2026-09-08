@@ -95,6 +95,9 @@ param aiFoundryProjectName string = 'fantasy-cards'
 @description('Azure AI Foundry project display name for the current environment.')
 param aiFoundryProjectDisplayName string = 'Fantasy Cards'
 
+@description('Grant Foundry hosted-agent invoke access to runtime managed identities. Off by default so existing deployments do not gain new permissions until explicitly opted in.')
+param enableFoundryAgentAccess bool = false
+
 @allowed([
   'ServicePrincipal'
   'User'
@@ -315,6 +318,8 @@ var storageAccountBase = replace('st${namePrefix}${environmentName}${uniqueToken
 var storageAccountName = toLower(take(storageAccountBase, 24))
 var aiFoundryAccountBase = replace('ai${namePrefix}${environmentName}${uniqueToken}', '-', '')
 var aiFoundryAccountName = toLower(take(aiFoundryAccountBase, 24))
+var resolvedAiFoundryProjectName = take('${aiFoundryProjectName}-${environmentName}', 64)
+var aiFoundryProjectEndpoint = 'https://${aiFoundryAccountName}.services.ai.azure.com/api/projects/${resolvedAiFoundryProjectName}'
 var registryName = toLower(take('${namePrefix}${environmentName}${uniqueToken}acr', 50))
 var acrPullIdentityName = take('${resourceToken}-acr-pull', 128)
 var virtualNetworkName = take('${resourceToken}-vnet', 64)
@@ -441,6 +446,7 @@ module containerApps './modules/container-apps.bicep' = {
     foundryApiVersion: '2025-03-01-preview'
     foundryEndpoint: 'https://${aiFoundryAccountName}.cognitiveservices.azure.com/'
     foundryImageDeployment: aiFoundryImageDeploymentName
+    foundryProjectEndpoint: aiFoundryProjectEndpoint
     foundryTextDeployment: aiFoundryTextDeploymentName
     healthzBlobTimeoutMs: healthzBlobTimeoutMs
     healthzCosmosTimeoutMs: healthzCosmosTimeoutMs
@@ -582,6 +588,7 @@ module aiFoundry './modules/ai-foundry.bicep' = {
     customSubDomainName: aiFoundryAccountName
     deployerPrincipalId: deployerPrincipalId
     deployerPrincipalType: deployerPrincipalType
+    enableFoundryAgentAccess: enableFoundryAgentAccess
     imageDeploymentCapacity: aiFoundryImageDeploymentCapacity
     imageDeploymentName: aiFoundryImageDeploymentName
     imageDeploymentSkuName: aiFoundryImageDeploymentSkuName
@@ -589,7 +596,7 @@ module aiFoundry './modules/ai-foundry.bicep' = {
     imageModelVersion: aiFoundryImageModelVersion
     location: location
     projectDisplayName: '${aiFoundryProjectDisplayName} (${toUpper(environmentName)})'
-    projectName: take('${aiFoundryProjectName}-${environmentName}', 64)
+    projectName: resolvedAiFoundryProjectName
     tags: tags
     textDeploymentCapacity: aiFoundryTextDeploymentCapacity
     textDeploymentName: aiFoundryTextDeploymentName
@@ -609,6 +616,7 @@ output aiFoundryAccountName string = aiFoundry.outputs.aiFoundryAccountName
 output aiFoundryAccountResourceId string = aiFoundry.outputs.aiFoundryAccountResourceId
 output aiFoundryImageDeploymentName string = aiFoundry.outputs.aiFoundryImageDeploymentName
 output aiFoundryProjectName string = aiFoundry.outputs.aiFoundryProjectName
+output aiFoundryProjectEndpoint string = aiFoundry.outputs.aiFoundryProjectEndpoint
 output aiFoundryProjectResourceId string = aiFoundry.outputs.aiFoundryProjectResourceId
 output aiFoundryTextDeploymentName string = aiFoundry.outputs.aiFoundryTextDeploymentName
 output deployedAuthRedirectUri string = '${containerApps.outputs.containerAppUrl}${entraRedirectPath}'

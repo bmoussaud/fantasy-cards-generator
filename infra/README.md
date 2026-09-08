@@ -91,6 +91,35 @@ No new azd environment variable is required for the deployer principal ID: the
 template derives it directly from the authenticated deployment context via
 `deployer().objectId`.
 
+`FOUNDRY_ENDPOINT` remains the direct Azure AI Services account URL
+(`https://<account>.cognitiveservices.azure.com/`) used by the existing model
+deployment path. `FOUNDRY_PROJECT_ENDPOINT` is also injected into the Container
+App as non-secret configuration for future hosted-agent invocation, using the
+same project name that the Foundry module creates:
+`https://<account>.services.ai.azure.com/api/projects/<project>`. The root
+template resolves that project name once with
+`take('${aiFoundryProjectName}-${environmentName}', 64)` and passes the same
+value to both the module and the Container App config to avoid module-output
+cycles.
+
+Hosted-agent permissions are gated separately from endpoint injection. Set
+`ENABLE_FOUNDRY_AGENT_ACCESS=true` only when the deployed environment is ready to
+let runtime managed identities invoke hosted agents:
+
+```bash
+azd env set ENABLE_FOUNDRY_AGENT_ACCESS true
+```
+
+The default is `false`, preserving existing dev/prod access until explicit
+opt-in. This gate controls only the new hosted-agent RBAC assignments; it does
+not switch generation modes, create agents, deploy hosted runtimes, or remove
+the existing direct model path.
+
+Setting the gate back to `false` does not revoke assignments already created:
+incremental ARM deployments do not delete resources omitted by a condition.
+Permission revocation requires a separate, explicitly reviewed cleanup; this
+parameter is not a runtime kill switch.
+
 Provisioning grants the deployment caller only:
 
 - **Key Vault Reader** at Key Vault scope, allowing metadata-only list/browse
@@ -111,6 +140,17 @@ container-scoped **Storage Blob Data Contributor** on both `card-assets` and
 vault-scoped **Key Vault Secrets User** for runtime secret-value reads. The
 deployer cannot create, replace, upload, overwrite, or delete Cosmos items or
 blobs through the reader roles.
+
+When `ENABLE_FOUNDRY_AGENT_ACCESS=true`, provisioning also grants only the
+additional hosted-agent permissions needed for future invoke-only access:
+
+- the Foundry project's system-assigned managed identity receives **Foundry
+  User** at the Foundry account scope, matching Microsoft Foundry's project
+  managed-identity access requirement.
+- the Container App's system-assigned managed identity receives **Foundry Agent
+  Consumer** at the Foundry project scope. This is intentionally narrower than
+  Foundry User/Contributor and can be narrowed to agent scope later once an
+  agent resource exists.
 
 The deploying identity must already be allowed to create assignments:
 

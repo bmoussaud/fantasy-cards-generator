@@ -26,6 +26,9 @@ param deployerPrincipalId string
 @description('Microsoft Entra principal type running the deployment.')
 param deployerPrincipalType string
 
+@description('Grant hosted-agent invoke-only access to runtime managed identities. Existing direct model access remains separate and always provisioned.')
+param enableFoundryAgentAccess bool = false
+
 @description('Deployment name for the text model used by the backend.')
 param textDeploymentName string
 
@@ -62,6 +65,7 @@ param tags object = {}
 var cognitiveServicesUserRoleDefinitionId = 'a97b65f3-24c7-4388-baec-2e87135dc908'
 // Foundry User (formerly Azure AI User): https://aka.ms/azure-built-in-roles
 var foundryUserRoleDefinitionId = '53ca6127-db72-4b80-b1b0-d745d6d5456d'
+var foundryAgentConsumerRoleDefinitionId = 'eed3b665-ab3a-47b6-8f48-c9382fb1dad6'
 
 resource foundryAccount 'Microsoft.CognitiveServices/accounts@2025-06-01' = {
   name: accountName
@@ -154,10 +158,31 @@ resource deployerFoundryUserRoleAssignment 'Microsoft.Authorization/roleAssignme
   }
 }
 
+resource projectManagedIdentityFoundryUserRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (enableFoundryAgentAccess) {
+  scope: foundryAccount
+  name: guid(foundryAccount.id, aiFoundryProject.id, foundryUserRoleDefinitionId)
+  properties: {
+    principalId: aiFoundryProject.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', foundryUserRoleDefinitionId)
+  }
+}
+
+resource containerAppFoundryAgentConsumerRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (enableFoundryAgentAccess) {
+  scope: aiFoundryProject
+  name: guid(aiFoundryProject.id, containerAppPrincipalId, foundryAgentConsumerRoleDefinitionId)
+  properties: {
+    principalId: containerAppPrincipalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', foundryAgentConsumerRoleDefinitionId)
+  }
+}
+
 output aiFoundryAccountName string = foundryAccount.name
 output aiFoundryAccountResourceId string = foundryAccount.id
 output aiFoundryAccountEndpoint string = foundryAccount.properties.endpoint
 output aiFoundryProjectName string = aiFoundryProject.name
+output aiFoundryProjectEndpoint string = 'https://${foundryAccount.name}.services.ai.azure.com/api/projects/${aiFoundryProject.name}'
 output aiFoundryProjectResourceId string = aiFoundryProject.id
 output aiFoundryTextDeploymentName string = textDeploymentName
 output aiFoundryImageDeploymentName string = imageDeploymentName

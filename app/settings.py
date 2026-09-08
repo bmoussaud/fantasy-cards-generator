@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from math import isfinite
 from typing import Literal
 
 AI_MODE_VALUES = {"mock", "live"}
@@ -48,6 +49,11 @@ class AppSettings:
     foundry_api_version: str
     foundry_text_deployment: str | None
     foundry_image_deployment: str | None
+    foundry_project_endpoint: str | None
+    foundry_agent_name: str | None
+    foundry_agent_api_version: str
+    foundry_agent_expected_version: str | None
+    foundry_agent_timeout_seconds: float
     cosmos_endpoint: str | None
     cosmos_database_name: str | None
     cosmos_container_name: str | None
@@ -133,6 +139,15 @@ def load_app_settings() -> AppSettings:
         foundry_api_version=_string_env("FOUNDRY_API_VERSION", default="2025-03-01-preview"),
         foundry_text_deployment=_optional_env("FOUNDRY_TEXT_DEPLOYMENT"),
         foundry_image_deployment=_optional_env("FOUNDRY_IMAGE_DEPLOYMENT"),
+        foundry_project_endpoint=_optional_env("FOUNDRY_PROJECT_ENDPOINT"),
+        foundry_agent_name=_optional_env("FOUNDRY_AGENT_NAME"),
+        foundry_agent_api_version=_string_env("FOUNDRY_AGENT_API_VERSION", default="v1"),
+        foundry_agent_expected_version=_optional_env("FOUNDRY_AGENT_EXPECTED_VERSION"),
+        foundry_agent_timeout_seconds=_finite_float_env(
+            "FOUNDRY_AGENT_TIMEOUT_SECONDS",
+            default=5.0,
+            minimum=0.1,
+        ),
         cosmos_endpoint=_optional_env("COSMOS_ENDPOINT"),
         cosmos_database_name=_optional_env("COSMOS_DATABASE_NAME"),
         cosmos_container_name=_optional_env("COSMOS_CONTAINER_NAME"),
@@ -309,6 +324,13 @@ def _float_env(name: str, *, default: float, minimum: float) -> float:
     value = default if raw_value is None else float(raw_value)
     if value < minimum:
         raise SettingsError(f"{name} must be >= {minimum}.")
+    return value
+
+
+def _finite_float_env(name: str, *, default: float, minimum: float) -> float:
+    value = _float_env(name, default=default, minimum=minimum)
+    if not isfinite(value):
+        raise SettingsError(f"{name} must be finite.")
     return value
 
 
