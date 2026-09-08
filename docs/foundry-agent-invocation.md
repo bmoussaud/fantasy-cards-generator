@@ -89,6 +89,8 @@ in memory from source, imports the existing `GeneratedCardModel`, and validates
 both build and hosted version metadata. No container files or settings are
 written. Output contains only allowlisted status/booleans/IDs/versions; no cards,
 model text or tokens. A timeout consumes the invocation allowance; never retry.
+Large invocation payloads are sent in lines of at most 1024 characters and
+reconstructed in memory to respect canonical terminal limits.
 `invocation_verified` can mean a validated `held` or `refused` result, not card
 generation success; inspect `outcome`. The remote deadline is 70 seconds and the
 local PTY deadline is 75 seconds.
@@ -141,7 +143,13 @@ The response parser reads the raw Responses wire envelope `output[]/content[]/ou
 
 ## Current live gap
 
-No hosted `card-orchestrator` agent is deployed by this branch. Passing unit tests or mock transports is not evidence of live end-to-end success; a real smoke test requires Gimli's infra/RBAC work and an existing configured agent endpoint.
+The approved smoke deployed `card-orchestrator` version `1`, then deleted it and
+its session in the cleanup path. Its single ACA invocation dispatch returned
+`exec_no_evidence`: Responses delivery, identity and card validation are unknown,
+not successful. The allowance was consumed and no retry occurred. Exact version,
+session and agent GETs subsequently returned 404; the web baseline was unchanged.
+See the [actual run evidence](foundry-agent-operations.md#executed-approved-dev-smoke--2026-09-08).
+Passing unit tests or mock transports is not evidence of live end-to-end success.
 
 The earlier 2026-09-08 checkpoint stopped without attempting deployment.
 Missing Application Insights linkage was incorrectly called a deployment blocker;

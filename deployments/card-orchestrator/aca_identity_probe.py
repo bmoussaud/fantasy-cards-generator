@@ -38,7 +38,9 @@ def parser_source():
     )
     lines = source.splitlines()
     return imports + "\n\n".join(
-        "\n".join(lines[min([node.lineno] + [d.lineno for d in node.decorator_list]) - 1:node.end_lineno])
+        "\n".join(lines[
+            min([node.lineno] + [d.lineno for d in node.decorator_list]) - 1:node.end_lineno
+        ])
         for node in nodes
     ) + "\nGenerateCardAgentResponse.model_rebuild(_types_namespace=globals())\n"
 
@@ -58,6 +60,20 @@ def remote_command(endpoint, principal, invocation=None):
     return "/app/.venv/bin/python -c " + (
         f"exec(__import__('zlib').decompress(__import__('base64').b64decode('{encoded}')))"
     )
+
+
+def stdin_payload(payload, *, invocation=False):
+    expression = payload.split(" ", 2)[2]
+    if not invocation:
+        return "/app/.venv/bin/python -c __import__('signal').alarm(60);exec(input())", expression
+    # ACA's terminal can be canonical: never send a source line beyond PC_MAX_CANON.
+    command = (
+        "/app/.venv/bin/python -c __import__('signal').alarm(75);"
+        "exec(''.join(iter(input,'END')))"
+    )
+    return command, "\n".join(
+        expression[offset:offset + 1024] for offset in range(0, len(expression), 1024)
+    ) + "\nEND"
 
 
 def extract_result(output):
@@ -113,7 +129,10 @@ def extract_result(output):
         if result["endpointPersisted"]:
             continue
         if "invocationsAttempted" in result:
-            if type(result["invocationsAttempted"]) is not int or result["invocationsAttempted"] not in (0, 1):
+            if (
+                type(result["invocationsAttempted"]) is not int
+                or result["invocationsAttempted"] not in (0, 1)
+            ):
                 continue
             if type(result.get("schemaValid")) is not bool:
                 continue
@@ -242,6 +261,7 @@ def main(argv=None):
         payload = remote_command(args.project_endpoint, args.expected_principal, invocation)
     except (ValueError, TypeError):
         parser.error("Supply a canonical verified project endpoint and principal UUID")
+    startup, input_line = stdin_payload(payload, invocation=invocation is not None)
     command = [
         "az",
         "containerapp",
@@ -259,8 +279,7 @@ def main(argv=None):
         "--container",
         args.container,
         "--command",
-        "/app/.venv/bin/python -c __import__('signal').alarm("
-        + ("75" if invocation else "60") + ");exec(input())",
+        startup,
         "--only-show-errors",
     ]
     if not args.execute:
@@ -269,7 +288,9 @@ def main(argv=None):
         return 0
     # Long startup commands receive HTTP 404 from the exec WebSocket gateway.
     # Send only reviewed source (never credentials) over stdin to the bounded process.
-    result = execute(command, input_line=payload.split(" ", 2)[2])
+    result = execute(command, input_line=input_line)
+    if invocation and "invocationsAttempted" not in result:
+        result["invocationAllowanceConsumed"] = True
     print(json.dumps(result, sort_keys=True))
     return 0 if result["status"] in ("access_verified", "invocation_verified") else 1
 

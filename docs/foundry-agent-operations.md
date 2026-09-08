@@ -378,6 +378,66 @@ before changing the allocation. No production deploy is supported by the launche
 
 ## ACA endpoint injection: a separate stop gate
 
+### Executed approved DEV smoke — 2026-09-08
+
+The approved run **did execute** against the existing resources, without an
+Application Insights link, telemetry IaC, root hooks, evaluation, web activation,
+new model capacity, network changes or additional role assignments.
+
+| Evidence | Actual result |
+| --- | --- |
+| Application/image source | `0dfb3ef8e47c29f86d6936eaedcea17ab6871334` |
+| Registry image | `fcagdevqhg3qc4rlbt4gacr.azurecr.io/card-orchestrator:0dfb3ef8e47c29f86d6936eaedcea17ab6871334` |
+| Registry digest | `sha256:22c7b63b85ad90bf4a2513437660b2c9eccec6de5de3e06d22ed1a64847584c6` |
+| Deployment submission / clock start | `2026-09-08T11:57:15.473661Z` |
+| Dedicated azd deploy | Exit 0, `2026-09-08T11:58:35.608805Z` |
+| New hosted version | `card-orchestrator`, version **`1`**, observed `active` |
+| Version-ref session | `02ea88d182aae88700SxWkhpky6493MLlK0tvxy7EiFIyYXZUP`, observed `active` at `11:58:46.431496Z` |
+| ACA invocation dispatches | **1**, at `11:58:46.437594Z`; **0 retries** |
+| Invocation outcome | `exec_no_evidence`, at `11:58:56.224365Z`; no validated card/refusal/held response |
+| Session stop / delete | Exit 0 at `11:59:01.561745Z` / `11:59:03.373857Z` |
+| Exact new-version force deletion | Exit 0 at `11:59:07.138924Z` |
+| Independent cleanup checks | Exact version GET **404**, exact session GET **404**, agent GET **404**, session-list endpoint **404**, each `not_found` |
+| Web baseline | Unchanged image, container, latest/ready revision, Single/latest 100% traffic, ingress and identity |
+| Endpoint persisted in ACA | **false** |
+
+The control script's first cleanup summary conservatively reported failure
+because session listing returned 404 after deleting the sole version (the agent
+endpoint disappeared too). Independent exact-resource GETs then confirmed
+version/session/agent absence. This is **not** an HTTP-200 empty-list result:
+the absence evidence is successful explicit stop/delete plus exact-resource and
+endpoint 404s, not an ignored 403/timeout. Compute/session termination completed
+within two minutes of submission, well inside the approved 30-minute window.
+No unrelated version or shared resource was deleted. The image remains in ACR
+and can continue incurring storage charges.
+
+**One ACA exec invocation was dispatched; whether its Responses POST reached
+Foundry is unknown (0 or 1), and its allowance is consumed.** No retry, developer
+inference call or model repair was attempted. Model-call/token usage is
+unobserved, not zero; code limits remain three calls, 1800 output tokens/stage,
+20 seconds/stage and 65 seconds overall. The earlier explicit-MI access probe
+proved the expected ACA principal, but this invocation exported no new identity
+or schema evidence and must not be called an end-to-end success.
+
+Live preparation found and fixed two manifest defects: extension service paths
+cannot escape the isolated project; container builds need `language: docker`
+to avoid a host-side requirements.txt restore. The failed Python restore created
+a local virtual environment but installed no project dependencies; that local
+artifact was removed. Actual agent Dockerfile build, packaging and push then
+succeeded through the dedicated azd project.
+
+The transmitted invocation expression was 5736 characters. Canonical PTY line
+limits are a plausible transport failure, not a proven service/model diagnosis.
+The subsequent source-only fix splits it into lines of at most 1024 characters
+and reconstructs it in memory; a canonical-PTY regression test passes. This
+fix was **not** retried live and is not part of the published image source.
+Targeted offline probe/deployment validation after the fix: **107 tests passed**.
+
+#109 remains open. Actual invocation/schema/MI evidence, runtime model
+authorization, production latency/privacy acceptance and separately reviewed
+ACA endpoint injection remain unproven or out of scope. Approval for this
+single consumed smoke does not authorize another invocation.
+
 The latest actual ACA-MI probe returned an empty agent inventory; the project
 endpoint remains absent from ACA environment configuration. The three
 prerequisite grants now exist. The repair above does not write the ACA resource,

@@ -105,7 +105,8 @@ def probe(endpoint, principal, credential_factory=None, opener=None, invocation=
                 }]}],
             }
             request = urllib.request.Request(
-                endpoint + "/agents/card-orchestrator/endpoint/protocols/openai/responses?api-version=v1",
+                endpoint
+                + "/agents/card-orchestrator/endpoint/protocols/openai/responses?api-version=v1",
                 data=json.dumps(body).encode(),
                 headers={
                     "Authorization": "Bearer " + token,
@@ -131,7 +132,8 @@ def probe(endpoint, principal, credential_factory=None, opener=None, invocation=
         if invocation is not None:
             if not isinstance(document, dict):
                 return {**result, "reason": "invalid_response"}
-            parsed = _parse_success_envelope(
+            # The wrapper prepends these exact owned parser definitions in memory.
+            parsed = globals()["_parse_success_envelope"](
                 document, request_id=None, expected_version=build
             )
             result.update(
@@ -141,11 +143,13 @@ def probe(endpoint, principal, credential_factory=None, opener=None, invocation=
                 hostedVersion=version,
                 applicationVersion=build,
             )
-            for key, value in (("responseId", parsed.response_id), ("requestId", parsed.request_id)):
+            for key, value in (
+                ("responseId", parsed.response_id), ("requestId", parsed.request_id)
+            ):
                 if value:
                     result[key] = value
             if parsed.schema_valid:
-                domain = json.loads(_extract_output_text(document))
+                domain = json.loads(globals()["_extract_output_text"](document))
                 result["hostedVersionMatched"] = (
                     domain.get("metadata", {}).get("hostedVersion") == version
                 )

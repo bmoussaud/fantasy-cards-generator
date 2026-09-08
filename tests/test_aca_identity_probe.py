@@ -280,8 +280,8 @@ def test_plan_only_and_prod_rejection(modules, capsys):
 def invocation_parser(payload, wrapper, monkeypatch):
     namespace = {"__name__": "aca_identity_payload"}
     exec(wrapper.parser_source(), namespace)
-    monkeypatch.setattr(payload, "_parse_success_envelope", namespace["_parse_success_envelope"], raising=False)
-    monkeypatch.setattr(payload, "_extract_output_text", namespace["_extract_output_text"], raising=False)
+    for name in ("_parse_success_envelope", "_extract_output_text"):
+        monkeypatch.setattr(payload, name, namespace[name], raising=False)
 
 
 @pytest.mark.parametrize("status", ["completed", "refused", "held", "routing_defer"])
@@ -365,3 +365,21 @@ def test_http_200_without_card_is_not_success(modules, monkeypatch):
     assert not result.success and not result.schema_valid
     with pytest.raises(ValueError):
         wrapper.remote_command(ENDPOINT, PRINCIPAL, ("1", "not-a-sha", "session-1"))
+
+
+def test_large_invocation_payload_survives_canonical_terminal(modules):
+    payload, wrapper = modules
+    result = payload.probe(ENDPOINT, PRINCIPAL, Credential().factory, Opener())
+    expression = "padding=" + repr("x" * 6000) + ";" + (
+        f"print({payload.MARKER!r}+{json.dumps(result)!r},flush=True)"
+    )
+    startup, input_line = wrapper.stdin_payload(
+        "/app/.venv/bin/python -c " + expression, invocation=True
+    )
+    assert max(map(len, input_line.splitlines())) <= 1024
+    program = (
+        "print('INFO: Successfully connected to container:',flush=True);"
+        + startup.split(" ", 2)[2]
+    )
+    # Deliberately keep canonical mode (unlike ACA's local CLI PTY test above).
+    assert wrapper.execute([sys.executable, "-c", program], input_line=input_line) == result
