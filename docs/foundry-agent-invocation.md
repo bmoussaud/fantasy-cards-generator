@@ -77,39 +77,150 @@ relaxing network policy. No hosted agent is needed to test MI token/access.
 
 The dev run on 2026-09-08 succeeded with the actual serving ACA system identity:
 token acquired, expected principal matched, HTTP 200, zero agents. Full hosted
-invocation was not proven by that access check. The subsequent smoke is
-cost-approved; the earlier App Insights deployment gate was incorrect (linkage
-is needed for tracing only), as corrected in the operations runbook.
+invocation was not proven by that access check. The first smoke consumed its
+single approved allowance. A **separately and newly authorized** second smoke
+subsequently sent one Responses request and received HTTP 403; that new allowance
+is now also consumed, with no retry authorized. The earlier
+App Insights deployment gate was incorrect (linkage is needed for tracing only),
+as corrected in the operations runbook.
+
+Un **troisième smoke, nouvellement autorisé**, a depuis déployé la correction
+à identité unique depuis `dc1925942c42756690f7dd5321cbdbf892cf7182`.
+Sa préparation ACA a réussi (MI attendue, HTTP 200, imports/contrat/fixture prêts,
+zéro POST), mais l'unique dispatch `--invoke-once` a renvoyé le diagnostic local
+`exec_setup_timeout` sans marqueur distant. Le nombre de créations/Responses
+effectivement arrivés est **inconnu**, pas zéro ou un confirmé ;
+`invocationAllowanceConsumed:true`, aucune relance. Aucun HTTP ni code service
+n'a été observé pour cette tentative. La nouvelle version a été supprimée et
+les GET exacts version/session ont confirmé 404. L'image ACR reste conservée ;
+le web est inchangé et `endpointPersisted:false`.
+Les [preuves horodatées et la divergence d'horloges](foundry-agent-operations.md#smoke-corrigé-à-identité-unique--2026-09-08)
+distinguent cette panne de transport du HTTP 403 historique. La création de
+session par la MI et le résultat métier restent non démontrés ; aucune nouvelle
+tentative facturable n'est autorisée.
+
+### Nonbillable invocation preparation
+
+Use the same pinned target arguments above with `--prepare-invocation --execute`.
+Do **not** supply `--invoke-once`, versions or a session: conflicting/unused
+invocation arguments fail locally before ACA exec. No hosted version, session or
+server is required.
+
+This explicit mode uses the **same** owned parser/request-model bundle,
+`app.generation.GeneratedCardModel` import, chunked stdin transport and phased
+deadlines as invocation. It builds the same `GenerateCardAgentRequest`/Responses
+body in memory with a clearly local placeholder session, exercises the parser
+against a labelled local valid card fixture and an invalid empty envelope, then
+acquires the actual explicit `ManagedIdentityCredential`, checks principal,
+audience and expiry, and sends **one GET agents only**. It never sends a
+Responses POST or calls a model, including when invocation arguments are malformed.
+Bytecode writes are disabled in the remote process; no remote files, packages,
+mounts, app settings or cloud resources are created or modified.
+
+`invocation_prepared` requires `parserImportReady`, `requestSchemaReady`,
+`localFixtureParseReady`, and real MI `accessVerified` with HTTP 200.
+`preparationOnly` is true; `invocationsAttempted` is zero;
+`invocationVerified` and service `schemaValid` remain **false**. No fixture content,
+service body, token or raw CLI output is exported. The local fixture is **not
+hosted-service acceptance evidence**, and this mode neither consumes nor grants
+a paid invocation allowance.
 
 The explicit `--invoke-once --hosted-version <version> --expected-version <full-sha>
---session-id <version-pinned-session>` mode sends exactly one synthetic Responses
-request using the same actual ACA MI. The platform consumes `session_id` to route
-to the pre-created version-ref session. The owned response parser is bundled
+--session-id <new-prerecorded-id>` mode first creates its **own** exact-version
+session inside ACA, then sends at most one synthetic Responses request. Both use
+one explicit system `ManagedIdentityCredential` and the same checked token in
+memory. The operator must pre-record a never-used `smoke-109-<uuid4().hex>` ID and
+the exact request-source/build/version bindings before dispatch, not create an
+operator-owned warmup session. The create request is:
+
+```text
+POST {project}/agents/card-orchestrator/endpoint/sessions?api-version=v1
+{"agent_session_id":"smoke-109-<32 lowercase hex characters>","version_indicator":{"type":"version_ref","agent_version":"<exact new hosted version>"}}
+```
+
+Only the documented **HTTP 201** `AgentSessionResource` is accepted. Its
+`agent_session_id` and `version_indicator.type/agent_version` must match the
+request; guessed `metadata.version` is not used. Only `status:active` permits
+inference. `creating`/`updating` cause bounded GETs to
+`.../endpoint/sessions/{id}?api-version=v1` (two-second intervals, at most 15 GETs,
+within the setup deadline), revalidating ID/version every time. Other statuses,
+malformed payloads, mismatches, HTTP failures and timeouts stop without inference.
+Neither POST is retried. A conflict (409) is not accepted as a replacement session
+and explicitly does **not** authorize deleting that existing session.
+
+The Responses body uses the documented **`agent_session_id`**, not the unverified
+legacy `session_id` alias, with the same ID and existing `store:false`,
+`stream:false`, structured `schemaVersion:1` request. No Foundry-Features,
+impersonation or isolation-header override is added. The owned response parser is bundled
 in memory from source, imports the existing `GeneratedCardModel`, and validates
 both build and hosted version metadata. No container files or settings are
 written. Output contains only allowlisted status/booleans/IDs/versions; no cards,
-model text or tokens. A timeout consumes the invocation allowance; never retry.
+model text or tokens. `sessionCreateAttempted` (boolean) and `invocationsAttempted`
+(0/1) are distinct. `sessionCreated` means matching create/GET resource evidence;
+`sessionReady` additionally requires `active`. `sessionCleanupRequired` is set
+**before** create dispatch, so a timeout is reconcilable even without a response.
+The HTTP diagnostic exports only `httpStatus`, `phase`
+(`session_create|session_ready|invoke`), and `serviceCode`
+(`session_not_accessible|unknown`). Error JSON reads are bounded to 64 KiB plus
+one overflow byte; arbitrary codes/messages/body/headers/URLs are never exported.
+No optional telemetry is required.
+
+A dispatch timeout consumes the allowance; never retry. Without a strict remote
+marker, local output conservatively sets `sessionCreationUnknown:true`,
+`sessionCleanupRequired:true` and `invocationAllowanceConsumed:true`, not a
+guessed attempt count. The operator's mandatory `finally` must reconcile the
+pre-recorded ID and remove only this run's owned session/version, including
+unknown creation completion. See the [cleanup contract](foundry-agent-operations.md#next-separately-approved-window-same-identity-session-contract).
 Large invocation payloads are sent in lines of at most 1024 characters and
 reconstructed in memory to respect canonical terminal limits.
 `invocation_verified` can mean a validated `held` or `refused` result, not card
-generation success; inspect `outcome`. Invocation mode allows 30 seconds from CLI
+generation success; inspect `outcome`. Invocation mode allows **30 seconds** from CLI
 launch for connection, terminal settling and complete payload delivery, followed
-by 80 seconds for a result, with a hard 110-second local transport cap. The result
-budget covers up to 5 seconds of remote parser imports after input, the unchanged
-70-second remote probe deadline (65-second request timeout), and 5 seconds for
-emission/transport. The pre-input remote alarm remains 75 seconds; after input it
-is reset to 5 seconds until the probe installs its 70-second alarm. PTY writes are
+by **100 seconds** for a result, with a hard **130-second** local transport cap.
+The earlier 10-second setup cap produced `exec_setup_timeout` during the latest
+live attempt. Setup now matches the successful preparation path without reducing
+the result budget. This correction has only been exercised offline; no further
+live invocation is implied.
+Its remote budget is **95 seconds**: at most **30 seconds** for decoding,
+parser/import, MI, session creation and readiness, separately reserving the
+**65-second** invocation guard (including response parsing). Setup failure never
+starts inference; cold imports cannot consume the model's reserved budget.
+Preparation retains its existing 30/80/110-second local and 70-second remote limits.
+A diagnostic
+SIGALRM handler is installed **before** chunked input, bounded at 30 seconds.
+After input, the 95-second invocation (70-second preparation) guard protects
+decoding/source entry. The payload preserves the remaining bootstrap budget
+**before importing the parser**, rather than resetting it after imports.
+Cold imports consume the bounded setup budget instead of
+silently dying under a separate five-second default signal. Parser setup failures
+emit sanitized `parser_setup_failed`/`parser_setup_timeout`; early transport/source
+failures emit `bootstrap_failed`/`bootstrap_timeout`. PTY writes are
 nonblocking and remain within setup/total deadlines, including partial transfers.
 Repeated connection messages never retransmit the payload. Local failures are
 sanitized as `exec_setup_timeout`, `exec_timeout` (result), or `exec_total_timeout`;
 process termination/reaping has a separate bounded cleanup wait. Access-only mode
 retains its 75-second launch-to-result budget. These offline deadline corrections
-do not establish the cause of the live `exec_no_evidence` result or permit a retry.
+do not establish the cause of the historical `exec_no_evidence` result or permit
+a retry. An offline subprocess regression demonstrates that the former default
+five-second SIGALRM kills a 5.2-second simulated cold import with no marker;
+the new path survives that delay and emits a structured diagnostic.
 
 ```bash
 python -m pytest -q --noconftest tests/test_aca_identity_probe.py \
-  tests/test_hosted_agent_deployment_config.py tests/test_deployment_config.py
+  tests/test_foundry_agent_client.py tests/test_hosted_agent_deployment_config.py \
+  tests/test_deployment_config.py
 ```
+
+Contract sources checked 2026-09-08:
+[session API and protocol binding](https://learn.microsoft.com/azure/foundry/agents/how-to/manage-hosted-sessions),
+[caller-Entra ownership](https://learn.microsoft.com/azure/foundry/agents/how-to/isolate-sessions-per-user#troubleshoot-isolation),
+[interaction permissions](https://learn.microsoft.com/azure/foundry/agents/concepts/hosted-agent-permissions#agent-interaction),
+and the public SDK's
+[`AgentSessionResource` / `VersionRefIndicator`](https://github.com/Azure/azure-sdk-for-python/blob/main/sdk/ai/azure-ai-projects/azure/ai/projects/models/_models.py)
+and [`create_session` HTTP 201 contract](https://github.com/Azure/azure-sdk-for-python/blob/main/sdk/ai/azure-ai-projects/azure/ai/projects/operations/_operations.py).
+The existing project-scoped Foundry Agent Consumer interaction role is retained;
+own-session creation with that role remains **unverified live**, not justification
+for broader RBAC.
 
 ## Wire contract
 
@@ -154,13 +265,57 @@ The response parser reads the raw Responses wire envelope `output[]/content[]/ou
 
 ## Current live gap
 
-The approved smoke deployed `card-orchestrator` version `1`, then deleted it and
+The same-identity session-creation/protocol correction above is **offline code,
+not deployed or live-tested**. The last deployed image remains the historical
+`2bdbf9967d8c397f7d88914bac06285b3b477297` build below. Current documentation verifies
+caller-scoped session ownership and `agent_session_id` binding. Those facts make
+the operator-created/ACA-invoked session a concrete protocol defect to correct,
+but do **not** prove the historical HTTP 403 cause: its error body was discarded,
+and legacy alias acceptance was never established. No further Azure request is
+authorized by this correction; #109 stays open.
+
+The latest **newly authorized** smoke on 2026-09-08 used application build
+`2bdbf9967d8c397f7d88914bac06285b3b477297`. Before deployment, the complete current
+parser/chunk-transport preparation returned `invocation_prepared`: all three
+parser/request/fixture readiness booleans true, actual ACA principal matched,
+GET agents HTTP 200, zero invocations.
+
+The dedicated azd deployment created a new version `1` and an active exact-version
+session. The one actual ACA-MI Responses POST returned **HTTP 403**:
+`tokenAcquired:true`, `principalMatched:true`, `invocationsAttempted:1`,
+`reason:http_error`, `invocationVerified:false`, `schemaValid:false`.
+`accessVerified:false` belongs to this rejected POST, not the successful
+preparation GET. There is no validated domain outcome or application/hosted-version
+match; HTTP authorization failure is **not** a domain `refused` card response.
+No retry or developer-credential invocation occurred.
+
+Session stop/delete and exact-version deletion completed within **2m16s** of
+deployment submission. Independent exact session/version GETs returned HTTP 404.
+The web baseline remained identical; `endpointPersisted:false`. Both images may
+remain billable in ACR. The existing consumer role was verified, not widened;
+the precise service authorization reason was not exported by the privacy-bound
+probe and cannot be inferred from 403 alone. End-to-end generation remains
+unproven. See the [new run evidence](foundry-agent-operations.md#newly-authorized-dev-smoke--2026-09-08).
+
+The earlier approved smoke deployed `card-orchestrator` version `1`, then deleted it and
 its session in the cleanup path. Its single ACA invocation dispatch returned
 `exec_no_evidence`: Responses delivery, identity and card validation are unknown,
 not successful. The allowance was consumed and no retry occurred. Exact version,
 session and agent GETs subsequently returned 404; the web baseline was unchanged.
 See the [actual run evidence](foundry-agent-operations.md#executed-approved-dev-smoke--2026-09-08).
 Passing unit tests or mock transports is not evidence of live end-to-end success.
+
+On 2026-09-08, nonbillable preparation on the existing serving revision
+`fcag-dev-app--azd-1788775203`, container `web`, image
+`azd-deploy-1788775195`, returned the strict `invocation_prepared` marker:
+parser import, generated request schema and local fixture parsing all ready;
+actual system principal matched; GET agents HTTP 200, empty page; **zero
+invocations**, `invocationVerified:false`, `schemaValid:false`. This verifies
+the deployed web image's parser/import compatibility and the complete preparation
+collection path, not delivery to or generation by a hosted service. No Responses
+POST, deployment, hosted session creation or model call was made. The previous
+single paid allowance remained consumed at that checkpoint. The later, separately
+authorized attempt above is distinct and is also now consumed.
 
 The earlier 2026-09-08 checkpoint stopped without attempting deployment.
 Missing Application Insights linkage was incorrectly called a deployment blocker;

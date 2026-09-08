@@ -24,6 +24,161 @@ dedicated container/deployment package in PR #119. Packaging-only tests are not
 startup evidence; the integrated validation below includes the correct agent
 Dockerfile, real entrypoint and credential-free readiness check.
 
+Dernier résultat réel : le [smoke corrigé à identité unique](#smoke-corrigé-à-identité-unique--2026-09-08)
+a déployé la nouvelle image, mais son unique dispatch a échoué localement avec
+`exec_setup_timeout`. Aucun marqueur distant ne permet de compter les POST :
+leur nombre reste **inconnu**, et la nouvelle autorisation est consommée.
+La nouvelle version a été supprimée ; les GET exacts de version/session ont
+confirmé HTTP 404. L'invocation de bout en bout reste non démontrée. Le HTTP 403
+documenté plus bas appartient à la tentative précédente, pas à celle-ci.
+
+### Smoke corrigé à identité unique — 2026-09-08
+
+Exécution Gimli sur PR #121, après la **nouvelle** approbation explicite et la
+revue indépendante du contrat par Samwise. La préparation non facturable dans
+la réplique ACA existante a réellement renvoyé `invocation_prepared`, HTTP 200,
+`principalMatched:true`, `parserImportReady:true`, `requestSchemaReady:true`,
+`localFixtureParseReady:true` et `invocationsAttempted:0`. Elle n'a créé aucune
+session et sa fixture locale ne prouve aucune génération par le service.
+
+| Preuve | Résultat réel (UTC) |
+| --- | --- |
+| Source application, image et requête | `dc1925942c42756690f7dd5321cbdbf892cf7182` ; les commits documentaires ultérieurs ne sont pas cette image |
+| Image ACR | `fcagdevqhg3qc4rlbt4gacr.azurecr.io/card-orchestrator:dc1925942c42756690f7dd5321cbdbf892cf7182` |
+| Digest vérifié dans ACR | `sha256:1c15ec813aa47991d59f8dba42ec50062130e10a878c4f4e9551751ab6eb5f94` |
+| Session préenregistrée | `smoke-109-46f9af78e7ef4129b961f4d80ef16b00`, GET exact **404** à `13:15:23.040602Z`, avant tout déploiement/création |
+| Soumission / début du plafond de 30 minutes | `13:15:23.568639Z`, **0,5 CPU / 1GiB**, une seule soumission |
+| Déploiement azd dédié | Exit 0 à `13:16:44.523033Z` ; aucun provisionnement/hook racine |
+| Nouvelle version détenue | `card-orchestrator:1`, `created_at:1788873361`, image et SHA applicatif vérifiés à `13:16:46.797699Z` |
+| Cible ACA inchangée | Révision `fcag-dev-app--azd-1788775203`, réplique `fcag-dev-app--azd-1788775203-69f9dc897b-c97p9`, conteneur `web` |
+| MI attendue, confirmée par la préparation | `946d8701-48f2-4fa5-8efd-bf053c7b4e4c` ; aucune identité développeur de substitution dans la sonde |
+| Unique dispatch de sonde / résultat local | `13:16:54.671713Z` / `13:17:05.120162Z`, exit 1, **zéro relance** |
+| Marqueur local exact | `status:failed`, `reason:exec_setup_timeout`, `invocationAllowanceConsumed:true`, `sessionCreationUnknown:true`, `sessionCleanupRequired:true` |
+| Compteurs distants | `sessionCreateAttempted`, `sessionCreated`, `sessionReady`, `invocationsAttempted` **non observés** : ne pas les remplacer par 0 ou 1 |
+| HTTP / code de service / schéma / résultat métier | **Non observés** ; aucun HTTP 403/200 d'invocation, aucun `serviceCode`, aucune validation de versions dans une réponse réelle |
+| Entrée dans le `finally` | `13:17:05.121148Z` |
+| Réconciliation avant suppression | GET session **404** à `13:17:06.878569Z` ; inventaire sessions HTTP **200**, zéro session liée à cette version à `13:17:07.820645Z` |
+| Suppression de la seule nouvelle version | `azd ai agent delete card-orchestrator --version 1 --force`, exit 0 à `13:17:11.618497Z` |
+| Première vérification indépendante après suppression | GET exacts version/session **404** à `13:17:14.738093Z` ; liste sessions **404**, donc endpoint absent, pas une page HTTP-200 vide |
+| Réconciliation répétée | GET exacts toujours **404** jusqu'à `13:18:07.892724Z`, puis au contrôle final horodaté `13:54:04.740514Z` |
+| Comparaison web finale | Identique : image, identités, révisions, trafic, ingress et mode ; `endpointPersisted:false` |
+
+Le numéro de plateforme `1` a été réattribué après suppression des anciennes
+versions ; l'inventaire initial de versions était absent. L'image, le SHA et
+`created_at` identifient la **nouvelle** version, sans confusion avec les versions
+historiques également numérotées `1`.
+
+**Échec réel et limite de preuve.** Le délai local de dix secondes pour la
+connexion et l'envoi complet du payload a expiré. Le wrapper n'a reçu aucun
+marqueur distant validé. Une seule sonde a été dispatchée ; le nombre exact de
+POST de création/Responses arrivés au service est inconnu, et non « un appel
+Responses confirmé » ou « zéro appel ». L'autorisation est donc consommée par
+prudence, sans nouvelle tentative. La préparation réussie utilisait son propre
+budget local de 30 secondes et ne prouvait pas le budget de dix secondes.
+Ce résultat ne teste ni ne réfute les permissions de création par la MI ; il
+n'établit pas non plus la cause du HTTP 403 historique.
+
+**Nettoyage et horloges.** Aucune session n'a été observée : aucun `sessions stop`
+ou `sessions delete` n'a donc été envoyé sans preuve de propriété. La version
+nouvellement détenue a été supprimée avec `--version 1 --force`, puis le contrôleur
+a poursuivi uniquement les GET bornés de réconciliation d'une création inconnue.
+Suppression et premiers GET exacts 404 sont enregistrés moins de deux minutes
+après soumission, donc avant le plafond de 30 minutes. L'horodatage UTC saute
+ensuite de `13:18:07` à `13:54:04`, alors que le contrôleur mesure **193,6 secondes
+monotones** de la soumission à la comparaison web finale. Cette divergence est
+conservée, sans en inventer la cause : le dernier contrôle UTC est après la
+fenêtre, mais la suppression et plusieurs preuves 404 précèdent ce saut.
+Ne pas présenter toute la vérification finale comme achevée avant 30 minutes UTC.
+
+**Périmètre et coûts.** Les trois grants préexistants ont été revérifiés à leurs
+scopes exacts : MI ACA → Consumer projet ; MI projet → Foundry User compte et
+AcrPull registre. Aucun grant, réseau, secret, capacité modèle ou ressource web
+n'a été modifié. Les seules écritures cloud demandées étaient l'image ACR et la
+nouvelle version agent, puis sa suppression ciblée ; la création de session
+demandée par la sonde reste inconnue. L'état azd isolé a enregistré le nouveau SHA
+et les métadonnées de déploiement. Pas d'évaluation, de télémétrie optionnelle
+activée, d'images utilisateur ou de génération d'image. Les bornes source restent
+trois appels maximum à `gpt-5-5`, 1800 tokens de sortie par étape, sans retry ;
+l'usage effectif modèle/tokens n'est pas observé. La nouvelle image et les images
+historiques sont conservées dans ACR, avec coût de stockage possible.
+
+**Écarts ouverts.** Création effective par la MI, readiness de sa session,
+Responses réel, schéma métier terminé, versions retournées et autorisation du
+runtime vers le modèle restent non démontrés. Endpoint ACA toujours non persisté ;
+son éventuelle injection, l'intégration web et l'acceptation production restent
+séparées. #109 reste ouvert et PR #121 n'est pas fusionnée automatiquement.
+
+### Next separately approved window: same-identity session contract
+
+**Historical correction gate.** At its offline review, no new allowance,
+deployment, session or inference had occurred. The then-last deployed image was
+application source
+`2bdbf9967d8c397f7d88914bac06285b3b477297`; it did not include this correction.
+The separately approved corrected execution is recorded above; it did not obtain
+live same-identity session/invocation evidence and does not authorize another run.
+The documented caller-Entra session scope and current Responses
+`agent_session_id` field are verified contract facts. Cross-identity ownership
+is a plausible explanation of the historical 403, **not a proven diagnosis**
+because the error body was discarded. No RBAC escalation is justified.
+
+For Gimli's **next independently approved** execution, this sequence supersedes
+any earlier operator-created warmup-session recipe:
+
+1. Keep the existing identity, project Consumer role, model limits and web
+   baseline. Build/deploy only the reviewed new source and record its immutable
+   application SHA, image digest, exact new hosted version and submission time.
+   Start the **30-minute maximum runtime clock at deployment submission**, with
+   cleanup in an outer `finally`, including deployment timeout. Do not deploy
+   from a historical image and label it the corrected code.
+2. Before any session creation or probe dispatch, durably record a fresh
+   `smoke-109-` plus `uuid.uuid4().hex` identifier, agent name, exact new version,
+   request-source SHA, application SHA and create-dispatch timestamp. Using the
+   already-privileged operator's read-only session GET, establish that this exact
+   ID is absent (404); don't reuse old IDs. A 403/timeout is not absence.
+   Do **not** create a session as the operator or invoke for warmup.
+3. Run GET-only `--prepare-invocation` if needed; preparation never creates a
+   session and is not invocation proof. Invoke the corrected probe **once**,
+   with `--invoke-once --hosted-version <new-version>
+   --expected-version <application-sha> --session-id <recorded-id>`, pinned to the
+   existing ACA revision/replica/container and expected system principal.
+   Inside ACA, the same checked in-memory MI token creates the session (one POST)
+   and invokes it (at most one Responses POST). HTTP 201 and matching
+   `agent_session_id` / `version_indicator` are mandatory. `creating`/`updating`
+   trigger only bounded readiness GETs; only `active` permits inference.
+4. Local invocation transport is capped at **10 seconds setup + 100 seconds
+   result, 110 seconds total**. Remote work is capped at **30 seconds setup**
+   (source decoding/import/MI/create/readiness, at most 15 GETs) plus a separate
+   **65-second invocation** guard. Preparation retains 30/80/110 local and
+   70 remote. The existing model orchestration remains three stages, 20 seconds
+   per stage / 65 overall, no retry. No timeout or HTTP failure authorizes a
+   second inference call; own-session create permissions remain untested live.
+5. In **every finally**, preserve the strict sanitized result first, then
+   reconcile the pre-recorded exact ID with bounded operator `azd`/session API
+   operations. `sessionCreateAttempted:true` with timeout/malformed output means
+   completion can be unknown. Missing marker means creation **and** invocation
+   completion are unknown; assume allowance consumed. Never depend on a
+   server-returned session ID being captured before cleanup.
+6. Stop/delete only the recorded newly owned session, after matching the exact
+   new version and the pre-recorded absence/create interval; never delete a
+   mismatched or pre-existing resource. **409 collision forbids deleting that
+   session**, even if it resembles the expected ID. Reconcile unknown creation
+   with exact GETs every two seconds for at most **60 seconds**, each request
+   capped at **10 seconds**; no create or inference retries. Run this reconciliation
+   again after deleting only the run's new hosted version, so late completion
+   cannot be mistaken for early absence. Verify exact session/version GET 404
+   and no active matching sessions using the privileged operator (no role
+   changes). Bound the entire cleanup to **five minutes**, begin it no later than
+   minute 25 of the deployment clock, and report unresolved cleanup explicitly
+   on deadline/403/mismatch rather than claiming success or touching older state.
+   A single early 404 after unknown create completion is not cleanup proof.
+
+The remote probe deliberately does **not** stop/delete in its own finally:
+cleanup must not consume its model/result budget or destroy evidence. Existing
+privileged operator cleanup can manage cross-user sessions; the ACA caller
+continues to have only its existing consumer grant. No optional telemetry
+inspection is a gate, and no service messages, raw responses, tokens or arbitrary
+headers are exported. See the [wire and diagnostic contract](foundry-agent-invocation.md#actual-aca-managed-identity-access-probe).
+
 The platform supplies `FOUNDRY_PROJECT_ENDPOINT`, `FOUNDRY_AGENT_NAME`,
 `FOUNDRY_AGENT_VERSION`, and the Application Insights connection configuration.
 Do **not** redeclare reserved values in service `environmentVariables`.
@@ -76,8 +231,10 @@ Authoritative references (reviewed 2026-09-08; Azure/azure-dev source revision
 The connection API deliberately uses `2025-04-01-preview`: the official azd
 template records a GA `2025-06-01` connection-resolution failure. This is not a
 reason to change the account or project's existing API/resource configuration.
-The installed CLI help and upstream source were inspected; a live deployment
-against this package has **not** been verified.
+At that packaging checkpoint, installed CLI help and upstream source had been
+inspected but live deployment had not yet been verified. The executed-smoke
+sections below record the subsequent successful deployments and failed invocation
+outcomes separately.
 The hosted-agent observability documentation confirms platform injection of the
 Application Insights connection string; no speculative connection resource is
 added by this package.
@@ -438,6 +595,97 @@ Targeted offline probe/deployment validation after the fix: **107 tests passed**
 authorization, production latency/privacy acceptance and separately reviewed
 ACA endpoint injection remain unproven or out of scope. Approval for this
 single consumed smoke does not authorize another invocation.
+
+### Newly authorized DEV smoke — 2026-09-08
+
+Requester `@bmoussaud` explicitly approved a **new** temporary DEV runtime and
+one new synthetic request after the preceding allowance was consumed. This run
+used that new allowance, not a retry under the old one. Bounds were unchanged:
+0.5 CPU / 1GiB, at most 30 minutes from deployment submission, one Responses
+request, at most three existing `gpt-5-5` calls, no retry, immediate owned-resource
+cleanup. Instrumentation remained disabled; no Insights link was required or added.
+
+Before any deployment, the current whole-parser/chunk bundle completed
+`--prepare-invocation --execute` inside the pinned serving ACA replica:
+`invocation_prepared`, `parserImportReady:true`, `requestSchemaReady:true`,
+`localFixtureParseReady:true`, `tokenAcquired:true`, `principalMatched:true`,
+`accessVerified:true`, HTTP **200**, empty agents page, **zero** invocations.
+Its labelled local fixture is not real hosted-card evidence. Offline validation
+of this revision passed **149 targeted probe/deployment tests**, Ruff and Black.
+
+Fresh isolated azd `dev` state was initialized using verified nonsecret bindings
+only; no existing dotenv/state was copied or read. The agent manifest retained
+`project: "."`, `language: docker`, the repository build context and dedicated
+agent Dockerfile. No root hooks or provisioning ran. The immutable source
+remained unchanged through build, package, push and invocation.
+
+| Evidence | Actual result (UTC) |
+| --- | --- |
+| Application/image source | `2bdbf9967d8c397f7d88914bac06285b3b477297` |
+| Registry image | `fcagdevqhg3qc4rlbt4gacr.azurecr.io/card-orchestrator:2bdbf9967d8c397f7d88914bac06285b3b477297` |
+| Registry digest | `sha256:cd23ea7a8f782eb434659d3c774646599df93bcbbfdb3322c1313f158f1f3989` |
+| Deployment submission / clock start | `2026-09-08T12:45:17.427155Z` |
+| Dedicated azd deploy | Exit 0 at `12:46:40.547790Z` |
+| Newly created hosted version | `card-orchestrator`, **`1`**, observed `active` |
+| Exact version-ref session | `smoke-109-2bdbf9967d8c-1788871606`, observed `active` at `12:46:58.064908Z` |
+| Actual ACA target | `fcag-dev-app--azd-1788775203-69f9dc897b-c97p9`, container `web` |
+| Expected/actual principal match | `946d8701-48f2-4fa5-8efd-bf053c7b4e4c`; `tokenAcquired:true`, `principalMatched:true` |
+| Invocation dispatch / result | **1** at `12:46:58.065475Z`; HTTP **403** at `12:47:16.550685Z`; **0 retries** |
+| Sanitized invocation marker | `status:failed`, `reason:http_error`, `invocationsAttempted:1`, `accessVerified:false`, `invocationVerified:false`, `schemaValid:false` |
+| Domain/application/hosted-version validation | No validated domain result; both version-match checks **unobserved**, not successful |
+| Session stop / delete | Exit 0 at `12:47:26.266723Z` / `12:47:28.886497Z` |
+| Exact new-version force deletion | Exit 0 at `12:47:32.826264Z` |
+| Independent exact-resource checks | Version, session, agent and session-list GETs all HTTP **404**, completed `12:49:32.516169Z` |
+| Web/endpoint | Allowlisted baseline identical; `endpointPersisted:false` |
+
+The platform reused version number `1` after the prior sole version was deleted;
+this is a newly created version with a different immutable application SHA, image
+digest and session, not reuse of the previous runtime. Initial agent inventory
+was explicitly empty. Ownership was recorded before invocation, including the
+caller-assigned session ID before session creation.
+
+The control script entered `finally` immediately after the response. Successful
+stop/delete/version deletion completed **135.4 seconds** after submission. Its
+first verification conservatively failed because Azure CLI omitted the HTTP
+status from its `not_found` rendering and post-deletion azd lookups returned
+errors without usable absence evidence. Two further bounded cleanup attempts
+also returned errors; they did not recreate resources. Independent SDK GETs to the exact
+version and documented `/agents/{name}/endpoint/sessions/{id}` paths then
+observed HTTP 404 directly, without printing bodies, headers or credentials.
+The session-list endpoint also returned 404: this is endpoint absence, **not**
+a fabricated empty HTTP-200 page. Verification completed within 4m16s of
+submission; no runtime was left running.
+
+**403 diagnosis and limits:** the POST was made by the expected actual ACA MI,
+not a developer credential fallback. Its successful preparation GET proves
+project-list access only. Subsequent nonbillable ARM projections confirmed the
+existing project-scoped **Foundry Agent Consumer** assignment
+`ee5a9eb3-9011-50f0-851b-5ca98438c8b1` and inherited account-scoped Cognitive
+Services User assignment. The consumer role's current data action is
+`Microsoft.CognitiveServices/accounts/AIServices/endpoints/interact/action`.
+The account reported `publicNetworkAccess:Enabled`, `networkAcls:null`.
+No role or network setting was changed. The probe intentionally discarded the
+HTTP error body/headers; no more specific service error code or request ID was
+exported. Therefore neither a missing grant, session-owner restriction nor a
+runtime/model failure is established. HTTP 403 is not a domain policy refusal.
+Do not send another prompt to diagnose it without another explicit approval.
+
+The allowance is now consumed. Model-call and token usage are unobserved, not
+asserted zero; enforced source bounds remain three calls, 1800 output tokens per
+stage, 20 seconds per stage and 65 seconds overall. No evaluations, image
+generation, production changes, new capacity, manual roles, network relaxation,
+secret changes, app persistence or endpoint injection occurred. Agent-image
+dependencies remain governed by the existing frozen lockfile; no host dependency
+installation ran.
+Only this run's hosted version/session were deleted. Its new immutable ACR image
+and the prior image remain and can incur storage cost, in addition to already
+incurred build/compute and any platform telemetry/model charges.
+
+Issue #109 remains open: actual completed domain/schema/version evidence and
+runtime model authorization remain unproven; separately reviewed ACA endpoint
+injection, web integration and production latency/privacy acceptance remain out
+of scope. PR #121 publishes the reviewed probe and truthful run evidence only,
+not a claim that the acceptance criteria are complete.
 
 The latest actual ACA-MI probe returned an empty agent inventory; the project
 endpoint remains absent from ACA environment configuration. The three

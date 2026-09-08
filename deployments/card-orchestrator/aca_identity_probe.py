@@ -13,17 +13,24 @@ import time
 import zlib
 from pathlib import Path
 
-from aca_identity_payload import MARKER, validate_inputs, validate_invocation
+from aca_identity_payload import (
+    MARKER,
+    REMOTE_TIMEOUT,
+    initial_result,
+    validate_inputs,
+    validate_invocation,
+)
 
 INVOCATION_SETUP_TIMEOUT = 30
-INVOCATION_RESULT_TIMEOUT = 80
-INVOCATION_TOTAL_TIMEOUT = 110
+INVOCATION_RESULT_TIMEOUT = 100
+INVOCATION_TOTAL_TIMEOUT = INVOCATION_SETUP_TIMEOUT + INVOCATION_RESULT_TIMEOUT
 
 
 def parser_source():
     """Bundle the owned parser/model definitions, not a substitute client or response."""
     root = Path(__file__).resolve().parents[2]
     names = {
+        "GenerateCardAgentRequest",
         "GenerateCardAgentResponse",
         "FoundryAgentInvocationResult",
         "_parse_success_envelope",
@@ -57,41 +64,74 @@ def parser_source():
             )
             for node in nodes
         )
-        + "\nGenerateCardAgentResponse.model_rebuild(_types_namespace=globals())\n"
+        + "\nGenerateCardAgentRequest.model_rebuild(_types_namespace=globals())\n"
+        + "GenerateCardAgentResponse.model_rebuild(_types_namespace=globals())\n"
     )
 
 
-def remote_command(endpoint, principal, invocation=None):
+def remote_command(endpoint, principal, invocation=None, *, prepare=False):
     validate_inputs(endpoint, principal)
+    if prepare and invocation is not None:
+        raise ValueError("conflicting_modes")
     source = Path(__file__).with_name("aca_identity_payload.py").read_text()
-    if invocation is None:
+    if invocation is None and not prepare:
         source += f"\nemit({endpoint!r}, {principal!r})\n"
     else:
-        validate_invocation(*invocation)
-        source = parser_source() + source + f"\nemit({endpoint!r}, {principal!r}, {invocation!r})\n"
+        if invocation is not None:
+            validate_invocation(*invocation)
+        source += (
+            f"\nemit({endpoint!r}, {principal!r}, {invocation!r}, "
+            f"prepare={prepare!r}, parser_bundle={parser_source()!r})\n"
+        )
     encoded = base64.b64encode(zlib.compress(source.encode())).decode("ascii")
     # The payload is the adjacent inspectable source, not a file written into the app.
     # ACA's exec command splitter retains shell quotes: use one whitespace-free
     # Python argument, rather than a shell-quoted program or an interactive shell.
     return "/app/.venv/bin/python -c " + (
+        "__import__('sys').dont_write_bytecode=True;"
         f"exec(__import__('zlib').decompress(__import__('base64').b64decode('{encoded}')))"
     )
 
 
-def stdin_payload(payload, *, invocation=False):
+def stdin_payload(payload, *, invocation=False, prepare=False):
     expression = payload.split(" ", 2)[2]
-    if not invocation:
-        return "/app/.venv/bin/python -c __import__('signal').alarm(60);exec(input())", expression
     # ACA's terminal can be canonical: never send a source line beyond PC_MAX_CANON.
-    command = (
-        "/app/.venv/bin/python -c __import__('signal').alarm(75);"
-        "source=''.join(iter(input,'END'));__import__('signal').alarm(5);exec(source)"
-    )
-    return (
-        command,
+    input_lines = (
         "\n".join(expression[offset : offset + 1024] for offset in range(0, len(expression), 1024))
-        + "\nEND",
+        + "\nEND"
     )
+    source_reader = "''.join(iter(input,'END'))"
+    if not invocation and not prepare:
+        return (
+            "/app/.venv/bin/python -c __import__('signal').alarm(60);" + f"exec({source_reader})",
+            input_lines,
+        )
+    # Install a diagnostic handler before input/decompression or any application import.
+    failure = initial_result(prepare, invocation)
+    bootstrap = (
+        "import signal,json\n"
+        "def deadline(signum,frame): raise TimeoutError()\n"
+        "signal.signal(signal.SIGALRM,deadline)\n"
+        "signal.alarm(30)\n"
+        f"result={failure!r}\n"
+        "try:\n"
+        f" source={source_reader}\n"
+        f" signal.alarm({REMOTE_TIMEOUT if invocation else 70})\n"
+        " exec(source)\n"
+        "except TimeoutError:\n"
+        " result['reason']='bootstrap_timeout'\n"
+        f" print({MARKER!r}+json.dumps(result),flush=True)\n"
+        "except Exception:\n"
+        " result['reason']='bootstrap_failed'\n"
+        f" print({MARKER!r}+json.dumps(result),flush=True)\n"
+        "finally: signal.alarm(0)\n"
+    )
+    encoded = base64.b64encode(zlib.compress(bootstrap.encode())).decode("ascii")
+    command = "/app/.venv/bin/python -c " + (
+        "__import__('sys').dont_write_bytecode=True;"
+        f"exec(__import__('zlib').decompress(__import__('base64').b64decode('{encoded}')))"
+    )
+    return command, input_lines
 
 
 def extract_result(output):
@@ -121,10 +161,25 @@ def extract_result(output):
             "requestId",
             "hostedVersionMatched",
             "applicationVersionMatched",
+            "preparationOnly",
+            "parserImportReady",
+            "requestSchemaReady",
+            "localFixtureParseReady",
+            "sessionCreateAttempted",
+            "sessionCreated",
+            "sessionReady",
+            "sessionCleanupRequired",
+            "phase",
+            "serviceCode",
         }
         if not isinstance(result, dict) or set(result) - allowed:
             continue
-        if result.get("status") not in ("failed", "access_verified", "invocation_verified"):
+        if result.get("status") not in (
+            "failed",
+            "access_verified",
+            "invocation_verified",
+            "invocation_prepared",
+        ):
             continue
         reasons = {
             "invalid_configuration",
@@ -138,6 +193,15 @@ def extract_result(output):
             "timeout",
             "probe_failed",
             "invalid_response",
+            "local_fixture_failed",
+            "parser_setup_timeout",
+            "parser_setup_failed",
+            "bootstrap_timeout",
+            "bootstrap_failed",
+            "invalid_session_response",
+            "session_version_mismatch",
+            "session_not_ready",
+            "session_readiness_timeout",
         }
         if "reason" in result and result["reason"] not in reasons:
             continue
@@ -152,6 +216,75 @@ def extract_result(output):
             continue
         if result["endpointPersisted"]:
             continue
+        if result["invocationVerified"] != (result["status"] == "invocation_verified"):
+            continue
+        if "phase" in result and result["phase"] not in (
+            "session_create",
+            "session_ready",
+            "invoke",
+        ):
+            continue
+        if "serviceCode" in result and result["serviceCode"] not in (
+            "unknown",
+            "session_not_accessible",
+        ):
+            continue
+        session_keys = {
+            "sessionCreateAttempted",
+            "sessionCreated",
+            "sessionReady",
+            "sessionCleanupRequired",
+        }
+        if session_keys & result.keys():
+            if (
+                any(type(result.get(key)) is not bool for key in session_keys)
+                or "preparationOnly" in result
+                or result["status"] not in ("failed", "invocation_verified")
+                or "invocationsAttempted" not in result
+                or (result["sessionCreated"] and not result["sessionCreateAttempted"])
+                or (result["sessionReady"] and not result["sessionCreated"])
+                or (result["sessionCleanupRequired"] and not result["sessionCreateAttempted"])
+                or (result["sessionCreated"] and not result["sessionCleanupRequired"])
+                or (result.get("phase") is not None and not result["sessionCreateAttempted"])
+                or (
+                    result.get("invocationsAttempted") == 1
+                    and (not result["sessionReady"] or result.get("phase") != "invoke")
+                )
+                or (result.get("phase") == "invoke" and result.get("invocationsAttempted") != 1)
+            ):
+                continue
+        elif "phase" in result or result.get("invocationsAttempted") == 1:
+            continue
+        preparation_keys = {
+            "preparationOnly",
+            "parserImportReady",
+            "requestSchemaReady",
+            "localFixtureParseReady",
+        }
+        if preparation_keys & result.keys() or result["status"] == "invocation_prepared":
+            if (
+                result.get("preparationOnly") is not True
+                or any(type(result.get(key)) is not bool for key in preparation_keys)
+                or result["invocationVerified"]
+                or result.get("invocationsAttempted") != 0
+                or result.get("schemaValid") is not False
+                or result["status"] not in ("failed", "invocation_prepared")
+                or set(result)
+                & {
+                    "outcome",
+                    "hostedVersion",
+                    "applicationVersion",
+                    "responseId",
+                    "requestId",
+                    "hostedVersionMatched",
+                    "applicationVersionMatched",
+                }
+            ):
+                continue
+            if result["status"] == "invocation_prepared" and not all(
+                result[key] for key in preparation_keys
+            ):
+                continue
         if "invocationsAttempted" in result:
             if type(result["invocationsAttempted"]) is not int or result[
                 "invocationsAttempted"
@@ -198,6 +331,7 @@ def extract_result(output):
             and result["accessVerified"]
             and result.get("httpStatus") == 200
             and result.get("invocationsAttempted") == 1
+            and result.get("sessionReady") is True
         ):
             continue
         if any(
@@ -205,7 +339,7 @@ def extract_result(output):
             for key in ("httpStatus", "agentCountOnPage")
         ):
             continue
-        if result["status"] == "access_verified" and not (
+        if result["status"] in ("access_verified", "invocation_prepared") and not (
             result["tokenAcquired"]
             and result["principalMatched"]
             and result["accessVerified"]
@@ -326,19 +460,32 @@ def main(argv=None):
     ):
         parser.add_argument("--" + name, required=True)
     parser.add_argument("--execute", action="store_true")
-    parser.add_argument("--invoke-once", action="store_true")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--invoke-once", action="store_true")
+    modes.add_argument("--prepare-invocation", action="store_true")
     parser.add_argument("--hosted-version")
     parser.add_argument("--expected-version")
     parser.add_argument("--session-id")
     args = parser.parse_args(argv)
+    if not args.invoke_once and any(
+        value is not None for value in (args.hosted_version, args.expected_version, args.session_id)
+    ):
+        parser.error("Version/session options require --invoke-once")
     invocation = (
         (args.hosted_version, args.expected_version, args.session_id) if args.invoke_once else None
     )
     try:
-        payload = remote_command(args.project_endpoint, args.expected_principal, invocation)
+        payload = remote_command(
+            args.project_endpoint,
+            args.expected_principal,
+            invocation,
+            prepare=args.prepare_invocation,
+        )
     except (ValueError, TypeError):
         parser.error("Supply a canonical verified project endpoint and principal UUID")
-    startup, input_line = stdin_payload(payload, invocation=invocation is not None)
+    startup, input_line = stdin_payload(
+        payload, invocation=invocation is not None, prepare=args.prepare_invocation
+    )
     command = [
         "az",
         "containerapp",
@@ -362,25 +509,40 @@ def main(argv=None):
     if not args.execute:
         print(
             "PLAN ONLY: pinned ACA exec; explicit system MI; "
-            + ("ONE Responses request." if invocation else "one GET agents; no model call.")
+            + (
+                "ONE owned version-pinned session create, bounded readiness GETs, "
+                "then at most ONE Responses request; operator finally-cleanup required."
+                if invocation
+                else (
+                    "parser/request/local fixture preparation; one GET agents; NO POST."
+                    if args.prepare_invocation
+                    else "one GET agents; no model call."
+                )
+            )
         )
         return 0
     # Long startup commands receive HTTP 404 from the exec WebSocket gateway.
     # Send only reviewed source (never credentials) over stdin to the bounded process.
-    if invocation:
+    if invocation or args.prepare_invocation:
         result = execute(
             command,
             input_line=input_line,
-            timeout=INVOCATION_RESULT_TIMEOUT,
-            setup_timeout=INVOCATION_SETUP_TIMEOUT,
-            total_timeout=INVOCATION_TOTAL_TIMEOUT,
+            timeout=INVOCATION_RESULT_TIMEOUT if invocation else 80,
+            setup_timeout=INVOCATION_SETUP_TIMEOUT if invocation else 30,
+            total_timeout=INVOCATION_TOTAL_TIMEOUT if invocation else 110,
         )
     else:
         result = execute(command, input_line=input_line)
     if invocation and "invocationsAttempted" not in result:
         result["invocationAllowanceConsumed"] = True
+        result["sessionCreationUnknown"] = True
+        result["sessionCleanupRequired"] = True
     print(json.dumps(result, sort_keys=True))
-    return 0 if result["status"] in ("access_verified", "invocation_verified") else 1
+    return (
+        0
+        if result["status"] in ("access_verified", "invocation_verified", "invocation_prepared")
+        else 1
+    )
 
 
 if __name__ == "__main__":
