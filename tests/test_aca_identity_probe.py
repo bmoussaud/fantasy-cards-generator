@@ -2,6 +2,7 @@
 
 import base64
 import importlib
+import io
 import json
 import logging
 import signal
@@ -17,6 +18,7 @@ import pytest
 
 ENDPOINT = "https://example.services.ai.azure.com/api/projects/example-dev"
 PRINCIPAL = "11111111-1111-4111-8111-111111111111"
+SESSION = "smoke-109-" + "a" * 32
 PROJECT = Path(__file__).resolve().parents[1] / "deployments/card-orchestrator"
 
 
@@ -188,7 +190,8 @@ def test_payload_is_exact_reviewable_source_without_container_writes(modules):
     assert command[:2] == ["/app/.venv/bin/python", "-c"]
     encoded = command[2].split("b64decode('")[1].split("'")[0]
     source = zlib.decompress(base64.b64decode(encoded)).decode()
-    assert len(wrapper.remote_command(ENDPOINT, PRINCIPAL)) < 8000
+    startup, lines = wrapper.stdin_payload(wrapper.remote_command(ENDPOINT, PRINCIPAL))
+    assert len(startup) < 2000 and max(map(len, lines.splitlines())) <= 1024
     assert (
         source
         == (PROJECT / "aca_identity_payload.py").read_text()
@@ -487,7 +490,7 @@ def test_invocation_selects_phased_deadlines_and_consumes_allowance(modules, mon
         encoded = startup.split("b64decode('")[1].split("'")[0]
         bootstrap = zlib.decompress(base64.b64decode(encoded)).decode()
         assert "signal.signal(signal.SIGALRM,deadline)" in bootstrap
-        assert "signal.alarm(30)" in bootstrap and "signal.alarm(70)" in bootstrap
+        assert "signal.alarm(30)" in bootstrap and "signal.alarm(95)" in bootstrap
         assert "alarm(5)" not in bootstrap
         return {"status": "failed", "reason": "exec_setup_timeout"}
 
@@ -506,20 +509,22 @@ def test_invocation_selects_phased_deadlines_and_consumes_allowance(modules, mon
         "--expected-version",
         "a" * 40,
         "--session-id",
-        "session-1",
+        SESSION,
     ]
     for name in ("subscription", "resource-group", "app", "revision", "replica", "container"):
         args.extend(["--" + name, "synthetic"])
     assert wrapper.main(args) == 1
     assert len(calls) == 1
-    assert calls[0]["timeout"] == 80
-    assert calls[0]["setup_timeout"] == 30
+    assert calls[0]["timeout"] == 100
+    assert calls[0]["setup_timeout"] == 10
     assert calls[0]["total_timeout"] == 110
     assert calls[0]["input_line"].endswith("\nEND")
     assert json.loads(capsys.readouterr().out) == {
         "status": "failed",
         "reason": "exec_setup_timeout",
         "invocationAllowanceConsumed": True,
+        "sessionCreationUnknown": True,
+        "sessionCleanupRequired": True,
     }
 
 
@@ -549,11 +554,265 @@ def invocation_parser(payload, wrapper, monkeypatch):
         monkeypatch.setattr(payload, name, namespace[name], raising=False)
 
 
+def session_resource(**overrides):
+    return {
+        "agent_session_id": SESSION,
+        "version_indicator": {"type": "version_ref", "agent_version": "1"},
+        "status": "active",
+        "created_at": 1788871606,
+        "last_accessed_at": 1788871606,
+        "expires_at": 1791463606,
+        **overrides,
+    }
+
+
+class SequenceOpener:
+    def __init__(self, *responses):
+        self.responses = list(responses)
+        self.requests = []
+        self.timeouts = []
+
+    def open(self, request, timeout):
+        self.requests.append(request)
+        self.timeouts.append(timeout)
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        status, document = response
+        body = document if isinstance(document, bytes) else json.dumps(document).encode()
+        return Opener(body=body, status=status)
+
+
+def test_session_and_invocation_share_one_checked_token_context(modules, monkeypatch):
+    payload, wrapper = modules
+    invocation_parser(payload, wrapper, monkeypatch)
+    credential = Credential()
+    token_calls = []
+    original = credential.get_token
+    monkeypatch.setattr(
+        credential, "get_token", lambda scope: (token_calls.append(scope), original(scope))[1]
+    )
+    opener = SequenceOpener((201, session_resource()), (200, {"output": []}))
+    result = payload.probe(
+        ENDPOINT, PRINCIPAL, credential.factory, opener, ("1", "a" * 40, SESSION)
+    )
+    create, invoke = opener.requests
+    assert (
+        create.full_url == ENDPOINT + "/agents/card-orchestrator/endpoint/sessions?api-version=v1"
+    )
+    assert json.loads(create.data) == {
+        "agent_session_id": SESSION,
+        "version_indicator": {"type": "version_ref", "agent_version": "1"},
+    }
+    assert invoke.full_url == (
+        ENDPOINT + "/agents/card-orchestrator/endpoint/protocols/openai/responses?api-version=v1"
+    )
+    assert create.method == invoke.method == "POST"
+    assert (
+        create.headers
+        == invoke.headers
+        == {
+            "Authorization": "Bearer " + credential.value,
+            "Accept": "application/json",
+            "Content-type": "application/json",
+        }
+    )
+    assert token_calls == [payload.SCOPE] and credential.closed
+    assert result["sessionCreateAttempted"] and result["sessionCreated"] and result["sessionReady"]
+    assert result["sessionCleanupRequired"] and result["invocationsAttempted"] == 1
+    assert result["phase"] == "invoke"
+    assert wrapper.extract_result(payload.MARKER + json.dumps(result)) == result
+
+
+@pytest.mark.parametrize(
+    "response,reason,cleanup",
+    [
+        ((201, b"private-malformed-json"), "invalid_session_response", True),
+        ((201, []), "invalid_session_response", True),
+        (
+            (201, session_resource(agent_session_id="another-session")),
+            "invalid_session_response",
+            True,
+        ),
+        (
+            (
+                201,
+                session_resource(version_indicator={"type": "version_ref", "agent_version": "2"}),
+            ),
+            "session_version_mismatch",
+            True,
+        ),
+        ((201, session_resource(version_indicator=None)), "session_version_mismatch", True),
+        ((201, session_resource(status="failed")), "session_not_ready", True),
+        ((201, session_resource(status="idle")), "session_not_ready", True),
+        ((201, session_resource(status="private-status")), "session_not_ready", True),
+        ((201, b"x" * 65537), "response_too_large", True),
+        ((200, session_resource()), "unexpected_http_status", True),
+        ((202, {}), "unexpected_http_status", True),
+        ((409, {"error": {"code": "private-code"}}), "unexpected_http_status", False),
+        (TimeoutError("private-timeout"), "timeout", True),
+    ],
+)
+def test_session_failure_never_invokes(modules, monkeypatch, response, reason, cleanup):
+    payload, wrapper = modules
+    invocation_parser(payload, wrapper, monkeypatch)
+    opener = SequenceOpener(response)
+    result = payload.probe(
+        ENDPOINT, PRINCIPAL, Credential().factory, opener, ("1", "a" * 40, SESSION)
+    )
+    assert len(opener.requests) == 1 and opener.requests[0].method == "POST"
+    assert result["sessionCreateAttempted"] and result["invocationsAttempted"] == 0
+    assert result["sessionCleanupRequired"] is cleanup and not result["sessionReady"]
+    assert result["reason"] == reason and result["phase"] == "session_create"
+    assert wrapper.extract_result(payload.MARKER + json.dumps(result)) == result
+    assert "private-" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("phase", ["session_create", "session_ready", "invoke"])
+@pytest.mark.parametrize("code", ["session_not_accessible", "unknown", "private-token-message"])
+def test_http_diagnostics_allow_only_literal_service_code(modules, monkeypatch, phase, code):
+    payload, wrapper = modules
+    invocation_parser(payload, wrapper, monkeypatch)
+    monkeypatch.setattr(payload.time, "sleep", lambda _: None)
+    error = urllib.error.HTTPError(
+        "https://private-url",
+        403,
+        "private-error-message",
+        {"X-Private": "private-header"},
+        io.BytesIO(
+            json.dumps({"error": {"code": code, "message": "private-token-canary"}}).encode()
+        ),
+    )
+    responses = []
+    if phase == "invoke":
+        responses.append((201, session_resource()))
+    elif phase == "session_ready":
+        responses.append((201, session_resource(status="creating")))
+    opener = SequenceOpener(*responses, error)
+    result = payload.probe(
+        ENDPOINT, PRINCIPAL, Credential().factory, opener, ("1", "a" * 40, SESSION)
+    )
+    assert result["phase"] == phase and result["httpStatus"] == 403
+    assert result["serviceCode"] == (
+        "session_not_accessible" if code == "session_not_accessible" else "unknown"
+    )
+    assert result["invocationsAttempted"] == (1 if phase == "invoke" else 0)
+    assert result["sessionCleanupRequired"] and error.closed
+    assert wrapper.extract_result(payload.MARKER + json.dumps(result)) == result
+    assert "private-" not in json.dumps(result)
+
+
+def test_collision_is_not_cleanup_permission(modules, monkeypatch):
+    payload, wrapper = modules
+    invocation_parser(payload, wrapper, monkeypatch)
+    error = urllib.error.HTTPError(ENDPOINT, 409, "private", {}, io.BytesIO(b"{}"))
+    opener = SequenceOpener(error)
+    result = payload.probe(
+        ENDPOINT, PRINCIPAL, Credential().factory, opener, ("1", "a" * 40, SESSION)
+    )
+    assert result["sessionCreateAttempted"] and not result["sessionCleanupRequired"]
+    assert not result["sessionCreated"] and result["invocationsAttempted"] == 0
+    assert len(opener.requests) == 1
+
+
+@pytest.mark.parametrize("states", [("creating", "active"), ("updating", "creating", "active")])
+def test_readiness_polls_same_session_with_bounded_gets(modules, monkeypatch, states):
+    payload, wrapper = modules
+    invocation_parser(payload, wrapper, monkeypatch)
+    sleeps = []
+    monkeypatch.setattr(payload.time, "sleep", sleeps.append)
+    opener = SequenceOpener(
+        *[
+            (201 if i == 0 else 200, session_resource(status=state))
+            for i, state in enumerate(states)
+        ],
+        (200, {"output": []}),
+    )
+    result = payload.probe(
+        ENDPOINT, PRINCIPAL, Credential().factory, opener, ("1", "a" * 40, SESSION)
+    )
+    assert [r.method for r in opener.requests] == ["POST"] + ["GET"] * (len(states) - 1) + ["POST"]
+    for request in opener.requests[1:-1]:
+        assert (
+            request.full_url
+            == ENDPOINT
+            + "/agents/card-orchestrator/endpoint/sessions/"
+            + SESSION
+            + "?api-version=v1"
+        )
+        assert request.data is None and request.headers == opener.requests[0].headers
+    assert all(0 < timeout <= 10 for timeout in opener.timeouts[:-1])
+    assert opener.timeouts[-1] == 65 and sleeps == [2] * (len(states) - 1)
+    assert result["sessionReady"] and result["invocationsAttempted"] == 1
+
+
+@pytest.mark.parametrize("advance_clock", [True, False])
+def test_readiness_deadline_and_poll_cap_prevent_inference(modules, monkeypatch, advance_clock):
+    payload, wrapper = modules
+    invocation_parser(payload, wrapper, monkeypatch)
+    clock = [0.0]
+    monkeypatch.setattr(payload.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        payload.time,
+        "sleep",
+        lambda delay: clock.__setitem__(0, clock[0] + delay if advance_clock else 0),
+    )
+    opener = SequenceOpener(
+        (201, session_resource(status="creating")),
+        *[(200, session_resource(status="creating")) for _ in range(16)],
+    )
+    result = payload.probe(
+        ENDPOINT, PRINCIPAL, Credential().factory, opener, ("1", "a" * 40, SESSION)
+    )
+    assert result["reason"] in ("timeout", "session_readiness_timeout")
+    assert result["phase"] == "session_ready" and result["invocationsAttempted"] == 0
+    assert result["sessionCleanupRequired"] and not result["sessionReady"]
+    assert len(opener.requests) <= 16 and clock[0] <= 30
+    assert sum(r.method == "POST" for r in opener.requests) == 1
+    assert wrapper.extract_result(payload.MARKER + json.dumps(result)) == result
+
+
+@pytest.mark.parametrize(
+    "session", ["session-1", "smoke-109-short", "smoke-109-" + "a" * 31, "old-existing-session"]
+)
+def test_session_id_requires_prerecorded_high_entropy_format(modules, session):
+    payload, wrapper = modules
+    opener, credential = SequenceOpener(), Credential()
+    assert (
+        payload.probe(ENDPOINT, PRINCIPAL, credential.factory, opener, ("1", "a" * 40, session))[
+            "reason"
+        ]
+        == "invalid_configuration"
+    )
+    assert opener.requests == [] and credential.options is None
+    with pytest.raises(ValueError):
+        wrapper.remote_command(ENDPOINT, PRINCIPAL, ("1", "a" * 40, session))
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"serviceCode": "private-code"},
+        {"phase": "private-phase"},
+        {"sessionCreateAttempted": "true"},
+        {"sessionReady": True},
+        {"sessionCreated": True, "sessionCreateAttempted": False},
+        {"sessionCleanupRequired": True, "sessionCreateAttempted": False},
+        {"invocationsAttempted": 1},
+    ],
+)
+def test_forged_session_marker_is_discarded(modules, changes):
+    payload, wrapper = modules
+    result = payload.initial_result(invocation=True)
+    result.update(changes)
+    assert wrapper.extract_result(payload.MARKER + json.dumps(result)) is None
+
+
 @pytest.mark.parametrize("status", ["completed", "refused", "held", "routing_defer"])
 def test_single_invocation_real_parser_and_versions(modules, monkeypatch, status):
     payload, wrapper = modules
     invocation_parser(payload, wrapper, monkeypatch)
-    build, version, session = "a" * 40, "1", "session-1"
+    build, version, session = "a" * 40, "1", SESSION
     card = {
         "schemaVersion": 1,
         "name": "Lantern Guardian",
@@ -591,10 +850,14 @@ def test_single_invocation_real_parser_and_versions(modules, monkeypatch, status
 
         def open(self, request, timeout):
             self.calls += 1
+            if self.calls == 1:
+                assert request.method == "POST" and 0 < timeout <= 10
+                return Opener(body=json.dumps(session_resource()).encode(), status=201)
             assert timeout == 65
             assert request.method == "POST"
             wire = json.loads(request.data)
-            assert wire["session_id"] == session
+            assert wire["agent_session_id"] == session
+            assert "session_id" not in wire
             assert wire["store"] is False and wire["stream"] is False
             assert len(wire["input"]) == 1
             assert json.loads(wire["input"][0]["content"][0]["text"])["schemaVersion"] == 1
@@ -605,7 +868,7 @@ def test_single_invocation_real_parser_and_versions(modules, monkeypatch, status
     result = payload.probe(
         ENDPOINT, PRINCIPAL, Credential().factory, opener, (version, build, session)
     )
-    assert opener.calls == 1
+    assert opener.calls == 2
     assert result["invocationsAttempted"] == 1
     assert result["invocationVerified"] and result["schemaValid"]
     assert result["outcome"] == status
@@ -623,14 +886,16 @@ def test_invocation_timeout_consumes_attempt_without_retry(modules, monkeypatch)
 
         def open(self, request, timeout):
             self.calls += 1
+            if self.calls == 1:
+                return Opener(body=json.dumps(session_resource()).encode(), status=201)
             raise TimeoutError()
 
     opener = TimeoutOpener()
     result = payload.probe(
-        ENDPOINT, PRINCIPAL, Credential().factory, opener, ("1", "a" * 40, "session-1")
+        ENDPOINT, PRINCIPAL, Credential().factory, opener, ("1", "a" * 40, SESSION)
     )
     assert result["reason"] == "timeout"
-    assert result["invocationsAttempted"] == opener.calls == 1
+    assert result["invocationsAttempted"] == 1 and opener.calls == 2
     assert not result["invocationVerified"]
 
 
@@ -642,7 +907,7 @@ def test_http_200_without_card_is_not_success(modules, monkeypatch):
     )
     assert not result.success and not result.schema_valid
     with pytest.raises(ValueError):
-        wrapper.remote_command(ENDPOINT, PRINCIPAL, ("1", "not-a-sha", "session-1"))
+        wrapper.remote_command(ENDPOINT, PRINCIPAL, ("1", "not-a-sha", SESSION))
 
 
 def test_access_only_real_payload_survives_canonical_terminal(modules, monkeypatch):
@@ -851,6 +1116,160 @@ def test_parser_setup_preserves_remote_remaining_budget(modules, monkeypatch, ca
     payload.emit(ENDPOINT, PRINCIPAL, prepare=True, parser_bundle="raise TimeoutError('private')")
     assert budgets == [12.5]
     assert wrapper.extract_result(capsys.readouterr().out)["reason"] == "parser_setup_timeout"
+
+
+def test_invocation_import_reserves_separate_model_budget(modules, monkeypatch, capsys):
+    payload, wrapper = modules
+    budgets = []
+    monkeypatch.setattr(payload.signal, "getitimer", lambda timer: (90, 0))
+    monkeypatch.setattr(payload.signal, "setitimer", lambda timer, value: budgets.append(value))
+    payload.emit(
+        ENDPOINT,
+        PRINCIPAL,
+        ("1", "a" * 40, SESSION),
+        parser_bundle="raise TimeoutError('private-import')",
+    )
+    assert budgets == [25]
+    result = wrapper.extract_result(capsys.readouterr().out)
+    assert result["reason"] == "parser_setup_timeout"
+    assert not result["sessionCreateAttempted"] and result["invocationsAttempted"] == 0
+
+
+def test_emit_installs_separate_setup_and_invoke_guards(modules, monkeypatch, capsys):
+    import azure.identity
+
+    payload, wrapper = modules
+    budgets = []
+    monkeypatch.setattr(payload.signal, "getitimer", lambda timer: (95, 0))
+    monkeypatch.setattr(payload.signal, "setitimer", lambda timer, value: budgets.append(value))
+    monkeypatch.setattr(azure.identity, "ManagedIdentityCredential", Credential().factory)
+    opener = SequenceOpener((201, session_resource()), (200, {"output": []}))
+    monkeypatch.setattr(payload.urllib.request, "build_opener", lambda *args: opener)
+    payload.emit(
+        ENDPOINT, PRINCIPAL, ("1", "a" * 40, SESSION), parser_bundle=wrapper.parser_source()
+    )
+    assert budgets == [30, 65]
+    result = wrapper.extract_result(capsys.readouterr().out)
+    assert result["invocationsAttempted"] == 1 and result["sessionReady"]
+    assert not result["invocationVerified"]
+
+
+def test_session_setup_exhaustion_prevents_creation(modules, monkeypatch):
+    payload, wrapper = modules
+    invocation_parser(payload, wrapper, monkeypatch)
+    opener = SequenceOpener()
+    result = payload.probe(
+        ENDPOINT,
+        PRINCIPAL,
+        Credential().factory,
+        opener,
+        ("1", "a" * 40, SESSION),
+        setup_deadline=0,
+    )
+    assert result["reason"] == "timeout" and opener.requests == []
+    assert result["invocationsAttempted"] == 0 and not result["sessionCreateAttempted"]
+
+
+@pytest.mark.parametrize(
+    "body", [b"private-non-json", b"x" * 65537, b'{"error":{"code":["private"]}}']
+)
+def test_error_body_size_and_shape_never_leak(modules, monkeypatch, body):
+    payload, wrapper = modules
+    invocation_parser(payload, wrapper, monkeypatch)
+    error = urllib.error.HTTPError(ENDPOINT, 403, "private", {}, io.BytesIO(body))
+    opener = SequenceOpener(error)
+    result = payload.probe(
+        ENDPOINT, PRINCIPAL, Credential().factory, opener, ("1", "a" * 40, SESSION)
+    )
+    assert result["serviceCode"] == "unknown" and result["httpStatus"] == 403
+    assert result["invocationsAttempted"] == 0 and "private" not in json.dumps(result)
+    assert wrapper.extract_result(payload.MARKER + json.dumps(result)) == result
+
+
+@pytest.mark.parametrize(
+    "document,reason",
+    [
+        (session_resource(agent_session_id="another"), "invalid_session_response"),
+        (
+            session_resource(version_indicator={"type": "version_ref", "agent_version": "2"}),
+            "session_version_mismatch",
+        ),
+    ],
+)
+def test_readiness_revalidates_actual_session_and_version(modules, monkeypatch, document, reason):
+    payload, wrapper = modules
+    invocation_parser(payload, wrapper, monkeypatch)
+    monkeypatch.setattr(payload.time, "sleep", lambda _: None)
+    opener = SequenceOpener((201, session_resource(status="creating")), (200, document))
+    result = payload.probe(
+        ENDPOINT, PRINCIPAL, Credential().factory, opener, ("1", "a" * 40, SESSION)
+    )
+    assert result["reason"] == reason and result["phase"] == "session_ready"
+    assert result["invocationsAttempted"] == 0 and not result["sessionReady"]
+    assert [r.method for r in opener.requests] == ["POST", "GET"]
+
+
+def test_invocation_plan_never_executes_or_creates_session(modules, monkeypatch, capsys):
+    _, wrapper = modules
+    args = [arg for arg in preparation_args() if arg not in ("--prepare-invocation", "--execute")]
+    args.extend(
+        [
+            "--invoke-once",
+            "--hosted-version",
+            "1",
+            "--expected-version",
+            "a" * 40,
+            "--session-id",
+            SESSION,
+        ]
+    )
+    monkeypatch.setattr(wrapper, "execute", lambda *a, **kw: pytest.fail("exec forbidden"))
+    assert wrapper.main(args) == 0
+    assert "PLAN ONLY" in capsys.readouterr().out
+
+
+def test_invocation_real_bundle_full_canonical_transport(modules):
+    _, wrapper = modules
+    startup, input_line = wrapper.stdin_payload(
+        wrapper.remote_command(ENDPOINT, PRINCIPAL, ("1", "a" * 40, SESSION)), invocation=True
+    )
+    domain = {
+        "schemaVersion": 1,
+        "status": "refused",
+        "card": None,
+        "artPrompt": None,
+        "metadata": {"agentVersion": "a" * 40, "hostedVersion": "1"},
+    }
+    envelope = {
+        "status": "completed",
+        "output": [
+            {"type": "message", "content": [{"type": "output_text", "text": json.dumps(domain)}]}
+        ],
+    }
+    program = (
+        "import sys,termios,azure.identity,urllib.request\n"
+        "from tests.test_aca_identity_probe import Credential,SequenceOpener,session_resource\n"
+        "assert termios.tcgetattr(0)[3] & termios.ICANON\n"
+        "def forbid_network(event,args):\n"
+        " if event.startswith('socket.'): raise AssertionError('network forbidden')\n"
+        "sys.addaudithook(forbid_network)\n"
+        "azure.identity.ManagedIdentityCredential=Credential().factory\n"
+        f"opener=SequenceOpener((201,session_resource()),(200,{envelope!r}))\n"
+        "urllib.request.build_opener=lambda *a:opener\n"
+        "print('INFO: Successfully connected to container:',flush=True)\n"
+        + startup.split(" ", 2)[2]
+    )
+    result = wrapper.execute(
+        [sys.executable, "-c", program],
+        input_line=input_line,
+        timeout=100,
+        setup_timeout=10,
+        total_timeout=110,
+    )
+    assert result["status"] == "invocation_verified" and result["outcome"] == "refused"
+    assert result["sessionCreateAttempted"] and result["sessionReady"]
+    assert result["invocationsAttempted"] == 1 and result["sessionCleanupRequired"]
+    assert len(startup) < 2000 and max(map(len, input_line.splitlines())) <= 1024
 
 
 def test_preparation_real_bundle_full_canonical_transport(modules):

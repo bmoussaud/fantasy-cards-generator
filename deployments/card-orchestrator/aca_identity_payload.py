@@ -16,9 +16,12 @@ API_VERSION = "2025-11-15-preview"
 MARKER = "ACA_IDENTITY_PROBE="
 MAX_BODY = 65536
 SYNTHETIC_QUERY = "Create an original gentle woodland guardian with a lantern and protective magic."
+SESSION_SETUP_TIMEOUT = 30
+INVOCATION_TIMEOUT = 65
+REMOTE_TIMEOUT = SESSION_SETUP_TIMEOUT + INVOCATION_TIMEOUT
 
 
-def initial_result(prepare=False):
+def initial_result(prepare=False, invocation=False):
     result = {
         "status": "failed",
         "tokenAcquired": False,
@@ -36,6 +39,15 @@ def initial_result(prepare=False):
             invocationsAttempted=0,
             schemaValid=False,
         )
+    if invocation:
+        result.update(
+            invocationsAttempted=0,
+            schemaValid=False,
+            sessionCreateAttempted=False,
+            sessionCreated=False,
+            sessionReady=False,
+            sessionCleanupRequired=False,
+        )
     return result
 
 
@@ -44,7 +56,7 @@ def invocation_body(session):
     return {
         "store": False,
         "stream": False,
-        "session_id": session,
+        "agent_session_id": session,
         "input": [
             {
                 "role": "user",
@@ -96,7 +108,7 @@ def validate_invocation(version, build, session):
         raise ValueError("invalid_version")
     if not re.fullmatch(r"[a-f0-9]{40}", build):
         raise ValueError("invalid_build")
-    if not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", session):
+    if not re.fullmatch(r"smoke-109-[a-f0-9]{32}", session):
         raise ValueError("invalid_session")
 
 
@@ -127,17 +139,107 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+class ProbeFailure(Exception):
+    pass
+
+
+def service_code(body):
+    """Only a literal, recognized service code may cross the diagnostic boundary."""
+    try:
+        document = json.loads(body)
+        if document["error"]["code"] == "session_not_accessible":
+            return "session_not_accessible"
+    except (ValueError, TypeError, KeyError):
+        pass
+    return "unknown"
+
+
+def session_document(opener, request, result, deadline, expected_status):
+    result.pop("httpStatus", None)
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError()
+    with opener.open(request, timeout=min(10, remaining)) as response:
+        result["httpStatus"] = response.status
+        body = response.read(MAX_BODY + 1)
+        if response.status != expected_status:
+            result["serviceCode"] = service_code(body) if len(body) <= MAX_BODY else "unknown"
+            if result["phase"] == "session_create" and response.status == 409:
+                result["sessionCleanupRequired"] = False
+            raise ProbeFailure("unexpected_http_status")
+    if len(body) > MAX_BODY:
+        raise ProbeFailure("response_too_large")
+    try:
+        return json.loads(body)
+    except ValueError:
+        raise ProbeFailure("invalid_session_response") from None
+
+
+def create_owned_session(endpoint, headers, opener, version, session, result, deadline):
+    base = endpoint + "/agents/card-orchestrator/endpoint/sessions"
+    request = urllib.request.Request(
+        base + "?api-version=v1",
+        data=json.dumps(
+            {
+                "agent_session_id": session,
+                "version_indicator": {"type": "version_ref", "agent_version": version},
+            }
+        ).encode(),
+        headers=headers,
+        method="POST",
+    )
+    if time.monotonic() >= deadline:
+        raise TimeoutError()
+    result.update(phase="session_create", sessionCreateAttempted=True, sessionCleanupRequired=True)
+    document = session_document(opener, request, result, deadline, 201)
+    for poll in range(16):
+        if not isinstance(document, dict) or document.get("agent_session_id") != session:
+            raise ProbeFailure("invalid_session_response")
+        if document.get("version_indicator") != {
+            "type": "version_ref",
+            "agent_version": version,
+        }:
+            raise ProbeFailure("session_version_mismatch")
+        result["sessionCreated"] = True
+        state = document.get("status")
+        if state == "active":
+            if time.monotonic() >= deadline:
+                raise TimeoutError()
+            result["sessionReady"] = True
+            return
+        if state not in ("creating", "updating"):
+            raise ProbeFailure("session_not_ready")
+        result["phase"] = "session_ready"
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or poll == 15:
+            raise ProbeFailure("session_readiness_timeout")
+        time.sleep(min(2, remaining))
+        request = urllib.request.Request(
+            base + "/" + session + "?api-version=v1", headers=headers, method="GET"
+        )
+        document = session_document(opener, request, result, deadline, 200)
+
+
 def probe(
-    endpoint, principal, credential_factory=None, opener=None, invocation=None, *, prepare=False
+    endpoint,
+    principal,
+    credential_factory=None,
+    opener=None,
+    invocation=None,
+    *,
+    prepare=False,
+    setup_deadline=None,
+    remote_deadline=None,
 ):
-    result = initial_result(prepare)
+    result = initial_result(prepare, invocation is not None and not prepare)
+    if setup_deadline is None:
+        setup_deadline = time.monotonic() + SESSION_SETUP_TIMEOUT
     try:
         validate_inputs(endpoint, principal)
         if prepare and invocation is not None:
             raise ValueError("conflicting_modes")
         if invocation is not None:
             validate_invocation(*invocation)
-            result.update(invocationsAttempted=0, schemaValid=False)
     except (ValueError, TypeError):
         return {**result, "reason": "invalid_configuration"}
     if not os.environ.get("IDENTITY_ENDPOINT") or not os.environ.get("IDENTITY_HEADER"):
@@ -164,6 +266,15 @@ def probe(
         if not matches_identity(token, principal):
             return {**result, "reason": "identity_claim_mismatch"}
         result["principalMatched"] = True
+        headers = {
+            "Authorization": "Bearer " + token,
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+        # Do not forward the bearer token to redirects or environment-configured proxies.
+        opener = opener or urllib.request.build_opener(
+            urllib.request.ProxyHandler({}), NoRedirect()
+        )
         request = urllib.request.Request(
             endpoint + "/agents?api-version=" + API_VERSION,
             headers={"Authorization": "Bearer " + token, "Accept": "application/json"},
@@ -171,28 +282,31 @@ def probe(
         )
         if invocation is not None:
             version, build, session = invocation
-            # The platform consumes session_id, pinning routing to the version-ref session.
             body = invocation_body(session)
+            create_owned_session(
+                endpoint, headers, opener, version, session, result, setup_deadline
+            )
             request = urllib.request.Request(
                 endpoint
                 + "/agents/card-orchestrator/endpoint/protocols/openai/responses?api-version=v1",
                 data=json.dumps(body).encode(),
-                headers={
-                    "Authorization": "Bearer " + token,
-                    "Accept": "application/json",
-                    "Content-Type": "application/json",
-                },
+                headers=headers,
                 method="POST",
             )
-        # Do not forward the bearer token to redirects or environment-configured proxies.
-        opener = opener or urllib.request.build_opener(
-            urllib.request.ProxyHandler({}), NoRedirect()
-        )
         if invocation is not None:
+            if remote_deadline is not None:
+                remaining = remote_deadline - time.monotonic()
+                if remaining < INVOCATION_TIMEOUT:
+                    raise TimeoutError()
+                signal.setitimer(signal.ITIMER_REAL, INVOCATION_TIMEOUT)
+            result["phase"] = "invoke"
+            result.pop("httpStatus", None)
             result["invocationsAttempted"] = 1
-        with opener.open(request, timeout=65 if invocation else 10) as response:
+        with opener.open(request, timeout=INVOCATION_TIMEOUT if invocation else 10) as response:
             result["httpStatus"] = response.status
             if response.status != 200:
+                body = response.read(MAX_BODY + 1)
+                result["serviceCode"] = service_code(body) if len(body) <= MAX_BODY else "unknown"
                 return {**result, "reason": "unexpected_http_status"}
             body = response.read(MAX_BODY + 1)
         if len(body) > MAX_BODY:
@@ -243,9 +357,20 @@ def probe(
             "agentCountOnPage": len(document["data"]),
         }
     except urllib.error.HTTPError as error:
-        # No service body, headers, request URL, or exception text leaves this process.
-        error.close()
-        return {**result, "reason": "http_error", "httpStatus": error.code}
+        result.update(reason="http_error", httpStatus=error.code, serviceCode="unknown")
+        if result.get("phase") == "session_create" and error.code == 409:
+            result["sessionCleanupRequired"] = False
+        try:
+            body = error.read(MAX_BODY + 1)
+            if len(body) <= MAX_BODY:
+                result["serviceCode"] = service_code(body)
+        except Exception:
+            pass
+        finally:
+            error.close()
+        return result
+    except ProbeFailure as error:
+        return {**result, "reason": str(error)}
     except ImportError:
         return {**result, "reason": "identity_dependency_missing"}
     except TimeoutError:
@@ -265,17 +390,27 @@ def emit(endpoint, principal, invocation=None, *, prepare=False, parser_bundle=N
         raise TimeoutError()
 
     signal.signal(signal.SIGALRM, deadline)
-    budget = 70 if invocation or prepare else 45
+    budget = REMOTE_TIMEOUT if invocation else (70 if prepare else 45)
     remaining = signal.getitimer(signal.ITIMER_REAL)[0]
     if parser_bundle is not None and remaining:
         budget = min(budget, remaining)
-    signal.setitimer(signal.ITIMER_REAL, budget)
-    result = initial_result(prepare)
+    remote_deadline = time.monotonic() + budget
+    setup_budget = min(SESSION_SETUP_TIMEOUT, max(0.001, budget - INVOCATION_TIMEOUT))
+    setup_deadline = time.monotonic() + setup_budget
+    signal.setitimer(signal.ITIMER_REAL, setup_budget if invocation else budget)
+    result = initial_result(prepare, invocation is not None and not prepare)
     logging.disable(logging.CRITICAL)
     try:
         if parser_bundle is not None:
             exec(parser_bundle, globals())
-        result = probe(endpoint, principal, invocation=invocation, prepare=prepare)
+        result = probe(
+            endpoint,
+            principal,
+            invocation=invocation,
+            prepare=prepare,
+            setup_deadline=setup_deadline,
+            remote_deadline=remote_deadline if invocation else None,
+        )
     except TimeoutError:
         result["reason"] = "parser_setup_timeout"
     except Exception:

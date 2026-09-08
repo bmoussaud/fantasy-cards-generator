@@ -13,10 +13,16 @@ import time
 import zlib
 from pathlib import Path
 
-from aca_identity_payload import MARKER, initial_result, validate_inputs, validate_invocation
+from aca_identity_payload import (
+    MARKER,
+    REMOTE_TIMEOUT,
+    initial_result,
+    validate_inputs,
+    validate_invocation,
+)
 
-INVOCATION_SETUP_TIMEOUT = 30
-INVOCATION_RESULT_TIMEOUT = 80
+INVOCATION_SETUP_TIMEOUT = 10
+INVOCATION_RESULT_TIMEOUT = 100
 INVOCATION_TOTAL_TIMEOUT = 110
 
 
@@ -101,7 +107,7 @@ def stdin_payload(payload, *, invocation=False, prepare=False):
             input_lines,
         )
     # Install a diagnostic handler before input/decompression or any application import.
-    failure = initial_result(prepare)
+    failure = initial_result(prepare, invocation)
     bootstrap = (
         "import signal,json\n"
         "def deadline(signum,frame): raise TimeoutError()\n"
@@ -110,7 +116,7 @@ def stdin_payload(payload, *, invocation=False, prepare=False):
         f"result={failure!r}\n"
         "try:\n"
         f" source={source_reader}\n"
-        " signal.alarm(70)\n"
+        f" signal.alarm({REMOTE_TIMEOUT if invocation else 70})\n"
         " exec(source)\n"
         "except TimeoutError:\n"
         " result['reason']='bootstrap_timeout'\n"
@@ -159,6 +165,12 @@ def extract_result(output):
             "parserImportReady",
             "requestSchemaReady",
             "localFixtureParseReady",
+            "sessionCreateAttempted",
+            "sessionCreated",
+            "sessionReady",
+            "sessionCleanupRequired",
+            "phase",
+            "serviceCode",
         }
         if not isinstance(result, dict) or set(result) - allowed:
             continue
@@ -186,6 +198,10 @@ def extract_result(output):
             "parser_setup_failed",
             "bootstrap_timeout",
             "bootstrap_failed",
+            "invalid_session_response",
+            "session_version_mismatch",
+            "session_not_ready",
+            "session_readiness_timeout",
         }
         if "reason" in result and result["reason"] not in reasons:
             continue
@@ -199,6 +215,45 @@ def extract_result(output):
         if any(type(result.get(key)) is not bool for key in bools):
             continue
         if result["endpointPersisted"]:
+            continue
+        if result["invocationVerified"] != (result["status"] == "invocation_verified"):
+            continue
+        if "phase" in result and result["phase"] not in (
+            "session_create",
+            "session_ready",
+            "invoke",
+        ):
+            continue
+        if "serviceCode" in result and result["serviceCode"] not in (
+            "unknown",
+            "session_not_accessible",
+        ):
+            continue
+        session_keys = {
+            "sessionCreateAttempted",
+            "sessionCreated",
+            "sessionReady",
+            "sessionCleanupRequired",
+        }
+        if session_keys & result.keys():
+            if (
+                any(type(result.get(key)) is not bool for key in session_keys)
+                or "preparationOnly" in result
+                or result["status"] not in ("failed", "invocation_verified")
+                or "invocationsAttempted" not in result
+                or (result["sessionCreated"] and not result["sessionCreateAttempted"])
+                or (result["sessionReady"] and not result["sessionCreated"])
+                or (result["sessionCleanupRequired"] and not result["sessionCreateAttempted"])
+                or (result["sessionCreated"] and not result["sessionCleanupRequired"])
+                or (result.get("phase") is not None and not result["sessionCreateAttempted"])
+                or (
+                    result.get("invocationsAttempted") == 1
+                    and (not result["sessionReady"] or result.get("phase") != "invoke")
+                )
+                or (result.get("phase") == "invoke" and result.get("invocationsAttempted") != 1)
+            ):
+                continue
+        elif "phase" in result or result.get("invocationsAttempted") == 1:
             continue
         preparation_keys = {
             "preparationOnly",
@@ -276,6 +331,7 @@ def extract_result(output):
             and result["accessVerified"]
             and result.get("httpStatus") == 200
             and result.get("invocationsAttempted") == 1
+            and result.get("sessionReady") is True
         ):
             continue
         if any(
@@ -454,7 +510,8 @@ def main(argv=None):
         print(
             "PLAN ONLY: pinned ACA exec; explicit system MI; "
             + (
-                "ONE Responses request."
+                "ONE owned version-pinned session create, bounded readiness GETs, "
+                "then at most ONE Responses request; operator finally-cleanup required."
                 if invocation
                 else (
                     "parser/request/local fixture preparation; one GET agents; NO POST."
@@ -470,14 +527,16 @@ def main(argv=None):
         result = execute(
             command,
             input_line=input_line,
-            timeout=INVOCATION_RESULT_TIMEOUT,
-            setup_timeout=INVOCATION_SETUP_TIMEOUT,
+            timeout=INVOCATION_RESULT_TIMEOUT if invocation else 80,
+            setup_timeout=INVOCATION_SETUP_TIMEOUT if invocation else 30,
             total_timeout=INVOCATION_TOTAL_TIMEOUT,
         )
     else:
         result = execute(command, input_line=input_line)
     if invocation and "invocationsAttempted" not in result:
         result["invocationAllowanceConsumed"] = True
+        result["sessionCreationUnknown"] = True
+        result["sessionCleanupRequired"] = True
     print(json.dumps(result, sort_keys=True))
     return (
         0

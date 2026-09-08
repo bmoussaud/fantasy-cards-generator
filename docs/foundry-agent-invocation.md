@@ -111,26 +111,68 @@ hosted-service acceptance evidence**, and this mode neither consumes nor grants
 a paid invocation allowance.
 
 The explicit `--invoke-once --hosted-version <version> --expected-version <full-sha>
---session-id <version-pinned-session>` mode sends exactly one synthetic Responses
-request using the same actual ACA MI. The platform consumes `session_id` to route
-to the pre-created version-ref session. The owned response parser is bundled
+--session-id <new-prerecorded-id>` mode first creates its **own** exact-version
+session inside ACA, then sends at most one synthetic Responses request. Both use
+one explicit system `ManagedIdentityCredential` and the same checked token in
+memory. The operator must pre-record a never-used `smoke-109-<uuid4().hex>` ID and
+the exact request-source/build/version bindings before dispatch, not create an
+operator-owned warmup session. The create request is:
+
+```text
+POST {project}/agents/card-orchestrator/endpoint/sessions?api-version=v1
+{"agent_session_id":"smoke-109-<32 lowercase hex characters>","version_indicator":{"type":"version_ref","agent_version":"<exact new hosted version>"}}
+```
+
+Only the documented **HTTP 201** `AgentSessionResource` is accepted. Its
+`agent_session_id` and `version_indicator.type/agent_version` must match the
+request; guessed `metadata.version` is not used. Only `status:active` permits
+inference. `creating`/`updating` cause bounded GETs to
+`.../endpoint/sessions/{id}?api-version=v1` (two-second intervals, at most 15 GETs,
+within the setup deadline), revalidating ID/version every time. Other statuses,
+malformed payloads, mismatches, HTTP failures and timeouts stop without inference.
+Neither POST is retried. A conflict (409) is not accepted as a replacement session
+and explicitly does **not** authorize deleting that existing session.
+
+The Responses body uses the documented **`agent_session_id`**, not the unverified
+legacy `session_id` alias, with the same ID and existing `store:false`,
+`stream:false`, structured `schemaVersion:1` request. No Foundry-Features,
+impersonation or isolation-header override is added. The owned response parser is bundled
 in memory from source, imports the existing `GeneratedCardModel`, and validates
 both build and hosted version metadata. No container files or settings are
 written. Output contains only allowlisted status/booleans/IDs/versions; no cards,
-model text or tokens. A timeout consumes the invocation allowance; never retry.
+model text or tokens. `sessionCreateAttempted` (boolean) and `invocationsAttempted`
+(0/1) are distinct. `sessionCreated` means matching create/GET resource evidence;
+`sessionReady` additionally requires `active`. `sessionCleanupRequired` is set
+**before** create dispatch, so a timeout is reconcilable even without a response.
+The HTTP diagnostic exports only `httpStatus`, `phase`
+(`session_create|session_ready|invoke`), and `serviceCode`
+(`session_not_accessible|unknown`). Error JSON reads are bounded to 64 KiB plus
+one overflow byte; arbitrary codes/messages/body/headers/URLs are never exported.
+No optional telemetry is required.
+
+A dispatch timeout consumes the allowance; never retry. Without a strict remote
+marker, local output conservatively sets `sessionCreationUnknown:true`,
+`sessionCleanupRequired:true` and `invocationAllowanceConsumed:true`, not a
+guessed attempt count. The operator's mandatory `finally` must reconcile the
+pre-recorded ID and remove only this run's owned session/version, including
+unknown creation completion. See the [cleanup contract](foundry-agent-operations.md#next-separately-approved-window-same-identity-session-contract).
 Large invocation payloads are sent in lines of at most 1024 characters and
 reconstructed in memory to respect canonical terminal limits.
 `invocation_verified` can mean a validated `held` or `refused` result, not card
-generation success; inspect `outcome`. Invocation mode allows 30 seconds from CLI
+generation success; inspect `outcome`. Invocation mode allows **10 seconds** from CLI
 launch for connection, terminal settling and complete payload delivery, followed
-by 80 seconds for a result, with a hard 110-second local transport cap. The result
-budget covers a shared 70-second remote parser/import + MI + request deadline
-(request timeout at most 65 seconds), with transport/emission headroom. A diagnostic
+by **100 seconds** for a result, with a hard **110-second** local transport cap.
+Its remote budget is **95 seconds**: at most **30 seconds** for decoding,
+parser/import, MI, session creation and readiness, separately reserving the
+**65-second** invocation guard (including response parsing). Setup failure never
+starts inference; cold imports cannot consume the model's reserved budget.
+Preparation retains its existing 30/80/110-second local and 70-second remote limits.
+A diagnostic
 SIGALRM handler is installed **before** chunked input, bounded at 30 seconds.
-After input, a shared 70-second guard protects decoding/source entry, parser
-imports and the probe. The payload preserves the remaining bootstrap budget
+After input, the 95-second invocation (70-second preparation) guard protects
+decoding/source entry. The payload preserves the remaining bootstrap budget
 **before importing the parser**, rather than resetting it after imports.
-Cold imports therefore consume the request budget instead of
+Cold imports consume the bounded setup budget instead of
 silently dying under a separate five-second default signal. Parser setup failures
 emit sanitized `parser_setup_failed`/`parser_setup_timeout`; early transport/source
 failures emit `bootstrap_failed`/`bootstrap_timeout`. PTY writes are
@@ -146,8 +188,20 @@ the new path survives that delay and emits a structured diagnostic.
 
 ```bash
 python -m pytest -q --noconftest tests/test_aca_identity_probe.py \
-  tests/test_hosted_agent_deployment_config.py tests/test_deployment_config.py
+  tests/test_foundry_agent_client.py tests/test_hosted_agent_deployment_config.py \
+  tests/test_deployment_config.py
 ```
+
+Contract sources checked 2026-09-08:
+[session API and protocol binding](https://learn.microsoft.com/azure/foundry/agents/how-to/manage-hosted-sessions),
+[caller-Entra ownership](https://learn.microsoft.com/azure/foundry/agents/how-to/isolate-sessions-per-user#troubleshoot-isolation),
+[interaction permissions](https://learn.microsoft.com/azure/foundry/agents/concepts/hosted-agent-permissions#agent-interaction),
+and the public SDK's
+[`AgentSessionResource` / `VersionRefIndicator`](https://github.com/Azure/azure-sdk-for-python/blob/main/sdk/ai/azure-ai-projects/azure/ai/projects/models/_models.py)
+and [`create_session` HTTP 201 contract](https://github.com/Azure/azure-sdk-for-python/blob/main/sdk/ai/azure-ai-projects/azure/ai/projects/operations/_operations.py).
+The existing project-scoped Foundry Agent Consumer interaction role is retained;
+own-session creation with that role remains **unverified live**, not justification
+for broader RBAC.
 
 ## Wire contract
 
@@ -191,6 +245,15 @@ The response parser reads the raw Responses wire envelope `output[]/content[]/ou
 - `safetyHints`
 
 ## Current live gap
+
+The same-identity session-creation/protocol correction above is **offline code,
+not deployed or live-tested**. The last deployed image remains the historical
+`2bdbf9967d8c397f7d88914bac06285b3b477297` build below. Current documentation verifies
+caller-scoped session ownership and `agent_session_id` binding. Those facts make
+the operator-created/ACA-invoked session a concrete protocol defect to correct,
+but do **not** prove the historical HTTP 403 cause: its error body was discarded,
+and legacy alias acceptance was never established. No further Azure request is
+authorized by this correction; #109 stays open.
 
 The latest **newly authorized** smoke on 2026-09-08 used application build
 `2bdbf9967d8c397f7d88914bac06285b3b477297`. Before deployment, the complete current

@@ -29,6 +29,74 @@ deployed successfully and sent exactly one actual ACA-MI Responses request, whic
 returned **HTTP 403**. Its session and version were deleted; exact-resource GETs
 confirmed HTTP 404. This is not successful end-to-end card generation.
 
+### Next separately approved window: same-identity session contract
+
+**Offline correction only; no new allowance, deployment, session or inference.**
+The last deployed image was application source
+`2bdbf9967d8c397f7d88914bac06285b3b477297`; it did not include this correction.
+The documented caller-Entra session scope and current Responses
+`agent_session_id` field are verified contract facts. Cross-identity ownership
+is a plausible explanation of the historical 403, **not a proven diagnosis**
+because the error body was discarded. No RBAC escalation is justified.
+
+For Gimli's **next independently approved** execution, this sequence supersedes
+any earlier operator-created warmup-session recipe:
+
+1. Keep the existing identity, project Consumer role, model limits and web
+   baseline. Build/deploy only the reviewed new source and record its immutable
+   application SHA, image digest, exact new hosted version and submission time.
+   Start the **30-minute maximum runtime clock at deployment submission**, with
+   cleanup in an outer `finally`, including deployment timeout. Do not deploy
+   from a historical image and label it the corrected code.
+2. Before any session creation or probe dispatch, durably record a fresh
+   `smoke-109-` plus `uuid.uuid4().hex` identifier, agent name, exact new version,
+   request-source SHA, application SHA and create-dispatch timestamp. Using the
+   already-privileged operator's read-only session GET, establish that this exact
+   ID is absent (404); don't reuse old IDs. A 403/timeout is not absence.
+   Do **not** create a session as the operator or invoke for warmup.
+3. Run GET-only `--prepare-invocation` if needed; preparation never creates a
+   session and is not invocation proof. Invoke the corrected probe **once**,
+   with `--invoke-once --hosted-version <new-version>
+   --expected-version <application-sha> --session-id <recorded-id>`, pinned to the
+   existing ACA revision/replica/container and expected system principal.
+   Inside ACA, the same checked in-memory MI token creates the session (one POST)
+   and invokes it (at most one Responses POST). HTTP 201 and matching
+   `agent_session_id` / `version_indicator` are mandatory. `creating`/`updating`
+   trigger only bounded readiness GETs; only `active` permits inference.
+4. Local invocation transport is capped at **10 seconds setup + 100 seconds
+   result, 110 seconds total**. Remote work is capped at **30 seconds setup**
+   (source decoding/import/MI/create/readiness, at most 15 GETs) plus a separate
+   **65-second invocation** guard. Preparation retains 30/80/110 local and
+   70 remote. The existing model orchestration remains three stages, 20 seconds
+   per stage / 65 overall, no retry. No timeout or HTTP failure authorizes a
+   second inference call; own-session create permissions remain untested live.
+5. In **every finally**, preserve the strict sanitized result first, then
+   reconcile the pre-recorded exact ID with bounded operator `azd`/session API
+   operations. `sessionCreateAttempted:true` with timeout/malformed output means
+   completion can be unknown. Missing marker means creation **and** invocation
+   completion are unknown; assume allowance consumed. Never depend on a
+   server-returned session ID being captured before cleanup.
+6. Stop/delete only the recorded newly owned session, after matching the exact
+   new version and the pre-recorded absence/create interval; never delete a
+   mismatched or pre-existing resource. **409 collision forbids deleting that
+   session**, even if it resembles the expected ID. Reconcile unknown creation
+   with exact GETs every two seconds for at most **60 seconds**, each request
+   capped at **10 seconds**; no create or inference retries. Run this reconciliation
+   again after deleting only the run's new hosted version, so late completion
+   cannot be mistaken for early absence. Verify exact session/version GET 404
+   and no active matching sessions using the privileged operator (no role
+   changes). Bound the entire cleanup to **five minutes**, begin it no later than
+   minute 25 of the deployment clock, and report unresolved cleanup explicitly
+   on deadline/403/mismatch rather than claiming success or touching older state.
+   A single early 404 after unknown create completion is not cleanup proof.
+
+The remote probe deliberately does **not** stop/delete in its own finally:
+cleanup must not consume its model/result budget or destroy evidence. Existing
+privileged operator cleanup can manage cross-user sessions; the ACA caller
+continues to have only its existing consumer grant. No optional telemetry
+inspection is a gate, and no service messages, raw responses, tokens or arbitrary
+headers are exported. See the [wire and diagnostic contract](foundry-agent-invocation.md#actual-aca-managed-identity-access-probe).
+
 The platform supplies `FOUNDRY_PROJECT_ENDPOINT`, `FOUNDRY_AGENT_NAME`,
 `FOUNDRY_AGENT_VERSION`, and the Application Insights connection configuration.
 Do **not** redeclare reserved values in service `environmentVariables`.
