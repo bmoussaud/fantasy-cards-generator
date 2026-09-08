@@ -426,8 +426,9 @@ a local virtual environment but installed no project dependencies; that local
 artifact was removed. Actual agent Dockerfile build, packaging and push then
 succeeded through the dedicated azd project.
 
-The transmitted invocation expression was 5736 characters. Canonical PTY line
-limits are a plausible transport failure, not a proven service/model diagnosis.
+An offline reproduction produced an encoded invocation command over 5700
+characters. Canonical PTY line limits are a plausible transport failure, not a
+proven service/model diagnosis.
 The subsequent source-only fix splits it into lines of at most 1024 characters
 and reconstructs it in memory; a canonical-PTY regression test passes. This
 fix was **not** retried live and is not part of the published image source.
