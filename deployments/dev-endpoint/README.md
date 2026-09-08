@@ -1,157 +1,124 @@
-# Dev endpoint persistence: fail-closed candidate, **NOT approved to apply**
+# Dev endpoint persistence — guarded candidate, application still blocked
 
-Refs #109. The endpoint is **not persisted** by this PR. Actual resource-provider
-validation found a blocker that a GET-snapshot PUT cannot safely work around
-under the no-secret-read/no-secret-change constraints. Do not merge this as
-successful persistence evidence, bypass the gate, or start the model smoke.
+Refs #109; PR #121 merged at `0cf7acc`. **The endpoint remains absent. No app
+deployment or model invocation was performed by this candidate.**
 
-## Actual leaf what-if evidence (2026-09-08)
+## Revised secret preservation contract
 
-Existing target:
-`/subscriptions/b8ff3e15-7e2d-4fac-a773-992fb59ccedd/resourceGroups/rg-fcag-dev/providers/Microsoft.App/containerApps/fcag-dev-app`.
-API: **2025-01-01**. Existing project ARM GET at API **2025-06-01**
-confirmed exactly:
-`https://aifcagdevqhg3qc4rlbt4g.services.ai.azure.com/api/projects/fantasy-cards-dev`.
+The old name-only PUT failed `ContainerAppSecretInvalid`; omitting native
+secrets planned deletion. The revised authorization permits **Azure-side**
+`listSecrets(resourceId(...), '2025-01-01').value`, never an operator/CLI secret
+lookup. This is a secret read inside Azure, not a claim that no secret is read.
+Native values pass directly from the existing app back to that same app.
+Key Vault metadata passes unchanged, without resolved values being added.
+No new role, identity, network, capacity, root provisioning hook or secret
+rotation is introduced.
 
-| Diagnostic | Actual result | Gate |
-| --- | --- | --- |
-| Resource-group leaf with secure snapshot parameter | `Succeeded`, app `Modify`, 40 unrelated resources `Ignore`; secure parameter left `properties`, `identity`, and `tags` unevaluated | Rejected: uninspectable, not a clean plan |
-| Equivalent literal leaf, current secret names retained without values | Provider validation rejected with `InvalidTemplateDeployment` / **`ContainerAppSecretInvalid`** | Rejected: actual PUT input invalid |
-| Equivalent literal leaf with native `configuration.secrets` omitted | `Succeeded`, app `Modify`; **Delete `properties.configuration.secrets`**, plus web env addition and revision suffix modification | Rejected: secret deletion is outside scope |
+The Bicep resource input is guarded by identical unique name inventories,
+exactly one matching name/reference/classification per entry, known fields,
+and native string values. Observable unknown fields fail closed. Unobservable
+future provider fields cannot be promised preserved. A mismatched inventory
+selects a deliberately invalid JSON expression containing only a constant
+marker and a zero-length resource-group-ID slice. It is evaluated in
+`resource.properties`, **before the app PUT**, never in a deployment output.
+The literal resource-ID lookup does not add a self-dependency. There are no
+outputs, deployment scripts, secret parameters, or local secret-value files.
 
-These are actual ARM what-if calls, not local guesses or subscription-level
-empty expanded modules. The failed literal request was repeated once to extract
-only allowlisted error identifiers. A credential-free empty-template stdin
-transport check also succeeded; it was **not** treated as app-plan evidence.
-No further cloud plan experiments are needed to establish this specific blocker.
+The helper pins the entire compiled executable ARM contract by SHA-256,
+excluding only compiler provenance, schema URL and content version. A compiler
+or expression change that changes that contract requires review and a new pin.
+The snapshot remains a `secureObject` of GET configuration/secret-reference
+metadata; no native credential value is reconstructed locally.
 
-Final GET-only verification: app `Succeeded`/`Running`, latest == latest-ready,
-revision still `fcag-dev-app--azd-1788775203`, image still
-`fcagdevqhg3qc4rlbt4gacr.azurecr.io/fantasy-cards-generator/web-nat-dev:azd-deploy-1788775195`,
-expected system principal matched, Single/100%-latest unchanged, endpoint absent.
-Final GET fingerprint:
+## Actual read-only evidence, 2026-09-08
+
+Target: existing `fcag-dev-app` in `rg-fcag-dev`, subscription
+`b8ff3e15-7e2d-4fac-a773-992fb59ccedd`.
+
+Two `ResourceIdOnly` what-if calls returned `Succeeded`: **one existing target
+`Deploy`, 40 unrelated `Ignore` resources**. They did not return `Modify`.
+The helper therefore stopped before application. This is not an unevaluated
+full-payload comparison masquerading as a clean diff.
+
+Microsoft documents that `ResourceIdOnly` returns `Deploy` for an existing
+resource; `Modify` belongs to `FullResourcePayloads`. The current authorization
+requires `Modify` while prohibiting full-payload preview with runtime secrets.
+Those two requirements cannot be met together. **The gate has not been
+weakened to accept `Deploy`.** A revised scope-only authorization would need
+independent review; it must not claim cloud validation of property equality.
+
+A third read-only attempt submitted deliberately mismatched secret metadata
+to deployment validation. The CLI exited unsuccessfully, but neither an
+allowlisted ARM error code nor the guard's constant marker was observed.
+**This does not prove Azure evaluated the guard.** No further attempts or
+deployment writes followed. The current permission to perform Azure-side
+list evaluation has not been confirmed by this inconclusive validation.
+
+Final GET matched the original fingerprint exactly:
 `ea77f0bf259648a25fd2171f61ab2354c1989f9301ae6d2984c187cf15e0b3de`.
-This is a blocked-baseline record, **not an approved application fingerprint**.
+App remained healthy (`Succeeded`/`Running`, latest == latest-ready), endpoint
+absent, original principal `946d8701-48f2-4fa5-8efd-bf053c7b4e4c`. This is
+blocked-baseline evidence, **not an approved application fingerprint**.
 
-The dev app currently has an ACA-native secret whose GET representation contains
-only its name. Returning that object as a PUT fails validation; omitting it
-produces the forbidden deletion plan. A successful omission validation does
-**not** establish secret preservation. This code rejects both cases and now
-blocks native-secret snapshots locally before preview/application.
-
-Resolving that blocker requires a separately reviewed change of constraints or
-design. This PR does **not** retrieve a secret, silently substitute an
-Application Insights value, migrate secrets, add a deployment script/identity/
-permission, use an imperative Container App PATCH, or assert that a predicted
-secret deletion is harmless. **Independent coordinator review is required;
-there is no approved application command for the current dev state.**
-
-## Proposed operator path
-
-The isolated resource-group Bicep leaf contains exactly one writable resource:
-the existing `fcag-dev-app`. The Python helper verifies hardcoded ownership,
-system MI, same-RG user-assigned identities, managed environment, Single mode,
-100%-latest traffic, and the canonical endpoint returned by the real project.
-It transforms the live current state rather than replaying `infra/main.bicep`.
-Only `web`'s endpoint entry and a fresh revision suffix may change. Sidecars,
-init containers, images/digests, all other env/secret refs, registry config,
-networking/ingress, identity maps, scale, probes, mounts, and volumes are retained.
-Unknown fields (even null) fail closed. Read-only fields are explicitly removed,
-not guessed writable. Nonempty undocumented delegated identities also fail.
-
-Native secret values cannot be reconstructed from metadata; their presence
-blocks this candidate. Existing Key Vault reference metadata is structurally
-replayable, but this is not authorization to migrate the live native secret.
+## Proof boundaries and operator path
 
 ```bash
-# From the repository worktree. Read-only; currently returns the native-secret blocker.
+# Read-only by default; currently rejects the live Deploy classification.
 python deployments/dev-endpoint/persist_endpoint.py
-
-# FUTURE ONLY, after the blocker is independently resolved and a complete
-# successful fresh preview fingerprint has been reviewed:
-python deployments/dev-endpoint/persist_endpoint.py \
-  --apply --expect-fingerprint <fresh-reviewed-sha256>
 ```
 
-The helper uses the already-installed Azure CLI and Bicep compiler. This is a
-deliberate operator leaf path, **not** `azd up`/root `azd provision`: root's
-pre/post-provision hooks can generate/rotate secrets or bootstrap an image.
-No azd state, `.env`, manifest inheritance, installer, model call, or root hook
-is used. A separate azd manifest would not fix the ARM PUT secret semantics.
+Preview transmits the compiled template through stdin with metadata as a
+secure parameter default. ARM-looking literal metadata strings are escaped.
+Runtime secret expressions remain unevaluated locally. Preview requests
+`ResourceIdOnly` exclusively: no raw diagnostics or full-payload preview,
+expanded template, deployment-operation request bodies, or debug logging.
 
-Apply uses the compiled Bicep template and a **secureObject** snapshot parameter,
-transmitted through stdin to ARM, never a file, shell argument, or azd env value.
-What-if cannot expand that secure parameter. For diagnostics only, the helper
-verifies the compiled leaf consists of four direct parameter projections,
-materializes those exact projections in memory, and submits the equivalent
-literal leaf through stdin. Strings beginning `[` are escaped as ARM literals.
-This preview is never submitted as a deployment. All raw tool stdout/stderr and
-before/after JSON remain in memory; only the public endpoint, resource ID, safe
-status, permitted path names, and fingerprint are printed. No secret-list or
-Key Vault value operation exists. Do not use CLI debug output or dump requests.
+The cloud plan proves scope only. Exact local metadata comparison independently
+checks that the transform changes only `web.FOUNDRY_PROJECT_ENDPOINT` and the
+revision suffix. Pinned compiled expressions provide the Azure pass-through
+shape, not empirical operator verification of native value equality.
+Images/digests, other env and secret references, sidecars/init containers,
+identity maps, configuration, traffic, ingress, scale, mounts and volumes must
+remain equal. Unknown GET fields fail closed.
 
-The plan gate compares complete evaluated before/after configurations, not
-merely a `Modify` resource count or loose delta prefix. Unrelated resource
-operations, missing/unexpanded payloads, image/identity/network/secret changes,
-and unknown output fields are rejected. Known presentation normalizations are
-limited to location formatting, absent nulls, empty registry username/password
-references, and empty identity settings.
+Application is currently blocked. Once all gates are genuinely satisfied,
+the existing `--apply --expect-fingerprint <reviewed-sha256>` path uses the
+secure compiled Bicep deployment, never root `azd` hooks. It checks a fresh GET
+after preview and immediately before application. API 2025-01-01 returned no
+ETag; there is no supported If-Match serialization in this helper. These are
+optimistic checks, **not atomicity**. Serialize the operator window. Concurrent
+config or native-secret changes between GET/list/PUT remain a residual risk.
+Drift requires replanning, not forcing.
 
-## Concurrency, verification, rollback
+Post-apply checks require exact writable metadata equality, unchanged system
+principal, healthy new latest revision, and HTTP 200 `/healthz` within a bounded
+window. No `/generate`, model call or feature switch is used. Failure does not
+prove rollback and must not trigger blind reapplication.
 
-The SHA-256 baseline includes complete GET metadata, including revision and
-`systemData`, without persisting that GET. A fresh read must match after preview
-and immediately before apply. API 2025-01-01 returned no ETag. These rereads are
-**optimistic**, not an atomic lock: serialize the operator change window; do not
-run another deploy concurrently. A moved fingerprint requires a new preview
-and review, not an override.
+Endpoint-only rollback uses `--remove` with a **new current snapshot, fresh
+preview, and reviewed fingerprint**, not stale full configuration or old
+traffic. The same secret and scope gates apply. No rollback was needed here.
 
-A new revision is expected, not a failure. Future application must compare all
-writable fields to the exact desired snapshot and require app
-`Succeeded`/`Running` plus latest == latest-ready before reporting success.
-Single mode and 100%-latest policy remain mandatory. No web `/generate` switch
-or feature flag is changed. A timeout or mismatch means application is
-unverified; it never authorizes a model call or blind deployment retry.
-
-The pre-change endpoint was absent. Rollback therefore removes **only** that
-entry using a new live snapshot and new revision, not an old full app template
-or old traffic assignment:
-
-```bash
-# Preview only; the current native-secret blocker applies to rollback too.
-python deployments/dev-endpoint/persist_endpoint.py --remove
-# FUTURE ONLY after independent rollback plan review:
-python deployments/dev-endpoint/persist_endpoint.py --remove \
-  --apply --expect-fingerprint <fresh-reviewed-rollback-sha256>
-```
-
-Any secret/image/identity/network drift blocks rollback as it blocks apply.
-Never dump secrets to prepare rollback. Revision IDs may change while the
-image/digest, Single/100%-latest policy and other configuration remain equal.
-
-## References and offline validation
-
-- [Container Apps 2025-01-01 Bicep contract](https://learn.microsoft.com/azure/templates/microsoft.app/2025-01-01/containerapps)
-- [Authoritative PUT/GET specification](https://github.com/Azure/azure-rest-api-specs/blob/main/specification/app/resource-manager/Microsoft.App/ContainerApps/stable/2025-01-01/ContainerApps.json)
-- [Shared definitions: Secret, Template, read-only ephemeralStorage](https://github.com/Azure/azure-rest-api-specs/blob/main/specification/app/resource-manager/Microsoft.App/ContainerApps/stable/2025-01-01/CommonDefinitions.json)
-
-The source specifies `PUT` for create-or-update and `PATCH` as a separate
-operation; native Bicep emits the former. An `existing` declaration is only a
-reference, not a property patch.
+## Validation
 
 ```bash
 python -m pytest -q tests/test_dev_endpoint_persistence.py tests/test_deployment_config.py
+python -m ruff check deployments/dev-endpoint/persist_endpoint.py tests/test_dev_endpoint_persistence.py
+python -m black --check deployments/dev-endpoint/persist_endpoint.py tests/test_dev_endpoint_persistence.py
 az bicep build --file deployments/dev-endpoint/infra/main.bicep --stdout >/dev/null
 ```
 
-Tests are credential-free transforms and mocked gates, **not live apply proof**.
-They cover malformed/extra/duplicate env, sidecar/init preservation, multi-MI
-maps, secret refs, unknown fields, native-secret refusal, full-plan rejection,
-root-hook absence, concurrency, endpoint ownership, rollback, and literal
-projection equivalence. No Azure resources or hosted runtimes were mutated and
-no sessions or model invocations were created for this work.
+89 tests pass; Ruff and Black pass. Bicep 0.46.1 compiles. The symbol-reference
+linter recommendation is deliberately not followed because it would create
+a self-dependency. The concat recommendation does not affect correctness.
+Tests interpret the actual compiled expression against synthetic native/KV
+fixtures and malformed inventories, assert guard failure before resource-input
+construction, and reject hidden outputs/dependencies/extra resources. That
+small offline interpreter is **not a substitute for actual Azure guard proof**.
 
-Validation completed: **59 tests passed** (36 new endpoint-gate tests plus 23
-existing deployment-config tests), targeted Ruff passed, Bicep **0.46.1**
-compiled successfully. One pre-existing Starlette/httpx deprecation warning
-was emitted; no dependency installation or upgrade was performed.
+## Authoritative references
+
+- [What-if change types and result formats](https://learn.microsoft.com/azure/azure-resource-manager/templates/deploy-what-if#change-types)
+- [Resource-ID list functions and dependencies](https://learn.microsoft.com/azure/azure-resource-manager/templates/resource-dependency#reference-and-list-functions)
+- [Container Apps List Secrets 2025-01-01](https://learn.microsoft.com/rest/api/resource-manager/containerapps/container-apps/list-secrets?view=rest-resource-manager-containerapps-2025-01-01)
+- [Container Apps writable contract](https://learn.microsoft.com/azure/templates/microsoft.app/2025-01-01/containerapps)

@@ -4,6 +4,7 @@ import argparse
 import copy
 import importlib.util
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -163,12 +164,33 @@ def test_unknown_fields_fail_even_on_sidecars_and_null(raw, path):
         endpoint.snapshot(raw)
 
 
-def test_native_secret_cannot_be_replayed_or_silently_dropped(raw):
+def test_native_secret_metadata_is_kept_without_client_values(raw):
     raw["properties"]["configuration"]["secrets"] = [{"name": "native-secret"}]
     current = endpoint.snapshot(raw)
     assert current["properties"]["configuration"]["secrets"] == [{"name": "native-secret"}]
-    with pytest.raises(endpoint.GateError, match="Native ACA secret"):
-        endpoint.deployment_body(current, "endpoint-reviewed", "persist")
+    endpoint.require_replayable_secrets(current)
+
+
+@pytest.mark.parametrize(
+    "secrets",
+    [
+        None,
+        {},
+        [{"name": ""}],
+        [{"name": 1}],
+        [{"name": "same"}, {"name": "same"}],
+        [{"name": "a", "identity": "system"}],
+        [{"name": "a", "keyVaultUrl": "https://example.vault.azure.net/secrets/a"}],
+        [{"name": "a", "keyVaultUrl": []}],
+        [{"name": "a", "unknown": None}],
+        [{"name": "a", "value": None}],
+    ],
+)
+def test_malformed_secret_inventory_fails_before_cli(raw, secrets, monkeypatch):
+    raw["properties"]["configuration"]["secrets"] = secrets
+    monkeypatch.setattr(endpoint, "command", lambda *a: pytest.fail("No CLI allowed"))
+    with pytest.raises(endpoint.GateError):
+        endpoint.snapshot(raw)
 
 
 def test_secret_values_are_rejected_without_rendering_them(raw):
@@ -197,14 +219,12 @@ def plan(current, expected):
             {
                 "resourceId": endpoint.APP,
                 "changeType": "Modify",
-                "before": current,
-                "after": expected,
             }
         ],
     }
 
 
-def test_full_payload_plan_with_ignored_unowned_resource(raw):
+def test_scope_only_plan_with_local_preservation_and_ignored_resource(raw):
     current = endpoint.snapshot(raw)
     expected = endpoint.desired(current, "new")
     actual = plan(current, expected)
@@ -215,7 +235,8 @@ def test_full_payload_plan_with_ignored_unowned_resource(raw):
         }
     )
     report = endpoint.inspect_plan(actual, current, expected)
-    assert report["fullBeforeAfterMatched"]
+    assert report["cloudScopeOnly"] and report["localMetadataPreservationMatched"]
+    assert "fullBeforeAfterMatched" not in report
     assert report["ignoredResources"] == 1
     assert "unchanged" not in json.dumps(report)
 
@@ -240,7 +261,7 @@ def test_whatif_rejects_image_network_secrets_scale_identity(raw, path, value):
         cursor = cursor[key]
     cursor[path[-1]] = value
     with pytest.raises(endpoint.GateError):
-        endpoint.inspect_plan(plan(current, altered), current, expected)
+        endpoint.inspect_plan(plan(current, altered), current, altered)
 
 
 @pytest.mark.parametrize("kind", ["Create", "Delete", "Unsupported", "Deploy", "NoChange"])
@@ -265,8 +286,9 @@ def test_whatif_rejects_role_creation_and_unexpanded_secure_parameter(raw):
     )
     with pytest.raises(endpoint.GateError):
         endpoint.inspect_plan(actual, current, expected)
-    actual = plan(current, {**expected, "properties": "[parameters('snapshot').properties]"})
-    with pytest.raises((endpoint.GateError, TypeError)):
+    actual = plan(current, expected)
+    actual["changes"][0]["after"] = "[parameters('snapshot').properties]"
+    with pytest.raises(endpoint.GateError):
         endpoint.inspect_plan(actual, current, expected)
 
 
@@ -302,38 +324,242 @@ def test_project_endpoint_requires_exact_arm_contract(monkeypatch):
         endpoint.verify_project()
 
 
-def test_compiled_projection_and_literal_escaping(raw, monkeypatch):
-    template = {
-        "parameters": {"snapshot": {"type": "secureObject"}},
-        "resources": [
-            {
-                "type": "Microsoft.App/containerApps",
-                "name": "fcag-dev-app",
-                "apiVersion": endpoint.API,
-                **{
-                    k: f"[parameters('snapshot').{k}]"
-                    for k in ("location", "tags", "identity", "properties")
-                },
-            }
-        ],
-    }
+@pytest.fixture(scope="module")
+def compiled():
+    return endpoint.command(
+        ["az", "bicep", "build", "--file", str(endpoint.HERE / "infra/main.bicep"), "--stdout"]
+    )
+
+
+def test_compiled_projection_and_literal_escaping(raw, monkeypatch, compiled):
+    template = copy.deepcopy(compiled)
     monkeypatch.setattr(endpoint, "command", lambda *a: template)
     raw["properties"]["template"]["containers"][0]["env"][1][
         "value"
     ] = "[literal-not-an-expression]"
     current = endpoint.snapshot(raw)
     body = endpoint.deployment_body(current, "new", "persist")
-    preview = endpoint.materialized_preview(body)
-    assert "parameters" not in preview
+    preview = endpoint.scope_preview_template(body)
     assert (
-        preview["resources"][0]["properties"]["template"]["containers"][0]["env"][1]["value"]
+        preview["parameters"]["snapshot"]["defaultValue"]["properties"]["template"]["containers"][
+            0
+        ]["env"][1]["value"]
         == "[[literal-not-an-expression]"
     )
+    assert preview["resources"] == template["resources"]
     assert body["properties"]["parameters"]["snapshot"]["value"] == endpoint.desired(current, "new")
     assert template["parameters"]["snapshot"]["type"] == "secureObject"
     body["properties"]["template"]["resources"][0]["properties"] = "[reference('other')]"
     with pytest.raises(endpoint.GateError):
-        endpoint.materialized_preview(body)
+        endpoint.scope_preview_template(body)
+
+
+def test_compiled_guard_is_resource_input_without_self_dependency_or_outputs(compiled):
+    endpoint.verify_compiled(compiled)
+    resource = compiled["resources"][0]
+    assert "dependsOn" not in resource and "condition" not in resource
+    assert not compiled.get("outputs") and not compiled.get("functions")
+    assert resource["properties"].startswith("[if(")
+    assert "json(concat('ENDPOINT_SECRET_INVENTORY_MISMATCH', take(resourceGroup().id, 0)))" in (
+        resource["properties"]
+    )
+    lookup = "listSecrets(resourceId('Microsoft.App/containerApps', 'fcag-dev-app'), '2025-01-01')"
+    assert lookup in resource["properties"]
+    assert "reference(" not in json.dumps(compiled)
+    for key in ("location", "tags", "identity"):
+        assert resource[key] == f"[parameters('snapshot').{key}]"
+
+
+@pytest.mark.parametrize("mutation", ["output", "dependency", "unguarded", "extra-resource"])
+def test_compiled_contract_rejects_any_executable_change(compiled, mutation):
+    candidate = copy.deepcopy(compiled)
+    if mutation == "output":
+        candidate["outputs"] = {"secret": {"type": "array", "value": "[listSecrets('x', 'y')]"}}
+    elif mutation == "dependency":
+        candidate["resources"][0]["dependsOn"] = ["fcag-dev-app"]
+    elif mutation == "unguarded":
+        candidate["resources"][0]["properties"] = "[parameters('snapshot').properties]"
+    else:
+        candidate["resources"].append({"type": "Microsoft.Authorization/roleAssignments"})
+    with pytest.raises(endpoint.GateError):
+        endpoint.verify_compiled(candidate)
+
+
+def test_scope_preview_never_requests_payloads(raw, monkeypatch, compiled):
+    monkeypatch.setattr(endpoint, "command", lambda *a: copy.deepcopy(compiled))
+    body = endpoint.deployment_body(endpoint.snapshot(raw), "new", "persist")
+    calls = []
+    monkeypatch.setattr(endpoint, "command", lambda *a: calls.append(a))
+    endpoint.preview(body)
+    assert calls[0][0][calls[0][0].index("--result-format") + 1] == "ResourceIdOnly"
+    assert "FullResourcePayloads" not in json.dumps(calls)
+
+
+def evaluate_guarded_properties(compiled, snapshot, live):
+    """Small offline interpreter for this pinned ARM expression, not Azure proof."""
+
+    def parse(text):
+        tokens = iter(re.findall(r"'(?:[^']|'')*'|[a-zA-Z_][a-zA-Z_0-9]*|\d+|[().,]", text))
+        token = next(tokens, None)
+
+        def consume(expected=None):
+            nonlocal token
+            result = token
+            if expected is not None:
+                assert token == expected
+            token = next(tokens, None)
+            return result
+
+        def node():
+            value = consume()
+            if value.startswith("'"):
+                result = ("literal", value[1:-1].replace("''", "'"))
+            elif value.isdigit():
+                result = ("literal", int(value))
+            else:
+                consume("(")
+                args = []
+                if token != ")":
+                    args.append(node())
+                    while token == ",":
+                        consume(",")
+                        args.append(node())
+                consume(")")
+                result = ("call", value, args)
+            while token == ".":
+                consume(".")
+                result = ("get", result, consume())
+            return result
+
+        result = node()
+        assert token is None
+        return result
+
+    def union(*values):
+        if isinstance(values[0], dict):
+            result = copy.deepcopy(values[0])
+            for other in values[1:]:
+                for key, value in other.items():
+                    result[key] = (
+                        union(result[key], value)
+                        if isinstance(result.get(key), dict) and isinstance(value, dict)
+                        else value
+                    )
+            return result
+        return list(dict.fromkeys(v for value in values for v in value))
+
+    def evaluate(node, bindings=None):
+        bindings = bindings or {}
+        if node[0] == "literal":
+            return node[1]
+        if node[0] == "get":
+            return evaluate(node[1], bindings)[node[2]]
+        _, name, args = node
+        if name == "if":
+            return evaluate(args[1] if evaluate(args[0], bindings) else args[2], bindings)
+        if name == "lambda":
+            return lambda value: evaluate(args[1], {**bindings, args[0][1]: value})
+        values = [evaluate(arg, bindings) for arg in args]
+        if name == "variables":
+            value = compiled["variables"][values[0]]
+            return evaluate(parse(value[1:-1]), bindings) if isinstance(value, str) else value
+        functions = {
+            "parameters": lambda key: snapshot,
+            "lambdaVariables": lambda key: bindings[key],
+            "listSecrets": lambda *a: {"value": live},
+            "resourceId": lambda *a: endpoint.APP,
+            "resourceGroup": lambda: {"id": endpoint.GROUP},
+            "map": lambda values, fn: list(map(fn, values)),
+            "filter": lambda values, fn: list(filter(fn, values)),
+            "items": lambda value: [{"key": k, "value": v} for k, v in value.items()],
+            "length": len,
+            "union": union,
+            "equals": lambda a, b: type(a) is type(b) and a == b,
+            "and": lambda a, b: a and b,
+            "or": lambda a, b: a or b,
+            "not": lambda a: not a,
+            "empty": lambda a: a is None or a == "" or a == [] or a == {},
+            "contains": lambda a, b: b in a,
+            "string": lambda a: "" if a is None else a if isinstance(a, str) else json.dumps(a),
+            "coalesce": lambda *a: next(value for value in a if value is not None),
+            "tryGet": lambda a, b: a.get(b),
+            "first": lambda a: a[0],
+            "createObject": lambda *a: dict(zip(a[::2], a[1::2])),
+            "concat": lambda *a: "".join(a),
+            "take": lambda a, b: a[:b],
+            "json": json.loads,
+        }
+        return functions[name](*values)
+
+    return evaluate(parse(compiled["resources"][0]["properties"][1:-1]))
+
+
+def test_compiled_native_identity_and_kv_metadata_preservation(raw, compiled):
+    current = endpoint.snapshot(raw)
+    metadata = current["properties"]["configuration"]["secrets"]
+    metadata.append({"name": "native"})
+    live = [{**metadata[0], "value": "FAKE-KV-RESOLUTION"}, {"name": "native", "value": "FAKE"}]
+    result = evaluate_guarded_properties(compiled, current, live)
+    expected = copy.deepcopy(current["properties"])
+    expected["configuration"]["secrets"][1]["value"] = "FAKE"
+    assert result == expected
+    assert "value" not in result["configuration"]["secrets"][0]
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing",
+        "extra",
+        "duplicate",
+        "rename",
+        "classification",
+        "kv-url",
+        "kv-identity",
+        "unknown-live",
+        "missing-value",
+        "null-value",
+        "object-value",
+        "duplicate-metadata",
+        "unknown-metadata",
+    ],
+)
+def test_compiled_inventory_guard_fails_before_resource_input_exists(raw, compiled, mutation):
+    current = endpoint.snapshot(raw)
+    metadata = current["properties"]["configuration"]["secrets"]
+    metadata.append({"name": "native"})
+    live = [copy.deepcopy(metadata[0]), {"name": "native", "value": "FAKE"}]
+    if mutation == "missing":
+        live.pop()
+    elif mutation == "extra":
+        live.append({"name": "extra", "value": "FAKE"})
+    elif mutation == "duplicate":
+        live.append(copy.deepcopy(live[0]))
+    elif mutation == "rename":
+        live[1]["name"] = "other"
+    elif mutation == "classification":
+        live[0] = {"name": metadata[0]["name"], "value": "FAKE"}
+    elif mutation == "kv-url":
+        live[0]["keyVaultUrl"] += "/other"
+    elif mutation == "kv-identity":
+        live[0]["identity"] = "other"
+    elif mutation == "unknown-live":
+        live[1]["future"] = None
+    elif mutation == "missing-value":
+        live[1].pop("value")
+    elif mutation == "null-value":
+        live[1]["value"] = None
+    elif mutation == "object-value":
+        live[1]["value"] = {}
+    elif mutation == "duplicate-metadata":
+        metadata.append(copy.deepcopy(metadata[0]))
+    else:
+        metadata[0]["future"] = None
+    writes = []
+    with pytest.raises(ValueError):
+        properties = evaluate_guarded_properties(compiled, current, live)
+        writes.append(properties)
+    assert writes == []
 
 
 def test_operator_has_no_root_hooks_azd_env_or_secret_lookup():

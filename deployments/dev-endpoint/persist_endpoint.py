@@ -1,7 +1,7 @@
 """Dev-only, drift-preserving Bicep leaf deployment. Default action is read-only.
 
 ARM requests and responses stay in memory; only allowlisted evidence is printed.
-No root azd hooks, env files, secret-list operations, or raw CLI diagnostics.
+No root azd hooks, env files, client secret-list operations, or raw CLI diagnostics.
 """
 
 import argparse
@@ -12,6 +12,7 @@ import re
 import subprocess
 import sys
 import time
+import urllib.request
 from pathlib import Path
 
 SUBSCRIPTION = "b8ff3e15-7e2d-4fac-a773-992fb59ccedd"
@@ -26,6 +27,9 @@ PRINCIPAL = "946d8701-48f2-4fa5-8efd-bf053c7b4e4c"
 API = "2025-01-01"
 KEY = "FOUNDRY_PROJECT_ENDPOINT"
 HERE = Path(__file__).resolve().parent
+# Pin the entire compiled executable contract, excluding compiler provenance.
+# Any expression/resource/parameter change requires independent re-review.
+COMPILED_CONTRACT = "56505e8c7bfe5512c58bdc8846ea0fb2fc735a357152d865732bb0ebaabf5af1"
 
 
 class GateError(Exception):
@@ -189,6 +193,7 @@ def snapshot(raw):
         "Unexpected managed environment",
     )
     config = properties["configuration"]
+    require_replayable_secrets(raw)
     require(config["activeRevisionsMode"] == "Single", "Only Single revision mode is allowed")
     require(
         config["ingress"]["traffic"] == [{"latestRevision": True, "weight": 100}],
@@ -249,12 +254,32 @@ def desired(current, suffix, operation="persist"):
 
 
 def require_replayable_secrets(current):
-    for secret in current["properties"]["configuration"].get("secrets") or []:
+    secrets = current["properties"]["configuration"].get("secrets")
+    require(isinstance(secrets, list), "Missing secret inventory")
+    names = []
+    for secret in secrets:
         require(
-            bool(secret.get("keyVaultUrl")) and bool(secret.get("identity")),
-            "Native ACA secret blocks safe Bicep PUT: name-only is rejected by ARM; "
-            "omission plans secret deletion. No apply permitted.",
+            isinstance(secret, dict)
+            and set(secret) <= {"name", "keyVaultUrl", "identity"}
+            and isinstance(secret.get("name"), str)
+            and bool(secret["name"])
+            and all(v is None or isinstance(v, str) for v in secret.values())
+            and bool(secret.get("keyVaultUrl")) == bool(secret.get("identity")),
+            "Malformed secret metadata",
         )
+        names.append(secret["name"])
+    require(len(names) == len(set(names)), "Duplicate secret metadata")
+
+
+def verify_compiled(template):
+    contract = {
+        k: v for k, v in template.items() if k not in ("metadata", "$schema", "contentVersion")
+    }
+    require(
+        hashlib.sha256(json.dumps(contract, sort_keys=True).encode()).hexdigest()
+        == COMPILED_CONTRACT,
+        "Compiled Azure pass-through contract changed; independent review required",
+    )
 
 
 def command(args, payload=None):
@@ -300,6 +325,7 @@ def deployment_body(current, suffix, operation):
     template = command(
         ["az", "bicep", "build", "--file", str(HERE / "infra/main.bicep"), "--stdout"]
     )
+    verify_compiled(template)
     resources = template["resources"]
     require(
         len(resources) == 1
@@ -362,22 +388,34 @@ def inspect_plan(plan, current, expected):
     )
     change = changes[0]
     require(change.get("resourceId", "").lower() == APP.lower(), "What-if has unrelated resource")
-    require(change.get("changeType") == "Modify", "What-if is not an inspectable app modification")
-    # Compare the complete evaluated before/after, not only a path or string count.
-    # A secure-parameter expansion failure (e.g. unevaluated ARM expressions) fails.
-    before, after = change.get("before"), change.get("after")
-    require(isinstance(before, dict) and isinstance(after, dict), "What-if lacks full payloads")
-    for resource, target in ((before, current), (after, expected)):
-        require(
-            set(resource)
-            <= {"id", "name", "type", "apiVersion", "location", "tags", "identity", "properties"},
-            "What-if includes an unreviewed resource property",
-        )
-        candidate = {k: resource.get(k) for k in ("location", "tags", "identity", "properties")}
-        require(
-            comparable(candidate) == comparable(target),
-            "What-if changes unowned configuration or cannot be evaluated",
-        )
+    require(
+        change.get("changeType") == "Modify",
+        "ResourceIdOnly returned no Modify proof; Deploy is not authorized by the current gate",
+    )
+    require(
+        all(
+            set(c) <= {"resourceId", "changeType", "before", "after", "delta", "unsupportedReason"}
+            and all(c.get(k) is None for k in ("before", "after", "delta", "unsupportedReason"))
+            for c in plan["changes"]
+        ),
+        "ResourceIdOnly preview unexpectedly contains payloads or diagnostics",
+    )
+    # Cloud preview proves scope ONLY. Independently compare the deterministic
+    # metadata transform, while the pinned ARM expression preserves native values.
+    local = copy.deepcopy(expected)
+    local["properties"]["template"]["revisionSuffix"] = current["properties"]["template"][
+        "revisionSuffix"
+    ]
+    old_web = next(c for c in current["properties"]["template"]["containers"] if c["name"] == "web")
+    new_web = next(c for c in local["properties"]["template"]["containers"] if c["name"] == "web")
+    entries = [e for e in new_web["env"] if e["name"] == KEY]
+    require(entries in ([], [{"name": KEY, "value": ENDPOINT}]), "Unexpected endpoint transform")
+    new_web["env"] = [e for e in new_web["env"] if e["name"] != KEY]
+    old = copy.deepcopy(current)
+    next(c for c in old["properties"]["template"]["containers"] if c["name"] == "web")["env"] = [
+        e for e in old_web["env"] if e["name"] != KEY
+    ]
+    require(local == old, "Local transform changes unowned configuration")
     return {
         "resource": APP,
         "operation": "Modify",
@@ -385,46 +423,28 @@ def inspect_plan(plan, current, expected):
             "properties.template.containers[web].env.FOUNDRY_PROJECT_ENDPOINT",
             "properties.template.revisionSuffix",
         ],
-        "fullBeforeAfterMatched": True,
+        "cloudScopeOnly": True,
+        "localMetadataPreservationMatched": True,
+        "nativeValues": "Azure-only guarded identity pass-through; not operator inspected",
         "ignoredResources": ignored,
     }
 
 
-def materialized_preview(body):
-    """Resolve only four direct parameter lookups in the compiled Bicep leaf.
-
-    ARM what-if cannot expand secureObject parameters. Its read-only diagnostic
-    receives the equivalent literal resource through stdin, never a parameter
-    file or deployment. The actual PUT keeps the secureObject parameter.
-    """
+def scope_preview_template(body):
+    """Only metadata enters the secure default; list evaluation stays inside ARM."""
     template = copy.deepcopy(body["properties"]["template"])
-    resource = template["resources"][0]
-    expected = body["properties"]["parameters"]["snapshot"]["value"]
-    require(
-        set(resource)
-        == {"type", "apiVersion", "name", "location", "tags", "identity", "properties"},
-        "Compiled Bicep leaf changed; review preview materialization",
-    )
+    verify_compiled(template)
 
+    # ARM evaluates strings in template defaults: escape metadata literal syntax.
     def literal(value):
         if isinstance(value, dict):
             return {k: literal(v) for k, v in value.items()}
         if isinstance(value, list):
             return [literal(v) for v in value]
-        if isinstance(value, str) and value.startswith("["):
-            return "[" + value
-        return value
+        return "[" + value if isinstance(value, str) and value.startswith("[") else value
 
-    for key in ("location", "tags", "identity", "properties"):
-        require(
-            resource[key] == f"[parameters('snapshot').{key}]",
-            "Compiled Bicep is not a direct snapshot projection",
-        )
-        resource[key] = literal(expected[key])
-    template.pop("parameters")
-    require(
-        not template.get("variables") and not template.get("outputs"),
-        "Unexpected Bicep variables or outputs",
+    template["parameters"]["snapshot"]["defaultValue"] = literal(
+        body["properties"]["parameters"]["snapshot"]["value"]
     )
     return template
 
@@ -447,12 +467,12 @@ def preview(body):
             "--template-file",
             "/dev/stdin",
             "--result-format",
-            "FullResourcePayloads",
+            "ResourceIdOnly",
             "--no-pretty-print",
             "--output",
             "json",
         ],
-        materialized_preview(body),
+        scope_preview_template(body),
     )
 
 
@@ -463,6 +483,19 @@ def healthy(raw):
         and properties.get("runningStatus") == "Running"
         and properties.get("latestRevisionName") == properties.get("latestReadyRevisionName")
     )
+
+
+def healthz(raw):
+    fqdn = raw["properties"]["configuration"]["ingress"]["fqdn"]
+    require(
+        re.fullmatch(r"fcag-dev-app\.[a-z0-9.-]+\.azurecontainerapps\.io", fqdn) is not None,
+        "Unexpected health endpoint hostname",
+    )
+    try:
+        with urllib.request.urlopen(f"https://{fqdn}/healthz", timeout=15) as response:
+            return response.status == 200
+    except OSError:
+        return False
 
 
 def run(args):
@@ -494,7 +527,11 @@ def run(args):
     deadline = time.monotonic() + 300
     while time.monotonic() < deadline:
         after = get_app()
-        if comparable(snapshot(after)) == comparable(expected) and healthy(after):
+        if (
+            comparable(snapshot(after)) == comparable(expected)
+            and healthy(after)
+            and healthz(after)
+        ):
             print(
                 json.dumps(
                     {
@@ -502,6 +539,10 @@ def run(args):
                         "healthy": True,
                         "resource": APP,
                         "revision": after["properties"]["latestRevisionName"],
+                        "endpoint": ENDPOINT if operation == "persist" else None,
+                        "systemPrincipalMatched": after["identity"]["principalId"] == PRINCIPAL,
+                        "allWritableMetadataMatched": True,
+                        "healthz": 200,
                     }
                 )
             )
@@ -525,7 +566,7 @@ def main():
     except GateError as error:
         print(json.dumps({"status": "blocked", "reason": str(error)}))
         return 1
-    except (KeyError, TypeError, ValueError, StopIteration, subprocess.SubprocessError):
+    except (KeyError, TypeError, ValueError, StopIteration, OSError, subprocess.SubprocessError):
         # Never expose raw payloads through exceptions or CLI stderr.
         print(json.dumps({"status": "blocked", "reason": "Safe deployment gate failed"}))
         return 1

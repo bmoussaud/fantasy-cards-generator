@@ -2,15 +2,21 @@
 
 ## Endpoint persistence follow-up gate (2026-09-08)
 
-PR #121 is merged. The next endpoint-only Bicep candidate was tested against the
-actual dev ARM leaf: replaying native secret names without values fails provider
-validation (`ContainerAppSecretInvalid`); omitting them produces a forbidden
-`properties.configuration.secrets` deletion in what-if. **No app apply or new
-E2E invocation occurred.** Endpoint persistence remains blocked, not completed.
+PR #121 is merged at `0cf7acc`. PR #122 now implements guarded **Azure-side**
+secret pass-through; no operator secret-value lookup is authorized. Actual
+`ResourceIdOnly` preview returned one existing app `Deploy` and 40 `Ignore`
+resources, not the currently required `Modify`. Microsoft documents that
+`Modify` requires full-payload format, which is prohibited here. The helper
+retains that fail-closed gate. A separate negative validation was inconclusive:
+it failed without observable guard marker or allowlisted ARM code, so Azure
+guard evaluation is not proven. **No app apply or new E2E invocation occurred.**
+Endpoint persistence remains blocked, not completed; final GET fingerprint is
+unchanged and the existing revision is healthy.
 See the [candidate and exact diagnostic evidence](../deployments/dev-endpoint/README.md).
-Do not run root provisioning, retrieve secret values, or treat a successful
-but secret-deleting preview as approval. Independent review must resolve this
-specific gate before application and the subsequently authorized bounded smoke.
+Do not run root provisioning, retrieve secret values into operator context, or
+treat scope-only preview as cloud verification of property/value equality.
+Independent review must resolve the scope authorization and actual Azure guard
+proof before application and the subsequently authorized bounded smoke.
 
 Related: #109 (hosting), #99 (operations), #117 (merged client/RBAC wiring),
 #118 (read-only preflight). This package does **not** deploy or enable the web
