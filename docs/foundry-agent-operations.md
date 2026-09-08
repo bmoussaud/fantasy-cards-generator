@@ -272,8 +272,11 @@ The parent `dev-1788866608` deployment nevertheless failed **after** these write
 `DeploymentOutputEvaluationFailed`, because the old subscription-scope
 `resourceId(resourceGroupName, ...)` output interpreted the RG name as a
 subscription ID. This branch fixes the output to the existing `project.id`;
-ARM subscription validation **Succeeded** with prerequisites off. The fix has
-**not** been applied: independent review is required, and no second apply was run.
+ARM subscription validation **Succeeded** with prerequisites off. After
+independent review, the output fix was applied through isolated azd with both
+resource-mutation flags disabled. Deployment `dev-1788867445` **Succeeded** and
+returned the correct existing project ARM ID. Its operations were a registry
+read and deployment-output evaluation; no additional resource changes were made.
 Do not interpret the failed parent deployment as rollback or rerun blindly.
 
 The new read-only [ACA identity probe](foundry-agent-invocation.md#actual-aca-managed-identity-access-probe)
