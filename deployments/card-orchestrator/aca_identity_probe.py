@@ -15,6 +15,10 @@ from pathlib import Path
 
 from aca_identity_payload import MARKER, validate_inputs, validate_invocation
 
+INVOCATION_SETUP_TIMEOUT = 30
+INVOCATION_RESULT_TIMEOUT = 80
+INVOCATION_TOTAL_TIMEOUT = 110
+
 
 def parser_source():
     """Bundle the owned parser/model definitions, not a substitute client or response."""
@@ -69,7 +73,7 @@ def stdin_payload(payload, *, invocation=False):
     # ACA's terminal can be canonical: never send a source line beyond PC_MAX_CANON.
     command = (
         "/app/.venv/bin/python -c __import__('signal').alarm(75);"
-        "exec(''.join(iter(input,'END')))"
+        "source=''.join(iter(input,'END'));__import__('signal').alarm(5);exec(source)"
     )
     return command, "\n".join(
         expression[offset:offset + 1024] for offset in range(0, len(expression), 1024)
@@ -180,12 +184,21 @@ def extract_result(output):
     return None
 
 
-def execute(command, timeout=75, input_line=None):
+def execute(command, timeout=75, input_line=None, *, setup_timeout=None, total_timeout=None):
+    started = time.monotonic()
+    deadline = started + (setup_timeout if setup_timeout is not None else timeout)
+    overall_deadline = started + (
+        total_timeout if total_timeout is not None else (setup_timeout or 0) + timeout
+    )
     master, slave = pty.openpty()
     process = None
     output = bytearray()
     sent = False
+    pending = None
+    ready_at = None
+    writing = False
     try:
+        os.set_blocking(master, False)
         process = subprocess.Popen(
             command, stdin=slave, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
         )
@@ -193,9 +206,41 @@ def execute(command, timeout=75, input_line=None):
         slave = None
         with selectors.DefaultSelector() as selector:
             selector.register(process.stdout, selectors.EVENT_READ)
-            deadline = time.monotonic() + timeout
-            while time.monotonic() < deadline:
-                for key, _ in selector.select(timeout=min(1, max(0, deadline - time.monotonic()))):
+            while True:
+                now = time.monotonic()
+                if total_timeout is not None and now >= overall_deadline:
+                    return {"status": "failed", "reason": "exec_total_timeout"}
+                if now >= deadline:
+                    reason = (
+                        "exec_setup_timeout"
+                        if setup_timeout is not None and not sent else "exec_timeout"
+                    )
+                    return {"status": "failed", "reason": reason}
+                wait = min(1, deadline - now, overall_deadline - now)
+                if pending is not None and not writing:
+                    if now >= ready_at:
+                        selector.register(master, selectors.EVENT_WRITE)
+                        writing = True
+                    else:
+                        wait = min(wait, ready_at - now)
+                for key, _ in selector.select(timeout=wait):
+                    if time.monotonic() >= min(deadline, overall_deadline):
+                        break
+                    if key.fd == master:
+                        try:
+                            written = os.write(master, pending)
+                        except BlockingIOError:
+                            continue
+                        if written <= 0:
+                            return {"status": "failed", "reason": "exec_unavailable"}
+                        pending = pending[written:]
+                        if not pending:
+                            selector.unregister(master)
+                            pending = None
+                            sent = True
+                            if setup_timeout is not None:
+                                deadline = time.monotonic() + timeout
+                        continue
                     chunk = os.read(key.fd, 4096)
                     if not chunk:
                         return {"status": "failed", "reason": "exec_no_evidence"}
@@ -205,18 +250,15 @@ def execute(command, timeout=75, input_line=None):
                     if (
                         input_line is not None
                         and not sent
+                        and pending is None
                         and b"Successfully connected to container:" in output
                     ):
                         # Wait until CLI sets up its terminal; early stdin can be flushed.
-                        time.sleep(0.2)
+                        ready_at = time.monotonic() + 0.2
                         pending = memoryview((input_line + "\n").encode())
-                        while pending:
-                            pending = pending[os.write(master, pending) :]
-                        sent = True
                     result = extract_result(output.decode("utf-8", errors="replace"))
                     if result is not None:
                         return result
-        return {"status": "failed", "reason": "exec_timeout"}
     except OSError:
         return {"status": "failed", "reason": "exec_unavailable"}
     finally:
@@ -288,7 +330,13 @@ def main(argv=None):
         return 0
     # Long startup commands receive HTTP 404 from the exec WebSocket gateway.
     # Send only reviewed source (never credentials) over stdin to the bounded process.
-    result = execute(command, input_line=input_line)
+    if invocation:
+        result = execute(
+            command, input_line=input_line, timeout=INVOCATION_RESULT_TIMEOUT,
+            setup_timeout=INVOCATION_SETUP_TIMEOUT, total_timeout=INVOCATION_TOTAL_TIMEOUT,
+        )
+    else:
+        result = execute(command, input_line=input_line)
     if invocation and "invocationsAttempted" not in result:
         result["invocationAllowanceConsumed"] = True
     print(json.dumps(result, sort_keys=True))

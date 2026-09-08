@@ -231,6 +231,188 @@ def test_exec_transmits_source_only_after_connection_over_pty(modules):
     assert wrapper.execute([sys.executable, "-c", program], input_line="reviewed-source") == result
 
 
+@pytest.fixture
+def fake_pty(modules, monkeypatch):
+    _, wrapper = modules
+    state = SimpleNamespace(
+        now=0.0, events=[], writes=[], write_size=1024, blocked_until=0,
+        write_interval=0, next_write=0, block_once=False, launches=0, terminated=False,
+    )
+    process = SimpleNamespace(
+        stdout=SimpleNamespace(close=lambda: None),
+        poll=lambda: None,
+        wait=lambda timeout: None,
+    )
+
+    def terminate():
+        state.terminated = True
+
+    process.terminate = terminate
+
+    def launch(*args, **kwargs):
+        state.launches += 1
+        return process
+
+    class Selector:
+        def __init__(self):
+            self.registered = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def register(self, file, event):
+            fd = 11 if file is process.stdout else file
+            self.registered[fd] = event
+
+        def unregister(self, fd):
+            del self.registered[fd]
+
+        def select(self, timeout):
+            ready = {}
+            if state.events:
+                ready[11] = state.events[0][0]
+            if 12 in self.registered:
+                ready[12] = max(state.blocked_until, state.next_write, state.now)
+            state.now = min(state.now + timeout, max(state.now, min(ready.values()))) \
+                if ready else state.now + timeout
+            return [
+                (SimpleNamespace(fd=fd), self.registered[fd])
+                for fd, at in ready.items() if at <= state.now
+            ]
+
+    def read(fd, size):
+        assert fd == 11
+        return state.events.pop(0)[1]
+
+    def write(fd, pending):
+        assert fd == 12
+        state.next_write = state.now + state.write_interval
+        if state.block_once:
+            state.block_once = False
+            raise BlockingIOError()
+        part = bytes(pending[:state.write_size])
+        state.writes.append((state.now, part))
+        return len(part)
+
+    monkeypatch.setattr(wrapper.time, "monotonic", lambda: state.now)
+    monkeypatch.setattr(wrapper.pty, "openpty", lambda: (12, 13))
+    monkeypatch.setattr(wrapper.os, "set_blocking", lambda fd, blocking: None)
+    monkeypatch.setattr(wrapper.os, "close", lambda fd: None)
+    monkeypatch.setattr(wrapper.os, "read", read)
+    monkeypatch.setattr(wrapper.os, "write", write)
+    monkeypatch.setattr(wrapper.subprocess, "Popen", launch)
+    monkeypatch.setattr(wrapper.selectors, "DefaultSelector", Selector)
+    return state
+
+
+def test_delayed_split_connection_gets_full_result_budget(modules, fake_pty):
+    payload, wrapper = modules
+    result = payload.probe(ENDPOINT, PRINCIPAL, Credential().factory, Opener())
+    fake_pty.events = [
+        (12, b"INFO: Successfully connec"),
+        (13, b"ted to container:\n"),
+        (14, b"INFO: Successfully connected to container:\n"),
+        (92, (payload.MARKER + json.dumps(result) + "\n").encode()),
+    ]
+    assert wrapper.execute(
+        ["offline"], input_line="reviewed-source", timeout=80,
+        setup_timeout=30, total_timeout=110,
+    ) == result
+    assert fake_pty.writes == [(13.2, b"reviewed-source\n")]
+    assert fake_pty.now == 92
+    assert fake_pty.launches == 1
+
+
+@pytest.mark.parametrize("phase", ["connect", "settle", "transfer"])
+def test_setup_deadline_covers_connection_settling_and_blocked_transfer(
+    modules, fake_pty, phase
+):
+    _, wrapper = modules
+    if phase != "connect":
+        fake_pty.events = [
+            (29.9 if phase == "settle" else 1, b"Successfully connected to container:\n")
+        ]
+    fake_pty.blocked_until = 31
+    assert wrapper.execute(
+        ["offline"], input_line="reviewed-source", timeout=80,
+        setup_timeout=30, total_timeout=110,
+    ) == {"status": "failed", "reason": "exec_setup_timeout"}
+    assert fake_pty.now == 30
+    assert fake_pty.writes == []
+    assert fake_pty.launches == 1 and fake_pty.terminated
+
+
+def test_partial_transfer_is_bounded_without_retransmission(modules, fake_pty):
+    _, wrapper = modules
+    fake_pty.events = [
+        (1, b"Successfully connected to container:\n"),
+        (4, b"Successfully connected to container:\n"),
+    ]
+    fake_pty.write_size = 2
+    fake_pty.write_interval = 10
+    fake_pty.block_once = True
+    assert wrapper.execute(
+        ["offline"], input_line="reviewed-source", timeout=80,
+        setup_timeout=30, total_timeout=110,
+    ) == {"status": "failed", "reason": "exec_setup_timeout"}
+    assert b"".join(part for _, part in fake_pty.writes) == b"revi"
+    assert fake_pty.now == 30 and fake_pty.launches == 1
+
+
+def test_result_budget_starts_after_last_partial_write(modules, fake_pty):
+    payload, wrapper = modules
+    result = payload.probe(ENDPOINT, PRINCIPAL, Credential().factory, Opener())
+    fake_pty.events = [
+        (1, b"Successfully connected to container:\n"),
+        (5, b"Successfully connected to container:\n"),
+        (100, (payload.MARKER + json.dumps(result) + "\n").encode()),
+    ]
+    fake_pty.write_size = 4
+    fake_pty.write_interval = 10
+    assert wrapper.execute(
+        ["offline"], input_line="abcdefghijk", timeout=80,
+        setup_timeout=30, total_timeout=110,
+    ) == result
+    assert b"".join(part for _, part in fake_pty.writes) == b"abcdefghijk\n"
+    assert fake_pty.writes[-1][0] == 21.2
+    assert fake_pty.launches == 1
+
+
+@pytest.mark.parametrize(
+    "setup,total,connect,reason,elapsed",
+    [
+        (30, 110, 10, "exec_timeout", 90.2),
+        (50, 110, 40, "exec_total_timeout", 110),
+        (50, 20, None, "exec_total_timeout", 20),
+    ],
+)
+def test_result_and_overall_deadlines_do_not_retry(
+    modules, fake_pty, setup, total, connect, reason, elapsed
+):
+    _, wrapper = modules
+    if connect is not None:
+        fake_pty.events = [(connect, b"Successfully connected to container:\n")]
+    assert wrapper.execute(
+        ["offline"], input_line="reviewed-source", timeout=80,
+        setup_timeout=setup, total_timeout=total,
+    ) == {"status": "failed", "reason": reason}
+    assert fake_pty.now == elapsed
+    assert len(fake_pty.writes) == (0 if connect is None else 1)
+    assert fake_pty.launches == 1 and fake_pty.terminated
+
+
+def test_access_only_deadline_does_not_reset_after_delivery(modules, fake_pty):
+    _, wrapper = modules
+    fake_pty.events = [(60, b"Successfully connected to container:\n")]
+    assert wrapper.execute(["offline"], input_line="reviewed-source") == {
+        "status": "failed", "reason": "exec_timeout",
+    }
+    assert fake_pty.now == 75 and len(fake_pty.writes) == 1
+
+
 def test_execution_pins_target_and_bounds_remote_input_wait(modules, monkeypatch):
     _, wrapper = modules
     args = [
@@ -256,6 +438,36 @@ def test_execution_pins_target_and_bounds_remote_input_wait(modules, monkeypatch
 
     monkeypatch.setattr(wrapper, "execute", execute)
     assert wrapper.main(args) == 1
+
+
+def test_invocation_selects_phased_deadlines_and_consumes_allowance(modules, monkeypatch, capsys):
+    _, wrapper = modules
+    calls = []
+
+    def execute(command, **kwargs):
+        calls.append(kwargs)
+        assert command[command.index("--command") + 1].endswith(
+            "source=''.join(iter(input,'END'));__import__('signal').alarm(5);exec(source)"
+        )
+        return {"status": "failed", "reason": "exec_setup_timeout"}
+
+    monkeypatch.setattr(wrapper, "execute", execute)
+    args = [
+        "--environment", "dev", "--project-endpoint", ENDPOINT,
+        "--expected-principal", PRINCIPAL, "--execute", "--invoke-once",
+        "--hosted-version", "1", "--expected-version", "a" * 40, "--session-id", "session-1",
+    ]
+    for name in ("subscription", "resource-group", "app", "revision", "replica", "container"):
+        args.extend(["--" + name, "synthetic"])
+    assert wrapper.main(args) == 1
+    assert len(calls) == 1
+    assert calls[0]["timeout"] == 80
+    assert calls[0]["setup_timeout"] == 30
+    assert calls[0]["total_timeout"] == 110
+    assert calls[0]["input_line"].endswith("\nEND")
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "failed", "reason": "exec_setup_timeout", "invocationAllowanceConsumed": True,
+    }
 
 
 def test_plan_only_and_prod_rejection(modules, capsys):

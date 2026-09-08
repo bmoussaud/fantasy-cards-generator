@@ -92,8 +92,19 @@ model text or tokens. A timeout consumes the invocation allowance; never retry.
 Large invocation payloads are sent in lines of at most 1024 characters and
 reconstructed in memory to respect canonical terminal limits.
 `invocation_verified` can mean a validated `held` or `refused` result, not card
-generation success; inspect `outcome`. The remote deadline is 70 seconds and the
-local PTY deadline is 75 seconds.
+generation success; inspect `outcome`. Invocation mode allows 30 seconds from CLI
+launch for connection, terminal settling and complete payload delivery, followed
+by 80 seconds for a result, with a hard 110-second local transport cap. The result
+budget covers up to 5 seconds of remote parser imports after input, the unchanged
+70-second remote probe deadline (65-second request timeout), and 5 seconds for
+emission/transport. The pre-input remote alarm remains 75 seconds; after input it
+is reset to 5 seconds until the probe installs its 70-second alarm. PTY writes are
+nonblocking and remain within setup/total deadlines, including partial transfers.
+Repeated connection messages never retransmit the payload. Local failures are
+sanitized as `exec_setup_timeout`, `exec_timeout` (result), or `exec_total_timeout`;
+process termination/reaping has a separate bounded cleanup wait. Access-only mode
+retains its 75-second launch-to-result budget. These offline deadline corrections
+do not establish the cause of the live `exec_no_evidence` result or permit a retry.
 
 ```bash
 python -m pytest -q --noconftest tests/test_aca_identity_probe.py \
