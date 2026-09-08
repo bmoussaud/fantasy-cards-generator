@@ -89,9 +89,17 @@ def remote_command(endpoint, principal, invocation=None, *, prepare=False):
 
 def stdin_payload(payload, *, invocation=False, prepare=False):
     expression = payload.split(" ", 2)[2]
-    if not invocation and not prepare:
-        return "/app/.venv/bin/python -c __import__('signal').alarm(60);exec(input())", expression
     # ACA's terminal can be canonical: never send a source line beyond PC_MAX_CANON.
+    input_lines = (
+        "\n".join(expression[offset : offset + 1024] for offset in range(0, len(expression), 1024))
+        + "\nEND"
+    )
+    source_reader = "''.join(iter(input,'END'))"
+    if not invocation and not prepare:
+        return (
+            "/app/.venv/bin/python -c __import__('signal').alarm(60);" + f"exec({source_reader})",
+            input_lines,
+        )
     # Install a diagnostic handler before input/decompression or any application import.
     failure = initial_result(prepare)
     bootstrap = (
@@ -101,7 +109,7 @@ def stdin_payload(payload, *, invocation=False, prepare=False):
         "signal.alarm(30)\n"
         f"result={failure!r}\n"
         "try:\n"
-        " source=''.join(iter(input,'END'))\n"
+        f" source={source_reader}\n"
         " signal.alarm(70)\n"
         " exec(source)\n"
         "except TimeoutError:\n"
@@ -117,11 +125,7 @@ def stdin_payload(payload, *, invocation=False, prepare=False):
         "__import__('sys').dont_write_bytecode=True;"
         f"exec(__import__('zlib').decompress(__import__('base64').b64decode('{encoded}')))"
     )
-    return (
-        command,
-        "\n".join(expression[offset : offset + 1024] for offset in range(0, len(expression), 1024))
-        + "\nEND",
-    )
+    return command, input_lines
 
 
 def extract_result(output):

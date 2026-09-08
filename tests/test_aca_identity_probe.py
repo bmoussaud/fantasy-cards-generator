@@ -463,11 +463,14 @@ def test_execution_pins_target_and_bounds_remote_input_wait(modules, monkeypatch
 
     def execute(command, input_line):
         assert command[command.index("--command") + 1] == (
-            "/app/.venv/bin/python -c __import__('signal').alarm(60);exec(input())"
+            "/app/.venv/bin/python -c __import__('signal').alarm(60);"
+            "exec(''.join(iter(input,'END')))"
         )
         assert command[command.index("--replica") + 1] == "synthetic"
         assert command[command.index("--revision") + 1] == "synthetic"
         assert input_line.startswith("__import__('sys').dont_write_bytecode=True;exec(")
+        assert input_line.endswith("\nEND")
+        assert max(map(len, input_line.splitlines())) <= 1024
         return {"status": "failed", "reason": "exec_no_evidence"}
 
     monkeypatch.setattr(wrapper, "execute", execute)
@@ -642,7 +645,31 @@ def test_http_200_without_card_is_not_success(modules, monkeypatch):
         wrapper.remote_command(ENDPOINT, PRINCIPAL, ("1", "not-a-sha", "session-1"))
 
 
-def test_large_invocation_payload_survives_canonical_terminal(modules):
+def test_access_only_real_payload_survives_canonical_terminal(modules, monkeypatch):
+    payload, wrapper = modules
+    monkeypatch.delenv("IDENTITY_ENDPOINT")
+    monkeypatch.delenv("IDENTITY_HEADER")
+    command = wrapper.remote_command(ENDPOINT, PRINCIPAL)
+    assert len(command.split(" ", 2)[2].encode()) > 4096
+    startup, input_line = wrapper.stdin_payload(command)
+    program = (
+        "import sys,termios\n"
+        "assert termios.tcgetattr(0)[3] & termios.ICANON\n"
+        "def forbid_network(event,args):\n"
+        " if event.startswith('socket.'): raise AssertionError('network forbidden')\n"
+        "sys.addaudithook(forbid_network)\n"
+        "print('INFO: Successfully connected to container:',flush=True)\n"
+        + startup.split(" ", 2)[2]
+    )
+    result = wrapper.execute([sys.executable, "-c", program], input_line=input_line)
+    assert result == {**payload.initial_result(), "reason": "aca_identity_unavailable"}
+    assert max(map(len, input_line.splitlines())) <= 1024
+
+
+@pytest.mark.parametrize(
+    "mode", [{}, {"invocation": True}, {"prepare": True}], ids=["access", "invocation", "prepare"]
+)
+def test_large_payload_survives_canonical_terminal(modules, mode):
     payload, wrapper = modules
     result = payload.probe(ENDPOINT, PRINCIPAL, Credential().factory, Opener())
     expression = (
@@ -651,15 +678,39 @@ def test_large_invocation_payload_survives_canonical_terminal(modules):
         + ";"
         + (f"print({payload.MARKER!r}+{json.dumps(result)!r},flush=True)")
     )
-    startup, input_line = wrapper.stdin_payload(
-        "/app/.venv/bin/python -c " + expression, invocation=True
-    )
+    startup, input_line = wrapper.stdin_payload("/app/.venv/bin/python -c " + expression, **mode)
     assert max(map(len, input_line.splitlines())) <= 1024
     program = (
         "print('INFO: Successfully connected to container:',flush=True);" + startup.split(" ", 2)[2]
     )
     # Deliberately keep canonical mode (unlike ACA's local CLI PTY test above).
     assert wrapper.execute([sys.executable, "-c", program], input_line=input_line) == result
+
+
+@pytest.mark.parametrize(
+    "failure,returncode",
+    [
+        ("signal.raise_signal(signal.SIGALRM)", -signal.SIGALRM),
+        ("raise ValueError('synthetic')", 1),
+    ],
+)
+def test_access_only_bootstrap_preserves_alarm_and_uncaught_errors(modules, failure, returncode):
+    _, wrapper = modules
+    expression = (
+        "import signal;"
+        "assert 0 < signal.getitimer(signal.ITIMER_REAL)[0] <= 60;"
+        "assert signal.getsignal(signal.SIGALRM) == signal.SIG_DFL;" + failure
+    )
+    startup, input_line = wrapper.stdin_payload("/app/.venv/bin/python -c " + expression)
+    result = subprocess.run(
+        [sys.executable, "-c", startup.split(" ", 2)[2]],
+        input=input_line + "\n",
+        text=True,
+        capture_output=True,
+        timeout=5,
+    )
+    assert result.returncode == returncode
+    assert result.stdout == ""
 
 
 def test_preparation_checks_real_schema_and_local_fixture_but_only_gets(modules, monkeypatch):
