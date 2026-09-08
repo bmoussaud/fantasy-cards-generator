@@ -60,6 +60,14 @@ App remained healthy (`Succeeded`/`Running`, latest == latest-ready), endpoint
 absent, original principal `946d8701-48f2-4fa5-8efd-bf053c7b4e4c`. This is
 blocked-baseline evidence, **not an approved application fingerprint**.
 
+### Independent review
+
+Samwise's actual read-only `code-review` task inspected the whole PR against
+`origin/main` at `4f4293a307ad8deba003f4b9cd21b890a2263ea8` and returned:
+**APPROVE — code only; no significant issues found.** This is explicitly **not
+approval to apply**: the required `Modify` gate is unsatisfied and Azure
+resource-input guard evaluation remains unproven. No application followed.
+
 ## Proof boundaries and operator path
 
 ```bash
