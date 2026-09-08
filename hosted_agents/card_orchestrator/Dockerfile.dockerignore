@@ -1,0 +1,33 @@
+# Allowlist the repository-root context; never send azd state or credentials.
+**
+!pyproject.toml
+!uv.lock
+!README.md
+!app/
+app/**
+!app/**/*.py
+!hosted_agents/
+hosted_agents/**
+!hosted_agents/**/*.py
+!hosted_agents/card_orchestrator/Dockerfile
+!hosted_agents/card_orchestrator/Dockerfile.dockerignore
+
+# Defense in depth even within allowlisted source directories.
+**/.env
+**/.env.*
+**/.azure
+**/.azure/**
+**/.git
+**/.git/**
+**/.squad
+**/.squad/**
+**/.foundry
+**/.foundry/**
+**/.venv
+**/.venv/**
+**/__pycache__
+**/__pycache__/**
+**/credentials/
+**/credentials/**
+**/*.pem
+**/*.key

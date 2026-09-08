@@ -220,6 +220,7 @@ def test_successful_invocation_uses_documented_wire_contract() -> None:
     )
     assert captured["authorization"] == "Bearer fake-token"
     assert captured["body"]["store"] is False
+    assert captured["body"]["stream"] is False
     assert "tools" not in captured["body"]
     assert "user" not in captured["body"]
     assert "safety_identifier" not in captured["body"]
