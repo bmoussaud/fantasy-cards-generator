@@ -74,6 +74,15 @@ azd env set LEGACY_COSMOS_IP_RULE 20.10.253.231
 azd up
 ```
 
+The text deployment capacity default is environment-specific: dev uses 10
+`GlobalStandard` capacity units, while prod remains at 1 until separately
+reviewed. For a dev-only repair that must not reprovision the application or
+other shared resources, preview and deploy
+[`text-model-capacity.bicep`](./text-model-capacity.bicep) at resource-group
+scope. The leaf updates only the existing text deployment and pins its current
+model, version, SKU, Responsible AI policy, and version-upgrade policy. Always
+run `what-if` and hand the result to a reviewer before applying it.
+
 Root `infra/main.bicep` resolves `deployer().objectId` once from the ARM
 deployment context and passes that Microsoft Entra object ID to the data and
 Foundry modules **and** to the Key Vault security module. That same derived

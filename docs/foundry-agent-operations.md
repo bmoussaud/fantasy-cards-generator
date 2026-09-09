@@ -1,5 +1,66 @@
 # Card-orchestrator operations
 
+## Dev model-capacity correction — review handoff, not applied
+
+Safe management-plane inspection after the classified HTTP 429 found the exact
+dev deployment `gpt-5-5` healthy but allocated only **1 capacity unit**:
+`GlobalStandard`, `gpt-5.5` `2026-04-24`, `Microsoft.DefaultV2`,
+`OnceNewDefaultVersionAvailable`, with reported limits of **1 RPM** and **1,000
+TPM**. The East US 2 regional quota record reports **1 of 1,000 capacity units
+allocated** for `OpenAI.GlobalStandard.gpt-5.5`; this is deployment allocation,
+not actual token consumption. The account has only this text deployment and the
+existing `gpt-image-2` deployment.
+
+One orchestration performs three sequential model requests inside 65 seconds,
+each configured with `max_output_tokens=1800`. Repository field bounds produce
+7,762 bounded input characters across the three request payloads, instructions,
+and duplicated strict schemas before framework overhead. The output reservation
+alone is 5,400 tokens. Azure documents that throttling admission estimates
+prompt characters plus the configured maximum output tokens, and RPM expects
+requests to be evenly distributed. Therefore 1 RPM/1K TPM is structurally
+insufficient; this is discriminating evidence for capacity correction rather
+than another identical E2E.
+
+The proposed dev allocation is **10 units = 10 RPM / 10K TPM**. Ten is the live
+catalog default for this exact model/SKU, permits the three sequential calls,
+and leaves roughly 20% headroom over an approximately 8K-token bounded
+reservation estimate without consuming the 1,000-unit regional allowance. Prod
+remains at 1. No PTU, model, region, deployment, RAI, upgrade-policy, RBAC,
+network, hosted runtime, or application change is proposed.
+
+Source changes persist the dev default in `infra/main.bicep`, explicitly pin the
+existing text deployment RAI and upgrade policies, and add the dev-only
+`infra/text-model-capacity.bicep` leaf so a reviewer can update only this model
+deployment without root provisioning. Bicep compilation and the deployment
+configuration tests passed. The live ARM `what-if` succeeded and reported one
+`Modify`: `sku.capacity` from 1 to 10 on `gpt-5-5`; its only other delta was
+deletion of read-only `properties.currentCapacity` from the request shape.
+Every unrelated resource was `Ignore`. A root `azd provision --preview` was not
+used because this clean worktree has no local azd environment and the dedicated
+leaf intentionally bypasses root provisioning; the management-plane `what-if`
+is the applicable real-ARM preview. The reviewed apply sequence is:
+
+```bash
+az deployment group what-if \
+  --resource-group rg-fcag-dev \
+  --template-file infra/text-model-capacity.bicep \
+  --parameters environmentName=dev accountName=aifcagdevqhg3qc4rlbt4g
+
+# REVIEW GATE: do not run before approval of the what-if.
+az deployment group create \
+  --resource-group rg-fcag-dev \
+  --template-file infra/text-model-capacity.bicep \
+  --parameters environmentName=dev accountName=aifcagdevqhg3qc4rlbt4g
+```
+
+The existing Application Insights component showed no 429 dependency row and no
+exception row during `08:45:30Z`–`08:46:20Z`; its safe aggregate counters were
+43 successful result-code-0 dependencies, 22 successful HTTP-200 dependencies,
+and 7 successful HTTP-200 requests. This does not contradict the typed hosted
+runtime failure because that provider call is not exported as an App Insights
+429 dependency. No raw prompt, response body, token, secret, or `.env` value was
+read or recorded. **No Azure change has been applied and no repeat E2E has run.**
+
 ## Exact classified runtime failure — 2026-09-09
 
 Working as Gimli (DevOps / Infra), exact Samwise-approved source

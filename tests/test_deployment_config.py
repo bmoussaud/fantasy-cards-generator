@@ -234,6 +234,42 @@ def test_foundry_project_endpoint_and_agent_access_gate_are_iac_managed() -> Non
     assert "Foundry Agent" in readme and "Consumer" in readme
 
 
+def test_dev_text_model_capacity_is_persisted_and_has_a_targeted_leaf() -> None:
+    main_bicep = (REPO_ROOT / "infra" / "main.bicep").read_text()
+    foundry_bicep = (REPO_ROOT / "infra" / "modules" / "ai-foundry.bicep").read_text()
+    capacity_leaf = (REPO_ROOT / "infra" / "text-model-capacity.bicep").read_text()
+    foundry_module = _bicep_block(main_bicep, "module aiFoundry './modules/ai-foundry.bicep'")
+    text_deployment = _bicep_block(foundry_bicep, "resource textModelDeployment")
+
+    assert (
+        "param aiFoundryTextDeploymentCapacity int = environmentName == 'dev' ? 10 : 1"
+        in main_bicep
+    )
+    assert "textDeploymentCapacity: aiFoundryTextDeploymentCapacity" in foundry_module
+    assert "textDeploymentRaiPolicyName: aiFoundryTextDeploymentRaiPolicyName" in foundry_module
+    assert (
+        "textDeploymentVersionUpgradeOption: "
+        "aiFoundryTextDeploymentVersionUpgradeOption" in foundry_module
+    )
+    assert "raiPolicyName: textDeploymentRaiPolicyName" in text_deployment
+    assert "versionUpgradeOption: textDeploymentVersionUpgradeOption" in text_deployment
+
+    assert "@allowed([\n  'dev'\n])" in capacity_leaf
+    assert "param capacity int = 10" in capacity_leaf
+    assert "resource foundryAccount" in capacity_leaf and "existing = {" in capacity_leaf
+    assert capacity_leaf.count("Microsoft.CognitiveServices/accounts/deployments") == 1
+    assert "name: 'gpt-5-5'" not in capacity_leaf
+    assert "param deploymentName string = 'gpt-5-5'" in capacity_leaf
+    assert "param skuName string = 'GlobalStandard'" in capacity_leaf
+    assert "param modelName string = 'gpt-5.5'" in capacity_leaf
+    assert "param modelVersion string = '2026-04-24'" in capacity_leaf
+    assert "param raiPolicyName string = 'Microsoft.DefaultV2'" in capacity_leaf
+    assert (
+        "param versionUpgradeOption string = 'OnceNewDefaultVersionAvailable'"
+        in capacity_leaf
+    )
+
+
 def test_deployer_gets_foundry_user_at_project_scope() -> None:
     main_bicep = (REPO_ROOT / "infra" / "main.bicep").read_text()
     main_parameters = json.loads((REPO_ROOT / "infra" / "main.parameters.json").read_text())
