@@ -54,6 +54,7 @@ class AppSettings:
     foundry_agent_api_version: str
     foundry_agent_expected_version: str | None
     foundry_agent_timeout_seconds: float
+    agent_generation_enabled: bool
     cosmos_endpoint: str | None
     cosmos_database_name: str | None
     cosmos_container_name: str | None
@@ -152,6 +153,7 @@ def load_app_settings() -> AppSettings:
             default=5.0,
             minimum=0.1,
         ),
+        agent_generation_enabled=_bool_env("AGENT_GENERATION_ENABLED", default=False),
         cosmos_endpoint=_optional_env("COSMOS_ENDPOINT"),
         cosmos_database_name=_optional_env("COSMOS_DATABASE_NAME"),
         cosmos_container_name=_optional_env("COSMOS_CONTAINER_NAME"),
@@ -283,6 +285,16 @@ def _validate_app_settings(settings: AppSettings) -> None:
         _require(
             settings.foundry_image_deployment,
             "FOUNDRY_IMAGE_DEPLOYMENT must be set when AI_MODE=live.",
+        )
+
+    if settings.agent_generation_enabled:
+        _require(
+            settings.foundry_project_endpoint,
+            "FOUNDRY_PROJECT_ENDPOINT must be set when AGENT_GENERATION_ENABLED=true.",
+        )
+        _require(
+            settings.foundry_agent_name,
+            "FOUNDRY_AGENT_NAME must be set when AGENT_GENERATION_ENABLED=true.",
         )
 
     if settings.retry.overall_timeout_seconds <= settings.retry.text_timeout_seconds:

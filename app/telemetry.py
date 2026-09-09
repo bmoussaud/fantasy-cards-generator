@@ -165,6 +165,7 @@ SAFE_ATTRIBUTE_KEYS = {
     "fcg.token_type",
     "fcg.duration_ms",
     "fcg.agent_version",
+    "fcg.generation_path",
     "http.route",
     "http.response.status_code",
 }
