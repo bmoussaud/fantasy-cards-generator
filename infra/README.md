@@ -80,8 +80,15 @@ reviewed. For a dev-only repair that must not reprovision the application or
 other shared resources, preview and deploy
 [`text-model-capacity.bicep`](./text-model-capacity.bicep) at resource-group
 scope. The leaf updates only the existing text deployment and pins its current
-model, version, SKU, Responsible AI policy, and version-upgrade policy. Always
-run `what-if` and hand the result to a reviewer before applying it.
+model, version, SKU, Responsible AI policy, and version-upgrade policy. It has
+no target parameters: a deployment-time `fail()` guard requires the exact dev
+subscription, `rg-fcag-dev`, and ARM deployment name
+`dev-text-model-capacity-10`; the Foundry account and `gpt-5-5` deployment are
+hard-bound in the template. A production or arbitrary resource-group target
+fails before the resource update. Always run ARM `validate` and `what-if`, then
+hand the result to a reviewer before applying it. The exact command sequence is
+documented in
+[`../docs/foundry-agent-operations.md`](../docs/foundry-agent-operations.md).
 
 Root `infra/main.bicep` resolves `deployer().objectId` once from the ARM
 deployment context and passes that Microsoft Entra object ID to the data and

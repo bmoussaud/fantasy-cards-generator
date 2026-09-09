@@ -1,5 +1,8 @@
 import json
+import subprocess
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -18,6 +21,16 @@ def _bicep_block(source: str, declaration: str) -> str:
                 return source[declaration_start : index + 1]
 
     raise AssertionError(f"Unclosed Bicep block: {declaration}")
+
+
+def _compile_bicep(path: Path) -> dict:
+    result = subprocess.run(
+        ["az", "bicep", "build", "--file", str(path), "--stdout"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(result.stdout)
 
 
 def test_dockerfile_serves_fastapi_on_port_8000() -> None:
@@ -253,21 +266,110 @@ def test_dev_text_model_capacity_is_persisted_and_has_a_targeted_leaf() -> None:
     )
     assert "raiPolicyName: textDeploymentRaiPolicyName" in text_deployment
     assert "versionUpgradeOption: textDeploymentVersionUpgradeOption" in text_deployment
-
-    assert "@allowed([\n  'dev'\n])" in capacity_leaf
-    assert "param capacity int = 10" in capacity_leaf
+    assert "param " not in capacity_leaf
+    assert "var targetIsExactDev" in capacity_leaf
+    assert ": fail('Refusing model-capacity update:" in capacity_leaf
     assert "resource foundryAccount" in capacity_leaf and "existing = {" in capacity_leaf
     assert capacity_leaf.count("Microsoft.CognitiveServices/accounts/deployments") == 1
-    assert "name: 'gpt-5-5'" not in capacity_leaf
-    assert "param deploymentName string = 'gpt-5-5'" in capacity_leaf
-    assert "param skuName string = 'GlobalStandard'" in capacity_leaf
-    assert "param modelName string = 'gpt-5.5'" in capacity_leaf
-    assert "param modelVersion string = '2026-04-24'" in capacity_leaf
-    assert "param raiPolicyName string = 'Microsoft.DefaultV2'" in capacity_leaf
-    assert (
-        "param versionUpgradeOption string = 'OnceNewDefaultVersionAvailable'"
-        in capacity_leaf
+    assert "var textDeploymentName = 'gpt-5-5'" in capacity_leaf
+    assert "capacity: 10" in capacity_leaf
+    assert "name: 'GlobalStandard'" in capacity_leaf
+    assert "name: 'gpt-5.5'" in capacity_leaf
+    assert "version: '2026-04-24'" in capacity_leaf
+    assert "raiPolicyName: 'Microsoft.DefaultV2'" in capacity_leaf
+    assert "versionUpgradeOption: 'OnceNewDefaultVersionAvailable'" in capacity_leaf
+
+
+def test_dev_text_model_capacity_compiles_to_exact_fail_closed_target() -> None:
+    compiled = _compile_bicep(REPO_ROOT / "infra" / "text-model-capacity.bicep")
+
+    assert "parameters" not in compiled
+    variables = compiled["variables"]
+    assert variables["devArmDeploymentName"] == "dev-text-model-capacity-10"
+    assert variables["devFoundryAccountName"] == "aifcagdevqhg3qc4rlbt4g"
+    assert variables["devResourceGroupName"] == "rg-fcag-dev"
+    assert variables["devSubscriptionId"] == "b8ff3e15-7e2d-4fac-a773-992fb59ccedd"
+    assert variables["textDeploymentName"] == "gpt-5-5"
+    assert variables["subscriptionIsExactDev"] == (
+        "[equals(subscription().subscriptionId, variables('devSubscriptionId'))]"
     )
+    assert variables["resourceGroupIsExactDev"] == (
+        "[equals(resourceGroup().name, variables('devResourceGroupName'))]"
+    )
+    assert variables["armDeploymentNameIsExact"] == (
+        "[equals(deployment().name, variables('devArmDeploymentName'))]"
+    )
+    assert variables["targetIsExactDev"] == (
+        "[and(and(variables('subscriptionIsExactDev'), "
+        "variables('resourceGroupIsExactDev')), "
+        "variables('armDeploymentNameIsExact'))]"
+    )
+    assert variables["validatedTarget"] == (
+        "[if(variables('targetIsExactDev'), "
+        "createObject('accountName', variables('devFoundryAccountName'), "
+        "'deploymentName', variables('textDeploymentName')), "
+        "fail('Refusing model-capacity update: target must be the exact "
+        "approved dev subscription, resource group, and ARM deployment name.'))]"
+    )
+
+    deployment = compiled["resources"][0]
+    assert deployment["name"] == (
+        "[format('{0}/{1}', variables('validatedTarget').accountName, "
+        "variables('validatedTarget').deploymentName)]"
+    )
+    assert deployment["sku"] == {"capacity": 10, "name": "GlobalStandard"}
+    assert deployment["properties"] == {
+        "model": {
+            "format": "OpenAI",
+            "name": "gpt-5.5",
+            "version": "2026-04-24",
+        },
+        "raiPolicyName": "Microsoft.DefaultV2",
+        "versionUpgradeOption": "OnceNewDefaultVersionAvailable",
+    }
+
+    expected_dev_context = {
+        "subscriptionId": variables["devSubscriptionId"],
+        "resourceGroupName": variables["devResourceGroupName"],
+        "armDeploymentName": variables["devArmDeploymentName"],
+        "accountName": variables["devFoundryAccountName"],
+    }
+
+    def resolve_compiled_target(context: dict[str, str]) -> tuple[str, str]:
+        guarded_context = {
+            "subscriptionId": context["subscriptionId"],
+            "resourceGroupName": context["resourceGroupName"],
+            "armDeploymentName": context["armDeploymentName"],
+        }
+        expected_guarded_context = {
+            "subscriptionId": expected_dev_context["subscriptionId"],
+            "resourceGroupName": expected_dev_context["resourceGroupName"],
+            "armDeploymentName": expected_dev_context["armDeploymentName"],
+        }
+        if guarded_context != expected_guarded_context:
+            raise ValueError("fail() rejects a non-dev deployment context")
+        if context["accountName"] != expected_dev_context["accountName"]:
+            raise ValueError("the compiled template exposes no account override")
+        return (
+            variables["devFoundryAccountName"],
+            variables["textDeploymentName"],
+        )
+
+    assert resolve_compiled_target(expected_dev_context) == (
+        "aifcagdevqhg3qc4rlbt4g",
+        "gpt-5-5",
+    )
+    for field, production_like_value in (
+        ("subscriptionId", "00000000-0000-0000-0000-000000000000"),
+        ("resourceGroupName", "rg-fcag-prod"),
+        ("armDeploymentName", "prod-text-model-capacity-10"),
+        ("accountName", "aifcagprod000000000000"),
+    ):
+        production_like_context = expected_dev_context | {
+            field: production_like_value
+        }
+        with pytest.raises(ValueError):
+            resolve_compiled_target(production_like_context)
 
 
 def test_deployer_gets_foundry_user_at_project_scope() -> None:

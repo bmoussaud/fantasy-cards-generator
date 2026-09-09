@@ -31,26 +31,43 @@ network, hosted runtime, or application change is proposed.
 Source changes persist the dev default in `infra/main.bicep`, explicitly pin the
 existing text deployment RAI and upgrade policies, and add the dev-only
 `infra/text-model-capacity.bicep` leaf so a reviewer can update only this model
-deployment without root provisioning. Bicep compilation and the deployment
-configuration tests passed. The live ARM `what-if` succeeded and reported one
-`Modify`: `sku.capacity` from 1 to 10 on `gpt-5-5`; its only other delta was
-deletion of read-only `properties.currentCapacity` from the request shape.
-Every unrelated resource was `Ignore`. A root `azd provision --preview` was not
-used because this clean worktree has no local azd environment and the dedicated
-leaf intentionally bypasses root provisioning; the management-plane `what-if`
-is the applicable real-ARM preview. The reviewed apply sequence is:
+deployment without root provisioning. The leaf accepts no target parameters.
+Its deployment-time `fail()` guard requires the exact dev subscription,
+`rg-fcag-dev`, and ARM deployment name `dev-text-model-capacity-10`; the
+Foundry account `aifcagdevqhg3qc4rlbt4g` and model deployment `gpt-5-5` are
+hard-bound in the compiled resource ID. A production-like subscription,
+resource group, deployment operation name, or account therefore cannot be
+substituted while retaining a valid template deployment.
+
+Bicep compilation and the deployment configuration tests passed. ARM
+validation succeeded for the exact guarded dev target and failed for an
+existing arbitrary resource group and for a production-like ARM deployment
+name; ARM also rejected a production-like `accountName` override because the
+template exposes no such parameter. The fail-closed template's live ARM
+`what-if` succeeded and reported one `Modify`: `sku.capacity` from 1 to 10 on
+`gpt-5-5`; its only other delta was deletion of read-only
+`properties.currentCapacity` from the request shape. Every unrelated resource
+was `Ignore`. A root `azd provision --preview` was not used because this clean
+worktree has no local azd environment and the dedicated leaf intentionally
+bypasses root provisioning; the management-plane validation and `what-if` are
+the applicable real-ARM gates. The reviewed apply sequence is:
 
 ```bash
-az deployment group what-if \
+az deployment group validate \
+  --name dev-text-model-capacity-10 \
   --resource-group rg-fcag-dev \
-  --template-file infra/text-model-capacity.bicep \
-  --parameters environmentName=dev accountName=aifcagdevqhg3qc4rlbt4g
+  --template-file infra/text-model-capacity.bicep
+
+az deployment group what-if \
+  --name dev-text-model-capacity-10 \
+  --resource-group rg-fcag-dev \
+  --template-file infra/text-model-capacity.bicep
 
 # REVIEW GATE: do not run before approval of the what-if.
 az deployment group create \
+  --name dev-text-model-capacity-10 \
   --resource-group rg-fcag-dev \
-  --template-file infra/text-model-capacity.bicep \
-  --parameters environmentName=dev accountName=aifcagdevqhg3qc4rlbt4g
+  --template-file infra/text-model-capacity.bicep
 ```
 
 The existing Application Insights component showed no 429 dependency row and no
