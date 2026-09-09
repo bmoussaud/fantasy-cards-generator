@@ -3,6 +3,43 @@
 Refs #109; PR #121 merged at `0cf7acc`. Application requires independent execution
 review, a fresh fingerprint, and successful real resource-free guard diagnostics.
 
+## Latest application outcome — blocked by ARM circular dependency
+
+At reviewed executable HEAD `836dc8c7365734b04283b219ea5092b94c3ac104`,
+Samwise independently returned **APPROVE execution under gates**, with no
+significant issues found in the full PR. The authorized command was executed:
+
+```bash
+python deployments/dev-endpoint/persist_endpoint.py --apply \
+  --expect-fingerprint ea77f0bf259648a25fd2171f61ab2354c1989f9301ae6d2984c187cf15e0b3de
+```
+
+Its fresh real preview returned exact-app `Deploy` plus 40 `Ignore`; resource-free
+valid/invalid guard diagnostics again succeeded with **true/false** respectively.
+The application deployment request then failed. A subsequent **non-mutating**
+deployment validation reproduced allowlisted `InvalidTemplate` with the fixed
+`circular` error-message flag. No raw errors or secret values were exported.
+Despite no explicit compiled `dependsOn`, Azure detects a circular dependency
+in the actual self-listing app deployment. Resource-free predicate success
+does not establish that the resource-bearing deployment graph is valid.
+
+Immediate postfailure GET matched the entire original fingerprint exactly.
+Endpoint remains **absent**, latest and latest-ready are both
+`fcag-dev-app--azd-1788775203`, the original principal matches, and `/healthz`
+returned HTTP 200. Thus no endpoint rollback or blind application retry was
+performed; no live E2E/model invocation occurred. The unchanged full fingerprint
+also covers the original image, public FQDN and all GET-visible metadata.
+Native secret values were never operator-read or byte-compared.
+
+**Required coordinator follow-up:** revise the ARM deployment graph so Azure-side
+secret evaluation is outside the app's own resource evaluation dependency cycle,
+while retaining secure transport, exact guarded same-app pass-through and
+zero secret outputs. A separate deployment evaluation boundary is a candidate,
+not a validated fix. Recompile, independently review that changed executable
+contract, prove the resource-bearing validation succeeds, and repeat all gates
+before another authorized application attempt. Do not remove the guard or
+request full-payload what-if to bypass this provider failure.
+
 ## Revised secret preservation contract
 
 The old name-only PUT failed `ContainerAppSecretInvalid`; omitting native
@@ -21,7 +58,9 @@ future provider fields cannot be promised preserved. A mismatched inventory
 selects a deliberately invalid JSON expression containing only a constant
 marker and a zero-length resource-group-ID slice. It is evaluated in
 `resource.properties`, **before the app PUT**, never in a deployment output.
-The literal resource-ID lookup does not add a self-dependency. There are no
+The literal resource-ID lookup produces no explicit compiled dependency, but
+the real resource-bearing ARM validation detects a circular dependency (above).
+There are no
 outputs in the app template, deployment scripts, native-secret parameters, or
 local secret-value files.
 
