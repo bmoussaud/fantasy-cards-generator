@@ -50,6 +50,15 @@
     "enableFoundryAgentAccess": {
       "value": "${ENABLE_FOUNDRY_AGENT_ACCESS=false}"
     },
+    "foundryAgentName": {
+      "value": "${FOUNDRY_AGENT_NAME=}"
+    },
+    "foundryAgentExpectedVersion": {
+      "value": "${FOUNDRY_AGENT_EXPECTED_VERSION=}"
+    },
+    "agentGenerationEnabled": {
+      "value": "${AGENT_GENERATION_ENABLED=false}"
+    },
     "contentSafetyEndpoint": {
       "value": "${CONTENT_SAFETY_ENDPOINT=}"
     },
