@@ -13,6 +13,7 @@ import pytest
 pytest.importorskip("azure.ai.agentserver.responses")
 pytest.importorskip("agent_framework.foundry")
 
+from app import telemetry  # noqa: E402
 from app.foundry_agent_client import (  # noqa: E402
     FoundryAgentClient,
     GenerateCardAgentRequest,
@@ -88,6 +89,37 @@ def runtime(fake=None, **kwargs):
     return CardOrchestrator(settings(), specialist_factory=fake.factory, **kwargs), fake
 
 
+class CapturingInstrument:
+    def __init__(self):
+        self.measurements = []
+
+    def add(self, value, *, attributes):
+        self.measurements.append((value, attributes))
+
+    def record(self, value, *, attributes):
+        self.measurements.append((value, attributes))
+
+
+@pytest.fixture
+def hosted_metrics(monkeypatch):
+    monkeypatch.setattr(telemetry, "_enabled", True)
+    monkeypatch.setattr(telemetry, "_tracer", None)
+    instruments = {}
+    for name in (
+        "_generation_counter",
+        "_generation_duration",
+        "_dependency_counter",
+        "_dependency_duration",
+        "_dependency_throttle_counter",
+        "_dependency_timeout_counter",
+        "_moderation_counter",
+    ):
+        instrument = CapturingInstrument()
+        monkeypatch.setattr(telemetry, name, instrument)
+        instruments[name] = instrument
+    return instruments
+
+
 def wire(query="A mountain drake"):
     return {
         "store": False,
@@ -133,6 +165,157 @@ def test_sequential_validation_and_mechanics_invariant():
     assert evidence[-2]["decision"] == "unavailable"
     assert evidence[-1]["decision"] == "not_applicable"
     assert all(e["decision"] == "allowed" for e in evidence[:-2])
+
+
+def test_success_emits_one_request_three_dependencies_and_five_moderation_decisions(
+    hosted_metrics,
+):
+    orchestrator, _ = runtime()
+    result = asyncio.run(
+        orchestrator.generate(
+            GenerateCardAgentRequest(query="drake"),
+            hosted_version="42",
+        )
+    )
+
+    assert result.status == "completed"
+    assert hosted_metrics["_generation_counter"].measurements == [
+        (
+            1,
+            {
+                "fcg.operation": "generate",
+                "fcg.outcome": "completed",
+                "fcg.agent_version": "42",
+            },
+        )
+    ]
+    dependencies = hosted_metrics["_dependency_counter"].measurements
+    assert len(dependencies) == 3
+    assert [attributes["fcg.stage"] for _, attributes in dependencies] == [
+        "concept",
+        "lore",
+        "art_direction",
+    ]
+    assert all(
+        attributes
+        == {
+            "fcg.dependency": "foundry_text",
+            "fcg.attempt": "first",
+            "fcg.outcome": "completed",
+            "fcg.error_code": "none",
+            "fcg.retryable": False,
+            "fcg.stage": attributes["fcg.stage"],
+            "fcg.agent_version": "42",
+        }
+        for _, attributes in dependencies
+    )
+    moderation = hosted_metrics["_moderation_counter"].measurements
+    assert len(moderation) == 5
+    assert [attributes["fcg.stage"] for _, attributes in moderation] == [
+        "pre_prompt",
+        "concept",
+        "lore",
+        "final_text",
+        "final_art_prompt",
+    ]
+    assert all(attributes["fcg.agent_version"] == "42" for _, attributes in moderation)
+
+
+@pytest.mark.parametrize(
+    "outputs,expected_status,expected_dependency_outcome",
+    [
+        ([SpecialistResult("held", reason="model_incomplete")], "held", "failed"),
+        ([SpecialistResult("refused", reason="model_refusal")], "refused", "blocked"),
+    ],
+)
+def test_held_and_refused_paths_emit_bounded_outcomes_once(
+    hosted_metrics,
+    outputs,
+    expected_status,
+    expected_dependency_outcome,
+):
+    orchestrator, _ = runtime(FakeSpecialists(outputs))
+    result = asyncio.run(
+        orchestrator.generate(
+            GenerateCardAgentRequest(query="drake"),
+            hosted_version="43",
+        )
+    )
+
+    assert result.status == expected_status
+    assert hosted_metrics["_generation_counter"].measurements[0][1] == {
+        "fcg.operation": "generate",
+        "fcg.outcome": expected_status,
+        "fcg.agent_version": "43",
+    }
+    assert (
+        hosted_metrics["_dependency_counter"].measurements[0][1]["fcg.outcome"]
+        == expected_dependency_outcome
+    )
+    assert len(hosted_metrics["_generation_counter"].measurements) == 1
+    assert len(hosted_metrics["_dependency_counter"].measurements) == 1
+
+
+def test_rate_limited_dependency_emits_throttle_and_failed_request_once(hosted_metrics):
+    failure = RuntimeFailure(
+        RuntimeFailureStage.CONCEPT,
+        RuntimeFailureReason.RATE_LIMITED,
+        RuntimeFailureHttpType.RATE_LIMIT,
+        RuntimeFailureHttpStatus.HTTP_429,
+    )
+    orchestrator, _ = runtime(FakeSpecialists([failure]))
+
+    with pytest.raises(RuntimeFailure):
+        asyncio.run(
+            orchestrator.generate(
+                GenerateCardAgentRequest(query="drake"),
+                hosted_version="44",
+            )
+        )
+
+    assert hosted_metrics["_generation_counter"].measurements[0][1] == {
+        "fcg.operation": "generate",
+        "fcg.outcome": "throttled",
+        "fcg.agent_version": "44",
+    }
+    assert hosted_metrics["_dependency_counter"].measurements[0][1] == {
+        "fcg.dependency": "foundry_text",
+        "fcg.attempt": "first",
+        "fcg.outcome": "throttled",
+        "fcg.error_code": "rate_limited",
+        "fcg.retryable": False,
+        "fcg.stage": "concept",
+        "fcg.agent_version": "44",
+    }
+    assert hosted_metrics["_dependency_throttle_counter"].measurements == [
+        (1, {"fcg.dependency": "foundry_text"})
+    ]
+
+
+def test_blocked_moderation_emits_decision_without_dependency_attempt(hosted_metrics):
+    orchestrator, _ = runtime()
+    result = asyncio.run(
+        orchestrator.generate(
+            GenerateCardAgentRequest(query="copyrighted logo"),
+            hosted_version="45",
+        )
+    )
+
+    assert result.status == "refused"
+    assert hosted_metrics["_generation_counter"].measurements[0][1]["fcg.outcome"] == "refused"
+    assert hosted_metrics["_dependency_counter"].measurements == []
+    assert hosted_metrics["_moderation_counter"].measurements == [
+        (
+            1,
+            {
+                "fcg.stage": "pre_prompt",
+                "fcg.outcome": "blocked",
+                "fcg.moderation_reason": "copyrighted_logo",
+                "fcg.policy": "original_fantasy_v1",
+                "fcg.agent_version": "45",
+            },
+        )
+    ]
 
 
 @pytest.mark.parametrize("query", ["in the style of a living artist", "copyrighted logo"])

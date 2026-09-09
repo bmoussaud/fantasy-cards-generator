@@ -15,9 +15,11 @@ param agentServiceName string = 'card-orchestrator'
 param containerAppName string
 
 @description('Existing workspace-based Application Insights resource ID.')
+@minLength(1)
 param appInsightsResourceId string
 
 @description('Existing Log Analytics workspace resource ID.')
+@minLength(1)
 param logAnalyticsWorkspaceResourceId string
 
 @description('Master alert switch. Disabled by default; rules also require at least one configured receiver.')
@@ -41,8 +43,8 @@ param modelThrottleThreshold int = 3
 
 @minValue(1)
 @maxValue(100)
-@description('Minimum runtime exceptions per window to trigger the alert.')
-param exceptionThreshold int = 5
+@description('Minimum failed or timed-out model dependency attempts per window to trigger the alert.')
+param dependencyFailureThreshold int = 3
 
 @minValue(1)
 @maxValue(100)
@@ -55,6 +57,7 @@ param tags object = {}
 var resourceToken = 'fcg-agent-${environmentName}'
 var hasAlertRouting = length(actionGroupEmailReceivers) > 0 || length(actionGroupWebhookReceivers) > 0
 var alertsEnabled = enableAlerts && hasAlertRouting
+var appInsightsHiddenLinkTag = 'hidden-link:${appInsightsResourceId}'
 
 resource actionGroup 'Microsoft.Insights/actionGroups@2023-01-01' = {
   name: take('${resourceToken}-ag', 260)
@@ -105,12 +108,12 @@ var workbookData = {
             value: '*'
           }
           {
-            id: guid('workbook-agent-session', environmentName)
+            id: guid('workbook-agent-environment', environmentName)
             version: 'KqlParameterItem/1.0'
-            name: 'SessionId'
+            name: 'Environment'
             type: 1
-            isRequired: false
-            value: ''
+            isRequired: true
+            value: environmentName
           }
         ]
         style: 'pills'
@@ -128,9 +131,9 @@ var workbookData = {
 AppMetrics
 | where AppRoleName == '{AgentService}'
 | where Name == "fcg.generation.requests"
-| extend Outcome=tostring(Properties["fcg.outcome"])
-| where '{AgentVersion}' == '*' or tostring(Properties["fcg.agent_version"]) == '{AgentVersion}'
-| summarize Invocations=sum(Sum) by Outcome, bin(TimeGenerated, 1h)
+| extend Outcome=tostring(Properties["fcg.outcome"]), AgentVersion=tostring(Properties["fcg.agent_version"])
+| where '{AgentVersion}' == '*' or AgentVersion == '{AgentVersion}'
+| summarize Invocations=sum(Sum) by Outcome, AgentVersion, bin(TimeGenerated, 1h)
 | order by TimeGenerated asc
 '''
         size: 0
@@ -144,14 +147,15 @@ AppMetrics
       type: 3
       content: {
         version: 'KqlItem/1.0'
-        title: 'Stage latency and failures by orchestration stage'
+        title: 'Overall invocation latency by outcome and hosted version'
         query: '''
 AppMetrics
 | where AppRoleName == '{AgentService}'
 | where Name == "fcg.generation.duration"
-| extend Stage=tostring(Properties["fcg.stage"]), Outcome=tostring(Properties["fcg.outcome"])
-| summarize TotalMs=sum(Sum), Count=count() by Stage, Outcome, bin(TimeGenerated, 1h)
-| extend AvgMs=TotalMs / Count
+| extend Outcome=tostring(Properties["fcg.outcome"]), AgentVersion=tostring(Properties["fcg.agent_version"])
+| where '{AgentVersion}' == '*' or AgentVersion == '{AgentVersion}'
+| summarize TotalMs=sum(Sum), MeasurementCount=sum(ItemCount) by Outcome, AgentVersion, bin(TimeGenerated, 1h)
+| extend AvgMs=TotalMs / MeasurementCount
 | order by TimeGenerated asc
 '''
         size: 0
@@ -165,11 +169,15 @@ AppMetrics
       type: 3
       content: {
         version: 'KqlItem/1.0'
-        title: 'Model provider dependencies: calls, throttles (429), timeouts'
+        title: 'Model dependency latency and outcomes by bounded orchestration stage'
         query: '''
-AppDependencies
+AppMetrics
 | where AppRoleName == '{AgentService}'
-| summarize Calls=count(), Failures=countif(Success == false), Throttles=countif(ResultCode == "429"), p50=percentile(DurationMs, 50), p95=percentile(DurationMs, 95) by DependencyType, bin(TimeGenerated, 1h)
+| where Name == "fcg.dependency.duration"
+| extend Stage=tostring(Properties["fcg.stage"]), Provider=tostring(Properties["fcg.dependency"]), Outcome=tostring(Properties["fcg.outcome"]), AgentVersion=tostring(Properties["fcg.agent_version"])
+| where '{AgentVersion}' == '*' or AgentVersion == '{AgentVersion}'
+| summarize TotalMs=sum(Sum), AttemptCount=sum(ItemCount) by Stage, Provider, Outcome, AgentVersion, bin(TimeGenerated, 1h)
+| extend AvgMs=TotalMs / AttemptCount
 | order by TimeGenerated desc
 '''
         size: 0
@@ -205,8 +213,9 @@ union isfuzzy=true
 AppMetrics
 | where AppRoleName == '{AgentService}'
 | where Name == "fcg.moderation.decisions"
-| extend Stage=tostring(Properties["fcg.stage"]), Reason=tostring(Properties["fcg.moderation_reason"]), Outcome=tostring(Properties["fcg.outcome"])
-| summarize Decisions=sum(Sum) by Stage, Reason, Outcome, bin(TimeGenerated, 1h)
+| extend Stage=tostring(Properties["fcg.stage"]), Reason=tostring(Properties["fcg.moderation_reason"]), Outcome=tostring(Properties["fcg.outcome"]), AgentVersion=tostring(Properties["fcg.agent_version"])
+| where '{AgentVersion}' == '*' or AgentVersion == '{AgentVersion}'
+| summarize Decisions=sum(Sum) by Stage, Reason, Outcome, AgentVersion, bin(TimeGenerated, 1h)
 | order by TimeGenerated desc
 '''
         size: 0
@@ -245,7 +254,9 @@ resource agentWorkbook 'Microsoft.Insights/workbooks@2022-04-01' = {
   name: guid(resourceGroup().id, environmentName, 'card-orchestrator-agent-operations')
   location: location
   kind: 'shared'
-  tags: tags
+  tags: union(tags, {
+    '${appInsightsHiddenLinkTag}': 'Resource'
+  })
   properties: {
     displayName: 'card-orchestrator ${toUpper(environmentName)} Agent Operations'
     serializedData: string(workbookData)
@@ -258,29 +269,34 @@ resource agentWorkbook 'Microsoft.Insights/workbooks@2022-04-01' = {
 var invocationAdverseQuery = format('''
 AppMetrics
 | where AppRoleName == '{0}'
-| where (Name == "fcg.generation.requests" and tostring(Properties["fcg.outcome"]) in ("failed", "timed_out", "throttled"))
-    or Name == "fcg.generation.partial_results"
+| where Name == "fcg.generation.requests"
+| where tostring(Properties["fcg.outcome"]) in ("failed", "timed_out", "throttled", "held", "refused", "routing_defer")
 | summarize AdverseOutcomes=sum(Sum)
 | where AdverseOutcomes >= {1}
 | project Breach=1
 ''', agentServiceName, invocationAdverseThreshold)
 
 var modelThrottleQuery = format('''
-AppDependencies
+AppMetrics
 | where AppRoleName == '{0}'
-| where ResultCode == "429"
-| summarize Throttles=count()
+| where Name == "fcg.dependency.attempts"
+| where tostring(Properties["fcg.dependency"]) == "foundry_text"
+| where tostring(Properties["fcg.outcome"]) == "throttled"
+| summarize Throttles=sum(Sum)
 | where Throttles >= {1}
 | project Breach=1
 ''', agentServiceName, modelThrottleThreshold)
 
-var exceptionQuery = format('''
-AppExceptions
+var dependencyFailureQuery = format('''
+AppMetrics
 | where AppRoleName == '{0}'
-| summarize Exceptions=count()
-| where Exceptions >= {1}
+| where Name == "fcg.dependency.attempts"
+| where tostring(Properties["fcg.dependency"]) == "foundry_text"
+| where tostring(Properties["fcg.outcome"]) in ("failed", "timed_out")
+| summarize DependencyFailures=sum(Sum)
+| where DependencyFailures >= {1}
 | project Breach=1
-''', agentServiceName, exceptionThreshold)
+''', agentServiceName, dependencyFailureThreshold)
 
 var containerRestartQuery = format('''
 ContainerAppSystemLogs_CL
@@ -311,13 +327,13 @@ var alertDefinitions = [
     query: modelThrottleQuery
   }
   {
-    name: 'agent-exceptions'
-    displayName: 'Agent runtime exception burst'
-    description: 'card-orchestrator runtime exceptions reached the configured threshold.'
+    name: 'agent-dependency-failures'
+    displayName: 'Agent model dependency failure burst'
+    description: 'card-orchestrator model dependency failures or timeouts reached the configured threshold.'
     severity: 1
     evaluationFrequency: 'PT5M'
     windowSize: 'PT15M'
-    query: exceptionQuery
+    query: dependencyFailureQuery
   }
   {
     name: 'agent-container-restarts'

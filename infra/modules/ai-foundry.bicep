@@ -13,6 +13,16 @@ param projectName string
 @description('Azure AI Foundry project display name.')
 param projectDisplayName string
 
+@description('Workspace-based Application Insights resource name linked to the Foundry account and project.')
+param appInsightsName string
+
+@description('Workspace-based Application Insights resource ID linked to the Foundry account and project.')
+param appInsightsResourceId string
+
+@secure()
+@description('Application Insights connection string stored only in Foundry connection credentials.')
+param appInsightsConnectionString string
+
 @description('Managed identity principal ID for the Container App that needs Azure AI Foundry access.')
 param containerAppPrincipalId string
 
@@ -150,6 +160,53 @@ resource aiFoundryProject 'Microsoft.CognitiveServices/accounts/projects@2025-06
     displayName: projectDisplayName
   }
 }
+
+resource appInsights 'Microsoft.Insights/components@2020-02-02' existing = {
+  name: appInsightsName
+}
+
+var appInsightsConnectionProperties = {
+  category: 'AppInsights'
+  target: appInsightsResourceId
+  authType: 'ApiKey'
+  isSharedToAll: true
+  credentials: {
+    key: appInsightsConnectionString
+  }
+  metadata: {
+    ApiType: 'Azure'
+    ResourceId: appInsightsResourceId
+  }
+}
+
+resource accountAppInsightsConnection 'Microsoft.CognitiveServices/accounts/connections@2025-06-01' = {
+  parent: foundryAccount
+  name: take('${accountName}-appinsights', 33)
+  properties: appInsightsConnectionProperties
+}
+
+resource projectAppInsightsConnection 'Microsoft.CognitiveServices/accounts/projects/connections@2025-06-01' = {
+  parent: aiFoundryProject
+  name: take('${projectName}-appinsights', 33)
+  properties: appInsightsConnectionProperties
+}
+
+var appInsightsReaderRoleDefinitionIds = [
+  '73c42c96-874c-492b-b04d-ab87d138a893'
+  'dbc9c667-e97f-4491-aee6-90b9cf960190'
+]
+
+resource projectAppInsightsReaderRoleAssignments 'Microsoft.Authorization/roleAssignments@2022-04-01' = [
+  for roleDefinitionId in appInsightsReaderRoleDefinitionIds: {
+    scope: appInsights
+    name: guid(aiFoundryProject.id, appInsights.id, roleDefinitionId)
+    properties: {
+      principalId: aiFoundryProject.identity.principalId
+      principalType: 'ServicePrincipal'
+      roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roleDefinitionId)
+    }
+  }
+]
 
 resource cognitiveServicesUserRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   scope: foundryAccount

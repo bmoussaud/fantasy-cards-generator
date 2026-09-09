@@ -1,7 +1,10 @@
 targetScope = 'subscription'
 
-@allowed(['dev'])
-@description('Initial rollout is dev-only; prod requires a separately reviewed change.')
+@allowed([
+  'dev'
+  'prod'
+])
+@description('Dedicated hosted-agent environment. Production execution has an additional launcher approval gate.')
 param environmentName string
 
 @minLength(1)
@@ -32,11 +35,13 @@ param createRegistryConnection bool = false
 @description('Name discovered from the project connection inventory; never rename an existing connection.')
 param registryConnectionName string = ''
 
-@description('Existing Log Analytics workspace resource ID from root infra. Required for agent monitoring alerts and workbook.')
-param logAnalyticsWorkspaceResourceId string = ''
+@minLength(1)
+@description('Existing Log Analytics workspace resource ID from root infra. Monitoring is mandatory.')
+param logAnalyticsWorkspaceResourceId string
 
-@description('Existing Application Insights resource ID from root infra. Required for agent monitoring alert scoping.')
-param appInsightsResourceId string = ''
+@minLength(1)
+@description('Existing Application Insights resource ID linked to the Foundry project by root infra.')
+param appInsightsResourceId string
 
 @description('Enable agent monitoring alerts. Requires at least one action group receiver to take effect.')
 param enableAgentAlerts bool = false
@@ -85,7 +90,7 @@ resource registry 'Microsoft.ContainerRegistry/registries@2023-07-01' existing =
   name: registryName
 }
 
-module agentMonitoring './modules/agent-monitoring.bicep' = if (!empty(logAnalyticsWorkspaceResourceId) && !empty(appInsightsResourceId)) {
+module agentMonitoring './modules/agent-monitoring.bicep' = {
   name: 'card-orchestrator-${environmentName}-agent-monitoring'
   scope: existingGroup
   params: {

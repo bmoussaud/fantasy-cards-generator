@@ -54,12 +54,12 @@ def test_only_nonreserved_model_and_build_variables_are_supplied() -> None:
     assert service["environmentVariables"] == [
         {"name": "AZURE_AI_MODEL_DEPLOYMENT_NAME", "value": "${AZURE_AI_MODEL_DEPLOYMENT_NAME}"},
         {"name": "CARD_ORCHESTRATOR_VERSION", "value": "${CARD_ORCHESTRATOR_VERSION}"},
-        {"name": "OTEL_SERVICE_NAME", "value": "card-orchestrator"},
-        {
-            "name": "APPLICATIONINSIGHTS_CONNECTION_STRING",
-            "value": "${APPLICATIONINSIGHTS_CONNECTION_STRING=}",
-        },
+        {"name": "TELEMETRY_ENABLED", "value": "true"},
+        {"name": "TELEMETRY_ENVIRONMENT", "value": "${AZURE_ENV_NAME}"},
     ]
+    assert "APPLICATIONINSIGHTS_CONNECTION_STRING" not in {
+        item["name"] for item in service["environmentVariables"]
+    }
 
 
 def test_container_contract_is_nonroot_frozen_and_independent_of_web() -> None:
@@ -143,10 +143,10 @@ def test_context_excludes_credentials_state_and_unrelated_artifacts(path: str) -
     assert not _context_includes(path)
 
 
-def test_prerequisites_default_off_and_dev_only() -> None:
+def test_prerequisites_default_off_and_infra_supports_dev_and_prod() -> None:
     main = (DEPLOYMENT / "infra/main.bicep").read_text()
     parameters = json.loads((DEPLOYMENT / "infra/main.parameters.json").read_text())["parameters"]
-    assert "@allowed(['dev'])" in main
+    assert "'dev'\n  'prod'" in main
     assert "param enablePrerequisites bool = false" in main
     assert "= if (enablePrerequisites)" in main
     assert "param createRegistryConnection bool = false" in main
@@ -265,3 +265,28 @@ def test_launcher_execution_is_scoped_to_dedicated_manifest(action: str, monkeyp
     assert options["cwd"] == DEPLOYMENT
     assert "env" not in options
     assert options["check"] is False
+
+
+def test_launcher_has_separately_gated_prod_path(monkeypatch) -> None:
+    launcher = _launcher()
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        return type("Result", (), {"returncode": 0})()
+
+    monkeypatch.setattr(launcher.subprocess, "run", run)
+    assert (
+        launcher.main(
+            [
+                "deploy",
+                "--environment",
+                "prod",
+                "--execute",
+                "--approve-change",
+                "--approve-prod",
+            ]
+        )
+        == 0
+    )
+    assert calls[0][0][-3:] == ["--environment", "prod", "--no-prompt"]

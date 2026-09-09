@@ -135,6 +135,16 @@ def test_telemetry_settings_default_to_disabled_without_connection_string(
     assert settings.sampling_ratio == 1.0
 
 
+def test_hosted_telemetry_uses_platform_agent_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FOUNDRY_AGENT_VERSION", "42")
+    monkeypatch.setenv("APP_VERSION", "web-version")
+    monkeypatch.setenv("CARD_ORCHESTRATOR_VERSION", "image-sha")
+
+    assert load_telemetry_settings().service_version == "42"
+
+
 def test_production_startup_fails_open_for_malformed_telemetry_configuration(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -487,6 +497,8 @@ def test_lifecycle_and_operational_signals_emit_bounded_events_and_metrics(
             request_id="request-42",
             error_code="arbitrary-upstream-code",
             retryable=True,
+            stage="concept",
+            agent_version="42",
         )
         telemetry.record_retry(dependency="foundry_text", attempt=2, request_id="request-42")
         telemetry.record_dependency_attempt(
@@ -504,6 +516,7 @@ def test_lifecycle_and_operational_signals_emit_bounded_events_and_metrics(
             allowed=False,
             reason="living-artist-imitation",
             policy="conservative-v1",
+            agent_version="42",
         )
         telemetry.record_persistence(
             store="cosmos",
@@ -574,6 +587,7 @@ def test_sensitive_values_are_removed_from_spans_events_logs_and_metrics(
         _attributes={
             "prompt": SENSITIVE_SENTINEL,
             "fcg.error_code": SENSITIVE_SENTINEL,
+            "fcg.agent_version": SENSITIVE_SENTINEL,
             "app.request_id": SENSITIVE_SENTINEL,
         },
     )
@@ -632,6 +646,7 @@ def test_attribute_and_metric_dimensions_are_allowlisted_and_bounded(
             "fcg.outcome": SENSITIVE_SENTINEL,
             "fcg.stage": SENSITIVE_SENTINEL,
             "fcg.error_code": SENSITIVE_SENTINEL,
+            "fcg.agent_version": SENSITIVE_SENTINEL,
             "prompt": SENSITIVE_SENTINEL,
             "user.email": SENSITIVE_SENTINEL,
             "card.id": SENSITIVE_SENTINEL,
@@ -644,6 +659,7 @@ def test_attribute_and_metric_dimensions_are_allowlisted_and_bounded(
         "fcg.outcome": "failed",
         "fcg.stage": "reserved",
         "fcg.error_code": "internal_error",
+        "fcg.agent_version": "unknown",
     }
 
     telemetry.record_dependency_attempt(

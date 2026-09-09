@@ -595,6 +595,9 @@ module aiFoundry './modules/ai-foundry.bicep' = {
   name: 'ai-foundry'
   params: {
     accountName: aiFoundryAccountName
+    appInsightsConnectionString: monitoring.outputs.appInsightsConnectionString
+    appInsightsName: monitoring.outputs.appInsightsName
+    appInsightsResourceId: monitoring.outputs.appInsightsResourceId
     containerAppPrincipalId: containerApps.outputs.containerAppPrincipalId
     customSubDomainName: aiFoundryAccountName
     deployerPrincipalId: deployerPrincipalId
@@ -675,4 +678,3 @@ output AZURE_CONTAINER_REGISTRY_NAME string = registry.outputs.registryName
 output ENTRA_CLIENT_ID string = entraClientId
 output AZURE_LOG_ANALYTICS_WORKSPACE_RESOURCE_ID string = monitoring.outputs.logAnalyticsWorkspaceResourceId
 output AZURE_APP_INSIGHTS_RESOURCE_ID string = monitoring.outputs.appInsightsResourceId
-output APPLICATIONINSIGHTS_CONNECTION_STRING string = monitoring.outputs.appInsightsConnectionString

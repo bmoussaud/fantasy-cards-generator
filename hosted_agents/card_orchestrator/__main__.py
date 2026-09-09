@@ -10,8 +10,7 @@ def main() -> None:
         settings = RuntimeSettings.from_env()
     except (ValidationError, ValueError):
         raise SystemExit("Invalid card-orchestrator configuration.") from None
-    # Initialise sanitised telemetry export before the host disables payload instrumentation.
-    # Fails open when APPLICATIONINSIGHTS_CONNECTION_STRING is absent or TELEMETRY_ENABLED=false.
+    # Foundry injects the linked project's reserved Application Insights setting.
     configure_telemetry()
     create_host(settings).run(port=8088)
 

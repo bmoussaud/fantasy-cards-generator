@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from enum import StrEnum
@@ -33,6 +34,7 @@ from app.generation import (
     ModerationDecision,
     derive_art_prompt,
 )
+from app.telemetry import instrument_generation, record_dependency_attempt, record_moderation
 from hosted_agents.card_orchestrator.settings import POLICY, RuntimeSettings
 from hosted_agents.card_orchestrator.specialists import SCHEMAS, Specialists, create_specialists
 
@@ -157,6 +159,7 @@ class RuntimeFailure(Exception):
         self.reason = RuntimeFailureReason(reason)
         self.http_type = RuntimeFailureHttpType(http_type)
         self.http_status = RuntimeFailureHttpStatus(http_status)
+        self.error_code = self.reason.value
         super().__init__("dependency_failure")
 
     @property
@@ -295,11 +298,16 @@ class CardOrchestrator:
     ) -> None:
         self.settings = settings
         self.specialist_factory = specialist_factory
-        self.moderation = moderation or HeuristicModerationService(settings.moderation_policy)
+        self.moderation = moderation or HeuristicModerationService(
+            settings.moderation_policy,
+            record_telemetry=False,
+        )
 
+    @instrument_generation("generate")
     async def generate(
         self, request: GenerateCardAgentRequest, *, hosted_version: str | None = None
     ) -> GenerateCardAgentResponse:
+        telemetry_version = hosted_version or self.settings.version
         evidence: list[SafetyEvidence] = []
         metadata = {
             "agentVersion": self.settings.version,
@@ -310,7 +318,13 @@ class CardOrchestrator:
         failure_stage = RuntimeFailureStage.ORCHESTRATION
         try:
             async with asyncio.timeout(self.settings.timeout_seconds):
-                await self._gate(request.query, "pre_prompt", "pre_prompt", evidence)
+                await self._gate(
+                    request.query,
+                    "pre_prompt",
+                    "pre_prompt",
+                    evidence,
+                    telemetry_version,
+                )
                 failure_stage = RuntimeFailureStage.SPECIALIST_SETUP
                 async with self.specialist_factory(self.settings) as specialists:
                     card = None
@@ -321,8 +335,39 @@ class CardOrchestrator:
                             if card is None
                             else {"card": card.model_dump()}
                         )
-                        async with asyncio.timeout(self.settings.stage_timeout_seconds):
-                            result = await specialists.run(stage, payload)
+                        started = time.perf_counter()
+                        try:
+                            async with asyncio.timeout(self.settings.stage_timeout_seconds):
+                                result = await specialists.run(stage, payload)
+                        except Exception as exc:
+                            failure = classify_runtime_failure(exc, failure_stage)
+                            record_dependency_attempt(
+                                dependency="foundry_text",
+                                attempt=1,
+                                outcome=_dependency_failure_outcome(failure),
+                                duration_ms=(time.perf_counter() - started) * 1000,
+                                request_id=None,
+                                error_code=failure.reason.value,
+                                retryable=False,
+                                stage=stage,
+                                agent_version=telemetry_version,
+                            )
+                            raise failure from None
+                        record_dependency_attempt(
+                            dependency="foundry_text",
+                            attempt=1,
+                            outcome=(
+                                "completed"
+                                if result.status == "completed"
+                                else "blocked" if result.status == "refused" else "failed"
+                            ),
+                            duration_ms=(time.perf_counter() - started) * 1000,
+                            request_id=None,
+                            error_code="none",
+                            retryable=False,
+                            stage=stage,
+                            agent_version=telemetry_version,
+                        )
                         if result.status != "completed":
                             if result.status not in {"refused", "held", "routing_defer"}:
                                 raise _Stop("held", "invalid_stage_status")
@@ -344,10 +389,28 @@ class CardOrchestrator:
                         except (ValidationError, ValueError, TypeError):
                             raise _Stop("held", "schema_invalid") from None
                         if stage in ("concept", "lore"):
-                            await self._gate(card.model_dump_json(), "post_text", stage, evidence)
+                            await self._gate(
+                                card.model_dump_json(),
+                                "post_text",
+                                stage,
+                                evidence,
+                                telemetry_version,
+                            )
                 art_prompt = derive_art_prompt(card)
-                await self._gate(card.model_dump_json(), "post_text", "final_text", evidence)
-                await self._gate(art_prompt, "post_art_prompt", "final_art_prompt", evidence)
+                await self._gate(
+                    card.model_dump_json(),
+                    "post_text",
+                    "final_text",
+                    evidence,
+                    telemetry_version,
+                )
+                await self._gate(
+                    art_prompt,
+                    "post_art_prompt",
+                    "final_art_prompt",
+                    evidence,
+                    telemetry_version,
+                )
                 required = {"pre_prompt", "concept", "lore", "final_text", "final_art_prompt"}
                 if {e.stage for e in evidence if e.decision == "allowed"} != required:
                     raise _Stop("held", "invalid_evidence")
@@ -386,6 +449,7 @@ class CardOrchestrator:
         moderation_stage: str,
         evidence_stage: str,
         evidence: list[SafetyEvidence],
+        agent_version: str,
     ) -> None:
         decision = await self.moderation.moderate_text(text, stage=moderation_stage)
         if (
@@ -395,6 +459,13 @@ class CardOrchestrator:
             or decision.allowed != (decision.reasonCode == "allowed")
         ):
             raise _Stop("held", "invalid_evidence")
+        record_moderation(
+            stage=evidence_stage,
+            allowed=decision.allowed,
+            reason=decision.reasonCode,
+            policy=POLICY,
+            agent_version=agent_version,
+        )
         evidence.append(
             SafetyEvidence(
                 stage=evidence_stage,
@@ -405,3 +476,11 @@ class CardOrchestrator:
         )
         if not decision.allowed:
             raise _Stop("refused", decision.reasonCode)
+
+
+def _dependency_failure_outcome(failure: RuntimeFailure) -> str:
+    if failure.reason == RuntimeFailureReason.RATE_LIMITED:
+        return "throttled"
+    if failure.reason == RuntimeFailureReason.TIMEOUT:
+        return "timed_out"
+    return "failed"

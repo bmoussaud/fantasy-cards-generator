@@ -457,8 +457,9 @@ class CsrfProtector:
 
 
 class HeuristicModerationService:
-    def __init__(self, policy_name: str) -> None:
+    def __init__(self, policy_name: str, *, record_telemetry: bool = True) -> None:
         self.policy_name = policy_name
+        self.record_telemetry = record_telemetry
         self._blocked_text_patterns = (
             ("in the style of", "living-artist-imitation"),
             ("living artist", "living-artist-imitation"),
@@ -518,6 +519,8 @@ class HeuristicModerationService:
         return decision
 
     def _record_decision(self, decision: ModerationDecision) -> None:
+        if not self.record_telemetry:
+            return
         record_moderation(
             stage=decision.stage,
             allowed=decision.allowed,

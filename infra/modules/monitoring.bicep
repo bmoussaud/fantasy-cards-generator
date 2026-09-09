@@ -46,6 +46,7 @@ resource applicationInsights 'Microsoft.Insights/components@2020-02-02' = {
   }
 }
 
+@secure()
 output appInsightsConnectionString string = applicationInsights.properties.ConnectionString
 output appInsightsName string = applicationInsights.name
 output appInsightsResourceId string = applicationInsights.id

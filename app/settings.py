@@ -100,7 +100,11 @@ def load_telemetry_settings() -> TelemetrySettings:
         sampling_ratio=_ratio_env("TELEMETRY_SAMPLING_RATIO", default=1.0),
         service_name=_bounded_identifier(service_name, name="TELEMETRY_SERVICE_NAME"),
         environment=environment,
-        service_version=_optional_bounded_identifier("APP_VERSION"),
+        service_version=_first_optional_bounded_identifier(
+            "FOUNDRY_AGENT_VERSION",
+            "APP_VERSION",
+            "CARD_ORCHESTRATOR_VERSION",
+        ),
         container_revision=_optional_bounded_identifier("CONTAINER_APP_REVISION"),
         container_replica=_optional_bounded_identifier("CONTAINER_APP_REPLICA_NAME"),
     )
@@ -367,6 +371,14 @@ def _optional_bounded_identifier(name: str) -> str | None:
     if value is None:
         return None
     return _bounded_identifier(value, name=name)
+
+
+def _first_optional_bounded_identifier(*names: str) -> str | None:
+    for name in names:
+        value = _optional_bounded_identifier(name)
+        if value is not None:
+            return value
+    return None
 
 
 def _bounded_identifier(value: str, *, name: str) -> str:

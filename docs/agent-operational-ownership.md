@@ -1,257 +1,354 @@
 # Agent operational ownership — card-orchestrator
 
-Issue #99: explicit operational ownership for the `card-orchestrator` hosted-agent runtime. This runbook covers the ownership matrix, telemetry boundary, alert definitions, rollout/rollback procedure, and synthetic readiness probe.
+This runbook defines operational ownership, monitoring, rollout, and rollback for the
+Foundry-hosted `card-orchestrator`. Hosted-agent versions and sessions are independent
+of the public web Container App. No Azure deployment or model invocation was performed
+while implementing this runbook.
 
-## Ownership matrix
+## Ownership
 
-| Concern | Owner | Authority |
+| Concern | Accountable owner | Required evidence |
 |---|---|---|
-| Hosted-agent runtime (`card-orchestrator`) | Gimli (DevOps / Infra) | Deploy, rollback, delete hosted version |
-| Web ACA application (`web-nat`) | Gimli (DevOps / Infra) | Independent; agent deploy MUST NOT touch web revision, traffic, or image |
-| Model capacity (`gpt-5-5`, `gpt-image-2`) | Gimli (DevOps / Infra) | Governed by `infra/text-model-capacity.bicep`; separate approval gate |
-| Agent monitoring alerts / workbook | Gimli (DevOps / Infra) | `deployments/card-orchestrator/infra/modules/agent-monitoring.bicep` |
-| Incident escalation | Gimli → Gandalf (Architect) | Escalate to Gandalf if root cause is architectural or cross-runtime |
-| Privacy / telemetry boundary | Aragorn (Backend Dev) review | Any telemetry schema change requires Aragorn review before merge |
-| Evidence retention | Scribe | Decisions and deployment evidence written to `.squad/decisions/` |
+| Hosted runtime and version routing | DevOps, with Lead approval for production | Agent/version JSON, endpoint selector, bounded smoke result |
+| Agent monitoring and alert routing | DevOps | Bicep what-if, workbook query results, Action Group test |
+| Public web ACA | Web operations | Before/after revision, image, configuration, and traffic snapshot |
+| Model capacity | AI platform operations | Deployment capacity and throttle evidence |
+| Privacy boundary | Backend and RAI reviewers | Metric schema review and content-exclusion tests |
+| Cross-runtime incident decision | Lead / Architect | Incident timeline and rollback decision |
 
-## Telemetry boundary
+This revision is independently owned by Gandalf after reviewer rejection. The normal
+operational role assignment does not permit a rejected revision author to change this
+artifact during the active review cycle.
 
-### What the agent exports
+## Implemented telemetry contract
 
-The `card-orchestrator` runtime initialises telemetry via `app.telemetry.configure_telemetry()` before the host starts. The framework payload instrumentation is **disabled** by `_disable_payload_telemetry()` in `server.py`.
+Foundry project monitoring injects the reserved
+`APPLICATIONINSIGHTS_CONNECTION_STRING` into hosted containers. It is not declared in
+`azure.yaml`, written to azd state by this deployment, printed by a runbook command, or
+copied between environments. Root Bicep creates account- and project-level
+`AppInsights` connections to the existing workspace-based Application Insights
+resource. The hosted manifest explicitly sets only non-secret
+`TELEMETRY_ENABLED=true` and the environment name.
 
-| Exported | Not exported |
+Foundry fixes `service.name` to the agent name, so `AppRoleName ==
+"card-orchestrator"` is the service boundary. `OTEL_SERVICE_NAME` is not configured
+because Foundry ignores overrides for hosted agents.
+
+The runtime emits these custom metrics:
+
+| Metric | Bounded dimensions |
 |---|---|
-| `AppRequests`: HTTP status codes, route, duration | Prompt text, card text, art prompts |
-| `AppDependencies`: model provider calls, HTTP status, duration | Response body content, token counts |
-| `AppExceptions`: exception type only | Exception messages that may echo request content |
-| `AppMetrics` (`fcg.*`): outcome codes, stage names, error codes | Raw user input, session IDs, tenant IDs |
-| `AppTraces`: bounded severity level + error code | Bearer tokens, auth headers |
+| `fcg.generation.requests` | operation, outcome, agent version |
+| `fcg.generation.duration` | operation, outcome, agent version |
+| `fcg.dependency.attempts` | stage, provider, attempt bucket, outcome, error code, retryable, agent version |
+| `fcg.dependency.duration` | same as dependency attempts |
+| `fcg.dependency.throttles` | provider |
+| `fcg.dependency.timeouts` | provider |
+| `fcg.moderation.decisions` | stage, allowed/blocked outcome, reason, policy, agent version |
 
-### OTel service name
+Generation outcomes are one of `completed`, `held`, `refused`, `routing_defer`,
+`throttled`, `timed_out`, or `failed`. Stages, providers, reasons, error codes, and
+versions pass through closed allowlists or bounded identifier validation.
 
-`OTEL_SERVICE_NAME=card-orchestrator` is injected via `azure.yaml`. In Application Insights, this maps to `AppRoleName == 'card-orchestrator'`. All agent-scoped alert and workbook KQL uses this value to isolate agent signals from the web app.
+The runtime never adds prompts, responses, card fields, art prompts, user or session
+identifiers, tokens, URLs, endpoints, exception messages, or arbitrary caller values
+to these measurements. The strict request boundary and no-response-store behavior are
+unchanged. Framework payload instrumentation and SDK payload-bearing logs remain
+disabled.
 
-### Application Insights wiring
+The single custom version dimension is `fcg.agent_version`. In Foundry it uses the
+platform-injected hosted version; local tests fall back to the immutable image
+candidate version. `service.version` follows the same precedence.
 
-The root infra outputs `APPLICATIONINSIGHTS_CONNECTION_STRING` as an azd env var. The agent `azure.yaml` injects it as `APPLICATIONINSIGHTS_CONNECTION_STRING` using `${APPLICATIONINSIGHTS_CONNECTION_STRING=}` (empty default so startup succeeds without export when not set). Telemetry is disabled when the value is absent or `TELEMETRY_ENABLED=false`.
+## Monitoring and alerts
 
-Both runtimes share the same Log Analytics workspace and Application Insights component. Signals are isolated by `AppRoleName`.
+`deployments/card-orchestrator/infra/modules/agent-monitoring.bicep` deploys one
+environment-isolated workbook, Action Group, and four scheduled-query alerts:
 
-### Privacy invariants
+| Alert | Window | Default threshold | Source |
+|---|---:|---:|---|
+| Adverse request outcomes | 15 min | 3 | `fcg.generation.requests` |
+| Model throttling | 15 min | 3 | `fcg.dependency.attempts`, `foundry_text`, `throttled` |
+| Model failures/timeouts | 15 min | 3 | `fcg.dependency.attempts`, `failed` or `timed_out` |
+| Container restart/unhealthy events | 15 min | 3 | `ContainerAppSystemLogs_CL` |
 
-- No prompt text, card content, art prompts, or generated text in any telemetry field.
-- No session IDs, user identifiers, tenant IDs, or blob keys in metrics or traces.
-- Exception events retain only a normalised exception type; message and stack are excluded before export.
-- `X-Request-ID` is excluded from metrics dimensions (diagnostic headers are bounded and sanitised elsewhere).
-- IP masking remains enabled on the shared Application Insights component.
+Alert rules are disabled unless both the explicit alert switch and at least one
+approved receiver are present. The workbook filters on service and
+`fcg.agent_version`; the environment is fixed by the isolated deployment. Histogram
+averages use `sum(Sum) / sum(ItemCount)`.
 
-## Alert definitions
+There is no fabricated heartbeat alert. Foundry does not expose the internal
+`/readiness` endpoint to Azure availability tests. Operators use the bounded managed
+identity smoke below; absence of traffic alone is not treated as runtime failure.
 
-Alerts are deployed by `deployments/card-orchestrator/infra/modules/agent-monitoring.bicep` and owned by the agent deployment. They are **disabled by default** (`enableAlerts=false`). Alert rules become active only when `CARD_ORCHESTRATOR_ENABLE_AGENT_ALERTS=true` **and** at least one receiver is configured.
-
-To activate after an approved rollout:
-
-```bash
-azd env set CARD_ORCHESTRATOR_ENABLE_AGENT_ALERTS true
-azd env set CARD_ORCHESTRATOR_ALERT_EMAIL_RECEIVERS '[{"name":"operations","emailAddress":"approved@example.com","useCommonAlertSchema":true}]'
-# cd deployments/card-orchestrator && python deploy.py provision --execute --approve-change
-```
-
-| Alert | Window | Trigger | Severity |
-|---|---|---|---|
-| Invocation adverse outcomes | 15 min | 3 failures / throttles / timeouts | 1 (critical) |
-| Model provider throttling (429) | 15 min | 3 throttle events | 1 (critical) |
-| Runtime exception burst | 15 min | 5 exceptions | 1 (critical) |
-| Container restart / unhealthy | 15 min | 3 events | 1 (critical) |
-
-These are initial thresholds. Revisit after two weeks of representative traffic in dev.
-
-### Signals not available via Azure native metrics
-
-**Hosted-version heartbeat**: the `/readiness` endpoint (port 8088) is Foundry-internal and not reachable from Application Insights availability test locations. Operational readiness is inferred from invocation outcome metrics. A direct readiness probe can be run by the operator as described in the synthetic probe section below.
-
-**Agent deployment version**: `CARD_ORCHESTRATOR_VERSION` is an ACA container environment variable, not an App Insights dimension. Version correlation is done via `fcg.agent_version` in `AppMetrics` if the orchestrator emits it, or via the `AppTraces` `service.version` resource attribute set from `CARD_ORCHESTRATOR_VERSION`.
-
-**Model capacity exhaustion**: detect via `AppDependencies` `ResultCode == "429"` on the text model dependency. Azure model quota counters are not exported to App Insights.
-
-## Dashboard / workbook
-
-The Bicep module deploys an Azure Workbook per environment: `card-orchestrator DEV Agent Operations` and `card-orchestrator PROD Agent Operations`. Views:
-
-- **Invocation outcomes**: `fcg.generation.requests` by outcome code and version
-- **Stage latency**: `fcg.generation.duration` by stage (concept / lore / art_direction)
-- **Model dependencies**: `AppDependencies` calls, failures, and 429 throttles
-- **Exceptions and errors**: `AppExceptions` (type only) and `AppTraces` (severity ≥ warning)
-- **Moderation signals**: `fcg.moderation.decisions` by stage and reason
-- **ACA health**: `ContainerAppSystemLogs_CL` restart and unhealthy events
-
-All KQL queries filter on `AppRoleName == 'card-orchestrator'`. No prompt, card text, art prompt, identity, or raw content field is selected.
-
-## Synthetic readiness probe
-
-Because `/readiness` is not publicly accessible, operators use the ACA identity probe tool to confirm hosted-version liveness without sending a model request:
+Monitoring resource IDs are mandatory. Provisioning fails during parameter resolution
+if either root output is absent:
 
 ```bash
-python deployments/card-orchestrator/aca_identity_probe.py \
-  --environment dev --subscription "<dev-subscription-id>" \
-  --resource-group "<dev-resource-group>" --app "<aca-app-name>" \
-  --revision "<ready-revision>" --replica "<running-replica>" --container web \
-  --project-endpoint "https://<account>.services.ai.azure.com/api/projects/<project>" \
-  --expected-principal "<ACA-system-principal-id>"
-# Add --execute after verifying the plan output.
-```
+# Root project: provision the App Insights resource and Foundry linkage first.
+AZURE_DEV_USER_AGENT=microsoft_foundry_skill azd provision --no-prompt
 
-This verifies the managed-identity token, project access, and agent endpoint without invoking a model. Success requires `status: access_verified` and HTTP 200 from the agents list endpoint.
-
-## Independent rollout procedure
-
-All steps use `deployments/card-orchestrator/` as the working directory. The web ACA application is deployed independently via the root `azure.yaml`. **Never run both in the same `azd up` invocation.**
-
-### Pre-rollout gates
-
-```bash
-# 1. Record existing web app state (do not modify).
-az containerapp show --name "<web-app-name>" --resource-group "<rg>" \
-  --query "{revision:properties.latestRevisionName, image:properties.template.containers[0].image, traffic:properties.configuration.ingress.traffic}" \
-  --output json
-
-# 2. Verify model capacity is sufficient for three sequential calls.
-az cognitiveservices account deployment show \
-  --name "<ai-account>" --resource-group "<rg>" \
-  --deployment-name "gpt-5-5" \
-  --query "{capacity:sku.capacity, rpmLimit:properties.rateLimits[?key=='request'].count | [0]}" \
-  --output json
-# Dev minimum: capacity 10 (10 RPM / 10K TPM). See infra/text-model-capacity.bicep.
-
-# 3. Run offline packaging tests.
-uv run python -m pytest tests/test_hosted_agent_deployment_config.py tests/test_agent_operational_monitoring.py -v
-```
-
-### Rollout
-
-```bash
-# Build and deploy an immutable tagged version.
-export CARD_ORCHESTRATOR_VERSION="$(git rev-parse HEAD)"
-export AZURE_DEV_USER_AGENT="microsoft_foundry_skill"
+# Copy only non-secret ARM resource IDs into the dedicated agent azd environment.
+azd env get-value AZURE_LOG_ANALYTICS_WORKSPACE_RESOURCE_ID
+azd env get-value AZURE_APP_INSIGHTS_RESOURCE_ID
 
 cd deployments/card-orchestrator
-python deploy.py preview          # review the azd command
-python deploy.py deploy --execute --approve-change
-```
-
-The `deploy` action runs `azd deploy card-orchestrator`. This builds and pushes a tagged image (`card-orchestrator:${CARD_ORCHESTRATOR_VERSION}`) and activates a new hosted version. The hosted version number is assigned by Foundry; record it from the deploy output.
-
-### Post-rollout health gates
-
-```bash
-# 1. Verify hosted version is active (replace VERSION with the Foundry-assigned hosted version number).
-az ai foundry agent version show \
-  --project "<project-endpoint>" \
-  --agent "card-orchestrator" --version VERSION 2>/dev/null || echo "Use Foundry CLI or SDK"
-
-# 2. Run ACA identity probe (no model call).
-python deployments/card-orchestrator/aca_identity_probe.py \
-  --environment dev ... --execute
-
-# 3. Confirm web app is unchanged.
-az containerapp show --name "<web-app-name>" --resource-group "<rg>" \
-  --query "{revision:properties.latestRevisionName, image:properties.template.containers[0].image, traffic:properties.configuration.ingress.traffic}" \
-  --output json
-# Compare with pre-rollout snapshot; values must be identical.
-
-# 4. Confirm /healthz on the web app.
-curl -sf "https://<web-app-fqdn>/healthz" | jq .status
-
-# 5. Check workbook: zero adverse invocations; no 429s; no container restarts.
-```
-
-Only treat the rollout as successful when all gates pass.
-
-### Version traffic / activation semantics
-
-Foundry hosted agents use single-version activation. Deploying a new version makes it the active version for all new sessions; there is no gradual traffic split at the Foundry layer. Rolling back to a previous version requires deleting the current version and re-deploying (or re-activating) the prior image. If both dev and prod environments exist, each has its own hosted version namespace; a dev rollback does not affect prod.
-
-### Rollback procedure
-
-**Rollback does not happen automatically.** An operator must execute the following steps:
-
-```bash
-# Step 1: Identify and record the exact hosted version to remove.
-# (Replace VERSION with the numeric version assigned during deploy.)
-export FOUNDRY_PROJECT_ENDPOINT="https://<account>.services.ai.azure.com/api/projects/<project>"
-export AZURE_DEV_USER_AGENT="microsoft_foundry_skill"
-
-# Step 2: Stop and delete the exact owned version.
-# Use the Foundry SDK, azd agent commands, or REST API.
-# Verify ownership before deletion: the version tag must match CARD_ORCHESTRATOR_VERSION.
-#
-# REST example (requires operator Bearer token):
-#   DELETE <FOUNDRY_PROJECT_ENDPOINT>/agents/versions/VERSION?api-version=2025-11-15-preview
-#
-# Python SDK example (uses existing ACA managed identity):
-#   from azure.ai.projects import AIProjectClient
-#   client = AIProjectClient(endpoint=FOUNDRY_PROJECT_ENDPOINT, credential=ManagedIdentityCredential())
-#   client.agents.delete_agent_version("card-orchestrator", VERSION)
-
-# Step 3: Verify absence.
-# GET <FOUNDRY_PROJECT_ENDPOINT>/agents/versions/VERSION  → must return 404
-
-# Step 4: If a known-good previous version is available, re-deploy it.
-export CARD_ORCHESTRATOR_VERSION="<prior-sha>"
-cd deployments/card-orchestrator
-python deploy.py deploy --execute --approve-change
-
-# Step 5: Confirm web app UNCHANGED (image, revision, traffic identical to pre-rollout snapshot).
-az containerapp show --name "<web-app-name>" --resource-group "<rg>" \
-  --query "{revision:properties.latestRevisionName, image:properties.template.containers[0].image, traffic:properties.configuration.ingress.traffic}" \
-  --output json
-```
-
-If there is no known-good previous version, the agent is simply absent until a new image is reviewed and deployed. The web app continues to serve traffic independently.
-
-### What rollback does NOT do
-
-- It does NOT alter the web ACA container image, revision, traffic weights, or environment variables.
-- It does NOT remove model deployments or capacity changes.
-- It does NOT revoke the managed identity's Foundry agent consumer role.
-- It does NOT affect other hosted agent versions (if any).
-
-## Monitoring deployment procedure
-
-Agent monitoring resources (workbook, alerts, action group) are provisioned by:
-
-```bash
-cd deployments/card-orchestrator
+azd env set AZURE_LOG_ANALYTICS_WORKSPACE_RESOURCE_ID "<workspace-resource-id>"
+azd env set AZURE_APP_INSIGHTS_RESOURCE_ID "<app-insights-resource-id>"
+python deploy.py preview --execute
 python deploy.py provision --execute --approve-change
 ```
 
-This runs `azd provision` scoped to `deployments/card-orchestrator/infra/`. Monitoring resources are created only when `AZURE_LOG_ANALYTICS_WORKSPACE_RESOURCE_ID` and `AZURE_APP_INSIGHTS_RESOURCE_ID` are set (populated from root infra outputs). These are optional; if absent, the monitoring module is skipped (`= if (!empty(...))`).
-
-To populate them from root infra:
+For production, there is no implicit fallback from dev and no prod default:
 
 ```bash
-# Run from repo root after root infra is provisioned:
-azd env get-values | grep -E "AZURE_LOG_ANALYTICS_WORKSPACE_RESOURCE_ID|AZURE_APP_INSIGHTS_RESOURCE_ID|APPLICATIONINSIGHTS_CONNECTION_STRING"
-# Copy values into the card-orchestrator azd environment:
 cd deployments/card-orchestrator
-azd env set AZURE_LOG_ANALYTICS_WORKSPACE_RESOURCE_ID "<value-from-root>"
-azd env set AZURE_APP_INSIGHTS_RESOURCE_ID "<value-from-root>"
-azd env set APPLICATIONINSIGHTS_CONNECTION_STRING "<value-from-root>"
+python deploy.py preview --environment prod --execute --approve-prod
+python deploy.py provision --environment prod --execute --approve-change --approve-prod
 ```
 
-Alert activation requires separate approval. Enable only after a workload review confirms thresholds are appropriate for observed traffic.
+Review the Bicep what-if and validate the environment-specific IDs before either
+command. Never reuse dev monitoring IDs for prod.
 
-## SLO baseline
+## Independent rollout
 
-No contractual SLO is defined in this rollout. The alert thresholds are operational baselines to be revised after two weeks of representative traffic. Current capacity (10 RPM / 10K TPM in dev) supports approximately 3–4 concurrent bounded orchestrations. Do not deploy more concurrent workloads than the capacity allows without first reviewing and approving a quota increase.
+Run all agent commands from `deployments/card-orchestrator`. Set
+`AZURE_DEV_USER_AGENT=microsoft_foundry_skill` inline for every azd command.
 
-## Validation evidence
+### Pre-rollout gates
 
-See `docs/foundry-agent-operations.md` for the 2026-09-09 successful ACA-MI E2E run at commit `669899d23701983fc0a540ad93d932fee688577e`. That run proved:
+1. Record the commit, immutable image candidate tag, current agent/version list, and
+   endpoint selector.
+2. Record the public web ACA revision, image, environment variables or configuration
+   hash, and traffic weights.
+3. Confirm mandatory monitoring IDs resolve and project monitoring is connected.
+4. Confirm model capacity and alert routing approval.
+5. Run offline tests and Bicep compilation.
 
-- Foundry hosted version deploys and activates within ~60 seconds.
-- ACA managed-identity token matches the expected principal.
-- Invocation returns HTTP 200 with a completed, schema-valid card result.
-- Cleanup (stop session, delete session, delete hosted version) completes within ~20 seconds.
-- Web ACA image, revision, traffic, and persisted endpoint are unchanged after agent lifecycle.
+```bash
+git rev-parse HEAD
+AZURE_DEV_USER_AGENT=microsoft_foundry_skill azd ai agent show --output json
+AZURE_DEV_USER_AGENT=microsoft_foundry_skill azd ai agent endpoint show --output json
+
+az containerapp show --name "<web-app>" --resource-group "<resource-group>" \
+  --query "{revision:properties.latestRevisionName,image:properties.template.containers[0].image,configuration:properties.configuration,traffic:properties.configuration.ingress.traffic}" \
+  --output json > "<evidence-directory>/web-before.json"
+```
+
+The evidence directory must be access-controlled and immutable under the operator's
+incident/change process; it is not committed to this repository.
+
+### Deploy and verify
+
+```bash
+export CARD_ORCHESTRATOR_VERSION="$(git rev-parse HEAD)"
+
+cd deployments/card-orchestrator
+python deploy.py deploy
+python deploy.py deploy --execute --approve-change
+
+AZURE_DEV_USER_AGENT=microsoft_foundry_skill \
+  azd ai agent show --output json > "<evidence-directory>/agent-after.json"
+AZURE_DEV_USER_AGENT=microsoft_foundry_skill \
+  azd ai agent endpoint show --output json > "<evidence-directory>/endpoint-after.json"
+```
+
+For a deliberately approved production rollout, add `--environment prod
+--approve-prod` to both launcher commands and add `--approve-prod` to the production
+managed-identity probe.
+
+Run exactly one bounded target-managed-identity invocation against the new hosted
+version, using the pinned ACA revision/replica and the expected immutable candidate:
+
+```bash
+python aca_identity_probe.py \
+  --environment dev \
+  --subscription "<subscription-id>" \
+  --resource-group "<resource-group>" \
+  --app "<web-app>" \
+  --revision "<recorded-web-revision>" \
+  --replica "<running-replica>" \
+  --container web \
+  --project-endpoint "https://<account>.services.ai.azure.com/api/projects/<project>" \
+  --expected-principal "<web-aca-system-identity-principal-id>" \
+  --invoke-once \
+  --hosted-version "<new-hosted-version>" \
+  --expected-version "$CARD_ORCHESTRATOR_VERSION" \
+  --session-id "<owned-bounded-session-id>" \
+  --require-persisted-endpoint \
+  --execute
+```
+
+The probe must report `invocation_verified`, one invocation attempted, a schema-valid
+response, and the expected version. Complete the probe's owned session cleanup. Then
+capture the web ACA state again and compare it byte-for-byte or structurally with the
+pre-rollout snapshot. The agent rollout is rejected if web image, revision,
+configuration, identity, or traffic changed.
+
+## Restore-first rollback
+
+The stable agent endpoint supports one 100% version-selection rule. Rollback therefore
+selects the prior known-good active version first, verifies service restoration, and
+only then considers deleting the bad version. Never delete the serving version before
+restoration.
+
+Set the data-plane variables:
+
+```bash
+ACCOUNT_NAME="<foundry-account>"
+PROJECT_NAME="<foundry-project>"
+AGENT_NAME="card-orchestrator"
+BASE_URL="https://${ACCOUNT_NAME}.services.ai.azure.com/api/projects/${PROJECT_NAME}"
+API_VERSION="v1"
+RESOURCE="https://ai.azure.com"
+PRIOR_VERSION="<known-good-hosted-version>"
+PRIOR_CANDIDATE="<known-good-git-sha>"
+BAD_VERSION="<failed-hosted-version>"
+```
+
+### Abort and no-op gates
+
+```bash
+test -n "$PRIOR_VERSION" && test -n "$BAD_VERSION"
+test "$PRIOR_VERSION" != "$BAD_VERSION"
+
+az rest --method GET \
+  --url "${BASE_URL}/agents/${AGENT_NAME}/versions/${PRIOR_VERSION}?api-version=${API_VERSION}" \
+  --resource "$RESOURCE" --output json \
+  > "<evidence-directory>/prior-version.json"
+
+az rest --method GET \
+  --url "${BASE_URL}/agents/${AGENT_NAME}?api-version=${API_VERSION}" \
+  --resource "$RESOURCE" --output json \
+  > "<evidence-directory>/agent-before-rollback.json"
+```
+
+Abort if the prior version is not `active`, if its immutable candidate cannot be
+matched to approved evidence, or if the endpoint already selects the prior version.
+The last case is a no-op: verify health and do not issue another selector update.
+
+### Select the prior version
+
+```bash
+az rest --method PATCH \
+  --url "${BASE_URL}/agents/${AGENT_NAME}?api-version=${API_VERSION}" \
+  --resource "$RESOURCE" \
+  --headers "Content-Type=application/merge-patch+json" \
+  --body "{
+    \"agent_endpoint\": {
+      \"version_selector\": {
+        \"version_selection_rules\": [
+          {
+            \"type\": \"FixedRatio\",
+            \"agent_version\": \"${PRIOR_VERSION}\",
+            \"traffic_percentage\": 100
+          }
+        ]
+      }
+    }
+  }"
+```
+
+Equivalent Python SDK operation for `azure-ai-projects>=2.3.0`:
+
+```python
+from azure.ai.projects import AIProjectClient
+from azure.ai.projects.models import (
+    AgentEndpointConfig,
+    FixedRatioVersionSelectionRule,
+    VersionSelector,
+)
+from azure.identity import DefaultAzureCredential
+
+project_client = AIProjectClient(
+    endpoint=BASE_URL,
+    credential=DefaultAzureCredential(),
+)
+project_client.agents.update_details(
+    agent_name=AGENT_NAME,
+    agent_endpoint=AgentEndpointConfig(
+        version_selector=VersionSelector(
+            version_selection_rules=[
+                FixedRatioVersionSelectionRule(
+                    agent_version=PRIOR_VERSION,
+                    traffic_percentage=100,
+                )
+            ]
+        )
+    ),
+)
+```
+
+### Verify restoration before cleanup
+
+```bash
+az rest --method GET \
+  --url "${BASE_URL}/agents/${AGENT_NAME}?api-version=${API_VERSION}" \
+  --resource "$RESOURCE" --output json \
+  > "<evidence-directory>/agent-after-selector.json"
+
+AZURE_DEV_USER_AGENT=microsoft_foundry_skill \
+  azd ai agent endpoint show --output json \
+  > "<evidence-directory>/endpoint-after-selector.json"
+```
+
+Verify exactly one `FixedRatio` rule selects `PRIOR_VERSION` at 100%, then run the
+same one-invocation ACA managed-identity smoke with:
+
+```text
+--hosted-version "$PRIOR_VERSION"
+--expected-version "$PRIOR_CANDIDATE"
+```
+
+Confirm the smoke reports `invocation_verified`, clean up only its owned session, and
+prove the web ACA state still matches `web-before.json`.
+
+### Optional bad-version deletion
+
+Deletion is not rollback and is never required for service restoration. Perform it
+only after the selector, managed-identity smoke, telemetry, and web immutability gates
+all pass and the change owner approves cleanup:
+
+```bash
+az rest --method DELETE \
+  --url "${BASE_URL}/agents/${AGENT_NAME}/versions/${BAD_VERSION}?api-version=${API_VERSION}" \
+  --resource "$RESOURCE"
+```
+
+Correct Python SDK method:
+
+```python
+project_client.agents.delete_version(
+    agent_name=AGENT_NAME,
+    agent_version=BAD_VERSION,
+)
+```
+
+The repository-pinned `azure.ai.agents` extension also exposes:
+
+```bash
+AZURE_DEV_USER_AGENT=microsoft_foundry_skill \
+  azd ai agent delete "$AGENT_NAME" --version "$BAD_VERSION" --no-prompt
+```
+
+Before deletion, re-read the agent selector and abort if `BAD_VERSION` is serving.
+After deletion, GET only that version and expect not found; do not delete the agent
+object or any unowned session/version.
+
+## Residual limitations
+
+- Foundry-hosted internal readiness cannot be monitored by a public availability
+  test. The bounded managed-identity invocation is an operator procedure, not a
+  recurrent platform heartbeat.
+- Alert thresholds are initial operational baselines and require tuning after
+  representative dev traffic.
+- Project monitoring linkage is deployed by root Bicep. Deploying only the dedicated
+  agent infra against an unrelated pre-existing project does not create that linkage;
+  operators must first verify the project has the intended Application Insights
+  connection.
+
+Authoritative platform references:
+
+- [Export hosted agent telemetry](https://learn.microsoft.com/azure/foundry/agents/how-to/configure-hosted-agent-telemetry)
+- [Configure hosted agent environment variables](https://learn.microsoft.com/azure/foundry/agents/how-to/configure-hosted-agent-env-variables)
+- [Manage hosted agents](https://learn.microsoft.com/azure/foundry/agents/how-to/manage-hosted-agent)
