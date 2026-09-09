@@ -201,3 +201,8 @@ Card generation now accepts a saved photo as an alternative reference source. `P
 **By:** Gimli
 **What:** PR #106 set Key Vault `publicNetworkAccess` to `Disabled` in `infra/modules/security.bicep` and removed the permissive `networkAcls` block.
 **Why:** The PR records that the previous declaration caused deployment-preview drift toward public exposure. Keep the private-network declaration rather than reintroducing permissive defaults. This note was recovered on 2026-09-07 from local WIP and checked against merged commit `2683457`; it does not assert the current live Azure configuration.
+
+### 2026-09-09T11:54:57.259+00:00: Dev web deployments use deploy-only `azd deploy` rather than `azd up`
+**By:** Gimli
+**What:** Development environment web deployments now use `azd deploy --service web-nat` instead of `azd up` or `azd provision`. This is a deploy-only invocation that updates only the Container App revision without reprovisioning Azure resources.
+**Why:** The root postprovision hook contains `az ad app credential reset --append`, which rotates the Entra client secret. When `ENTRA_CLIENT_ID` is set in the `dev` environment, running `azd provision` (via `azd up`) would rotate the secret during deployment, breaking subsequent authentication until the new secret is fetched. Deploy-only avoids this rotation by skipping the hook entirely. The infrastructure (VNet, NAT, Cosmos, Key Vault, etc.) is stable and requires no reprove each deploy. Postprovision hook changes should be coordinated through the Coordinator before any future use of `azd up` in dev.

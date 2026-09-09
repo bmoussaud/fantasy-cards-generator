@@ -31,3 +31,5 @@
 📌 Team update (2026-09-02T16:31:07.441+00:00): The authenticated card library uses read-only 5-minute user-delegation Blob SAS URLs for artwork, so infra/runtime access must pair container-scoped Blob Data Contributor with account-scoped Storage Blob Delegator for SAS signing.
 📌 Team update (2026-09-04T13:10:31.843+00:00): Gandalf published an architecture spec at docs/architecture-agents-foundry.md proposing a Foundry-hosted card-orchestrator agent (Microsoft Agent Framework); review for your domain's implications (backend integration / infra RBAC+Bicep / UI states / test strategy).
 📌 Recovered note (2026-09-07): PR #56 (`6375922`) completed issue #51 by scoping runtime Blob RBAC to the `card-assets` container and wiring `HEALTHZ_COSMOS_TIMEOUT_MS` / `HEALTHZ_BLOB_TIMEOUT_MS` through azd and Bicep with 1500ms defaults. This records the merged change, not a fresh live-deployment observation.
+
+📌 Team update (2026-09-09T11:54:57.259+00:00): Dev web deployments must use deploy-only `azd deploy --service web-nat` to avoid postprovision hook's credential rotation when `ENTRA_CLIENT_ID` is set — decided by Gimli
