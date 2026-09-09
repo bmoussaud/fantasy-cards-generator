@@ -1,6 +1,6 @@
 # Card-orchestrator operations
 
-## Dev model-capacity correction — review handoff, not applied
+## Dev model-capacity correction and successful ACA-MI E2E — 2026-09-09
 
 Safe management-plane inspection after the classified HTTP 429 found the exact
 dev deployment `gpt-5-5` healthy but allocated only **1 capacity unit**:
@@ -75,8 +75,72 @@ exception row during `08:45:30Z`–`08:46:20Z`; its safe aggregate counters were
 43 successful result-code-0 dependencies, 22 successful HTTP-200 dependencies,
 and 7 successful HTTP-200 requests. This does not contradict the typed hosted
 runtime failure because that provider call is not exported as an App Insights
-429 dependency. No raw prompt, response body, token, secret, or `.env` value was
-read or recorded. **No Azure change has been applied and no repeat E2E has run.**
+429 dependency.
+
+After Gandalf approved revision
+`669899d23701983fc0a540ad93d932fee688577e` and Samwise independently approved
+its application, Gimli pushed that exact accepted revision without force and
+repeated the live gates. ARM validation succeeded. The fresh full-payload
+what-if contained one `Modify`, on the exact `gpt-5-5` resource: only
+`sku.capacity` changed from 1 to 10, plus omission of the read-only
+`properties.currentCapacity`; model, version, SKU, RAI policy and upgrade policy
+were identical before and after. Every other resource was `Ignore`. Regional
+quota was 1 of 1,000 units before apply.
+
+The documented leaf deployment ran once. ARM deployment
+`dev-text-model-capacity-10` completed `Succeeded` at
+`2026-09-09T09:17:49.389075Z`. The effective deployment then reported capacity
+10, 10 RPM and 10,000 TPM, with regional allocation 10 of 1,000 units and the
+same `GlobalStandard`, `gpt-5.5` `2026-04-24`, `Microsoft.DefaultV2` and
+`OnceNewDefaultVersionAvailable` properties.
+
+The corrected actual ACA-managed-identity E2E then built and deployed exact
+source `669899d23701983fc0a540ad93d932fee688577e` as
+`card-orchestrator:1`, image digest
+`sha256:fd18e117ec58c3bcee3b692d464e41aae92bea0b1b5300424832b937e268761a`.
+Deployment was submitted at `09:20:25.680407Z`; the image was published at
+`09:20:39.5991604Z`, and the hosted version became active within the deploy
+command's reported 58 seconds. The version used 0.5 CPU / 1 GiB and exposed the
+expected application SHA and existing `gpt-5-5` deployment.
+
+GET-only preparation against revision
+`fcag-dev-app--endpoint-ea77f0bf2596`, replica
+`fcag-dev-app--endpoint-ea77f0bf2596-5f75998d86-nwvzw`, container `web`
+confirmed the persisted project endpoint, actual ACA system identity
+`946d8701-48f2-4fa5-8efd-bf053c7b4e4c`, project access, parser, request schema
+and local fixture, with zero invocation attempts. The unique pre-recorded
+session `smoke-109-dc546e69831d47fa8dcbc217b98765c5` returned not found before
+the invocation.
+
+One ACA-MI probe was submitted at `09:22:17.960284Z`. The same credential
+created and readied its own exact version-pinned session, then sent one Responses
+POST with zero retries. HTTP 200 carried a completed, schema-valid card result,
+not a held result or refusal. Both hosted and application versions matched, so
+the prior `art_direction/rate_limited/rate_limit/http_429` failure is resolved
+for this bounded run. The result intentionally contains no card text:
+
+```json
+{"accessVerified":true,"applicationVersion":"669899d23701983fc0a540ad93d932fee688577e","applicationVersionMatched":true,"endpointPersisted":true,"endpointSource":"aca_environment","hostedVersion":"1","hostedVersionMatched":true,"httpStatus":200,"invocationVerified":true,"invocationsAttempted":1,"outcome":"completed","phase":"invoke","principalMatched":true,"responseId":"caresp_0c3111ffd0c24c5300Da3S4fgS2WviBtzGZpmFkhFtz2p9NCee","schemaValid":true,"sessionCleanupRequired":true,"sessionCreateAttempted":true,"sessionCreated":true,"sessionReady":true,"status":"invocation_verified","tokenAcquired":true}
+```
+
+Cleanup began at `09:23:04.234Z`. Ownership was rechecked against version `1`;
+the session stopped at `09:23:08.346Z`, was deleted at `09:23:10.525Z`, and the
+exact hosted version was deleted at `09:23:13.218Z`. Exact session lookup
+returned not found, agent-version resolution failed after deletion, and the
+session-list endpoint returned HTTP 404. The serving ACA image, revision,
+system identity, Single/100%-latest traffic and persisted endpoint were
+unchanged; its actual FQDN `/healthz` returned HTTP 200. Capacity 10 is an
+intentional persistent dev change and was not rolled back. No local probe,
+deployment or azd process remained.
+
+Cloud-write count was one targeted ARM model-deployment update, one agent image
+publication, one hosted version, one ACA-owned session create and one Responses
+POST, followed by exact session/version cleanup. Provider request count and
+token usage were not exported, so they remain unobserved rather than being
+invented from the three-stage maximum. No raw prompt, response/card body, token,
+secret or `.env` value was read or recorded. No production, application,
+traffic, identity, RBAC, network, root-provisioning, evaluation, PTU or unrelated
+resource change occurred.
 
 ## Exact classified runtime failure — 2026-09-09
 
