@@ -228,6 +228,7 @@ def probe(
     invocation=None,
     *,
     prepare=False,
+    require_persisted_endpoint=False,
     setup_deadline=None,
     remote_deadline=None,
 ):
@@ -236,12 +237,24 @@ def probe(
         setup_deadline = time.monotonic() + SESSION_SETUP_TIMEOUT
     try:
         validate_inputs(endpoint, principal)
+        if type(require_persisted_endpoint) is not bool:
+            raise ValueError("invalid_endpoint_requirement")
         if prepare and invocation is not None:
             raise ValueError("conflicting_modes")
         if invocation is not None:
             validate_invocation(*invocation)
     except (ValueError, TypeError):
         return {**result, "reason": "invalid_configuration"}
+    if require_persisted_endpoint:
+        persisted = os.environ.get("FOUNDRY_PROJECT_ENDPOINT")
+        try:
+            validate_inputs(persisted, principal)
+        except (ValueError, TypeError):
+            return {**result, "reason": "persisted_endpoint_invalid"}
+        if persisted != endpoint:
+            return {**result, "reason": "persisted_endpoint_mismatch"}
+        endpoint = persisted
+        result.update(endpointPersisted=True, endpointSource="aca_environment")
     if not os.environ.get("IDENTITY_ENDPOINT") or not os.environ.get("IDENTITY_HEADER"):
         return {**result, "reason": "aca_identity_unavailable"}
     logging.disable(logging.CRITICAL)
@@ -385,7 +398,15 @@ def probe(
                 pass
 
 
-def emit(endpoint, principal, invocation=None, *, prepare=False, parser_bundle=None):
+def emit(
+    endpoint,
+    principal,
+    invocation=None,
+    *,
+    prepare=False,
+    parser_bundle=None,
+    require_persisted_endpoint=False,
+):
     def deadline(signum, frame):
         raise TimeoutError()
 
@@ -408,6 +429,7 @@ def emit(endpoint, principal, invocation=None, *, prepare=False, parser_bundle=N
             principal,
             invocation=invocation,
             prepare=prepare,
+            require_persisted_endpoint=require_persisted_endpoint,
             setup_deadline=setup_deadline,
             remote_deadline=remote_deadline if invocation else None,
         )

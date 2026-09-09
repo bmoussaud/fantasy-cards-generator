@@ -106,6 +106,56 @@ Do **not** supply `--invoke-once`, versions or a session: conflicting/unused
 invocation arguments fail locally before ACA exec. No hosted version, session or
 server is required.
 
+#### Proving the persisted endpoint
+
+Add `--require-persisted-endpoint` to access-only, `--prepare-invocation`, or
+`--invoke-once` mode. The probe reads **only** `os.environ["FOUNDRY_PROJECT_ENDPOINT"]`
+inside the pinned ACA process (no dotenv/file reads). Environment configuration
+is untrusted: it must pass the existing canonical Azure project URL validation
+and exactly match the operator-verified `--project-endpoint` before credentials,
+network requests, or session creation. Missing/malformed and mismatched values
+produce only `persisted_endpoint_invalid` and `persisted_endpoint_mismatch`;
+the environment value is never printed. Credentials, arbitrary URLs, redirects,
+query strings and environment proxies are not accepted as project destinations.
+
+Only after that actual comparison does request construction use the persisted
+value and emit `endpointPersisted:true` with `endpointSource:"aca_environment"`.
+The wrapper requires these fields to agree and, when opted in, rejects successful
+legacy markers without persistence proof. The flag requests verification; it
+cannot supply a boolean assertion of persistence. Default usage still reports
+`endpointPersisted:false`, meaning persistence was not checked, not that the
+environment variable is necessarily absent. Historical results remain unchanged.
+
+Use `--prepare-invocation --require-persisted-endpoint --execute` for the
+nonbillable gate: a successful `invocation_prepared` marker also requires the
+actual expected MI principal, HTTP 200 with a valid agents list, and the bundled
+parser/request/local-fixture checks. It sends one GET and **zero POSTs**.
+Endpoint matching alone never proves access or invocation; preparation is not
+hosted generation, domain validation of a service response, or E2E completion.
+Invocation keeps the existing 30s setup / 65s remote invocation budget (95s
+remote total, 130s local bound), same-MI session ownership, and no retries.
+
+**Actual nonbillable persisted-endpoint preparation, 2026-09-09 UTC**
+(evidence recorded at `06:26:33Z`; this is not the historical 2026-09-08 run):
+fresh allowlisted management GETs selected healthy/running revision
+`fcag-dev-app--endpoint-ea77f0bf2596`, ready replica
+`fcag-dev-app--endpoint-ea77f0bf2596-5f75998d86-nwvzw`, container `web`.
+The expected system principal was `946d8701-48f2-4fa5-8efd-bf053c7b4e4c`;
+Single mode, 100%-latest traffic and the existing
+`web-nat-dev:azd-deploy-1788775195` image were observed unchanged.
+One `--prepare-invocation --require-persisted-endpoint --execute` completed:
+
+```json
+{"accessVerified":true,"agentCountOnPage":0,"endpointPersisted":true,"endpointSource":"aca_environment","httpStatus":200,"invocationVerified":false,"invocationsAttempted":0,"localFixtureParseReady":true,"parserImportReady":true,"preparationOnly":true,"principalMatched":true,"requestSchemaReady":true,"schemaValid":false,"status":"invocation_prepared","tokenAcquired":true}
+```
+
+The verified persisted value matched
+`https://aifcagdevqhg3qc4rlbt4g.services.ai.azure.com/api/projects/fantasy-cards-dev`.
+This preparation sent one agents GET, zero session-create/Responses POSTs and
+created no hosted runtime. No app configuration, remote files or packages changed.
+Persistence and GET access are now proven inside ACA; real hosted E2E remains
+pending the separately reviewed bounded invocation.
+
 This explicit mode uses the **same** owned parser/request-model bundle,
 `app.generation.GeneratedCardModel` import, chunked stdin transport and phased
 deadlines as invocation. It builds the same `GenerateCardAgentRequest`/Responses

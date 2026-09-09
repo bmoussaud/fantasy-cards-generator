@@ -30,6 +30,7 @@ def modules(monkeypatch):
     wrapper = importlib.import_module("aca_identity_probe")
     monkeypatch.setenv("IDENTITY_ENDPOINT", "http://localhost/identity")
     monkeypatch.setenv("IDENTITY_HEADER", "synthetic-test-header")
+    monkeypatch.delenv("FOUNDRY_PROJECT_ENDPOINT", raising=False)
     yield payload, wrapper
     logging.disable(previous)
 
@@ -103,6 +104,179 @@ def test_empty_list_proves_access_only_with_explicit_identity(modules):
     assert opener.request.full_url == ENDPOINT + "/agents?api-version=2025-11-15-preview"
     assert opener.request.data is None
     assert credential.value not in json.dumps(result)
+
+
+@pytest.mark.parametrize("mode", ["access", "prepare", "invoke"])
+@pytest.mark.parametrize(
+    "persisted,reason",
+    [
+        (None, "persisted_endpoint_invalid"),
+        ("", "persisted_endpoint_invalid"),
+        ("private-secret-value", "persisted_endpoint_invalid"),
+        (ENDPOINT + "?secret=private", "persisted_endpoint_invalid"),
+        (
+            "https://user:private@example.services.ai.azure.com/api/projects/x",
+            "persisted_endpoint_invalid",
+        ),
+        (ENDPOINT + "/", "persisted_endpoint_invalid"),
+        (ENDPOINT + "-other", "persisted_endpoint_mismatch"),
+    ],
+)
+def test_persisted_endpoint_fails_before_identity_or_network(
+    modules, monkeypatch, mode, persisted, reason
+):
+    payload, wrapper = modules
+    if persisted is not None:
+        monkeypatch.setenv("FOUNDRY_PROJECT_ENDPOINT", persisted)
+    credential, opener = Credential(), Opener()
+    result = payload.probe(
+        ENDPOINT,
+        PRINCIPAL,
+        credential.factory,
+        opener,
+        ("1", "a" * 40, SESSION) if mode == "invoke" else None,
+        prepare=mode == "prepare",
+        require_persisted_endpoint=True,
+    )
+    assert result["reason"] == reason and result["status"] == "failed"
+    assert not result["endpointPersisted"] and not result["tokenAcquired"]
+    assert credential.options is None and opener.request is None
+    assert not result.get("sessionCreateAttempted") and not result.get("invocationsAttempted")
+    assert "private" not in json.dumps(result)
+    assert (
+        wrapper.extract_result(payload.MARKER + json.dumps(result), require_persisted_endpoint=True)
+        == result
+    )
+
+
+@pytest.mark.parametrize("prepare", [False, True])
+def test_persisted_endpoint_match_is_get_only_proof(modules, monkeypatch, prepare):
+    payload, wrapper = modules
+    invocation_parser(payload, wrapper, monkeypatch)
+    monkeypatch.setenv("FOUNDRY_PROJECT_ENDPOINT", ENDPOINT)
+    opener = SequenceOpener((200, {"data": []}))
+    result = payload.probe(
+        ENDPOINT,
+        PRINCIPAL,
+        Credential().factory,
+        opener,
+        prepare=prepare,
+        require_persisted_endpoint=True,
+    )
+    assert result["endpointPersisted"] is True
+    assert result["endpointSource"] == "aca_environment"
+    assert result["status"] == ("invocation_prepared" if prepare else "access_verified")
+    assert result["principalMatched"] and result["httpStatus"] == 200
+    assert not result["invocationVerified"] and not result.get("invocationsAttempted")
+    assert len(opener.requests) == 1
+    assert opener.requests[0].method == "GET" and opener.requests[0].data is None
+    assert opener.requests[0].full_url == ENDPOINT + "/agents?api-version=" + payload.API_VERSION
+    assert (
+        wrapper.extract_result(payload.MARKER + json.dumps(result), require_persisted_endpoint=True)
+        == result
+    )
+
+
+@pytest.mark.parametrize("identity_matches", [False, True])
+def test_endpoint_match_does_not_prove_service_access(modules, monkeypatch, identity_matches):
+    payload, wrapper = modules
+    monkeypatch.setenv("FOUNDRY_PROJECT_ENDPOINT", ENDPOINT)
+    result = payload.probe(
+        ENDPOINT,
+        PRINCIPAL,
+        Credential(token(oid=PRINCIPAL if identity_matches else "wrong")).factory,
+        Opener(status=403),
+        require_persisted_endpoint=True,
+    )
+    assert result["endpointPersisted"] and result["status"] == "failed"
+    assert not result["accessVerified"] and not result["invocationVerified"]
+    assert (
+        wrapper.extract_result(payload.MARKER + json.dumps(result), require_persisted_endpoint=True)
+        == result
+    )
+
+
+@pytest.mark.parametrize(
+    "proof",
+    [
+        {"endpointPersisted": True},
+        {"endpointPersisted": False, "endpointSource": "aca_environment"},
+        {"endpointPersisted": True, "endpointSource": "operator"},
+        {"endpointPersisted": 1, "endpointSource": "aca_environment"},
+    ],
+)
+def test_forged_endpoint_proof_is_rejected(modules, proof):
+    payload, wrapper = modules
+    result = payload.probe(ENDPOINT, PRINCIPAL, Credential().factory, Opener())
+    result.update(proof)
+    assert wrapper.extract_result(payload.MARKER + json.dumps(result)) is None
+
+
+def test_required_transport_rejects_legacy_success(modules):
+    payload, wrapper = modules
+    result = payload.probe(ENDPOINT, PRINCIPAL, Credential().factory, Opener())
+    line = payload.MARKER + json.dumps(result)
+    assert wrapper.extract_result(line) == result
+    assert wrapper.extract_result(line, require_persisted_endpoint=True) is None
+    assert wrapper.execute(
+        [sys.executable, "-c", f"print({line!r},flush=True)"],
+        require_persisted_endpoint=True,
+    ) == {"status": "failed", "reason": "exec_no_evidence"}
+
+
+def test_default_mode_does_not_claim_or_use_environment_endpoint(modules, monkeypatch):
+    payload, _ = modules
+    monkeypatch.setenv("FOUNDRY_PROJECT_ENDPOINT", "https://private-untrusted.example")
+    opener = Opener()
+    result = payload.probe(ENDPOINT, PRINCIPAL, Credential().factory, opener)
+    assert result["status"] == "access_verified" and result["endpointPersisted"] is False
+    assert "endpointSource" not in result
+    assert opener.request.full_url.startswith(ENDPOINT + "/agents?")
+
+
+@pytest.mark.parametrize("value", [None, 1, "true", "false"])
+def test_endpoint_requirement_type_validated_before_exec(modules, value):
+    payload, wrapper = modules
+    with pytest.raises(ValueError):
+        wrapper.remote_command(ENDPOINT, PRINCIPAL, require_persisted_endpoint=value)
+    credential = Credential()
+    result = payload.probe(
+        ENDPOINT, PRINCIPAL, credential.factory, require_persisted_endpoint=value
+    )
+    assert result["reason"] == "invalid_configuration" and credential.options is None
+
+
+@pytest.mark.parametrize("mode", ["access", "prepare", "invoke"])
+def test_endpoint_requirement_reaches_remote_emit_and_result_filter(modules, monkeypatch, mode):
+    _, wrapper = modules
+    args = [a for a in preparation_args() if a != "--prepare-invocation"]
+    args.append("--require-persisted-endpoint")
+    if mode == "prepare":
+        args.append("--prepare-invocation")
+    elif mode == "invoke":
+        args += [
+            "--invoke-once",
+            "--hosted-version",
+            "1",
+            "--expected-version",
+            "a" * 40,
+            "--session-id",
+            SESSION,
+        ]
+    calls = []
+
+    def execute(command, **kwargs):
+        calls.append(kwargs)
+        assert kwargs["require_persisted_endpoint"] is True
+        expression = "".join(kwargs["input_line"].splitlines()[:-1])
+        encoded = expression.split("b64decode('")[1].split("'")[0]
+        source = zlib.decompress(base64.b64decode(encoded)).decode()
+        assert source.splitlines()[-1].endswith("require_persisted_endpoint=True)")
+        return {"status": "failed", "reason": "exec_no_evidence"}
+
+    monkeypatch.setattr(wrapper, "execute", execute)
+    assert wrapper.main(args) == 1
+    assert len(calls) == 1
 
 
 @pytest.mark.parametrize(
@@ -487,7 +661,8 @@ def test_execution_pins_target_and_bounds_remote_input_wait(modules, monkeypatch
     for name in ("subscription", "resource-group", "app", "revision", "replica", "container"):
         args.extend(["--" + name, "synthetic"])
 
-    def execute(command, input_line):
+    def execute(command, input_line, *, require_persisted_endpoint):
+        assert require_persisted_endpoint is False
         assert command[command.index("--command") + 1] == (
             "/app/.venv/bin/python -c __import__('signal').alarm(60);"
             "exec(''.join(iter(input,'END')))"
@@ -1084,6 +1259,8 @@ def preparation_args():
         ["--expected-version", "bad"],
         ["--session-id", "session"],
         ["--invoke-once", "--session-id", "bad"],
+        ["--require-persisted-endpoint", "true"],
+        ["--require-persisted-endpoint=false"],
     ],
 )
 def test_preparation_cli_malformed_args_never_launch_exec(modules, monkeypatch, extra):
@@ -1251,10 +1428,15 @@ def test_invocation_plan_never_executes_or_creates_session(modules, monkeypatch,
     assert "PLAN ONLY" in capsys.readouterr().out
 
 
-def test_invocation_real_bundle_full_canonical_transport(modules):
+@pytest.mark.parametrize("required", [False, True])
+def test_invocation_real_bundle_full_canonical_transport(modules, monkeypatch, required):
     _, wrapper = modules
+    monkeypatch.setenv("FOUNDRY_PROJECT_ENDPOINT", ENDPOINT)
     startup, input_line = wrapper.stdin_payload(
-        wrapper.remote_command(ENDPOINT, PRINCIPAL, ("1", "a" * 40, SESSION)), invocation=True
+        wrapper.remote_command(
+            ENDPOINT, PRINCIPAL, ("1", "a" * 40, SESSION), require_persisted_endpoint=required
+        ),
+        invocation=True,
     )
     domain = {
         "schemaVersion": 1,
@@ -1288,17 +1470,24 @@ def test_invocation_real_bundle_full_canonical_transport(modules):
         timeout=100,
         setup_timeout=10,
         total_timeout=110,
+        require_persisted_endpoint=required,
     )
     assert result["status"] == "invocation_verified" and result["outcome"] == "refused"
     assert result["sessionCreateAttempted"] and result["sessionReady"]
     assert result["invocationsAttempted"] == 1 and result["sessionCleanupRequired"]
+    assert result["endpointPersisted"] is required
     assert len(startup) < 2000 and max(map(len, input_line.splitlines())) <= 1024
 
 
-def test_preparation_real_bundle_full_canonical_transport(modules):
+@pytest.mark.parametrize("required", [False, True])
+def test_preparation_real_bundle_full_canonical_transport(modules, monkeypatch, required):
     payload, wrapper = modules
+    monkeypatch.setenv("FOUNDRY_PROJECT_ENDPOINT", ENDPOINT)
     startup, input_line = wrapper.stdin_payload(
-        wrapper.remote_command(ENDPOINT, PRINCIPAL, prepare=True), prepare=True
+        wrapper.remote_command(
+            ENDPOINT, PRINCIPAL, prepare=True, require_persisted_endpoint=required
+        ),
+        prepare=True,
     )
     # Only the identity and HTTP boundary are mocked; parser/import/request/PTY are real.
     program = (
@@ -1314,10 +1503,13 @@ def test_preparation_real_bundle_full_canonical_transport(modules):
         timeout=80,
         setup_timeout=30,
         total_timeout=110,
+        require_persisted_endpoint=required,
     )
     assert result["status"] == "invocation_prepared"
     assert result["localFixtureParseReady"] is True
     assert result["invocationsAttempted"] == 0 and result["invocationVerified"] is False
+    assert result["endpointPersisted"] is required
+    assert len(startup) < 2000 and max(map(len, input_line.splitlines())) <= 1024
 
 
 def test_cold_import_exceeding_old_five_second_alarm_now_completes(modules):

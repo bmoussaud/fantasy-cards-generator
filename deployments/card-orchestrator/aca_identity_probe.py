@@ -69,19 +69,24 @@ def parser_source():
     )
 
 
-def remote_command(endpoint, principal, invocation=None, *, prepare=False):
+def remote_command(
+    endpoint, principal, invocation=None, *, prepare=False, require_persisted_endpoint=False
+):
     validate_inputs(endpoint, principal)
+    if type(require_persisted_endpoint) is not bool:
+        raise ValueError("invalid_endpoint_requirement")
     if prepare and invocation is not None:
         raise ValueError("conflicting_modes")
     source = Path(__file__).with_name("aca_identity_payload.py").read_text()
+    requirement = ", require_persisted_endpoint=True" if require_persisted_endpoint else ""
     if invocation is None and not prepare:
-        source += f"\nemit({endpoint!r}, {principal!r})\n"
+        source += f"\nemit({endpoint!r}, {principal!r}{requirement})\n"
     else:
         if invocation is not None:
             validate_invocation(*invocation)
         source += (
             f"\nemit({endpoint!r}, {principal!r}, {invocation!r}, "
-            f"prepare={prepare!r}, parser_bundle={parser_source()!r})\n"
+            f"prepare={prepare!r}, parser_bundle={parser_source()!r}{requirement})\n"
         )
     encoded = base64.b64encode(zlib.compress(source.encode())).decode("ascii")
     # The payload is the adjacent inspectable source, not a file written into the app.
@@ -134,7 +139,7 @@ def stdin_payload(payload, *, invocation=False, prepare=False):
     return command, input_lines
 
 
-def extract_result(output):
+def extract_result(output, *, require_persisted_endpoint=False):
     for line in output.replace("\r", "").splitlines():
         if not line.startswith(MARKER):
             continue
@@ -149,6 +154,7 @@ def extract_result(output):
             "accessVerified",
             "invocationVerified",
             "endpointPersisted",
+            "endpointSource",
             "reason",
             "httpStatus",
             "agentCountOnPage",
@@ -183,6 +189,8 @@ def extract_result(output):
             continue
         reasons = {
             "invalid_configuration",
+            "persisted_endpoint_invalid",
+            "persisted_endpoint_mismatch",
             "aca_identity_unavailable",
             "identity_claim_mismatch",
             "unexpected_http_status",
@@ -214,7 +222,15 @@ def extract_result(output):
         )
         if any(type(result.get(key)) is not bool for key in bools):
             continue
-        if result["endpointPersisted"]:
+        if result["endpointPersisted"] != (result.get("endpointSource") == "aca_environment"):
+            continue
+        if "endpointSource" in result and result["endpointSource"] != "aca_environment":
+            continue
+        if (
+            require_persisted_endpoint
+            and result["status"] != "failed"
+            and not result["endpointPersisted"]
+        ):
             continue
         if result["invocationVerified"] != (result["status"] == "invocation_verified"):
             continue
@@ -352,7 +368,15 @@ def extract_result(output):
     return None
 
 
-def execute(command, timeout=75, input_line=None, *, setup_timeout=None, total_timeout=None):
+def execute(
+    command,
+    timeout=75,
+    input_line=None,
+    *,
+    setup_timeout=None,
+    total_timeout=None,
+    require_persisted_endpoint=False,
+):
     started = time.monotonic()
     deadline = started + (setup_timeout if setup_timeout is not None else timeout)
     overall_deadline = started + (
@@ -425,7 +449,10 @@ def execute(command, timeout=75, input_line=None, *, setup_timeout=None, total_t
                         # Wait until CLI sets up its terminal; early stdin can be flushed.
                         ready_at = time.monotonic() + 0.2
                         pending = memoryview((input_line + "\n").encode())
-                    result = extract_result(output.decode("utf-8", errors="replace"))
+                    result = extract_result(
+                        output.decode("utf-8", errors="replace"),
+                        require_persisted_endpoint=require_persisted_endpoint,
+                    )
                     if result is not None:
                         return result
     except OSError:
@@ -460,6 +487,11 @@ def main(argv=None):
     ):
         parser.add_argument("--" + name, required=True)
     parser.add_argument("--execute", action="store_true")
+    parser.add_argument(
+        "--require-persisted-endpoint",
+        action="store_true",
+        help="Require ACA's environment endpoint to exactly match the verified project endpoint",
+    )
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--invoke-once", action="store_true")
     modes.add_argument("--prepare-invocation", action="store_true")
@@ -480,6 +512,7 @@ def main(argv=None):
             args.expected_principal,
             invocation,
             prepare=args.prepare_invocation,
+            require_persisted_endpoint=args.require_persisted_endpoint,
         )
     except (ValueError, TypeError):
         parser.error("Supply a canonical verified project endpoint and principal UUID")
@@ -530,9 +563,14 @@ def main(argv=None):
             timeout=INVOCATION_RESULT_TIMEOUT if invocation else 80,
             setup_timeout=INVOCATION_SETUP_TIMEOUT if invocation else 30,
             total_timeout=INVOCATION_TOTAL_TIMEOUT if invocation else 110,
+            require_persisted_endpoint=args.require_persisted_endpoint,
         )
     else:
-        result = execute(command, input_line=input_line)
+        result = execute(
+            command,
+            input_line=input_line,
+            require_persisted_endpoint=args.require_persisted_endpoint,
+        )
     if invocation and "invocationsAttempted" not in result:
         result["invocationAllowanceConsumed"] = True
         result["sessionCreationUnknown"] = True
