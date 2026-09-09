@@ -143,16 +143,55 @@ class ProbeFailure(Exception):
     pass
 
 
-def service_code(body):
-    """Only a literal, recognized service code may cross the diagnostic boundary."""
+def service_diagnostic(body):
+    """Only fixed service diagnostics may cross the diagnostic boundary."""
     try:
         document = json.loads(body)
-        code = document["error"]["code"]
+        error = document["error"]
+        code = error["code"]
         if code in ("session_not_accessible", "invalid_request"):
-            return code
+            return {"serviceCode": code}
+        if code == "card_boundary_invalid_request":
+            reason = error.get("reason")
+            param = error.get("param")
+            if reason in (
+                "invalid_json",
+                "invalid_object",
+                "unsupported_field",
+                "not_false",
+                "invalid_value",
+                "not_single_item_list",
+                "invalid_user_message",
+                "invalid_input_text",
+                "invalid_schema",
+            ) and param in (
+                "body",
+                "top_level",
+                "agent",
+                "agent_reference",
+                "background",
+                "conversation",
+                "instructions",
+                "max_output_tokens",
+                "metadata",
+                "model",
+                "previous_response_id",
+                "prompt",
+                "response_id",
+                "store",
+                "stream",
+                "text",
+                "tool_choice",
+                "tools",
+                "agent_session_id",
+                "input",
+                "content",
+                "domain",
+            ):
+                return {"serviceCode": code, "serviceReason": reason, "serviceParam": param}
     except (ValueError, TypeError, KeyError):
         pass
-    return "unknown"
+    return {"serviceCode": "unknown"}
 
 
 def session_document(opener, request, result, deadline, expected_status):
@@ -164,7 +203,9 @@ def session_document(opener, request, result, deadline, expected_status):
         result["httpStatus"] = response.status
         body = response.read(MAX_BODY + 1)
         if response.status != expected_status:
-            result["serviceCode"] = service_code(body) if len(body) <= MAX_BODY else "unknown"
+            result.update(
+                service_diagnostic(body) if len(body) <= MAX_BODY else {"serviceCode": "unknown"}
+            )
             if result["phase"] == "session_create" and response.status == 409:
                 result["sessionCleanupRequired"] = False
             raise ProbeFailure("unexpected_http_status")
@@ -320,7 +361,11 @@ def probe(
             result["httpStatus"] = response.status
             if response.status != 200:
                 body = response.read(MAX_BODY + 1)
-                result["serviceCode"] = service_code(body) if len(body) <= MAX_BODY else "unknown"
+                result.update(
+                    service_diagnostic(body)
+                    if len(body) <= MAX_BODY
+                    else {"serviceCode": "unknown"}
+                )
                 return {**result, "reason": "unexpected_http_status"}
             body = response.read(MAX_BODY + 1)
         if len(body) > MAX_BODY:
@@ -377,7 +422,7 @@ def probe(
         try:
             body = error.read(MAX_BODY + 1)
             if len(body) <= MAX_BODY:
-                result["serviceCode"] = service_code(body)
+                result.update(service_diagnostic(body))
         except Exception:
             pass
         finally:

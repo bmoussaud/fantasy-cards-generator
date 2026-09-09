@@ -41,9 +41,10 @@ only `store`, `stream`, `input`. No re-provisioning or permission change.
 
 **Result: deployment and same-identity session creation/readiness succeeded;
 the one Responses POST returned HTTP 400 `invalid_request`. E2E domain success
-remains blocked. `serviceCode:"invalid_request"` is a new finding compared to
-the prior run's `serviceCode:"unknown"`, indicating the platform now returns an
-explicit error code in the response body.**
+remains blocked.** The code became observable because source `a7a1e2f` added
+`invalid_request` to the probe allowlist; the prior source mapped that same code
+to `unknown`. Therefore the changed marker does **not** establish that the
+service response or reject boundary changed.
 
 Fresh GET-only `--prepare-invocation` was NOT re-run separately for this trial;
 endpoint persistence, session creation and readiness were confirmed live by the
@@ -81,7 +82,23 @@ Exact sanitized probe result:
 
 `sessionCleanupRequired:true` describes the marker at invocation return; the subsequent operator cleanup above completed successfully. `accessVerified:false` here does not negate the successful session creation or endpoint persistence; the invocation branch only sets it after a successful Responses reply.
 
-**Changed from prior run:** `serviceCode` is now `"invalid_request"` (was `"unknown"` from source `aad771477c34fb4c699d2bc63e279aa2be1badd7`). The `service_code()` allowlist in `aca_identity_payload.py` permits `invalid_request` as a recognized platform error code; this means the response body contained `{"error":{"code":"invalid_request"}}`. The routing fix successfully prevents `validate_wire()` from rejecting the inbound request, and the canonical outbound SDK request no longer includes `agent_session_id`. The platform's explicit `invalid_request` at invocation may indicate a different aspect of the request is invalid, or the session routing contract differs. This is a backend investigation item for Aragorn; no speculative fix or re-run is authorized.
+**Changed from prior run:** `serviceCode` is now `"invalid_request"` (was
+`"unknown"` from source `aad771477c34fb4c699d2bc63e279aa2be1badd7`).
+Source `aad7714` allowed only `session_not_accessible`, so it would map an
+`invalid_request` body to `unknown`; source `a7a1e2f` added that code to the
+allowlist. The marker change is thus a diagnostic-code change, not causal proof
+that the routing fix passed the container boundary. Offline, the exact probe
+body passes `validate_wire()` and the pinned SDK 2.1.0 host. Live, the gateway
+may consume or transform routing fields before the container, and the retained
+evidence contains no safe field-level detail. The exact reject boundary and
+offending hosted input remain unproven by this run.
+
+The next source uses a unique fixed `card_boundary_invalid_request` code plus
+allowlisted reason/field enums for strict-boundary failures. If Gimli's next
+otherwise-identical run returns that code, the container boundary and exact
+field/category are proven. If it still returns generic `invalid_request`, the
+strict application boundary did not generate the observed body; inspect hosted
+system logs before changing the domain contract or permissions.
 
 Exact probe flags, run from the repository root:
 
@@ -103,7 +120,10 @@ python deployments/card-orchestrator/aca_identity_probe.py \
 This is an execution record, **not permission to rerun**. Cloud writes: ACR image publication, one hosted version, one ACA-MI-created session and one Responses POST, followed by session stop/delete and exact-version deletion. No app PUT, identity/RBAC/network/secret/model-capacity change, production action, web activation, image generation or shared-resource deletion. Serving web image remained unchanged. No operator process remains running.
 Post-run regression tests: **225 passed** (`python -m pytest --noconftest tests/test_aca_identity_probe.py tests/test_foundry_agent_client.py -q`). `git diff --check` passed. No application or infrastructure source changed during this E2E workstream.
 
-**#109 remains open:** routing fix verified locally and deployed; platform `invalid_request` at invocation is not schema-valid domain success. PR #122 is not merged by this operation.
+**#109 remains open:** routing compatibility is verified offline and its source
+was deployed, but live passage through the strict boundary is unproven;
+`invalid_request` is not schema-valid domain success. PR #122 is not merged by
+this operation.
 
 ## Persisted-endpoint ACA MI E2E — 2026-09-09
 

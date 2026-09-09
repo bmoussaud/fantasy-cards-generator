@@ -211,8 +211,10 @@ model text or tokens. `sessionCreateAttempted` (boolean) and `invocationsAttempt
 **before** create dispatch, so a timeout is reconcilable even without a response.
 The HTTP diagnostic exports only `httpStatus`, `phase`
 (`session_create|session_ready|invoke`), and `serviceCode`
-(`session_not_accessible|unknown`). Error JSON reads are bounded to 64 KiB plus
-one overflow byte; arbitrary codes/messages/body/headers/URLs are never exported.
+(`session_not_accessible|invalid_request|card_boundary_invalid_request|unknown`).
+For the boundary-specific code only, fixed `serviceReason`/`serviceParam` enums
+are also exported. Error JSON reads are bounded to 64 KiB plus one overflow byte;
+arbitrary codes/messages/body/headers/URLs are never exported.
 No optional telemetry is required.
 
 A dispatch timeout consumes the allowance; never retry. Without a strict remote
@@ -282,8 +284,15 @@ session-ownership authorization. Other unsupported request fields remain rejecte
 An offline regression sends the actual probe-built body through the SDK host
 with fake specialists. The previous deployed boundary rejected this body if
 Foundry forwarded the routing field; that mismatch is fixed, but does not prove
-the origin of the historical HTTP 400. The probe now also permits the fixed
-diagnostic code `invalid_request`, without exporting error messages or bodies.
+the origin of either historical HTTP 400.
+
+The boundary now returns `card_boundary_invalid_request` only when its own
+strict validation rejects the container request, together with allowlisted
+`serviceReason` and `serviceParam` enums. The probe exports only those fixed
+values; it never exports request values, error messages or bodies. A subsequent
+live result with that code proves the request reached the container boundary and
+identifies the rejected field/category. A generic `invalid_request` instead
+remains upstream-platform or inner-SDK evidence, not proof of boundary rejection.
 
 The client uses Microsoft Entra ID with the `https://ai.azure.com/.default` token scope and posts to the documented hosted-agent Responses protocol endpoint:
 

@@ -177,6 +177,8 @@ def extract_result(output, *, require_persisted_endpoint=False):
             "sessionCleanupRequired",
             "phase",
             "serviceCode",
+            "serviceReason",
+            "serviceParam",
         }
         if not isinstance(result, dict) or set(result) - allowed:
             continue
@@ -244,7 +246,46 @@ def extract_result(output, *, require_persisted_endpoint=False):
             "unknown",
             "session_not_accessible",
             "invalid_request",
+            "card_boundary_invalid_request",
         ):
+            continue
+        if result.get("serviceCode") == "card_boundary_invalid_request":
+            if result.get("serviceReason") not in (
+                "invalid_json",
+                "invalid_object",
+                "unsupported_field",
+                "not_false",
+                "invalid_value",
+                "not_single_item_list",
+                "invalid_user_message",
+                "invalid_input_text",
+                "invalid_schema",
+            ) or result.get("serviceParam") not in (
+                "body",
+                "top_level",
+                "agent",
+                "agent_reference",
+                "background",
+                "conversation",
+                "instructions",
+                "max_output_tokens",
+                "metadata",
+                "model",
+                "previous_response_id",
+                "prompt",
+                "response_id",
+                "store",
+                "stream",
+                "text",
+                "tool_choice",
+                "tools",
+                "agent_session_id",
+                "input",
+                "content",
+                "domain",
+            ):
+                continue
+        elif "serviceReason" in result or "serviceParam" in result:
             continue
         session_keys = {
             "sessionCreateAttempted",

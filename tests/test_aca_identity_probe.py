@@ -868,7 +868,14 @@ def test_session_failure_never_invokes(modules, monkeypatch, response, reason, c
 
 @pytest.mark.parametrize("phase", ["session_create", "session_ready", "invoke"])
 @pytest.mark.parametrize(
-    "code", ["session_not_accessible", "invalid_request", "unknown", "private-token-message"]
+    "code",
+    [
+        "session_not_accessible",
+        "invalid_request",
+        "card_boundary_invalid_request",
+        "unknown",
+        "private-token-message",
+    ],
 )
 def test_http_diagnostics_allow_only_literal_service_code(modules, monkeypatch, phase, code):
     payload, wrapper = modules
@@ -880,7 +887,16 @@ def test_http_diagnostics_allow_only_literal_service_code(modules, monkeypatch, 
         "private-error-message",
         {"X-Private": "private-header"},
         io.BytesIO(
-            json.dumps({"error": {"code": code, "message": "private-token-canary"}}).encode()
+            json.dumps(
+                {
+                    "error": {
+                        "code": code,
+                        "message": "private-token-canary",
+                        "reason": "unsupported_field",
+                        "param": "model",
+                    }
+                }
+            ).encode()
         ),
     )
     responses = []
@@ -893,11 +909,49 @@ def test_http_diagnostics_allow_only_literal_service_code(modules, monkeypatch, 
         ENDPOINT, PRINCIPAL, Credential().factory, opener, ("1", "a" * 40, SESSION)
     )
     assert result["phase"] == phase and result["httpStatus"] == 403
-    assert result["serviceCode"] == (
-        code if code in ("session_not_accessible", "invalid_request") else "unknown"
+    expected = (
+        code
+        if code in ("session_not_accessible", "invalid_request", "card_boundary_invalid_request")
+        else "unknown"
     )
+    assert result["serviceCode"] == expected
+    if expected == "card_boundary_invalid_request":
+        assert result["serviceReason"] == "unsupported_field"
+        assert result["serviceParam"] == "model"
+    else:
+        assert "serviceReason" not in result and "serviceParam" not in result
     assert result["invocationsAttempted"] == (1 if phase == "invoke" else 0)
     assert result["sessionCleanupRequired"] and error.closed
+    assert wrapper.extract_result(payload.MARKER + json.dumps(result)) == result
+    assert "private-" not in json.dumps(result)
+
+
+def test_boundary_diagnostic_rejects_unallowlisted_reason_and_param(modules, monkeypatch):
+    payload, wrapper = modules
+    invocation_parser(payload, wrapper, monkeypatch)
+    error = urllib.error.HTTPError(
+        "https://private-url",
+        400,
+        "private-error-message",
+        {},
+        io.BytesIO(
+            json.dumps(
+                {
+                    "error": {
+                        "code": "card_boundary_invalid_request",
+                        "reason": "private-reason",
+                        "param": "private-field",
+                    }
+                }
+            ).encode()
+        ),
+    )
+    opener = SequenceOpener((201, session_resource()), error)
+    result = payload.probe(
+        ENDPOINT, PRINCIPAL, Credential().factory, opener, ("1", "a" * 40, SESSION)
+    )
+    assert result["serviceCode"] == "unknown"
+    assert "serviceReason" not in result and "serviceParam" not in result
     assert wrapper.extract_result(payload.MARKER + json.dumps(result)) == result
     assert "private-" not in json.dumps(result)
 

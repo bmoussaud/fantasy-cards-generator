@@ -324,7 +324,7 @@ def test_actual_sdk_boundary_rejects_state_and_caller_controls(patch):
     orchestrator, fake = runtime()
     response = asyncio.run(post(create_host(settings(), orchestrator=orchestrator), wire() | patch))
     assert response.status_code == 400
-    assert response.json()["error"]["code"] == "invalid_request"
+    assert response.json()["error"]["code"] == "card_boundary_invalid_request"
     assert not fake.calls
 
 
@@ -497,7 +497,32 @@ def test_invalid_routing_session_is_rejected_before_model_calls(session):
         )
     )
     assert response.status_code == 400
-    assert response.json()["error"]["code"] == "invalid_request"
+    assert response.json()["error"]["code"] == "card_boundary_invalid_request"
+    assert not fake.calls
+
+
+@pytest.mark.parametrize(
+    "patch,reason,param",
+    [
+        ({"model": "platform-model"}, "unsupported_field", "model"),
+        ({"store": True}, "not_false", "store"),
+        ({"stream": None}, "not_false", "stream"),
+        ({"agent_session_id": "../session"}, "invalid_value", "agent_session_id"),
+        ({"input": "drake"}, "not_single_item_list", "input"),
+    ],
+)
+def test_boundary_returns_only_fixed_diagnostic_categories(patch, reason, param):
+    orchestrator, fake = runtime()
+    response = asyncio.run(post(create_host(settings(), orchestrator=orchestrator), wire() | patch))
+    assert response.status_code == 400
+    assert response.json() == {
+        "error": {
+            "code": "card_boundary_invalid_request",
+            "message": "Invalid card request.",
+            "reason": reason,
+            "param": param,
+        }
+    }
     assert not fake.calls
 
 

@@ -23,6 +23,31 @@ from hosted_agents.card_orchestrator.orchestrator import CardOrchestrator, Runti
 from hosted_agents.card_orchestrator.settings import RuntimeSettings
 
 MAX_BODY_BYTES = 8192
+SAFE_TOP_LEVEL_FIELDS = {
+    "agent",
+    "agent_reference",
+    "background",
+    "conversation",
+    "instructions",
+    "max_output_tokens",
+    "metadata",
+    "model",
+    "previous_response_id",
+    "prompt",
+    "response_id",
+    "store",
+    "stream",
+    "text",
+    "tool_choice",
+    "tools",
+}
+
+
+class WireValidationError(ValueError):
+    def __init__(self, reason: str, field: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.field = field
 
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -35,19 +60,27 @@ def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 
 def validate_wire(body: bytes) -> GenerateCardAgentRequest:
-    data = json.loads(body, object_pairs_hook=_unique_object)
-    if (
-        not isinstance(data, dict)
-        or set(data) - {"store", "stream", "input", "metadata", "agent_session_id"}
-        or data.get("store") is not False
-        or data.get("stream") is not False
-    ):
-        raise ValueError("invalid_request")
+    try:
+        data = json.loads(body, object_pairs_hook=_unique_object)
+    except (ValueError, TypeError, UnicodeError, RecursionError):
+        raise WireValidationError("invalid_json", "body") from None
+    if not isinstance(data, dict):
+        raise WireValidationError("invalid_object", "body")
+    unexpected = set(data) - {"store", "stream", "input", "metadata", "agent_session_id"}
+    if unexpected:
+        field = next(iter(unexpected)) if len(unexpected) == 1 else "top_level"
+        if field not in SAFE_TOP_LEVEL_FIELDS:
+            field = "top_level"
+        raise WireValidationError("unsupported_field", field)
+    if data.get("store") is not False:
+        raise WireValidationError("not_false", "store")
+    if data.get("stream") is not False:
+        raise WireValidationError("not_false", "stream")
     if "agent_session_id" in data and (
         not isinstance(data["agent_session_id"], str)
         or not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", data["agent_session_id"])
     ):
-        raise ValueError("invalid_session_id")
+        raise WireValidationError("invalid_value", "agent_session_id")
     metadata = data.get("metadata", {})
     if (
         not isinstance(metadata, dict)
@@ -57,10 +90,10 @@ def validate_wire(body: bytes) -> GenerateCardAgentRequest:
             for v in metadata.values()
         )
     ):
-        raise ValueError("invalid_metadata")
+        raise WireValidationError("invalid_value", "metadata")
     items = data.get("input")
     if not isinstance(items, list) or len(items) != 1:
-        raise ValueError("invalid_input")
+        raise WireValidationError("not_single_item_list", "input")
     message = items[0]
     if (
         not isinstance(message, dict)
@@ -68,10 +101,10 @@ def validate_wire(body: bytes) -> GenerateCardAgentRequest:
         or message.get("role") != "user"
         or message.get("type", "message") != "message"
     ):
-        raise ValueError("invalid_message")
+        raise WireValidationError("invalid_user_message", "input")
     content = message.get("content")
     if not isinstance(content, list) or len(content) != 1:
-        raise ValueError("invalid_content")
+        raise WireValidationError("not_single_item_list", "content")
     part = content[0]
     if (
         not isinstance(part, dict)
@@ -79,13 +112,19 @@ def validate_wire(body: bytes) -> GenerateCardAgentRequest:
         or part["type"] != "input_text"
         or not isinstance(part["text"], str)
     ):
-        raise ValueError("invalid_text")
-    request = json.loads(part["text"], object_pairs_hook=_unique_object)
+        raise WireValidationError("invalid_input_text", "content")
+    try:
+        request = json.loads(part["text"], object_pairs_hook=_unique_object)
+    except (ValueError, TypeError, UnicodeError, RecursionError):
+        raise WireValidationError("invalid_json", "domain") from None
     if not isinstance(request, dict) or request.get("schemaVersion") != 1:
-        raise ValueError("invalid_schema")
+        raise WireValidationError("invalid_schema", "domain")
     if type(request["schemaVersion"]) is not int:
-        raise ValueError("invalid_schema")
-    return GenerateCardAgentRequest.model_validate(request, strict=True)
+        raise WireValidationError("invalid_schema", "domain")
+    try:
+        return GenerateCardAgentRequest.model_validate(request, strict=True)
+    except ValidationError:
+        raise WireValidationError("invalid_schema", "domain") from None
 
 
 class StatelessBoundary:
@@ -114,13 +153,33 @@ class StatelessBoundary:
                     return
                 body.extend(message.get("body", b""))
                 if len(body) > MAX_BODY_BYTES:
-                    raise ValueError("body_too_large")
+                    raise WireValidationError("invalid_value", "body")
                 if not message.get("more_body", False):
                     break
             request = validate_wire(bytes(body))
-        except (ValueError, TypeError, UnicodeError, ValidationError, RecursionError):
+        except WireValidationError as error:
             await JSONResponse(
-                {"error": {"code": "invalid_request", "message": "Invalid card request."}},
+                {
+                    "error": {
+                        "code": "card_boundary_invalid_request",
+                        "message": "Invalid card request.",
+                        "reason": error.reason,
+                        "param": error.field,
+                    }
+                },
+                status_code=400,
+            )(scope, receive, send)
+            return
+        except (TypeError, UnicodeError, RecursionError):
+            await JSONResponse(
+                {
+                    "error": {
+                        "code": "card_boundary_invalid_request",
+                        "message": "Invalid card request.",
+                        "reason": "invalid_value",
+                        "param": "body",
+                    }
+                },
                 status_code=400,
             )(scope, receive, send)
             return
