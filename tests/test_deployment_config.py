@@ -365,9 +365,7 @@ def test_dev_text_model_capacity_compiles_to_exact_fail_closed_target() -> None:
         ("armDeploymentName", "prod-text-model-capacity-10"),
         ("accountName", "aifcagprod000000000000"),
     ):
-        production_like_context = expected_dev_context | {
-            field: production_like_value
-        }
+        production_like_context = expected_dev_context | {field: production_like_value}
         with pytest.raises(ValueError):
             resolve_compiled_target(production_like_context)
 
