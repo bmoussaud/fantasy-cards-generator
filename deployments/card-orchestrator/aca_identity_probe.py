@@ -40,6 +40,7 @@ def parser_source():
         "_incomplete_reason",
         "_string_or_none",
         "_safe_identifier_or_none",
+        "_parse_runtime_failure_code",
     }
     source = (root / "app/foundry_agent_client.py").read_text()
     nodes = [node for node in ast.parse(source).body if getattr(node, "name", None) in names]
@@ -179,6 +180,10 @@ def extract_result(output, *, require_persisted_endpoint=False):
             "serviceCode",
             "serviceReason",
             "serviceParam",
+            "runtimeStage",
+            "runtimeReason",
+            "runtimeHttpType",
+            "runtimeHttpStatus",
         }
         if not isinstance(result, dict) or set(result) - allowed:
             continue
@@ -287,6 +292,71 @@ def extract_result(output, *, require_persisted_endpoint=False):
                 continue
         elif "serviceReason" in result or "serviceParam" in result:
             continue
+        runtime_keys = {
+            "runtimeStage",
+            "runtimeReason",
+            "runtimeHttpType",
+            "runtimeHttpStatus",
+        }
+        if runtime_keys & result.keys():
+            if (
+                not runtime_keys <= result.keys()
+                or result.get("outcome") != "failed"
+                or result.get("schemaValid") is not False
+                or result.get("status") != "failed"
+                or result.get("runtimeStage")
+                not in (
+                    "specialist_setup",
+                    "concept",
+                    "lore",
+                    "art_direction",
+                    "orchestration",
+                )
+                or result.get("runtimeReason")
+                not in (
+                    "timeout",
+                    "authentication",
+                    "authorization",
+                    "resource_not_found",
+                    "invalid_request",
+                    "rate_limited",
+                    "service_error",
+                    "transport_error",
+                    "invalid_response",
+                    "dependency_error",
+                )
+                or result.get("runtimeHttpType")
+                not in (
+                    "none",
+                    "bad_request",
+                    "authentication",
+                    "permission_denied",
+                    "not_found",
+                    "conflict",
+                    "unprocessable",
+                    "rate_limit",
+                    "server",
+                    "api_status",
+                )
+                or result.get("runtimeHttpStatus")
+                not in (
+                    "none",
+                    "http_400",
+                    "http_401",
+                    "http_403",
+                    "http_404",
+                    "http_408",
+                    "http_409",
+                    "http_422",
+                    "http_429",
+                    "http_500",
+                    "http_502",
+                    "http_503",
+                    "http_504",
+                    "http_other",
+                )
+            ):
+                continue
         session_keys = {
             "sessionCreateAttempted",
             "sessionCreated",

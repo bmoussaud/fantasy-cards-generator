@@ -23,6 +23,10 @@ from app.settings import load_app_settings  # noqa: E402
 from hosted_agents.card_orchestrator.orchestrator import (  # noqa: E402
     CardOrchestrator,
     RuntimeFailure,
+    RuntimeFailureHttpStatus,
+    RuntimeFailureHttpType,
+    RuntimeFailureReason,
+    RuntimeFailureStage,
 )
 from hosted_agents.card_orchestrator.server import (  # noqa: E402
     _with_cancellation,
@@ -211,8 +215,12 @@ def test_timeout_closes_owned_invocation(overall):
     fake = Slow()
     config = settings(**{"timeout_seconds" if overall else "stage_timeout_seconds": 0.01})
     orchestrator = CardOrchestrator(config, specialist_factory=fake.factory)
-    with pytest.raises(RuntimeFailure, match="dependency_failure"):
+    with pytest.raises(RuntimeFailure, match="dependency_failure") as exc:
         asyncio.run(orchestrator.generate(GenerateCardAgentRequest(query="drake")))
+    assert exc.value.stage == "concept"
+    assert exc.value.reason == "timeout"
+    assert exc.value.http_type == "none"
+    assert exc.value.http_status == "none"
     assert fake.closed
 
 
@@ -343,12 +351,44 @@ def test_dependency_failure_is_genuine_failed_response_not_completed(caplog):
     assert response.status_code == 200
     envelope = response.json()
     assert envelope["status"] == "failed"
-    assert envelope["error"]["code"] == "server_error"
+    assert envelope["error"]["code"] == ("card_runtime:concept:dependency_error:none:none")
     assert "PRIVATE_PAYLOAD" not in response.text + caplog.text
     result = _parse_success_envelope(envelope, request_id=None, expected_version=None)
     assert result.status == "failed"
     assert not result.success
+    assert result.error_code == "card_runtime_failure"
+    assert result.runtime_failure_stage == "concept"
+    assert result.runtime_failure_reason == "dependency_error"
+    assert result.runtime_http_type == "none"
+    assert result.runtime_http_status == "none"
     assert fake.closed
+
+
+def test_runtime_failure_rejects_unknown_diagnostic_values():
+    with pytest.raises(ValueError):
+        RuntimeFailure(RuntimeFailureStage.CONCEPT, "private-reason")
+    with pytest.raises(ValueError):
+        RuntimeFailure(
+            RuntimeFailureStage.CONCEPT,
+            RuntimeFailureReason.DEPENDENCY_ERROR,
+            "private-http-type",
+        )
+    with pytest.raises(ValueError):
+        RuntimeFailure(
+            RuntimeFailureStage.CONCEPT,
+            RuntimeFailureReason.DEPENDENCY_ERROR,
+            RuntimeFailureHttpType.NONE,
+            "http_418",
+        )
+    failure = RuntimeFailure(
+        RuntimeFailureStage.CONCEPT,
+        RuntimeFailureReason.AUTHORIZATION,
+        RuntimeFailureHttpType.PERMISSION_DENIED,
+        RuntimeFailureHttpStatus.HTTP_403,
+    )
+    assert failure.response_code == (
+        "card_runtime:concept:authorization:permission_denied:http_403"
+    )
 
 
 def test_readiness_and_retrieval_do_not_use_cloud_or_store(monkeypatch):

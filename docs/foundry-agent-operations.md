@@ -1,5 +1,69 @@
 # Card-orchestrator operations
 
+## Payload-free runtime classification candidate — 2026-09-09
+
+Working as Aragorn (Backend Dev), the successful strict-routing live result at
+`dc6b83161a62f66b93e2a487f2b5d16e91bfd2b0` proves that the prior HTTP 400
+`agent_reference` failure is resolved. The remaining HTTP 200
+`outcome:"failed"` is a genuine Responses failure envelope, not a valid card
+domain envelope and not a schema failure that may be treated as success.
+
+Safe read-only configuration evidence narrows, but does not identify, the
+downstream cause:
+
+- the dedicated azd environment resolves `AZURE_AI_MODEL_DEPLOYMENT_NAME` to
+  `gpt-5-5`;
+- the account exposes deployment `gpt-5-5`, model `gpt-5.5`, version
+  `2026-04-24`, `GlobalStandard`, provisioning state `Succeeded`;
+- the project system identity has the repository's expected Foundry User
+  assignment at account scope.
+
+These facts rule out an absent configured alias and an absent model deployment.
+They do **not** prove the dedicated per-agent runtime identity was authorized,
+nor distinguish credential failure, provider request rejection, timeout,
+transport failure or provider response failure. The deleted hosted version
+cannot supply further identity metadata. No paid call was made for this code
+cycle.
+
+The exact observability defect is in the existing exception path. Pinned Agent
+Framework `1.17.0` wraps provider exceptions as `ChatClientException` while
+preserving the provider exception as its cause. `CardOrchestrator.generate()`
+then caught every exception and replaced that chain with the single
+`RuntimeFailure("dependency_failure")`; the response host consequently emitted
+only `server_error`. Provider HTTP type and status therefore existed in-process
+but were intentionally erased before the ACA probe could observe them.
+
+The candidate preserves the failed Responses envelope and the unchanged card
+domain schema, but carries only four closed enums in its error code:
+
+- `runtimeStage`: `specialist_setup|concept|lore|art_direction|orchestration`
+- `runtimeReason`: `timeout|authentication|authorization|resource_not_found|`
+  `invalid_request|rate_limited|service_error|transport_error|`
+  `invalid_response|dependency_error`
+- `runtimeHttpType`: `none|bad_request|authentication|permission_denied|`
+  `not_found|conflict|unprocessable|rate_limit|server|api_status`
+- `runtimeHttpStatus`: `none|http_400|http_401|http_403|http_404|http_408|`
+  `http_409|http_422|http_429|http_500|http_502|http_503|http_504|http_other`
+
+The host code is assembled only from those enums. The application parser
+validates the tuple, and the ACA marker revalidates every field before export.
+Exception messages, response bodies, URLs, headers, request/model text, tokens
+and stack traces never cross the boundary. Unknown values cause the diagnostic
+to be discarded, not echoed.
+
+Expected Gimli handoff after review: deploy the exact candidate once and run the
+existing single bounded ACA-MI invocation. A marker such as
+`concept/authorization/permission_denied/http_403` proves a model-call
+authorization failure; `concept/resource_not_found/not_found/http_404` proves
+the provider endpoint could not resolve the configured resource;
+`concept/invalid_request/bad_request/http_400` proves model-contract rejection.
+`specialist_setup/*/none/none` identifies pre-call client or credential setup,
+while `concept/timeout/none/none` identifies the first bounded model stage.
+Do not broaden roles or replace failure with a success fallback before that
+typed result exists. Budgets remain three stages, 20 seconds and 1800 output
+tokens per stage, 65 seconds overall, managed identity, `store:false`, and no
+retry.
+
 ## Exact-source runtime failure — 2026-09-09
 
 Working as Gimli (DevOps / Infra), exact reviewed source

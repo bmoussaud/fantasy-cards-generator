@@ -1164,6 +1164,68 @@ def test_http_200_without_card_is_not_success(modules, monkeypatch):
         wrapper.remote_command(ENDPOINT, PRINCIPAL, ("1", "not-a-sha", SESSION))
 
 
+def test_runtime_failure_diagnostic_reaches_strict_aca_marker(modules, monkeypatch):
+    payload, wrapper = modules
+    invocation_parser(payload, wrapper, monkeypatch)
+    envelope = {
+        "id": "resp_safe",
+        "status": "failed",
+        "error": {
+            "code": "card_runtime:concept:authorization:permission_denied:http_403",
+            "message": "PRIVATE_PROVIDER_BODY",
+        },
+        "output": [],
+    }
+    opener = SequenceOpener((201, session_resource()), (200, envelope))
+    result = payload.probe(
+        ENDPOINT,
+        PRINCIPAL,
+        Credential().factory,
+        opener,
+        ("1", "a" * 40, SESSION),
+    )
+    assert result["status"] == "failed"
+    assert result["outcome"] == "failed"
+    assert result["schemaValid"] is False
+    assert result["runtimeStage"] == "concept"
+    assert result["runtimeReason"] == "authorization"
+    assert result["runtimeHttpType"] == "permission_denied"
+    assert result["runtimeHttpStatus"] == "http_403"
+    assert "PRIVATE" not in json.dumps(result)
+    assert wrapper.extract_result(payload.MARKER + json.dumps(result)) == result
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("runtimeStage", "private-stage"),
+        ("runtimeReason", "private-reason"),
+        ("runtimeHttpType", "private-http-type"),
+        ("runtimeHttpStatus", "http_418"),
+    ],
+)
+def test_runtime_failure_marker_rejects_unknown_enum(modules, monkeypatch, field, value):
+    payload, wrapper = modules
+    invocation_parser(payload, wrapper, monkeypatch)
+    envelope = {
+        "status": "failed",
+        "error": {
+            "code": "card_runtime:concept:authorization:permission_denied:http_403",
+            "message": "safe",
+        },
+        "output": [],
+    }
+    result = payload.probe(
+        ENDPOINT,
+        PRINCIPAL,
+        Credential().factory,
+        SequenceOpener((201, session_resource()), (200, envelope)),
+        ("1", "a" * 40, SESSION),
+    )
+    result[field] = value
+    assert wrapper.extract_result(payload.MARKER + json.dumps(result)) is None
+
+
 def test_access_only_real_payload_survives_canonical_terminal(modules, monkeypatch):
     payload, wrapper = modules
     monkeypatch.delenv("IDENTITY_ENDPOINT")

@@ -385,6 +385,16 @@ def probe(
                 hostedVersion=version,
                 applicationVersion=build,
             )
+            runtime_diagnostic = (
+                ("runtimeStage", parsed.runtime_failure_stage),
+                ("runtimeReason", parsed.runtime_failure_reason),
+                ("runtimeHttpType", parsed.runtime_http_type),
+                ("runtimeHttpStatus", parsed.runtime_http_status),
+            )
+            if any(value is not None for _, value in runtime_diagnostic):
+                if not all(value is not None for _, value in runtime_diagnostic):
+                    return {**result, "reason": "invalid_response"}
+                result.update(runtime_diagnostic)
             for key, value in (
                 ("responseId", parsed.response_id),
                 ("requestId", parsed.request_id),

@@ -65,6 +65,58 @@ class FoundryAgentInvocationResult:
     card: GeneratedCardModel | None = None
     art_prompt: str | None = None
     error_code: str | None = None
+    runtime_failure_stage: (
+        Literal["specialist_setup", "concept", "lore", "art_direction", "orchestration"] | None
+    ) = None
+    runtime_failure_reason: (
+        Literal[
+            "timeout",
+            "authentication",
+            "authorization",
+            "resource_not_found",
+            "invalid_request",
+            "rate_limited",
+            "service_error",
+            "transport_error",
+            "invalid_response",
+            "dependency_error",
+        ]
+        | None
+    ) = None
+    runtime_http_type: (
+        Literal[
+            "none",
+            "bad_request",
+            "authentication",
+            "permission_denied",
+            "not_found",
+            "conflict",
+            "unprocessable",
+            "rate_limit",
+            "server",
+            "api_status",
+        ]
+        | None
+    ) = None
+    runtime_http_status: (
+        Literal[
+            "none",
+            "http_400",
+            "http_401",
+            "http_403",
+            "http_404",
+            "http_408",
+            "http_409",
+            "http_422",
+            "http_429",
+            "http_500",
+            "http_502",
+            "http_503",
+            "http_504",
+            "http_other",
+        ]
+        | None
+    ) = None
     message: str = ""
 
 
@@ -365,6 +417,20 @@ def _parse_success_envelope(
                 error_code=code,
                 message="Foundry policy refused the request.",
             )
+        runtime_failure = _parse_runtime_failure_code(code)
+        if runtime_failure is not None:
+            stage, reason, http_type, http_status = runtime_failure
+            return FoundryAgentInvocationResult(
+                status="failed",
+                response_id=response_id,
+                request_id=request_id,
+                error_code="card_runtime_failure",
+                runtime_failure_stage=stage,
+                runtime_failure_reason=reason,
+                runtime_http_type=http_type,
+                runtime_http_status=http_status,
+                message="Foundry agent response reported a classified runtime failure.",
+            )
         return FoundryAgentInvocationResult(
             status="failed",
             response_id=response_id,
@@ -531,6 +597,27 @@ def _safe_identifier_or_none(value: object) -> str | None:
     if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,79}", stripped):
         return stripped
     return None
+
+
+def _parse_runtime_failure_code(
+    code: str | None,
+) -> tuple[str, str, str, str] | None:
+    if not isinstance(code, str):
+        return None
+    match = re.fullmatch(
+        r"card_runtime:"
+        r"(specialist_setup|concept|lore|art_direction|orchestration):"
+        r"(timeout|authentication|authorization|resource_not_found|invalid_request|"
+        r"rate_limited|service_error|transport_error|invalid_response|dependency_error):"
+        r"(none|bad_request|authentication|permission_denied|not_found|conflict|"
+        r"unprocessable|rate_limit|server|api_status):"
+        r"(none|http_400|http_401|http_403|http_404|http_408|http_409|http_422|"
+        r"http_429|http_500|http_502|http_503|http_504|http_other)",
+        code,
+    )
+    if match is None:
+        return None
+    return match.groups()
 
 
 def _parser() -> argparse.ArgumentParser:

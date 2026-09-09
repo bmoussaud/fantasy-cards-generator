@@ -3,8 +3,27 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
+from enum import StrEnum
 from typing import Literal
 
+from agent_framework.exceptions import (
+    ChatClientInvalidAuthException,
+    ChatClientInvalidRequestException,
+    ChatClientInvalidResponseException,
+    IntegrationInvalidAuthException,
+    IntegrationInvalidRequestException,
+    IntegrationInvalidResponseException,
+)
+from azure.core.exceptions import (
+    ClientAuthenticationError,
+    ServiceRequestError,
+    ServiceResponseError,
+)
+from openai import (
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+)
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from app.foundry_agent_client import GenerateCardAgentRequest, GenerateCardAgentResponse
@@ -57,8 +76,205 @@ class SafetyEvidence(BaseModel):
     ]
 
 
+class RuntimeFailureStage(StrEnum):
+    SPECIALIST_SETUP = "specialist_setup"
+    CONCEPT = "concept"
+    LORE = "lore"
+    ART_DIRECTION = "art_direction"
+    ORCHESTRATION = "orchestration"
+
+
+class RuntimeFailureReason(StrEnum):
+    TIMEOUT = "timeout"
+    AUTHENTICATION = "authentication"
+    AUTHORIZATION = "authorization"
+    RESOURCE_NOT_FOUND = "resource_not_found"
+    INVALID_REQUEST = "invalid_request"
+    RATE_LIMITED = "rate_limited"
+    SERVICE_ERROR = "service_error"
+    TRANSPORT_ERROR = "transport_error"
+    INVALID_RESPONSE = "invalid_response"
+    DEPENDENCY_ERROR = "dependency_error"
+
+
+class RuntimeFailureHttpType(StrEnum):
+    NONE = "none"
+    BAD_REQUEST = "bad_request"
+    AUTHENTICATION = "authentication"
+    PERMISSION_DENIED = "permission_denied"
+    NOT_FOUND = "not_found"
+    CONFLICT = "conflict"
+    UNPROCESSABLE = "unprocessable"
+    RATE_LIMIT = "rate_limit"
+    SERVER = "server"
+    API_STATUS = "api_status"
+
+
+class RuntimeFailureHttpStatus(StrEnum):
+    NONE = "none"
+    HTTP_400 = "http_400"
+    HTTP_401 = "http_401"
+    HTTP_403 = "http_403"
+    HTTP_404 = "http_404"
+    HTTP_408 = "http_408"
+    HTTP_409 = "http_409"
+    HTTP_422 = "http_422"
+    HTTP_429 = "http_429"
+    HTTP_500 = "http_500"
+    HTTP_502 = "http_502"
+    HTTP_503 = "http_503"
+    HTTP_504 = "http_504"
+    HTTP_OTHER = "http_other"
+
+
+_HTTP_STATUS = {
+    400: RuntimeFailureHttpStatus.HTTP_400,
+    401: RuntimeFailureHttpStatus.HTTP_401,
+    403: RuntimeFailureHttpStatus.HTTP_403,
+    404: RuntimeFailureHttpStatus.HTTP_404,
+    408: RuntimeFailureHttpStatus.HTTP_408,
+    409: RuntimeFailureHttpStatus.HTTP_409,
+    422: RuntimeFailureHttpStatus.HTTP_422,
+    429: RuntimeFailureHttpStatus.HTTP_429,
+    500: RuntimeFailureHttpStatus.HTTP_500,
+    502: RuntimeFailureHttpStatus.HTTP_502,
+    503: RuntimeFailureHttpStatus.HTTP_503,
+    504: RuntimeFailureHttpStatus.HTTP_504,
+}
+
+
 class RuntimeFailure(Exception):
-    """A dependency failed; never include the original exception or payload."""
+    """A payload-free, closed-enum dependency failure."""
+
+    def __init__(
+        self,
+        stage: RuntimeFailureStage | str,
+        reason: RuntimeFailureReason | str,
+        http_type: RuntimeFailureHttpType | str = RuntimeFailureHttpType.NONE,
+        http_status: RuntimeFailureHttpStatus | str = RuntimeFailureHttpStatus.NONE,
+    ) -> None:
+        self.stage = RuntimeFailureStage(stage)
+        self.reason = RuntimeFailureReason(reason)
+        self.http_type = RuntimeFailureHttpType(http_type)
+        self.http_status = RuntimeFailureHttpStatus(http_status)
+        super().__init__("dependency_failure")
+
+    @property
+    def response_code(self) -> str:
+        return ":".join(
+            (
+                "card_runtime",
+                self.stage.value,
+                self.reason.value,
+                self.http_type.value,
+                self.http_status.value,
+            )
+        )
+
+
+def _exception_chain(exc: BaseException) -> list[BaseException]:
+    chain: list[BaseException] = []
+    seen: set[int] = set()
+    while id(exc) not in seen and len(chain) < 8:
+        seen.add(id(exc))
+        chain.append(exc)
+        next_exc = exc.__cause__ or exc.__context__
+        if next_exc is None:
+            break
+        exc = next_exc
+    return chain
+
+
+def _http_failure(status: int) -> tuple[
+    RuntimeFailureReason,
+    RuntimeFailureHttpType,
+    RuntimeFailureHttpStatus,
+]:
+    http_status = _HTTP_STATUS.get(status, RuntimeFailureHttpStatus.HTTP_OTHER)
+    if status == 400:
+        return RuntimeFailureReason.INVALID_REQUEST, RuntimeFailureHttpType.BAD_REQUEST, http_status
+    if status == 401:
+        return (
+            RuntimeFailureReason.AUTHENTICATION,
+            RuntimeFailureHttpType.AUTHENTICATION,
+            http_status,
+        )
+    if status == 403:
+        return (
+            RuntimeFailureReason.AUTHORIZATION,
+            RuntimeFailureHttpType.PERMISSION_DENIED,
+            http_status,
+        )
+    if status == 404:
+        return (
+            RuntimeFailureReason.RESOURCE_NOT_FOUND,
+            RuntimeFailureHttpType.NOT_FOUND,
+            http_status,
+        )
+    if status == 408:
+        return RuntimeFailureReason.TIMEOUT, RuntimeFailureHttpType.API_STATUS, http_status
+    if status == 409:
+        return RuntimeFailureReason.INVALID_REQUEST, RuntimeFailureHttpType.CONFLICT, http_status
+    if status == 422:
+        return (
+            RuntimeFailureReason.INVALID_REQUEST,
+            RuntimeFailureHttpType.UNPROCESSABLE,
+            http_status,
+        )
+    if status == 429:
+        return RuntimeFailureReason.RATE_LIMITED, RuntimeFailureHttpType.RATE_LIMIT, http_status
+    if status >= 500:
+        return RuntimeFailureReason.SERVICE_ERROR, RuntimeFailureHttpType.SERVER, http_status
+    return RuntimeFailureReason.DEPENDENCY_ERROR, RuntimeFailureHttpType.API_STATUS, http_status
+
+
+def classify_runtime_failure(exc: BaseException, stage: RuntimeFailureStage) -> RuntimeFailure:
+    if isinstance(exc, RuntimeFailure):
+        return exc
+    chain = _exception_chain(exc)
+    for current in chain:
+        if isinstance(current, APIStatusError):
+            reason, http_type, http_status = _http_failure(current.status_code)
+            return RuntimeFailure(stage, reason, http_type, http_status)
+    if any(isinstance(current, (TimeoutError, APITimeoutError)) for current in chain):
+        return RuntimeFailure(stage, RuntimeFailureReason.TIMEOUT)
+    if any(
+        isinstance(
+            current,
+            (
+                ClientAuthenticationError,
+                ChatClientInvalidAuthException,
+                IntegrationInvalidAuthException,
+            ),
+        )
+        for current in chain
+    ):
+        return RuntimeFailure(stage, RuntimeFailureReason.AUTHENTICATION)
+    if any(
+        isinstance(
+            current,
+            (ChatClientInvalidRequestException, IntegrationInvalidRequestException),
+        )
+        for current in chain
+    ):
+        return RuntimeFailure(stage, RuntimeFailureReason.INVALID_REQUEST)
+    if any(
+        isinstance(
+            current,
+            (
+                ChatClientInvalidResponseException,
+                IntegrationInvalidResponseException,
+            ),
+        )
+        for current in chain
+    ):
+        return RuntimeFailure(stage, RuntimeFailureReason.INVALID_RESPONSE)
+    if any(
+        isinstance(current, (APIConnectionError, ServiceRequestError, ServiceResponseError))
+        for current in chain
+    ):
+        return RuntimeFailure(stage, RuntimeFailureReason.TRANSPORT_ERROR)
+    return RuntimeFailure(stage, RuntimeFailureReason.DEPENDENCY_ERROR)
 
 
 class _Stop(Exception):
@@ -91,12 +307,15 @@ class CardOrchestrator:
         }
         if hosted_version:
             metadata["hostedVersion"] = hosted_version
+        failure_stage = RuntimeFailureStage.ORCHESTRATION
         try:
             async with asyncio.timeout(self.settings.timeout_seconds):
                 await self._gate(request.query, "pre_prompt", "pre_prompt", evidence)
+                failure_stage = RuntimeFailureStage.SPECIALIST_SETUP
                 async with self.specialist_factory(self.settings) as specialists:
                     card = None
                     for stage in ("concept", "lore", "art_direction"):
+                        failure_stage = RuntimeFailureStage(stage)
                         payload = (
                             {"query": request.query}
                             if card is None
@@ -139,8 +358,8 @@ class CardOrchestrator:
             response = GenerateCardAgentResponse(
                 schemaVersion=1, status=stop.status, safetyHints=[stop.reason]
             )
-        except Exception:
-            raise RuntimeFailure("dependency_failure") from None
+        except Exception as exc:
+            raise classify_runtime_failure(exc, failure_stage) from None
 
         evidence.extend(
             [

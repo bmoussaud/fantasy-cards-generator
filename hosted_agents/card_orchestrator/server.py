@@ -306,14 +306,13 @@ def create_host(
                 cancellation_signal,
                 context.shutdown,
             )
-        except RuntimeFailure:
+        except RuntimeFailure as error:
+            failure_code = error.response_code
 
             async def failed():
                 stream = ResponseEventStream(response_id=context.response_id, request=request)
                 yield stream.emit_created()
-                yield stream.emit_failed(
-                    code="server_error", message="Card generation unavailable."
-                )
+                yield stream.emit_failed(code=failure_code, message="Card generation unavailable.")
 
             return failed()
         return TextResponse(context, request, text=response.model_dump_json())
