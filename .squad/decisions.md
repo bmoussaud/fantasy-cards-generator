@@ -206,3 +206,18 @@ Card generation now accepts a saved photo as an alternative reference source. `P
 **By:** Gimli
 **What:** Development environment web deployments now use `azd deploy --service web-nat` instead of `azd up` or `azd provision`. This is a deploy-only invocation that updates only the Container App revision without reprovisioning Azure resources.
 **Why:** The root postprovision hook contains `az ad app credential reset --append`, which rotates the Entra client secret. When `ENTRA_CLIENT_ID` is set in the `dev` environment, running `azd provision` (via `azd up`) would rotate the secret during deployment, breaking subsequent authentication until the new secret is fetched. Deploy-only avoids this rotation by skipping the hook entirely. The infrastructure (VNet, NAT, Cosmos, Key Vault, etc.) is stable and requires no reprove each deploy. Postprovision hook changes should be coordinated through the Coordinator before any future use of `azd up` in dev.
+
+### 2026-09-09T14:34:30.000+00:00: PR #126 — Agent generation feature gate and contract (consolidated)
+**By:** Aragorn, Legolas, Samwise, Gimli, Rai
+**What:** Completed issue #125 agentic integration. Merged PR #126 with:
+- `AGENT_GENERATION_ENABLED` feature gate (default: `false`) gates hosted agent path in CardGenerationService; fallback always available.
+- Non-retryable agent failures (parse error, 400/401) never fallback; caller receives error.
+- Retryable agent failures (timeout, 429, 5xx) fallback to legacy text path once within 225s budget; image flow continues unchanged.
+- Deterministic moderation and artwork persistence remain in web backend; agent receives only text request.
+- Hosted agent telemetry fail-closed: startup gate (`configure_telemetry()`) blocks agent if telemetry init fails; missing credentials → no agent (does not fallback).
+- Generated eval suite configuration committed to infra (smoke-core, submitted to Foundry but not executed).
+- Dev environment: durable hosted agent v1 active, card-orchestrator service via Foundry, AppInsights linkage configured.
+**Why:** Issue #125 required a bounded, safe integration path that minimizes blast radius while preserving existing web reliability. The feature flag allows gradual activation; bounded error budgets + deterministic payloads + fail-closed telemetry prevent runaway costs or cascading failures. Infra wiring (env vars, Bicep RBAC, managed identity) established for durable dev deployment. Evaluation artifacts prepared for offline review before production activation.
+**Testing & Review:** Baseline 690 passed/2 skipped; Samwise initial review REJECTED (RBAC description error); Aragorn corrected and locked out; Legolas independently revised with commit 4983c6e (generation_path fix, client lifecycle); Samwise re-reviewed and APPROVED (723 passed/2 skipped); Gimli deployed app-side infra with dev capacity 10/min; Rai final verdict GREEN. Merged at 2026-09-09T14:34:30Z as 939d1ed0d19671d725aa124df3a2d76f90c580eb.
+**Scope & Deferral:** Out of scope: auth/persistence migration into agent, broad MCP toolbox, premature standalone agents. Open placeholder #102 remains for future agent-driven persistence.
+**Blockers Resolved:** (1) Pre-existing Bicep Entra redeploy footgun discovered during deployment, repaired live, tracked as issue #127 (out of #126 scope). (2) Reviewer lockout recovery per reviewer-protocol: Gandalf independently corrected RBAC conditional assignments (enableFoundryAgentAccess two assignments; Cognitive Services User one unconditional).
