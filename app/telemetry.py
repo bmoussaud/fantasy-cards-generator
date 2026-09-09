@@ -51,6 +51,9 @@ SAFE_OUTCOMES = {
     "started",
     "completed",
     "partial",
+    "held",
+    "refused",
+    "routing_defer",
     "allowed",
     "blocked",
     "throttled",
@@ -76,6 +79,13 @@ SAFE_STAGES = {
     "post_text",
     "post_art_prompt",
     "post_image",
+    "specialist_setup",
+    "concept",
+    "lore",
+    "art_direction",
+    "final_text",
+    "final_art_prompt",
+    "orchestration",
 }
 SAFE_DEPENDENCIES = {"foundry_text", "foundry_image", "cosmos", "blob", "entra", "other"}
 SAFE_STORES = {"card", "audit", "blob", "cosmos", "memory"}
@@ -129,6 +139,14 @@ SAFE_ERROR_CODES = {
     "validation_error",
     "dependency_error",
     "internal_error",
+    "authentication",
+    "authorization",
+    "resource_not_found",
+    "invalid_request",
+    "rate_limited",
+    "service_error",
+    "transport_error",
+    "invalid_response",
 }
 SAFE_ATTRIBUTE_KEYS = {
     "app.request_id",
@@ -146,6 +164,7 @@ SAFE_ATTRIBUTE_KEYS = {
     "fcg.persistence_operation",
     "fcg.token_type",
     "fcg.duration_ms",
+    "fcg.agent_version",
     "http.route",
     "http.response.status_code",
 }
@@ -448,7 +467,10 @@ def instrument_generation(
             request_id = kwargs.get("request_id")
             diagnostic_id = request_id if isinstance(request_id, str) else None
             started = time.perf_counter()
+            version = _generation_version(args, kwargs)
             base = {"fcg.operation": normalized_operation}
+            if version is not None:
+                base["fcg.agent_version"] = version
             with telemetry_span(
                 "fcg.generation",
                 request_id=diagnostic_id,
@@ -470,6 +492,7 @@ def instrument_generation(
                         normalized_operation,
                         outcome,
                         (time.perf_counter() - started) * 1000,
+                        version,
                     )
                     if normalized_operation == "artwork_retry":
                         _metric_add(
@@ -484,21 +507,25 @@ def instrument_generation(
                         attributes=attributes,
                     )
                     raise
-                outcome = (
-                    "partial"
-                    if getattr(result, "status", None) == "awaiting_artwork_retry"
-                    else "completed"
-                )
+                result_status = getattr(result, "status", None)
+                outcome = {
+                    "awaiting_artwork_retry": "partial",
+                    "held": "held",
+                    "refused": "refused",
+                    "routing_defer": "routing_defer",
+                }.get(result_status, "completed")
                 attributes = {**base, "fcg.outcome": outcome, "fcg.error_code": "none"}
                 _set_span_attributes(span, attributes)
-                add_event(
-                    "generation.partial" if outcome == "partial" else "generation.completed",
-                    attributes,
-                )
+                event = {
+                    "completed": "generation.completed",
+                    "partial": "generation.partial",
+                }.get(outcome, "generation.failed")
+                add_event(event, attributes)
                 _record_generation(
                     normalized_operation,
                     outcome,
                     (time.perf_counter() - started) * 1000,
+                    version,
                 )
                 if normalized_operation == "artwork_retry":
                     _metric_add(
@@ -507,7 +534,8 @@ def instrument_generation(
                         {"fcg.outcome": outcome, "fcg.error_code": "none"},
                     )
                 safe_log(
-                    "generation.partial" if outcome == "partial" else "generation.completed",
+                    event,
+                    level=logging.INFO if outcome == "completed" else logging.WARNING,
                     request_id=diagnostic_id,
                     attributes=attributes,
                 )
@@ -534,6 +562,8 @@ def record_dependency_attempt(
     request_id: str | None,
     error_code: Any = "none",
     retryable: bool = False,
+    stage: str | None = None,
+    agent_version: str | None = None,
 ) -> None:
     normalized_dependency = normalize_dependency(dependency)
     normalized_outcome = _bounded_value(outcome, SAFE_OUTCOMES, "failed")
@@ -545,6 +575,10 @@ def record_dependency_attempt(
         "fcg.error_code": normalized_error,
         "fcg.retryable": bool(retryable),
     }
+    if stage is not None:
+        attributes["fcg.stage"] = normalize_stage(stage)
+    if agent_version is not None:
+        attributes["fcg.agent_version"] = normalize_agent_version(agent_version)
     _metric_add(_dependency_counter, 1, attributes)
     _metric_record(_dependency_duration, duration_ms, attributes)
     if normalized_outcome == "throttled":
@@ -581,13 +615,22 @@ def record_retry(*, dependency: str, attempt: int, request_id: str | None) -> No
     safe_log("dependency.retry", request_id=request_id, attributes=attributes)
 
 
-def record_moderation(*, stage: str, allowed: bool, reason: str, policy: str) -> None:
+def record_moderation(
+    *,
+    stage: str,
+    allowed: bool,
+    reason: str,
+    policy: str,
+    agent_version: str | None = None,
+) -> None:
     attributes = {
         "fcg.stage": normalize_stage(stage),
         "fcg.outcome": "allowed" if allowed else "blocked",
         "fcg.moderation_reason": normalize_moderation_reason(reason),
         "fcg.policy": _normalize_policy(policy),
     }
+    if agent_version is not None:
+        attributes["fcg.agent_version"] = normalize_agent_version(agent_version)
     _metric_add(_moderation_counter, 1, attributes)
     add_event("moderation.decision", attributes)
 
@@ -688,6 +731,8 @@ def safe_attributes(attributes: dict[str, Any]) -> dict[str, Any]:
                 safe[key] = max(0, int(value))
             except (TypeError, ValueError):
                 continue
+        elif key == "fcg.agent_version":
+            safe[key] = normalize_agent_version(value)
         elif key == "http.route":
             safe[key] = normalize_route(str(value))
         elif key == "http.response.status_code" and isinstance(value, int):
@@ -716,8 +761,15 @@ def _initialize_metrics() -> None:
     _token_counter = meter.create_counter("fcg.ai.tokens", unit="{token}")
 
 
-def _record_generation(operation: str, outcome: str, duration_ms: float) -> None:
+def _record_generation(
+    operation: str,
+    outcome: str,
+    duration_ms: float,
+    agent_version: str | None = None,
+) -> None:
     attributes = {"fcg.operation": operation, "fcg.outcome": outcome}
+    if agent_version is not None:
+        attributes["fcg.agent_version"] = normalize_agent_version(agent_version)
     _metric_add(_generation_counter, 1, attributes)
     _metric_record(_generation_duration, duration_ms, attributes)
 
@@ -740,9 +792,9 @@ def _set_span_attributes(span: Any, attributes: dict[str, Any]) -> None:
 
 
 def _outcome_for_error(error_code: str) -> str:
-    if error_code == "rate_limit_exceeded":
+    if error_code in {"rate_limit_exceeded", "rate_limited"}:
         return "throttled"
-    if error_code in {"upstream_timeout", "request_replay_timeout"}:
+    if error_code in {"timeout", "upstream_timeout", "request_replay_timeout"}:
         return "timed_out"
     if error_code in {
         "prompt_rejected",
@@ -763,6 +815,27 @@ def _attempt_bucket(attempt: int) -> str:
     return "retry_many"
 
 
+def normalize_agent_version(value: Any) -> str:
+    token = str(value)
+    if 1 <= len(token) <= 64 and all(
+        character.isascii() and (character.isalnum() or character in "._-") for character in token
+    ):
+        return token
+    return "unknown"
+
+
+def _generation_version(args: tuple[Any, ...], kwargs: dict[str, Any]) -> str | None:
+    hosted_version = kwargs.get("hosted_version")
+    if hosted_version is not None:
+        return normalize_agent_version(hosted_version)
+    if args:
+        settings = getattr(args[0], "settings", None)
+        version = getattr(settings, "version", None)
+        if version is not None:
+            return normalize_agent_version(version)
+    return None
+
+
 def _normalize_token(value: Any) -> str:
     text = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
     return re.sub(r"[^a-z0-9_]", "", text)[:64]
@@ -775,7 +848,7 @@ def _bounded_value(value: Any, allowed: set[str], fallback: str) -> str:
 
 def _normalize_policy(value: Any) -> str:
     normalized = _normalize_token(value)
-    return normalized if normalized == "conservative_v1" else "other"
+    return normalized if normalized in {"conservative_v1", "original_fantasy_v1"} else "other"
 
 
 def _normalize_azure_error_code(value: Any) -> str:

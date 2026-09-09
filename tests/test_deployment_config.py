@@ -857,7 +857,13 @@ def test_telemetry_reuses_single_workspace_app_insights_and_secret_wiring() -> N
     main_bicep = bicep_files["infra/main.bicep"]
 
     assert all_bicep.count("Microsoft.OperationalInsights/workspaces@") == 1
-    assert all_bicep.count("Microsoft.Insights/components@") == 1
+    assert monitoring.count("resource applicationInsights 'Microsoft.Insights/components@") == 1
+    assert (
+        bicep_files["infra/modules/ai-foundry.bicep"].count(
+            "resource appInsights 'Microsoft.Insights/components@2020-02-02' existing"
+        )
+        == 1
+    )
     assert "WorkspaceResourceId: logAnalyticsWorkspace.id" in monitoring
     assert "DisableIpMasking: false" in monitoring
     assert "retentionInDays: retentionInDays" in monitoring
