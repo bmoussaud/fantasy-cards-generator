@@ -243,6 +243,7 @@ def extract_result(output, *, require_persisted_endpoint=False):
         if "serviceCode" in result and result["serviceCode"] not in (
             "unknown",
             "session_not_accessible",
+            "invalid_request",
         ):
             continue
         session_keys = {

@@ -147,8 +147,9 @@ def service_code(body):
     """Only a literal, recognized service code may cross the diagnostic boundary."""
     try:
         document = json.loads(body)
-        if document["error"]["code"] == "session_not_accessible":
-            return "session_not_accessible"
+        code = document["error"]["code"]
+        if code in ("session_not_accessible", "invalid_request"):
+            return code
     except (ValueError, TypeError, KeyError):
         pass
     return "unknown"

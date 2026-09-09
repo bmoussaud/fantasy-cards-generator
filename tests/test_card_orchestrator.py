@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 from contextlib import asynccontextmanager
 from dataclasses import replace
+from pathlib import Path
 
 import httpx
 import pytest
@@ -448,6 +450,55 @@ def test_platform_version_is_distinct_and_metadata_cannot_instruct(monkeypatch):
     assert payload["metadata"]["hostedVersion"] == "42"
     assert fake.calls[0] == ("concept", {"query": "x"})
     assert "request-123" not in json.dumps(fake.calls)
+
+
+def test_actual_probe_body_roundtrips_without_session_state(monkeypatch, caplog):
+    from hosted_agents.card_orchestrator import server
+
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "deployments/card-orchestrator/aca_identity_payload.py"
+    )
+    spec = importlib.util.spec_from_file_location("probe_payload_boundary_test", path)
+    assert spec is not None and spec.loader is not None
+    payload = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(payload)
+    monkeypatch.setattr(
+        payload, "GenerateCardAgentRequest", GenerateCardAgentRequest, raising=False
+    )
+    session = "smoke-109-routing-only"
+    store = server.NoResponseStore()
+    monkeypatch.setattr(server, "NoResponseStore", lambda: store)
+    orchestrator, fake = runtime()
+    response = asyncio.run(
+        post(create_host(settings(), orchestrator=orchestrator), payload.invocation_body(session))
+    )
+    assert response.status_code == 200
+    parsed = _parse_success_envelope(
+        response.json(), request_id=None, expected_version="candidate-1"
+    )
+    assert parsed.success and parsed.schema_valid
+    assert parsed.card == GeneratedCardModel.model_validate(CARD | LORE | ART)
+    assert fake.calls[0] == ("concept", {"query": payload.SYNTHETIC_QUERY})
+    assert session not in json.dumps(fake.calls) + response.text + caplog.text
+    assert not store._entries
+    assert not store._item_store
+    assert not store._conversation_responses
+    assert not store._stream_events
+
+
+@pytest.mark.parametrize("session", [None, "", 1, [], {}, "x" * 129, "../session", "a b"])
+def test_invalid_routing_session_is_rejected_before_model_calls(session):
+    orchestrator, fake = runtime()
+    response = asyncio.run(
+        post(
+            create_host(settings(), orchestrator=orchestrator),
+            wire() | {"agent_session_id": session},
+        )
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_request"
+    assert not fake.calls
 
 
 def test_host_never_writes_response_store(monkeypatch):

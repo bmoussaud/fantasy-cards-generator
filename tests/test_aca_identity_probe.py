@@ -867,7 +867,9 @@ def test_session_failure_never_invokes(modules, monkeypatch, response, reason, c
 
 
 @pytest.mark.parametrize("phase", ["session_create", "session_ready", "invoke"])
-@pytest.mark.parametrize("code", ["session_not_accessible", "unknown", "private-token-message"])
+@pytest.mark.parametrize(
+    "code", ["session_not_accessible", "invalid_request", "unknown", "private-token-message"]
+)
 def test_http_diagnostics_allow_only_literal_service_code(modules, monkeypatch, phase, code):
     payload, wrapper = modules
     invocation_parser(payload, wrapper, monkeypatch)
@@ -892,7 +894,7 @@ def test_http_diagnostics_allow_only_literal_service_code(modules, monkeypatch, 
     )
     assert result["phase"] == phase and result["httpStatus"] == 403
     assert result["serviceCode"] == (
-        "session_not_accessible" if code == "session_not_accessible" else "unknown"
+        code if code in ("session_not_accessible", "invalid_request") else "unknown"
     )
     assert result["invocationsAttempted"] == (1 if phase == "invoke" else 0)
     assert result["sessionCleanupRequired"] and error.closed

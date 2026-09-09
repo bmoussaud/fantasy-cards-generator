@@ -38,11 +38,16 @@ def validate_wire(body: bytes) -> GenerateCardAgentRequest:
     data = json.loads(body, object_pairs_hook=_unique_object)
     if (
         not isinstance(data, dict)
-        or set(data) - {"store", "stream", "input", "metadata"}
+        or set(data) - {"store", "stream", "input", "metadata", "agent_session_id"}
         or data.get("store") is not False
         or data.get("stream") is not False
     ):
         raise ValueError("invalid_request")
+    if "agent_session_id" in data and (
+        not isinstance(data["agent_session_id"], str)
+        or not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", data["agent_session_id"])
+    ):
+        raise ValueError("invalid_session_id")
     metadata = data.get("metadata", {})
     if (
         not isinstance(metadata, dict)
@@ -120,7 +125,7 @@ class StatelessBoundary:
             )(scope, receive, send)
             return
 
-        # Canonicalize only the already-validated single user message. Metadata is not prompt input.
+        # Routing metadata never reaches the model or enables SDK conversation state.
         canonical = json.dumps(
             {
                 "store": False,

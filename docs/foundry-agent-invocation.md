@@ -274,6 +274,17 @@ for broader RBAC.
 
 ## Wire contract
 
+The hosted boundary accepts optional `agent_session_id` routing metadata with
+1-128 ASCII letters, digits, dots, underscores or hyphens. It validates and
+discards that field before SDK normalization: it is not prompt input, does not
+enable conversation history or response storage, and does not replace Foundry's
+session-ownership authorization. Other unsupported request fields remain rejected.
+An offline regression sends the actual probe-built body through the SDK host
+with fake specialists. The previous deployed boundary rejected this body if
+Foundry forwarded the routing field; that mismatch is fixed, but does not prove
+the origin of the historical HTTP 400. The probe now also permits the fixed
+diagnostic code `invalid_request`, without exporting error messages or bodies.
+
 The client uses Microsoft Entra ID with the `https://ai.azure.com/.default` token scope and posts to the documented hosted-agent Responses protocol endpoint:
 
 ```text
