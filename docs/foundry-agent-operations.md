@@ -17,13 +17,154 @@ Healthy/Running, `/healthz` HTTP 200, unchanged image and other writable metadat
 See the [candidate and exact diagnostic evidence](../deployments/dev-endpoint/README.md).
 Do not run root provisioning, retrieve secret values into operator context, or
 treat scope-only preview as cloud verification of property/value equality.
-Endpoint persistence is complete. The separately authorized bounded E2E smoke
-is the remaining step; no hosted compute or model call accompanied this change.
+Endpoint persistence is complete. No hosted compute or model call accompanied
+the persistence change itself. The separately authorized E2E subsequently ran
+and reached HTTP 400 at invocation, as recorded below.
 
 Related: #109 (hosting), #99 (operations), #117 (merged client/RBAC wiring),
 #118 (read-only preflight). This package does **not** deploy or enable the web
 generation path. It contains no web hooks, model deployment, new registry,
 new Foundry account/project, or monitoring resource.
+
+## Persisted-endpoint ACA MI E2E — 2026-09-09
+
+Working as Gimli (DevOps / Infra), using the requester's fresh, bounded
+authorization and coordinator-reported independent Samwise review of
+`aad771477c34fb4c699d2bc63e279aa2be1badd7`. **That full SHA is the deployed
+application/image source; subsequent evidence-documentation commits are not
+the deployed image.** This run did not re-provision the already-persisted
+endpoint or change permissions.
+
+**Result: deployment and same-identity session creation/readiness succeeded;
+the one Responses POST returned HTTP 400. E2E domain success remains blocked.**
+There is no validated card, refusal, held result, schema or response-version
+match. `serviceCode:"unknown"` does not identify the source of the HTTP 400.
+Actual model-call/token counts are unobserved, not proven zero. No inference
+retry is authorized by this result; this run's allowance is consumed.
+
+Fresh GET-only preparation on the serving ACA replica returned
+`invocation_prepared`, HTTP 200, `accessVerified:true`, `principalMatched:true`,
+`endpointPersisted:true`, `endpointSource:"aca_environment"`,
+`parserImportReady:true`, `requestSchemaReady:true`,
+`localFixtureParseReady:true`, and `invocationsAttempted:0`.
+It made no session-create or Responses POST. The local fixture is not service
+generation evidence.
+
+| Evidence | Observed result (2026-09-09 UTC) |
+| --- | --- |
+| Image | `fcagdevqhg3qc4rlbt4gacr.azurecr.io/card-orchestrator:aad771477c34fb4c699d2bc63e279aa2be1badd7` |
+| ACR digest | `sha256:9eceae6213c24da0636ce4691a0f1d77d5c40128b291870154571688a657267f` |
+| Pre-recorded session | `smoke-109-3cb91a4027a3452aadad1f8e946f16ae`; exact GET 404 at `06:32:48.009856Z` |
+| Initial version inventory | HTTP 200, zero versions; no existing version reused |
+| Deploy submission / runtime clock start | `06:32:48.010438Z`; 0.5 CPU / 1GiB, dedicated azd project, one deployment |
+| Deploy return | Exit 0 at `06:33:45.780705Z`, **57.776 monotonic seconds** |
+| New owned version | `card-orchestrator:1`, `created_at:1788935592`; exact version/image/application ownership checked at `06:33:48.315762Z` |
+| ACA target | Revision `fcag-dev-app--endpoint-ea77f0bf2596`, replica `fcag-dev-app--endpoint-ea77f0bf2596-5f75998d86-nwvzw`, container `web` |
+| Expected actual ACA system MI | `946d8701-48f2-4fa5-8efd-bf053c7b4e4c`, checked audience `https://ai.azure.com/.default` |
+| Single probe submission / return | `06:33:52.026525Z` / `06:34:12.308277Z`, exit 1, **20.285 monotonic seconds** |
+| Session and inference counters | One session-create attempt, created and ready, exact session/version matched by the fail-closed creation gate; **one Responses POST attempt**, zero retries |
+| Finally begins | `06:34:12.309084Z`, **84.308 seconds** after deployment submission |
+| Session ownership reconciliation | Exact GET 200 and matching pre-recorded ID/version at `06:34:13.823606Z` |
+| Session stop / delete | Exit 0 at `06:34:22.442762Z` / `06:34:25.023440Z` |
+| New version deletion | Exact version `1` only, exit 0 at `06:34:27.802542Z`, **99.801 seconds** after submission |
+| Independent absence verification | Exact session and version GET **404** at `06:34:30.671927Z`; session-list endpoint **404** at `06:34:31.479304Z` |
+| Cleanup complete | `06:34:31.480434Z`, **103.479 seconds** after submission |
+| Final web verification | `06:34:35.382233Z`, unchanged safe baseline, endpoint persisted, `/healthz` HTTP 200 |
+| Entire run including digest read | `06:34:41.368186Z`, **113.370 seconds**; below 30 minutes |
+
+The session-list 404 proves endpoint absence after removal of its sole version,
+not a fictional HTTP-200 empty page. Exact session/version 404s and successful
+stop/delete independently establish cleanup. This run's UTC clock and monotonic
+durations agree; the earlier September 8 records and their clock caveats remain
+separate history.
+
+Exact sanitized marker (the probe prints this object without its internal
+`ACA_IDENTITY_PROBE=` transport prefix):
+
+```json
+{"accessVerified":false,"endpointPersisted":true,"endpointSource":"aca_environment","httpStatus":400,"invocationVerified":false,"invocationsAttempted":1,"phase":"invoke","principalMatched":true,"reason":"http_error","schemaValid":false,"serviceCode":"unknown","sessionCleanupRequired":true,"sessionCreateAttempted":true,"sessionCreated":true,"sessionReady":true,"status":"failed","tokenAcquired":true}
+```
+
+`sessionCleanupRequired:true` describes the marker at invocation return;
+the subsequent operator cleanup above completed. `accessVerified:false` here
+does not negate the separate HTTP-200 access preparation or successful session
+creation; the invocation branch only sets it after a successful Responses reply.
+
+Exact probe flags, run from the repository root:
+
+```bash
+python deployments/card-orchestrator/aca_identity_probe.py \
+  --environment dev \
+  --subscription b8ff3e15-7e2d-4fac-a773-992fb59ccedd \
+  --resource-group rg-fcag-dev --app fcag-dev-app \
+  --revision fcag-dev-app--endpoint-ea77f0bf2596 \
+  --replica fcag-dev-app--endpoint-ea77f0bf2596-5f75998d86-nwvzw \
+  --container web \
+  --project-endpoint https://aifcagdevqhg3qc4rlbt4g.services.ai.azure.com/api/projects/fantasy-cards-dev \
+  --expected-principal 946d8701-48f2-4fa5-8efd-bf053c7b4e4c \
+  --require-persisted-endpoint --invoke-once --hosted-version 1 \
+  --expected-version aad771477c34fb4c699d2bc63e279aa2be1badd7 \
+  --session-id smoke-109-3cb91a4027a3452aadad1f8e946f16ae --execute
+```
+
+This is an execution record, **not permission to rerun**. The prior nonbillable
+preparation used the same target plus `--require-persisted-endpoint
+--prepare-invocation --execute`, omitting invocation/version/session flags.
+Local invocation budgets were 30 seconds setup / 100 result / 130 total;
+remote setup and invocation budgets remained 30 / 65 / 95 seconds.
+The unchanged runtime bounds allow at most three existing-model stages,
+20 seconds and 1800 output tokens per stage, 65 seconds overall, no retries.
+
+The isolated dev azd context was missing in this worktree, so it was created
+from explicit allowlisted nonsecret values using `azd env new` / `azd env set`,
+not copied from another environment or read from `.env`. Both endpoint context
+names were set identically, along with the existing model `gpt-5-5`, existing
+registry/project/resource-group bindings and the full application SHA.
+`AZURE_DEV_USER_AGENT=microsoft_foundry_skill` was process-local for azd.
+No dependencies were installed, no root hooks or provisioning ran, and no
+evaluation/extra model probe was executed.
+
+**Offline diagnostic after cleanup:** the exact deployed image was run with
+`--rm --network none`, no credentials or mounts, and no server. Its actual
+`validate_wire()` rejects the exact outbound request with `invalid_request`;
+removing only `agent_session_id` makes that request pass. The hosted boundary
+currently allows only `store`, `stream`, `input`, and `metadata`.
+This is a reproducible local contract mismatch **if the platform forwards the
+routing field**; it is not proof that the platform forwarded that field in
+this failed live call or that its HTTP 400 originated in this boundary.
+The local operator interpreter lacked the optional hosted dependency, so the
+already-built image supplied the offline diagnostic without any installation.
+
+**Precise backend follow-up:** verify the platform-to-container routing-field
+contract offline; if forwarded, accept only a tightly validated routing-only
+`agent_session_id` and discard it before SDK normalization. Add an exact
+probe-body-to-host-boundary regression and retain strict rejection of unrelated
+fields/history/persistence. Extend fixed-code diagnostics to distinguish the
+owned `invalid_request` response from platform errors without exporting bodies.
+Do not remove the required session selector from the platform request, broaden
+RBAC, or retry paid inference by guess. No backend fix is claimed in this
+documentation-only follow-up.
+
+Cloud writes in this run were the owned ACR image/package publication, one
+hosted version, one ACA-MI-created session and the one Responses attempt,
+followed by session stop/delete and exact-version deletion. No app PUT,
+identity/RBAC/network/secret/model-capacity change, production action, web
+activation, image generation or shared-resource deletion occurred. The
+serving web image remained
+`fcagdevqhg3qc4rlbt4gacr.azurecr.io/fantasy-cards-generator/web-nat-dev:azd-deploy-1788775195`;
+revision, identities, ingress, Single/100%-latest traffic and
+`FOUNDRY_PROJECT_ENDPOINT` matched the fresh before/after baseline.
+The agent image and earlier images remain in ACR and can incur storage cost.
+No operator server/container/process remains running.
+Post-run existing probe/client regression tests: **222 passed**
+(`python -m pytest --noconftest tests/test_aca_identity_probe.py
+tests/test_foundry_agent_client.py -q`); `git diff --check` passed.
+No application or infrastructure source changed during this E2E workstream.
+
+**#109 remains open:** persisted project configuration, existing RBAC,
+actual-audience ACA identity/session access and real hosted packaging are
+observed; schema-valid domain invocation and response version matches are not.
+PR #122 is not merged by this operation.
 
 ## Contract and status
 
@@ -44,7 +185,7 @@ dedicated container/deployment package in PR #119. Packaging-only tests are not
 startup evidence; the integrated validation below includes the correct agent
 Dockerfile, real entrypoint and credential-free readiness check.
 
-Dernier résultat réel : le [smoke corrigé à identité unique](#smoke-corrigé-à-identité-unique--2026-09-08)
+Résultat historique du 8 septembre : le [smoke corrigé à identité unique](#smoke-corrigé-à-identité-unique--2026-09-08)
 a déployé la nouvelle image, mais son unique dispatch a échoué localement avec
 `exec_setup_timeout`. Aucun marqueur distant ne permet de compter les POST :
 leur nombre reste **inconnu**, et la nouvelle autorisation est consommée.
@@ -165,8 +306,8 @@ any earlier operator-created warmup-session recipe:
    and invokes it (at most one Responses POST). HTTP 201 and matching
    `agent_session_id` / `version_indicator` are mandatory. `creating`/`updating`
    trigger only bounded readiness GETs; only `active` permits inference.
-4. Local invocation transport is capped at **10 seconds setup + 100 seconds
-   result, 110 seconds total**. Remote work is capped at **30 seconds setup**
+4. Local invocation transport is capped at **30 seconds setup + 100 seconds
+   result, 130 seconds total**. Remote work is capped at **30 seconds setup**
    (source decoding/import/MI/create/readiness, at most 15 GETs) plus a separate
    **65-second invocation** guard. Preparation retains 30/80/110 local and
    70 remote. The existing model orchestration remains three stages, 20 seconds
