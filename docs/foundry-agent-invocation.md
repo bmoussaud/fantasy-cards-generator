@@ -287,15 +287,30 @@ for broader RBAC.
 
 ## Wire contract
 
-The hosted boundary accepts optional `agent_session_id` routing metadata with
-1-128 ASCII letters, digits, dots, underscores or hyphens. It validates and
-discards that field before SDK normalization: it is not prompt input, does not
-enable conversation history or response storage, and does not replace Foundry's
-session-ownership authorization. Other unsupported request fields remain rejected.
-An offline regression sends the actual probe-built body through the SDK host
-with fake specialists. The previous deployed boundary rejected this body if
-Foundry forwarded the routing field; that mismatch is fixed, but does not prove
-the origin of either historical HTTP 400.
+The hosted boundary accepts two optional routing-only fields:
+
+- `agent_session_id`: 1-128 ASCII letters, digits, dots, underscores or hyphens.
+- `agent_reference`: the pinned AgentServer 2.1.0 `AgentReference` shape,
+  exactly `{"type":"agent_reference","name":"<non-empty string>","version":"<string>"}`
+  with `version` optional.
+
+Both are validated and discarded before SDK normalization: neither is prompt
+input, enables conversation history/response storage, nor replaces Foundry's
+session-ownership authorization. Unknown keys or malformed routing values still
+fail closed. An offline regression adds the supported platform reference to the
+actual probe-built body and sends it through the real pinned SDK host with fake
+specialists. The deployed `45c03cb` boundary rejected that live field before the
+SDK/model; the new regression fixes that exact mismatch without claiming hosted
+success.
+
+Pinned SDK inspection also covered its other identity resolution inputs:
+`response_id` and the `x-agent-response-id` header affect response correlation,
+while `agent_session_id` selects session affinity. The current probe sends no
+`response_id`, and the live diagnostic proved no additional rejected field.
+Those surfaces remain unsupported rather than being speculatively allowlisted.
+Standard Responses controls such as `model`, `instructions`, `conversation`,
+`tools`, and persistence/streaming overrides remain strict caller inputs and are
+not treated as routing metadata.
 
 The boundary now returns `card_boundary_invalid_request` only when its own
 strict validation rejects the container request, together with allowlisted

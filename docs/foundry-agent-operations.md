@@ -57,6 +57,24 @@ unrelated strict validation, persistence, history, identity, or content-safety
 controls. Further dev diagnostic deployment remains authorized when a reviewed,
 hypothesis-driven source is ready; do not blindly repeat this unchanged call.
 
+**Backend correction prepared after this run:** pinned
+`azure-ai-agentserver-responses==2.1.0` defines `AgentReference` as an object
+with required literal `type:"agent_reference"`, required non-empty string
+`name`, and optional string `version`. The SDK uses it for agent identity,
+response-item stamping, telemetry, and deterministic session derivation; it is
+not card-domain input. The strict boundary now accepts only those exact keys and
+types, then discards the object together with `agent_session_id` while rebuilding
+the existing `store:false`, `stream:false`, single-message canonical request.
+Malformed references, extra reference keys, unrelated top-level fields, caller
+controls, and domain-schema failures remain rejected before the SDK/model.
+
+The regression takes the real `aca_identity_payload.invocation_body()` envelope,
+adds the documented hosted `agent_reference` shape, and sends it through the
+real pinned AgentServer host with fake specialists. This proves the prior local
+boundary rejection is removed; it does not prove the hosted gateway's exact
+value, a model call, or a successful hosted response. Gimli's post-review
+deployment is still required to establish the next live boundary/result.
+
 ## Endpoint persistence follow-up gate (2026-09-09)
 
 PR #121 is merged at `0cf7acc`. PR #122 now implements guarded **Azure-side**

@@ -59,6 +59,18 @@ def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def _validate_agent_reference(value: Any) -> None:
+    if (
+        not isinstance(value, dict)
+        or set(value) - {"type", "name", "version"}
+        or value.get("type") != "agent_reference"
+        or not isinstance(value.get("name"), str)
+        or not value["name"].strip()
+        or ("version" in value and not isinstance(value["version"], str))
+    ):
+        raise WireValidationError("invalid_value", "agent_reference")
+
+
 def validate_wire(body: bytes) -> GenerateCardAgentRequest:
     try:
         data = json.loads(body, object_pairs_hook=_unique_object)
@@ -66,7 +78,14 @@ def validate_wire(body: bytes) -> GenerateCardAgentRequest:
         raise WireValidationError("invalid_json", "body") from None
     if not isinstance(data, dict):
         raise WireValidationError("invalid_object", "body")
-    unexpected = set(data) - {"store", "stream", "input", "metadata", "agent_session_id"}
+    unexpected = set(data) - {
+        "store",
+        "stream",
+        "input",
+        "metadata",
+        "agent_reference",
+        "agent_session_id",
+    }
     if unexpected:
         field = next(iter(unexpected)) if len(unexpected) == 1 else "top_level"
         if field not in SAFE_TOP_LEVEL_FIELDS:
@@ -81,6 +100,8 @@ def validate_wire(body: bytes) -> GenerateCardAgentRequest:
         or not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", data["agent_session_id"])
     ):
         raise WireValidationError("invalid_value", "agent_session_id")
+    if "agent_reference" in data:
+        _validate_agent_reference(data["agent_reference"])
     metadata = data.get("metadata", {})
     if (
         not isinstance(metadata, dict)
