@@ -34,14 +34,34 @@ def _reset_telemetry(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(telemetry, "_enabled", False)
 
 
+def _install_guarded_fake_server(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
+    """Install a fake server module that records if create_host is ever reached.
+
+    Used by the failure tests below so the assertion on "zero calls to create_host"
+    exercises the real deferred-import gate in __main__.main() rather than trusting
+    a stubbed configure_telemetry() to short-circuit before that import is attempted.
+    """
+    host_created: list[bool] = []
+
+    class _GuardedHost:
+        def run(self, port: int) -> None:
+            del port
+            host_created.append(True)
+
+    fake_server = ModuleType("hosted_agents.card_orchestrator.server")
+    fake_server.create_host = lambda _settings: _GuardedHost()  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "hosted_agents.card_orchestrator.server", fake_server)
+    return host_created
+
+
 def test_hosted_entrypoint_fails_when_platform_connection_string_is_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Mandatory monitoring gate: missing platform-injected connection string must block startup.
 
     Foundry reserves APPLICATIONINSIGHTS_CONNECTION_STRING and injects it at runtime.
-    When it is absent the hosted runtime has no telemetry and must not serve requests.
-    create_host must never be reached in this scenario.
+    When it is absent, the real configure_telemetry() must itself return False (the
+    gate is not exercised via a stub), and create_host must never be reached.
     """
     import hosted_agents.card_orchestrator.__main__ as entrypoint
 
@@ -50,16 +70,14 @@ def test_hosted_entrypoint_fails_when_platform_connection_string_is_absent(
     monkeypatch.delenv("APPLICATIONINSIGHTS_CONNECTION_STRING", raising=False)
     _reset_telemetry(monkeypatch)
 
-    host_created: list[bool] = []
-    monkeypatch.setattr(entrypoint, "configure_telemetry", lambda: False)
+    host_created = _install_guarded_fake_server(monkeypatch)
 
     with pytest.raises(SystemExit) as exc:
         entrypoint.main()
 
-    msg = str(exc.value).lower()
-    assert (
-        "telemetry" in msg or "monitoring" in msg
-    ), f"Exit message must mention telemetry/monitoring, got: {exc.value!r}"
+    assert str(exc.value) == (
+        "Hosted agent requires telemetry; monitoring initialisation did not succeed."
+    ), f"Exit message must be the fixed redacted message, got: {exc.value!r}"
     assert not host_created, "create_host must not be reached when telemetry init returns False"
 
 
@@ -68,8 +86,11 @@ def test_hosted_entrypoint_fails_when_telemetry_exporter_raises(
 ) -> None:
     """Exporter/SDK failure during configure_azure_monitor must also block startup.
 
-    configure_telemetry() swallows the exception internally and returns False.
-    The hosted entrypoint treats False as fatal; raw exception internals must not leak.
+    configure_telemetry() is exercised for real: only the underlying
+    configure_azure_monitor() call is made to raise, so the test proves the entrypoint's
+    fail-closed handling of a genuine exporter failure rather than a stubbed return value.
+    configure_telemetry() swallows the exception internally and returns False; the hosted
+    entrypoint treats False as fatal, and raw exception internals must not leak.
     """
     import azure.monitor.opentelemetry
 
@@ -86,16 +107,14 @@ def test_hosted_entrypoint_fails_when_telemetry_exporter_raises(
         lambda **_kw: (_ for _ in ()).throw(RuntimeError("exporter_unavailable")),
     )
 
-    host_created: list[bool] = []
-
-    def _guard(*_a: object, **_kw: object) -> None:
-        host_created.append(True)
-
-    monkeypatch.setattr(entrypoint, "configure_telemetry", lambda: False)
+    host_created = _install_guarded_fake_server(monkeypatch)
 
     with pytest.raises(SystemExit) as exc:
         entrypoint.main()
 
+    assert str(exc.value) == (
+        "Hosted agent requires telemetry; monitoring initialisation did not succeed."
+    ), f"Exit message must be the fixed redacted message, got: {exc.value!r}"
     assert "exporter_unavailable" not in str(
         exc.value
     ), "Raw exporter exception detail must not appear in the exit message"
