@@ -35,6 +35,7 @@ from app.telemetry import (
     record_retry,
     record_token_usage,
     safe_persistence_log,
+    set_generation_path,
     telemetry_span,
 )
 
@@ -1987,6 +1988,7 @@ class CardGenerationService:
             idempotency_key=idempotency_key,
             request_id=request_id,
         )
+        set_generation_path(generation_path)
 
         progress.stage = "post-text-moderation"
         post_text = await self.services.moderation_service.moderate_text(

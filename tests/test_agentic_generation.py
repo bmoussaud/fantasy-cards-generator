@@ -711,6 +711,158 @@ def test_agent_success_emits_invocation_event_not_fallback(
 
 
 # ---------------------------------------------------------------------------
+# fcg.generation.requests path dimension
+# ---------------------------------------------------------------------------
+
+
+def test_set_generation_path_is_exported_from_telemetry() -> None:
+    """set_generation_path must be importable and callable without error."""
+    from app.telemetry import set_generation_path
+
+    # Should not raise; unknown value is normalized to 'direct'
+    set_generation_path("agent")
+    set_generation_path("direct")
+    set_generation_path("agent_fallback")
+    set_generation_path("unknown_value")  # normalized to 'direct'
+
+
+def test_generation_path_dimension_in_metric_on_agent_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When agent succeeds, _record_generation must receive path='agent' dimension."""
+    from app import telemetry as telemetry_module
+
+    agent_result = _make_agent_success()
+
+    class SuccessAgentClient:
+        async def invoke(self, query: str) -> FoundryAgentInvocationResult:
+            return agent_result
+
+    recorded_metric_attributes: list[dict] = []
+    original_record = telemetry_module._record_generation
+
+    def spy_record(operation, outcome, duration_ms, agent_version=None):
+        # Capture what _record_generation sees from the context var
+        path = telemetry_module._generation_path_var.get()
+        recorded_metric_attributes.append(
+            {"operation": operation, "outcome": outcome, "path": path}
+        )
+        original_record(operation, outcome, duration_ms, agent_version)
+
+    monkeypatch.setattr(telemetry_module, "_record_generation", spy_record)
+
+    services = _build_services_with_agent(SuccessAgentClient(), monkeypatch=monkeypatch)
+    client = _agent_client(monkeypatch, services)
+    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
+
+    response = client.post(
+        "/api/v1/cards/generate",
+        json={
+            "prompt": "a safe metric dimension test card hero generation",
+            "idempotencyKey": "idem-metric-dim-agent",
+            "csrfToken": csrf_token,
+        },
+    )
+
+    assert response.status_code == 200
+    generate_recordings = [r for r in recorded_metric_attributes if r["operation"] == "generate"]
+    assert generate_recordings, "Expected at least one generate recording"
+    assert any(
+        r["path"] == "agent" for r in generate_recordings
+    ), f"Expected path='agent' in metric dimensions; got: {generate_recordings}"
+
+
+def test_generation_path_dimension_in_metric_on_direct_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When flag is off (direct path), _record_generation must receive path='direct'."""
+    from app import telemetry as telemetry_module
+
+    recorded_metric_attributes: list[dict] = []
+    original_record = telemetry_module._record_generation
+
+    def spy_record(operation, outcome, duration_ms, agent_version=None):
+        path = telemetry_module._generation_path_var.get()
+        recorded_metric_attributes.append(
+            {"operation": operation, "outcome": outcome, "path": path}
+        )
+        original_record(operation, outcome, duration_ms, agent_version)
+
+    monkeypatch.setattr(telemetry_module, "_record_generation", spy_record)
+
+    settings = load_app_settings()
+    services = create_services(settings)
+    client = _agent_client(monkeypatch, services)
+    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
+
+    response = client.post(
+        "/api/v1/cards/generate",
+        json={
+            "prompt": "a safe metric dimension test direct path generation",
+            "idempotencyKey": "idem-metric-dim-direct",
+            "csrfToken": csrf_token,
+        },
+    )
+
+    assert response.status_code == 200
+    generate_recordings = [r for r in recorded_metric_attributes if r["operation"] == "generate"]
+    assert generate_recordings, "Expected at least one generate recording"
+    assert any(
+        r["path"] == "direct" for r in generate_recordings
+    ), f"Expected path='direct' in metric dimensions; got: {generate_recordings}"
+
+
+def test_generation_path_dimension_in_metric_on_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When agent falls back, _record_generation must receive path='agent_fallback'."""
+    from app import telemetry as telemetry_module
+
+    retryable = FoundryAgentInvocationResult(
+        status="transient_error",
+        retryable=True,
+        error_code="timeout",
+        message="Timed out.",
+    )
+
+    class FallbackAgentClient:
+        async def invoke(self, query: str) -> FoundryAgentInvocationResult:
+            return retryable
+
+    recorded_metric_attributes: list[dict] = []
+    original_record = telemetry_module._record_generation
+
+    def spy_record(operation, outcome, duration_ms, agent_version=None):
+        path = telemetry_module._generation_path_var.get()
+        recorded_metric_attributes.append(
+            {"operation": operation, "outcome": outcome, "path": path}
+        )
+        original_record(operation, outcome, duration_ms, agent_version)
+
+    monkeypatch.setattr(telemetry_module, "_record_generation", spy_record)
+
+    services = _build_services_with_agent(FallbackAgentClient(), monkeypatch=monkeypatch)
+    client = _agent_client(monkeypatch, services)
+    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
+
+    response = client.post(
+        "/api/v1/cards/generate",
+        json={
+            "prompt": "a safe metric dimension test fallback path generation",
+            "idempotencyKey": "idem-metric-dim-fallback",
+            "csrfToken": csrf_token,
+        },
+    )
+
+    assert response.status_code == 200
+    generate_recordings = [r for r in recorded_metric_attributes if r["operation"] == "generate"]
+    assert generate_recordings, "Expected at least one generate recording"
+    assert any(
+        r["path"] == "agent_fallback" for r in generate_recordings
+    ), f"Expected path='agent_fallback' in metric dimensions; got: {generate_recordings}"
+
+
+# ---------------------------------------------------------------------------
 # Non-regression: flag-off path leaves all existing behavior unchanged
 # ---------------------------------------------------------------------------
 
