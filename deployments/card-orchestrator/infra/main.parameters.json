@@ -11,6 +11,11 @@
     "containerAppName": {"value": "${AZURE_CONTAINER_APP_NAME}"},
     "enablePrerequisites": {"value": "${CARD_ORCHESTRATOR_ENABLE_PREREQUISITES=false}"},
     "createRegistryConnection": {"value": "${CARD_ORCHESTRATOR_CREATE_REGISTRY_CONNECTION=false}"},
-    "registryConnectionName": {"value": "${AZURE_AI_PROJECT_ACR_CONNECTION_NAME=}"}
+    "registryConnectionName": {"value": "${AZURE_AI_PROJECT_ACR_CONNECTION_NAME=}"},
+    "logAnalyticsWorkspaceResourceId": {"value": "${AZURE_LOG_ANALYTICS_WORKSPACE_RESOURCE_ID=}"},
+    "appInsightsResourceId": {"value": "${AZURE_APP_INSIGHTS_RESOURCE_ID=}"},
+    "enableAgentAlerts": {"value": "${CARD_ORCHESTRATOR_ENABLE_AGENT_ALERTS=false}"},
+    "agentAlertEmailReceivers": {"value": "${CARD_ORCHESTRATOR_ALERT_EMAIL_RECEIVERS=[]}"},
+    "agentAlertWebhookReceivers": {"value": "${CARD_ORCHESTRATOR_ALERT_WEBHOOK_RECEIVERS=[]}"}
   }
 }

@@ -32,6 +32,21 @@ param createRegistryConnection bool = false
 @description('Name discovered from the project connection inventory; never rename an existing connection.')
 param registryConnectionName string = ''
 
+@description('Existing Log Analytics workspace resource ID from root infra. Required for agent monitoring alerts and workbook.')
+param logAnalyticsWorkspaceResourceId string = ''
+
+@description('Existing Application Insights resource ID from root infra. Required for agent monitoring alert scoping.')
+param appInsightsResourceId string = ''
+
+@description('Enable agent monitoring alerts. Requires at least one action group receiver to take effect.')
+param enableAgentAlerts bool = false
+
+@description('Action Group email receivers for agent alerts.')
+param agentAlertEmailReceivers array = []
+
+@description('Action Group webhook receivers for agent alerts. Do not embed credentials in serviceUri.')
+param agentAlertWebhookReceivers array = []
+
 resource existingGroup 'Microsoft.Resources/resourceGroups@2024-03-01' existing = {
   name: resourceGroupName
 }
@@ -68,6 +83,21 @@ module prerequisites './modules/prerequisites.bicep' = if (enablePrerequisites) 
 resource registry 'Microsoft.ContainerRegistry/registries@2023-07-01' existing = {
   scope: existingGroup
   name: registryName
+}
+
+module agentMonitoring './modules/agent-monitoring.bicep' = if (!empty(logAnalyticsWorkspaceResourceId) && !empty(appInsightsResourceId)) {
+  name: 'card-orchestrator-${environmentName}-agent-monitoring'
+  scope: existingGroup
+  params: {
+    location: existingGroup.location
+    environmentName: environmentName
+    containerAppName: containerAppName
+    appInsightsResourceId: appInsightsResourceId
+    logAnalyticsWorkspaceResourceId: logAnalyticsWorkspaceResourceId
+    enableAlerts: enableAgentAlerts
+    actionGroupEmailReceivers: agentAlertEmailReceivers
+    actionGroupWebhookReceivers: agentAlertWebhookReceivers
+  }
 }
 
 output AZURE_AI_PROJECT_ID string = project.id

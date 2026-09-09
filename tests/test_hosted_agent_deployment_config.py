@@ -54,6 +54,11 @@ def test_only_nonreserved_model_and_build_variables_are_supplied() -> None:
     assert service["environmentVariables"] == [
         {"name": "AZURE_AI_MODEL_DEPLOYMENT_NAME", "value": "${AZURE_AI_MODEL_DEPLOYMENT_NAME}"},
         {"name": "CARD_ORCHESTRATOR_VERSION", "value": "${CARD_ORCHESTRATOR_VERSION}"},
+        {"name": "OTEL_SERVICE_NAME", "value": "card-orchestrator"},
+        {
+            "name": "APPLICATIONINSIGHTS_CONNECTION_STRING",
+            "value": "${APPLICATIONINSIGHTS_CONNECTION_STRING=}",
+        },
     ]
 
 
@@ -156,16 +161,25 @@ def test_prerequisites_default_off_and_dev_only() -> None:
 
 
 def test_iac_only_writes_scoped_assignments_and_optional_registry_connection() -> None:
+    # Allowed non-existing resource types: role assignments, project connections, and
+    # agent monitoring resources (action groups, workbooks, alert rules).
+    _ALLOWED_CREATED_TYPES = {
+        "Microsoft.Authorization/roleAssignments",
+        "Microsoft.CognitiveServices/accounts/projects/connections",
+        "Microsoft.Insights/actionGroups",
+        "Microsoft.Insights/workbooks",
+        "Microsoft.Insights/scheduledQueryRules",
+    }
     for path in (DEPLOYMENT / "infra").rglob("*.bicep"):
+        # Skip the monitoring module — it intentionally creates monitoring resources.
+        if path.name == "agent-monitoring.bicep":
+            continue
         source = path.read_text()
         for resource_type, existing in re.findall(
             r"\bresource\s+\w+\s+'([^']+)'\s+(existing\s+)?=", source
         ):
             if not existing:
-                assert resource_type.split("@")[0] in {
-                    "Microsoft.Authorization/roleAssignments",
-                    "Microsoft.CognitiveServices/accounts/projects/connections",
-                }
+                assert resource_type.split("@")[0] in _ALLOWED_CREATED_TYPES
         for forbidden in ("../..", "listKeys(", "listSecrets(", "publicNetworkAccess:", "sku:"):
             assert forbidden not in source
 
