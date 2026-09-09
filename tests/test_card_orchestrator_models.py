@@ -168,15 +168,41 @@ def test_real_model_schema_failure_is_held(model_transport):
     assert len(calls) == 1
 
 
-@pytest.mark.parametrize("status", [429, 500])
-def test_real_model_http_errors_do_not_retry_or_leak(model_transport, caplog, status):
+@pytest.mark.parametrize(
+    ("status", "reason", "http_type", "http_status"),
+    [
+        (400, "invalid_request", "bad_request", "http_400"),
+        (401, "authentication", "authentication", "http_401"),
+        (403, "authorization", "permission_denied", "http_403"),
+        (404, "resource_not_found", "not_found", "http_404"),
+        (429, "rate_limited", "rate_limit", "http_429"),
+        (500, "service_error", "server", "http_500"),
+    ],
+)
+def test_real_model_http_errors_do_not_retry_or_leak(
+    model_transport, caplog, status, reason, http_type, http_status
+):
     calls, responses, clients, credentials, _ = model_transport
-    responses[0] = httpx.Response(status, json={"error": {"message": "PRIVATE_DEPENDENCY"}})
+    responses[0] = httpx.Response(
+        status,
+        json={
+            "error": {
+                "code": "PRIVATE_PROVIDER_CODE",
+                "message": "PRIVATE_DEPENDENCY",
+                "body": "PRIVATE_MODEL_OUTPUT",
+            }
+        },
+    )
     with pytest.raises(RuntimeFailure) as exc:
         asyncio.run(
             CardOrchestrator(settings()).generate(GenerateCardAgentRequest(query="mountain drake"))
         )
-    assert "PRIVATE" not in str(exc.value) + caplog.text
+    failure = exc.value
+    assert failure.stage == "concept"
+    assert failure.reason == reason
+    assert failure.http_type == http_type
+    assert failure.http_status == http_status
+    assert "PRIVATE" not in str(failure) + failure.response_code + caplog.text
     assert len(calls) == 1
     assert all(client.is_closed() for client in clients)
     assert all(credential.closed for credential in credentials)

@@ -143,15 +143,55 @@ class ProbeFailure(Exception):
     pass
 
 
-def service_code(body):
-    """Only a literal, recognized service code may cross the diagnostic boundary."""
+def service_diagnostic(body):
+    """Only fixed service diagnostics may cross the diagnostic boundary."""
     try:
         document = json.loads(body)
-        if document["error"]["code"] == "session_not_accessible":
-            return "session_not_accessible"
+        error = document["error"]
+        code = error["code"]
+        if code in ("session_not_accessible", "invalid_request"):
+            return {"serviceCode": code}
+        if code == "card_boundary_invalid_request":
+            reason = error.get("reason")
+            param = error.get("param")
+            if reason in (
+                "invalid_json",
+                "invalid_object",
+                "unsupported_field",
+                "not_false",
+                "invalid_value",
+                "not_single_item_list",
+                "invalid_user_message",
+                "invalid_input_text",
+                "invalid_schema",
+            ) and param in (
+                "body",
+                "top_level",
+                "agent",
+                "agent_reference",
+                "background",
+                "conversation",
+                "instructions",
+                "max_output_tokens",
+                "metadata",
+                "model",
+                "previous_response_id",
+                "prompt",
+                "response_id",
+                "store",
+                "stream",
+                "text",
+                "tool_choice",
+                "tools",
+                "agent_session_id",
+                "input",
+                "content",
+                "domain",
+            ):
+                return {"serviceCode": code, "serviceReason": reason, "serviceParam": param}
     except (ValueError, TypeError, KeyError):
         pass
-    return "unknown"
+    return {"serviceCode": "unknown"}
 
 
 def session_document(opener, request, result, deadline, expected_status):
@@ -163,7 +203,9 @@ def session_document(opener, request, result, deadline, expected_status):
         result["httpStatus"] = response.status
         body = response.read(MAX_BODY + 1)
         if response.status != expected_status:
-            result["serviceCode"] = service_code(body) if len(body) <= MAX_BODY else "unknown"
+            result.update(
+                service_diagnostic(body) if len(body) <= MAX_BODY else {"serviceCode": "unknown"}
+            )
             if result["phase"] == "session_create" and response.status == 409:
                 result["sessionCleanupRequired"] = False
             raise ProbeFailure("unexpected_http_status")
@@ -228,6 +270,7 @@ def probe(
     invocation=None,
     *,
     prepare=False,
+    require_persisted_endpoint=False,
     setup_deadline=None,
     remote_deadline=None,
 ):
@@ -236,12 +279,24 @@ def probe(
         setup_deadline = time.monotonic() + SESSION_SETUP_TIMEOUT
     try:
         validate_inputs(endpoint, principal)
+        if type(require_persisted_endpoint) is not bool:
+            raise ValueError("invalid_endpoint_requirement")
         if prepare and invocation is not None:
             raise ValueError("conflicting_modes")
         if invocation is not None:
             validate_invocation(*invocation)
     except (ValueError, TypeError):
         return {**result, "reason": "invalid_configuration"}
+    if require_persisted_endpoint:
+        persisted = os.environ.get("FOUNDRY_PROJECT_ENDPOINT")
+        try:
+            validate_inputs(persisted, principal)
+        except (ValueError, TypeError):
+            return {**result, "reason": "persisted_endpoint_invalid"}
+        if persisted != endpoint:
+            return {**result, "reason": "persisted_endpoint_mismatch"}
+        endpoint = persisted
+        result.update(endpointPersisted=True, endpointSource="aca_environment")
     if not os.environ.get("IDENTITY_ENDPOINT") or not os.environ.get("IDENTITY_HEADER"):
         return {**result, "reason": "aca_identity_unavailable"}
     logging.disable(logging.CRITICAL)
@@ -306,7 +361,11 @@ def probe(
             result["httpStatus"] = response.status
             if response.status != 200:
                 body = response.read(MAX_BODY + 1)
-                result["serviceCode"] = service_code(body) if len(body) <= MAX_BODY else "unknown"
+                result.update(
+                    service_diagnostic(body)
+                    if len(body) <= MAX_BODY
+                    else {"serviceCode": "unknown"}
+                )
                 return {**result, "reason": "unexpected_http_status"}
             body = response.read(MAX_BODY + 1)
         if len(body) > MAX_BODY:
@@ -326,6 +385,16 @@ def probe(
                 hostedVersion=version,
                 applicationVersion=build,
             )
+            runtime_diagnostic = (
+                ("runtimeStage", parsed.runtime_failure_stage),
+                ("runtimeReason", parsed.runtime_failure_reason),
+                ("runtimeHttpType", parsed.runtime_http_type),
+                ("runtimeHttpStatus", parsed.runtime_http_status),
+            )
+            if any(value is not None for _, value in runtime_diagnostic):
+                if not all(value is not None for _, value in runtime_diagnostic):
+                    return {**result, "reason": "invalid_response"}
+                result.update(runtime_diagnostic)
             for key, value in (
                 ("responseId", parsed.response_id),
                 ("requestId", parsed.request_id),
@@ -363,7 +432,7 @@ def probe(
         try:
             body = error.read(MAX_BODY + 1)
             if len(body) <= MAX_BODY:
-                result["serviceCode"] = service_code(body)
+                result.update(service_diagnostic(body))
         except Exception:
             pass
         finally:
@@ -385,7 +454,15 @@ def probe(
                 pass
 
 
-def emit(endpoint, principal, invocation=None, *, prepare=False, parser_bundle=None):
+def emit(
+    endpoint,
+    principal,
+    invocation=None,
+    *,
+    prepare=False,
+    parser_bundle=None,
+    require_persisted_endpoint=False,
+):
     def deadline(signum, frame):
         raise TimeoutError()
 
@@ -408,6 +485,7 @@ def emit(endpoint, principal, invocation=None, *, prepare=False, parser_bundle=N
             principal,
             invocation=invocation,
             prepare=prepare,
+            require_persisted_endpoint=require_persisted_endpoint,
             setup_deadline=setup_deadline,
             remote_deadline=remote_deadline if invocation else None,
         )

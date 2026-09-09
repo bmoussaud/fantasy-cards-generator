@@ -84,6 +84,27 @@ is now also consumed, with no retry authorized. The earlier
 App Insights deployment gate was incorrect (linkage is needed for tracing only),
 as corrected in the operations runbook.
 
+Those per-attempt statements are historical records, not the current
+authorization state. The requester subsequently authorized continued bounded dev
+diagnostics. Source `45c03cbfda5a4667d36a73aee0184bcb908bc9f3`
+was deployed once and the actual ACA-MI request returned the exact sanitized
+boundary diagnostic `card_boundary_invalid_request`,
+`serviceReason:"unsupported_field"`, `serviceParam:"agent_reference"`. The owned
+session and hosted version were then deleted. See the
+[exact execution record](foundry-agent-operations.md#exact-strict-boundary-rejection--2026-09-09).
+
+The next exact-source E2E deployed reviewed source
+`d2de0b358a9d665a2d63d5b5fb74119b4a77edec` and proved the correction live:
+the actual ACA MI created and readied its exact-version session, the Responses
+POST passed the corrected `agent_reference` boundary, and the service returned
+HTTP 200. The envelope itself had `outcome:"failed"`,
+`schemaValid:false`, and `invocationVerified:false`; it contained no valid card,
+held result or refusal, so neither application nor hosted response-version
+matching was established. Exactly one Responses POST was sent with no retry.
+The owned session/version were deleted and both exact GETs returned 404; the web
+baseline and `/healthz` HTTP 200 were preserved. See the
+[latest exact execution record](foundry-agent-operations.md#exact-source-runtime-failure--2026-09-09).
+
 Un **troisième smoke, nouvellement autorisé**, a depuis déployé la correction
 à identité unique depuis `dc1925942c42756690f7dd5321cbdbf892cf7182`.
 Sa préparation ACA a réussi (MI attendue, HTTP 200, imports/contrat/fixture prêts,
@@ -105,6 +126,56 @@ Use the same pinned target arguments above with `--prepare-invocation --execute`
 Do **not** supply `--invoke-once`, versions or a session: conflicting/unused
 invocation arguments fail locally before ACA exec. No hosted version, session or
 server is required.
+
+#### Proving the persisted endpoint
+
+Add `--require-persisted-endpoint` to access-only, `--prepare-invocation`, or
+`--invoke-once` mode. The probe reads **only** `os.environ["FOUNDRY_PROJECT_ENDPOINT"]`
+inside the pinned ACA process (no dotenv/file reads). Environment configuration
+is untrusted: it must pass the existing canonical Azure project URL validation
+and exactly match the operator-verified `--project-endpoint` before credentials,
+network requests, or session creation. Missing/malformed and mismatched values
+produce only `persisted_endpoint_invalid` and `persisted_endpoint_mismatch`;
+the environment value is never printed. Credentials, arbitrary URLs, redirects,
+query strings and environment proxies are not accepted as project destinations.
+
+Only after that actual comparison does request construction use the persisted
+value and emit `endpointPersisted:true` with `endpointSource:"aca_environment"`.
+The wrapper requires these fields to agree and, when opted in, rejects successful
+legacy markers without persistence proof. The flag requests verification; it
+cannot supply a boolean assertion of persistence. Default usage still reports
+`endpointPersisted:false`, meaning persistence was not checked, not that the
+environment variable is necessarily absent. Historical results remain unchanged.
+
+Use `--prepare-invocation --require-persisted-endpoint --execute` for the
+nonbillable gate: a successful `invocation_prepared` marker also requires the
+actual expected MI principal, HTTP 200 with a valid agents list, and the bundled
+parser/request/local-fixture checks. It sends one GET and **zero POSTs**.
+Endpoint matching alone never proves access or invocation; preparation is not
+hosted generation, domain validation of a service response, or E2E completion.
+Invocation keeps the existing 30s setup / 65s remote invocation budget (95s
+remote total, 130s local bound), same-MI session ownership, and no retries.
+
+**Actual nonbillable persisted-endpoint preparation, 2026-09-09 UTC**
+(evidence recorded at `06:26:33Z`; this is not the historical 2026-09-08 run):
+fresh allowlisted management GETs selected healthy/running revision
+`fcag-dev-app--endpoint-ea77f0bf2596`, ready replica
+`fcag-dev-app--endpoint-ea77f0bf2596-5f75998d86-nwvzw`, container `web`.
+The expected system principal was `946d8701-48f2-4fa5-8efd-bf053c7b4e4c`;
+Single mode, 100%-latest traffic and the existing
+`web-nat-dev:azd-deploy-1788775195` image were observed unchanged.
+One `--prepare-invocation --require-persisted-endpoint --execute` completed:
+
+```json
+{"accessVerified":true,"agentCountOnPage":0,"endpointPersisted":true,"endpointSource":"aca_environment","httpStatus":200,"invocationVerified":false,"invocationsAttempted":0,"localFixtureParseReady":true,"parserImportReady":true,"preparationOnly":true,"principalMatched":true,"requestSchemaReady":true,"schemaValid":false,"status":"invocation_prepared","tokenAcquired":true}
+```
+
+The verified persisted value matched
+`https://aifcagdevqhg3qc4rlbt4g.services.ai.azure.com/api/projects/fantasy-cards-dev`.
+This preparation sent one agents GET, zero session-create/Responses POSTs and
+created no hosted runtime. No app configuration, remote files or packages changed.
+Persistence and GET access are now proven inside ACA; real hosted E2E remains
+pending the separately reviewed bounded invocation.
 
 This explicit mode uses the **same** owned parser/request-model bundle,
 `app.generation.GeneratedCardModel` import, chunked stdin transport and phased
@@ -161,8 +232,10 @@ model text or tokens. `sessionCreateAttempted` (boolean) and `invocationsAttempt
 **before** create dispatch, so a timeout is reconcilable even without a response.
 The HTTP diagnostic exports only `httpStatus`, `phase`
 (`session_create|session_ready|invoke`), and `serviceCode`
-(`session_not_accessible|unknown`). Error JSON reads are bounded to 64 KiB plus
-one overflow byte; arbitrary codes/messages/body/headers/URLs are never exported.
+(`session_not_accessible|invalid_request|card_boundary_invalid_request|unknown`).
+For the boundary-specific code only, fixed `serviceReason`/`serviceParam` enums
+are also exported. Error JSON reads are bounded to 64 KiB plus one overflow byte;
+arbitrary codes/messages/body/headers/URLs are never exported.
 No optional telemetry is required.
 
 A dispatch timeout consumes the allowance; never retry. Without a strict remote
@@ -179,8 +252,10 @@ launch for connection, terminal settling and complete payload delivery, followed
 by **100 seconds** for a result, with a hard **130-second** local transport cap.
 The earlier 10-second setup cap produced `exec_setup_timeout` during the latest
 live attempt. Setup now matches the successful preparation path without reducing
-the result budget. This correction has only been exercised offline; no further
-live invocation is implied.
+the result budget. The deadline correction was initially exercised only offline. It was later used
+successfully by the bounded live diagnostic recorded above; transport completed
+and the strict application boundary identified `agent_reference` as an
+unsupported top-level field.
 Its remote budget is **95 seconds**: at most **30 seconds** for decoding,
 parser/import, MI, session creation and readiness, separately reserving the
 **65-second** invocation guard (including response parsing). Setup failure never
@@ -224,6 +299,39 @@ for broader RBAC.
 
 ## Wire contract
 
+The hosted boundary accepts two optional routing-only fields:
+
+- `agent_session_id`: 1-128 ASCII letters, digits, dots, underscores or hyphens.
+- `agent_reference`: the pinned AgentServer 2.1.0 `AgentReference` shape,
+  exactly `{"type":"agent_reference","name":"<non-empty string>","version":"<string>"}`
+  with `version` optional.
+
+Both are validated and discarded before SDK normalization: neither is prompt
+input, enables conversation history/response storage, nor replaces Foundry's
+session-ownership authorization. Unknown keys or malformed routing values still
+fail closed. An offline regression adds the supported platform reference to the
+actual probe-built body and sends it through the real pinned SDK host with fake
+specialists. The deployed `45c03cb` boundary rejected that live field before the
+SDK/model; the new regression fixes that exact mismatch without claiming hosted
+success.
+
+Pinned SDK inspection also covered its other identity resolution inputs:
+`response_id` and the `x-agent-response-id` header affect response correlation,
+while `agent_session_id` selects session affinity. The current probe sends no
+`response_id`, and the live diagnostic proved no additional rejected field.
+Those surfaces remain unsupported rather than being speculatively allowlisted.
+Standard Responses controls such as `model`, `instructions`, `conversation`,
+`tools`, and persistence/streaming overrides remain strict caller inputs and are
+not treated as routing metadata.
+
+The boundary now returns `card_boundary_invalid_request` only when its own
+strict validation rejects the container request, together with allowlisted
+`serviceReason` and `serviceParam` enums. The probe exports only those fixed
+values; it never exports request values, error messages or bodies. A subsequent
+live result with that code proves the request reached the container boundary and
+identifies the rejected field/category. A generic `invalid_request` instead
+remains upstream-platform or inner-SDK evidence, not proof of boundary rejection.
+
 The client uses Microsoft Entra ID with the `https://ai.azure.com/.default` token scope and posts to the documented hosted-agent Responses protocol endpoint:
 
 ```text
@@ -265,9 +373,22 @@ The response parser reads the raw Responses wire envelope `output[]/content[]/ou
 
 ## Current live gap
 
-The same-identity session-creation/protocol correction above is **offline code,
-not deployed or live-tested**. The last deployed image remains the historical
-`2bdbf9967d8c397f7d88914bac06285b3b477297` build below. Current documentation verifies
+The latest bounded dev diagnostic deployed exact reviewed source
+`22aa53bc5678437cf6b4e8507220b7ed36e04ead`. Same-identity session creation and
+readiness succeeded, and the single ACA-MI Responses POST returned HTTP 200 with
+a failed envelope carrying the closed runtime tuple
+`art_direction/rate_limited/rate_limit/http_429`. This precisely identifies a
+provider HTTP 429 at the art-direction stage, not an authorization,
+configuration, routing or schema failure. No POST retry, RBAC change, production
+operation or evaluation occurred. The owned session and hosted version were
+deleted; exact GETs returned 404; the unchanged web baseline returned
+`/healthz` HTTP 200. See the
+[exact classified runtime evidence](foundry-agent-operations.md#exact-classified-runtime-failure--2026-09-09).
+
+At the historical checkpoint below, the same-identity session-creation/protocol
+correction was **offline code, not yet deployed or live-tested**, and the last
+deployed image was
+`2bdbf9967d8c397f7d88914bac06285b3b477297`. Current documentation verifies
 caller-scoped session ownership and `agent_session_id` binding. Those facts make
 the operator-created/ACA-invoked session a concrete protocol defect to correct,
 but do **not** prove the historical HTTP 403 cause: its error body was discarded,

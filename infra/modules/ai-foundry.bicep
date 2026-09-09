@@ -44,6 +44,17 @@ param textDeploymentSkuName string = 'GlobalStandard'
 @description('Capacity units for the text deployment. Confirm against real quota availability before production rollout.')
 param textDeploymentCapacity int = 1
 
+@description('Responsible AI policy for the text deployment.')
+param textDeploymentRaiPolicyName string = 'Microsoft.DefaultV2'
+
+@allowed([
+  'NoAutoUpgrade'
+  'OnceCurrentVersionExpired'
+  'OnceNewDefaultVersionAvailable'
+])
+@description('Version upgrade policy for the text deployment.')
+param textDeploymentVersionUpgradeOption string = 'OnceNewDefaultVersionAvailable'
+
 @description('Deployment name for the image model used by the backend.')
 param imageDeploymentName string
 
@@ -103,6 +114,8 @@ resource textModelDeployment 'Microsoft.CognitiveServices/accounts/deployments@2
       name: textModelName
       version: textModelVersion
     }
+    raiPolicyName: textDeploymentRaiPolicyName
+    versionUpgradeOption: textDeploymentVersionUpgradeOption
   }
 }
 

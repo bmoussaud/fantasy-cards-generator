@@ -117,8 +117,19 @@ param aiFoundryTextModelVersion string = '2026-04-24'
 @description('Azure AI Foundry SKU for the text deployment. Verify against regional quota availability before deployment.')
 param aiFoundryTextDeploymentSkuName string = 'GlobalStandard'
 
-@description('Azure AI Foundry capacity units for the text deployment. Verify against live quota before deployment.')
-param aiFoundryTextDeploymentCapacity int = 1
+@description('Azure AI Foundry capacity units for the text deployment. Dev needs three bounded sequential model calls; prod retains its existing default pending separate review.')
+param aiFoundryTextDeploymentCapacity int = environmentName == 'dev' ? 10 : 1
+
+@description('Responsible AI policy for the text deployment.')
+param aiFoundryTextDeploymentRaiPolicyName string = 'Microsoft.DefaultV2'
+
+@allowed([
+  'NoAutoUpgrade'
+  'OnceCurrentVersionExpired'
+  'OnceNewDefaultVersionAvailable'
+])
+@description('Version upgrade policy for the text deployment.')
+param aiFoundryTextDeploymentVersionUpgradeOption string = 'OnceNewDefaultVersionAvailable'
 
 @description('Azure AI Foundry deployment name for the image model.')
 param aiFoundryImageDeploymentName string = 'gpt-image-2'
@@ -600,7 +611,9 @@ module aiFoundry './modules/ai-foundry.bicep' = {
     tags: tags
     textDeploymentCapacity: aiFoundryTextDeploymentCapacity
     textDeploymentName: aiFoundryTextDeploymentName
+    textDeploymentRaiPolicyName: aiFoundryTextDeploymentRaiPolicyName
     textDeploymentSkuName: aiFoundryTextDeploymentSkuName
+    textDeploymentVersionUpgradeOption: aiFoundryTextDeploymentVersionUpgradeOption
     textModelName: aiFoundryTextModelName
     textModelVersion: aiFoundryTextModelVersion
   }

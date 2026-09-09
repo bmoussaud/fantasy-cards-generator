@@ -40,6 +40,7 @@ def parser_source():
         "_incomplete_reason",
         "_string_or_none",
         "_safe_identifier_or_none",
+        "_parse_runtime_failure_code",
     }
     source = (root / "app/foundry_agent_client.py").read_text()
     nodes = [node for node in ast.parse(source).body if getattr(node, "name", None) in names]
@@ -69,19 +70,24 @@ def parser_source():
     )
 
 
-def remote_command(endpoint, principal, invocation=None, *, prepare=False):
+def remote_command(
+    endpoint, principal, invocation=None, *, prepare=False, require_persisted_endpoint=False
+):
     validate_inputs(endpoint, principal)
+    if type(require_persisted_endpoint) is not bool:
+        raise ValueError("invalid_endpoint_requirement")
     if prepare and invocation is not None:
         raise ValueError("conflicting_modes")
     source = Path(__file__).with_name("aca_identity_payload.py").read_text()
+    requirement = ", require_persisted_endpoint=True" if require_persisted_endpoint else ""
     if invocation is None and not prepare:
-        source += f"\nemit({endpoint!r}, {principal!r})\n"
+        source += f"\nemit({endpoint!r}, {principal!r}{requirement})\n"
     else:
         if invocation is not None:
             validate_invocation(*invocation)
         source += (
             f"\nemit({endpoint!r}, {principal!r}, {invocation!r}, "
-            f"prepare={prepare!r}, parser_bundle={parser_source()!r})\n"
+            f"prepare={prepare!r}, parser_bundle={parser_source()!r}{requirement})\n"
         )
     encoded = base64.b64encode(zlib.compress(source.encode())).decode("ascii")
     # The payload is the adjacent inspectable source, not a file written into the app.
@@ -134,7 +140,7 @@ def stdin_payload(payload, *, invocation=False, prepare=False):
     return command, input_lines
 
 
-def extract_result(output):
+def extract_result(output, *, require_persisted_endpoint=False):
     for line in output.replace("\r", "").splitlines():
         if not line.startswith(MARKER):
             continue
@@ -149,6 +155,7 @@ def extract_result(output):
             "accessVerified",
             "invocationVerified",
             "endpointPersisted",
+            "endpointSource",
             "reason",
             "httpStatus",
             "agentCountOnPage",
@@ -171,6 +178,12 @@ def extract_result(output):
             "sessionCleanupRequired",
             "phase",
             "serviceCode",
+            "serviceReason",
+            "serviceParam",
+            "runtimeStage",
+            "runtimeReason",
+            "runtimeHttpType",
+            "runtimeHttpStatus",
         }
         if not isinstance(result, dict) or set(result) - allowed:
             continue
@@ -183,6 +196,8 @@ def extract_result(output):
             continue
         reasons = {
             "invalid_configuration",
+            "persisted_endpoint_invalid",
+            "persisted_endpoint_mismatch",
             "aca_identity_unavailable",
             "identity_claim_mismatch",
             "unexpected_http_status",
@@ -214,7 +229,15 @@ def extract_result(output):
         )
         if any(type(result.get(key)) is not bool for key in bools):
             continue
-        if result["endpointPersisted"]:
+        if result["endpointPersisted"] != (result.get("endpointSource") == "aca_environment"):
+            continue
+        if "endpointSource" in result and result["endpointSource"] != "aca_environment":
+            continue
+        if (
+            require_persisted_endpoint
+            and result["status"] != "failed"
+            and not result["endpointPersisted"]
+        ):
             continue
         if result["invocationVerified"] != (result["status"] == "invocation_verified"):
             continue
@@ -227,8 +250,113 @@ def extract_result(output):
         if "serviceCode" in result and result["serviceCode"] not in (
             "unknown",
             "session_not_accessible",
+            "invalid_request",
+            "card_boundary_invalid_request",
         ):
             continue
+        if result.get("serviceCode") == "card_boundary_invalid_request":
+            if result.get("serviceReason") not in (
+                "invalid_json",
+                "invalid_object",
+                "unsupported_field",
+                "not_false",
+                "invalid_value",
+                "not_single_item_list",
+                "invalid_user_message",
+                "invalid_input_text",
+                "invalid_schema",
+            ) or result.get("serviceParam") not in (
+                "body",
+                "top_level",
+                "agent",
+                "agent_reference",
+                "background",
+                "conversation",
+                "instructions",
+                "max_output_tokens",
+                "metadata",
+                "model",
+                "previous_response_id",
+                "prompt",
+                "response_id",
+                "store",
+                "stream",
+                "text",
+                "tool_choice",
+                "tools",
+                "agent_session_id",
+                "input",
+                "content",
+                "domain",
+            ):
+                continue
+        elif "serviceReason" in result or "serviceParam" in result:
+            continue
+        runtime_keys = {
+            "runtimeStage",
+            "runtimeReason",
+            "runtimeHttpType",
+            "runtimeHttpStatus",
+        }
+        if runtime_keys & result.keys():
+            if (
+                not runtime_keys <= result.keys()
+                or result.get("outcome") != "failed"
+                or result.get("schemaValid") is not False
+                or result.get("status") != "failed"
+                or result.get("runtimeStage")
+                not in (
+                    "specialist_setup",
+                    "concept",
+                    "lore",
+                    "art_direction",
+                    "orchestration",
+                )
+                or result.get("runtimeReason")
+                not in (
+                    "timeout",
+                    "authentication",
+                    "authorization",
+                    "resource_not_found",
+                    "invalid_request",
+                    "rate_limited",
+                    "service_error",
+                    "transport_error",
+                    "invalid_response",
+                    "dependency_error",
+                )
+                or result.get("runtimeHttpType")
+                not in (
+                    "none",
+                    "bad_request",
+                    "authentication",
+                    "permission_denied",
+                    "not_found",
+                    "conflict",
+                    "unprocessable",
+                    "rate_limit",
+                    "server",
+                    "api_status",
+                )
+                or result.get("runtimeHttpStatus")
+                not in (
+                    "none",
+                    "http_400",
+                    "http_401",
+                    "http_403",
+                    "http_404",
+                    "http_408",
+                    "http_409",
+                    "http_422",
+                    "http_429",
+                    "http_500",
+                    "http_502",
+                    "http_503",
+                    "http_504",
+                    "http_other",
+                )
+            ):
+                continue
         session_keys = {
             "sessionCreateAttempted",
             "sessionCreated",
@@ -352,7 +480,15 @@ def extract_result(output):
     return None
 
 
-def execute(command, timeout=75, input_line=None, *, setup_timeout=None, total_timeout=None):
+def execute(
+    command,
+    timeout=75,
+    input_line=None,
+    *,
+    setup_timeout=None,
+    total_timeout=None,
+    require_persisted_endpoint=False,
+):
     started = time.monotonic()
     deadline = started + (setup_timeout if setup_timeout is not None else timeout)
     overall_deadline = started + (
@@ -425,7 +561,10 @@ def execute(command, timeout=75, input_line=None, *, setup_timeout=None, total_t
                         # Wait until CLI sets up its terminal; early stdin can be flushed.
                         ready_at = time.monotonic() + 0.2
                         pending = memoryview((input_line + "\n").encode())
-                    result = extract_result(output.decode("utf-8", errors="replace"))
+                    result = extract_result(
+                        output.decode("utf-8", errors="replace"),
+                        require_persisted_endpoint=require_persisted_endpoint,
+                    )
                     if result is not None:
                         return result
     except OSError:
@@ -460,6 +599,11 @@ def main(argv=None):
     ):
         parser.add_argument("--" + name, required=True)
     parser.add_argument("--execute", action="store_true")
+    parser.add_argument(
+        "--require-persisted-endpoint",
+        action="store_true",
+        help="Require ACA's environment endpoint to exactly match the verified project endpoint",
+    )
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--invoke-once", action="store_true")
     modes.add_argument("--prepare-invocation", action="store_true")
@@ -480,6 +624,7 @@ def main(argv=None):
             args.expected_principal,
             invocation,
             prepare=args.prepare_invocation,
+            require_persisted_endpoint=args.require_persisted_endpoint,
         )
     except (ValueError, TypeError):
         parser.error("Supply a canonical verified project endpoint and principal UUID")
@@ -530,9 +675,14 @@ def main(argv=None):
             timeout=INVOCATION_RESULT_TIMEOUT if invocation else 80,
             setup_timeout=INVOCATION_SETUP_TIMEOUT if invocation else 30,
             total_timeout=INVOCATION_TOTAL_TIMEOUT if invocation else 110,
+            require_persisted_endpoint=args.require_persisted_endpoint,
         )
     else:
-        result = execute(command, input_line=input_line)
+        result = execute(
+            command,
+            input_line=input_line,
+            require_persisted_endpoint=args.require_persisted_endpoint,
+        )
     if invocation and "invocationsAttempted" not in result:
         result["invocationAllowanceConsumed"] = True
         result["sessionCreationUnknown"] = True
