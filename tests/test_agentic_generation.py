@@ -876,3 +876,254 @@ def test_existing_generation_path_unaffected_with_flag_off(
     services = create_services(settings)
     assert services.agent_client is None
     assert isinstance(services.ai_client, MockAIClient)
+
+
+# ---------------------------------------------------------------------------
+# fcg.generation_path=agent recorded for every non-retryable agent error
+# ---------------------------------------------------------------------------
+
+
+def _spy_record_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[dict]:
+    """Attach a spy to _record_generation that records (operation, outcome, path) tuples."""
+    from app import telemetry as telemetry_module
+
+    recorded: list[dict] = []
+    original_record = telemetry_module._record_generation
+
+    def spy_record(operation, outcome, duration_ms, agent_version=None):
+        path = telemetry_module._generation_path_var.get()
+        recorded.append({"operation": operation, "outcome": outcome, "path": path})
+        original_record(operation, outcome, duration_ms, agent_version)
+
+    monkeypatch.setattr(telemetry_module, "_record_generation", spy_record)
+    return recorded
+
+
+def test_generation_path_is_agent_on_auth_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """fcg.generation_path must be 'agent' in the metric when auth_error is raised."""
+    recorded = _spy_record_path(monkeypatch)
+
+    auth_error = FoundryAgentInvocationResult(
+        status="auth_error",
+        retryable=False,
+        error_code="credential_unavailable",
+        message="No token.",
+    )
+
+    class AuthErrorClient:
+        async def invoke(self, query: str) -> FoundryAgentInvocationResult:
+            return auth_error
+
+    services = _build_services_with_agent(AuthErrorClient(), monkeypatch=monkeypatch)
+    client = _agent_client(monkeypatch, services)
+    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
+
+    response = client.post(
+        "/api/v1/cards/generate",
+        json={
+            "prompt": "a safe auth error metric path test card hero",
+            "idempotencyKey": "idem-auth-err-path",
+            "csrfToken": csrf_token,
+        },
+    )
+
+    assert response.status_code == 503
+    generate_recordings = [r for r in recorded if r["operation"] == "generate"]
+    assert generate_recordings, "Expected at least one generate recording"
+    assert any(
+        r["path"] == "agent" for r in generate_recordings
+    ), f"Expected path='agent' for auth_error; got: {generate_recordings}"
+
+
+def test_generation_path_is_agent_on_configuration_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """fcg.generation_path must be 'agent' in the metric when configuration_error is raised."""
+    recorded = _spy_record_path(monkeypatch)
+
+    config_error = FoundryAgentInvocationResult(
+        status="configuration_error",
+        retryable=False,
+        error_code="invalid_configuration",
+        message="Config error.",
+    )
+
+    class ConfigErrorClient:
+        async def invoke(self, query: str) -> FoundryAgentInvocationResult:
+            return config_error
+
+    services = _build_services_with_agent(ConfigErrorClient(), monkeypatch=monkeypatch)
+    client = _agent_client(monkeypatch, services)
+    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
+
+    response = client.post(
+        "/api/v1/cards/generate",
+        json={
+            "prompt": "a safe config error metric path test card hero",
+            "idempotencyKey": "idem-config-err-path",
+            "csrfToken": csrf_token,
+        },
+    )
+
+    assert response.status_code == 503
+    generate_recordings = [r for r in recorded if r["operation"] == "generate"]
+    assert generate_recordings, "Expected at least one generate recording"
+    assert any(
+        r["path"] == "agent" for r in generate_recordings
+    ), f"Expected path='agent' for configuration_error; got: {generate_recordings}"
+
+
+def test_generation_path_is_agent_on_policy_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """fcg.generation_path must be 'agent' in the metric when policy_refusal is raised."""
+    recorded = _spy_record_path(monkeypatch)
+
+    policy_refusal = FoundryAgentInvocationResult(
+        status="policy_refusal",
+        retryable=False,
+        error_code="refusal",
+        message="Agent refused.",
+    )
+
+    class PolicyRefusalClient:
+        async def invoke(self, query: str) -> FoundryAgentInvocationResult:
+            return policy_refusal
+
+    services = _build_services_with_agent(PolicyRefusalClient(), monkeypatch=monkeypatch)
+    client = _agent_client(monkeypatch, services)
+    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
+
+    response = client.post(
+        "/api/v1/cards/generate",
+        json={
+            "prompt": "a safe policy refusal metric path test card hero",
+            "idempotencyKey": "idem-policy-ref-path",
+            "csrfToken": csrf_token,
+        },
+    )
+
+    assert response.status_code == 422
+    generate_recordings = [r for r in recorded if r["operation"] == "generate"]
+    assert generate_recordings, "Expected at least one generate recording"
+    assert any(
+        r["path"] == "agent" for r in generate_recordings
+    ), f"Expected path='agent' for policy_refusal; got: {generate_recordings}"
+
+
+def test_generation_path_is_agent_on_schema_fail(monkeypatch: pytest.MonkeyPatch) -> None:
+    """fcg.generation_path must be 'agent' in the metric when schema validation fails."""
+    recorded = _spy_record_path(monkeypatch)
+
+    schema_fail = FoundryAgentInvocationResult(
+        status="invalid_response",
+        retryable=False,
+        schema_valid=False,
+        error_code="schema_validation_failed",
+        message="Invalid schema.",
+    )
+
+    class SchemaFailClient:
+        async def invoke(self, query: str) -> FoundryAgentInvocationResult:
+            return schema_fail
+
+    services = _build_services_with_agent(SchemaFailClient(), monkeypatch=monkeypatch)
+    client = _agent_client(monkeypatch, services)
+    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
+
+    response = client.post(
+        "/api/v1/cards/generate",
+        json={
+            "prompt": "a safe schema fail metric path test card hero",
+            "idempotencyKey": "idem-schema-fail-path",
+            "csrfToken": csrf_token,
+        },
+    )
+
+    assert response.status_code == 502
+    generate_recordings = [r for r in recorded if r["operation"] == "generate"]
+    assert generate_recordings, "Expected at least one generate recording"
+    assert any(
+        r["path"] == "agent" for r in generate_recordings
+    ), f"Expected path='agent' for schema_fail (invalid_response); got: {generate_recordings}"
+
+
+def test_generation_path_is_agent_on_agent_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """fcg.generation_path must be 'agent' in the metric for generic non-retryable agent_failure."""
+    recorded = _spy_record_path(monkeypatch)
+
+    agent_failure = FoundryAgentInvocationResult(
+        status="failed",
+        retryable=False,
+        error_code="agent_failure",
+        message="Agent failed.",
+    )
+
+    class FailedAgentClient:
+        async def invoke(self, query: str) -> FoundryAgentInvocationResult:
+            return agent_failure
+
+    services = _build_services_with_agent(FailedAgentClient(), monkeypatch=monkeypatch)
+    client = _agent_client(monkeypatch, services)
+    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
+
+    response = client.post(
+        "/api/v1/cards/generate",
+        json={
+            "prompt": "a safe agent failure metric path test card hero",
+            "idempotencyKey": "idem-agent-fail-path",
+            "csrfToken": csrf_token,
+        },
+    )
+
+    assert response.status_code == 502
+    generate_recordings = [r for r in recorded if r["operation"] == "generate"]
+    assert generate_recordings, "Expected at least one generate recording"
+    assert any(
+        r["path"] == "agent" for r in generate_recordings
+    ), f"Expected path='agent' for agent_failure; got: {generate_recordings}"
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle: FoundryAgentClient.aclose() called on app shutdown
+# ---------------------------------------------------------------------------
+
+
+def test_agent_client_aclose_called_on_lifespan_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FoundryAgentClient.aclose() must be called during app lifespan shutdown."""
+    import app.main as main_module
+
+    aclose_called = []
+
+    class TrackingAgentClient:
+        async def invoke(self, query: str) -> FoundryAgentInvocationResult:
+            raise AssertionError("invoke should not be called in this test")
+
+        async def aclose(self) -> None:
+            aclose_called.append(True)
+
+    services = _build_services_with_agent(TrackingAgentClient(), monkeypatch=monkeypatch)
+    monkeypatch.setattr(main_module, "create_oauth_client", lambda s: FakeOAuthClient())
+
+    with TestClient(create_app(services=services), base_url="https://testserver"):
+        # Lifespan startup has run; shutdown runs when context manager exits
+        pass
+
+    assert aclose_called, "agent_client.aclose() was not called during lifespan shutdown"
+
+
+def test_lifespan_shutdown_without_agent_client_does_not_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When agent_client is None, lifespan shutdown must not raise."""
+    import app.main as main_module
+
+    settings = load_app_settings()
+    services = create_services(settings)
+    assert services.agent_client is None
+
+    monkeypatch.setattr(main_module, "create_oauth_client", lambda s: FakeOAuthClient())
+
+    # Should not raise
+    with TestClient(create_app(services=services), base_url="https://testserver"):
+        pass

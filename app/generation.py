@@ -2292,6 +2292,7 @@ class CardGenerationService:
                 error_code,
                 problem=problem,
             )
+            set_generation_path("agent")
             raise problem
 
         # Retryable/routing_defer: fall back to direct path once.
