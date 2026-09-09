@@ -1,5 +1,51 @@
 # Card-orchestrator operations
 
+## Exact classified runtime failure — 2026-09-09
+
+Working as Gimli (DevOps / Infra), exact Samwise-approved source
+`22aa53bc5678437cf6b4e8507220b7ed36e04ead` was deployed once to the existing
+dev Foundry project. No production, web-app, RBAC, network, secret, model,
+provisioning or evaluation change was made.
+
+**Exact failure cause:** the hosted runtime reached the `art_direction`
+specialist, where its provider request was rate-limited with HTTP 429. The
+closed diagnostic tuple was
+`art_direction/rate_limited/rate_limit/http_429`. This is not an authorization,
+configuration, routing or schema diagnosis, and it does not justify an RBAC
+change or an unchanged retry. The Responses endpoint returned HTTP 200 carrying
+a genuine failed envelope; no schema-valid card, held result or refusal was
+returned.
+
+| Evidence | Observed result (2026-09-09 UTC) |
+| --- | --- |
+| Exact source / image tag | `22aa53bc5678437cf6b4e8507220b7ed36e04ead` |
+| Image | `fcagdevqhg3qc4rlbt4gacr.azurecr.io/card-orchestrator:22aa53bc5678437cf6b4e8507220b7ed36e04ead` |
+| ACR digest / created | `sha256:12919b30280b6157672618ef2cdde8f423169c8256eef0a168aa5eb8ee95e67f` / `08:44:31.286686Z` |
+| Fresh preparation | `08:42:56.939Z`–`08:43:11.825Z`; expected ACA system MI and persisted endpoint matched; agents GET HTTP 200; parser/request/local-fixture gates passed; zero POSTs |
+| Pre-recorded session | `smoke-109-a863247758484454bdb0ecc2094db656`; exact operator GET returned 404 before deployment |
+| Deployment | `08:44:15.603Z`–`08:45:17.755Z`, **62.118 monotonic seconds**; 0.5 CPU / 1 GiB |
+| Owned hosted version | `card-orchestrator:1`, active, created `08:44:43Z`; exact application SHA and tagged image verified |
+| ACA target | Revision `fcag-dev-app--endpoint-ea77f0bf2596`, replica `fcag-dev-app--endpoint-ea77f0bf2596-5f75998d86-nwvzw`, container `web` |
+| Invocation | `08:45:41.723Z`–`08:46:11.952Z`, **30.178 monotonic seconds**; one session create and one Responses POST, zero retries |
+| Result | HTTP 200 failed envelope; `art_direction/rate_limited/rate_limit/http_429`; schema/version verification false |
+| Cleanup | Ownership rechecked against exact session/version; stop, session delete and exact version delete completed `08:46:24.622Z`–`08:46:42.555Z` in **17.903 monotonic seconds** |
+| Absence verification | Exact session GET 404, exact version GET 404 and session-list endpoint `not_found` |
+| Final web verification | Same image, revision, system MI, Single/100%-latest traffic and persisted endpoint; `/healthz` HTTP 200 at `08:47:04.445Z` |
+| Hosted lifetime through final health | **168.842 UTC seconds**, below the 30-minute limit; no local probe, azd or exec process remained |
+
+Exact sanitized result marker:
+
+```json
+{"accessVerified":true,"applicationVersion":"22aa53bc5678437cf6b4e8507220b7ed36e04ead","endpointPersisted":true,"endpointSource":"aca_environment","hostedVersion":"1","httpStatus":200,"invocationVerified":false,"invocationsAttempted":1,"outcome":"failed","phase":"invoke","principalMatched":true,"responseId":"caresp_0d880e91d9b2b29d00kxt80Hq5RyFuEK7yDD4FSjWCr1XGZX4N","runtimeHttpStatus":"http_429","runtimeHttpType":"rate_limit","runtimeReason":"rate_limited","runtimeStage":"art_direction","schemaValid":false,"sessionCleanupRequired":true,"sessionCreateAttempted":true,"sessionCreated":true,"sessionReady":true,"status":"failed","tokenAcquired":true}
+```
+
+The existing `gpt-5-5` deployment was independently healthy immediately before
+the run (`Succeeded`, `gpt-5.5` version `2026-04-24`, `GlobalStandard`). The
+typed runtime result supplies the missing causal evidence: provider throttling
+occurred at the third orchestration stage. Exact provider token usage and
+service-side quota counters were not exported. No retry was sent because the
+request contract forbids POST retries and no changed hypothesis exists.
+
 ## Payload-free runtime classification candidate — 2026-09-09
 
 Working as Aragorn (Backend Dev), the successful strict-routing live result at

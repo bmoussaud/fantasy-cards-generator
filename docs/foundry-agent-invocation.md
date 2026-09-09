@@ -373,9 +373,22 @@ The response parser reads the raw Responses wire envelope `output[]/content[]/ou
 
 ## Current live gap
 
-The same-identity session-creation/protocol correction above is **offline code,
-not deployed or live-tested**. The last deployed image remains the historical
-`2bdbf9967d8c397f7d88914bac06285b3b477297` build below. Current documentation verifies
+The latest bounded dev diagnostic deployed exact reviewed source
+`22aa53bc5678437cf6b4e8507220b7ed36e04ead`. Same-identity session creation and
+readiness succeeded, and the single ACA-MI Responses POST returned HTTP 200 with
+a failed envelope carrying the closed runtime tuple
+`art_direction/rate_limited/rate_limit/http_429`. This precisely identifies a
+provider HTTP 429 at the art-direction stage, not an authorization,
+configuration, routing or schema failure. No POST retry, RBAC change, production
+operation or evaluation occurred. The owned session and hosted version were
+deleted; exact GETs returned 404; the unchanged web baseline returned
+`/healthz` HTTP 200. See the
+[exact classified runtime evidence](foundry-agent-operations.md#exact-classified-runtime-failure--2026-09-09).
+
+At the historical checkpoint below, the same-identity session-creation/protocol
+correction was **offline code, not yet deployed or live-tested**, and the last
+deployed image was
+`2bdbf9967d8c397f7d88914bac06285b3b477297`. Current documentation verifies
 caller-scoped session ownership and `agent_session_id` binding. Those facts make
 the operator-created/ACA-invoked session a concrete protocol defect to correct,
 but do **not** prove the historical HTTP 403 cause: its error body was discarded,
