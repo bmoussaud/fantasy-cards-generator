@@ -13,6 +13,7 @@ Set these only when an operator wants to smoke-test an already deployed agent:
 - `FOUNDRY_AGENT_API_VERSION`: defaults to `v1`
 - `FOUNDRY_AGENT_EXPECTED_VERSION`: optional application metadata check against the agent response `metadata.agentVersion` or `metadata.version`
 - `FOUNDRY_AGENT_TIMEOUT_SECONDS`: defaults to `5.0`
+- `AGENT_GENERATION_ENABLED`: `false` (default, direct model path) or `true` (agentic text generation). When `true`, `FOUNDRY_PROJECT_ENDPOINT` and `FOUNDRY_AGENT_NAME` are required at startup.
 
 `FOUNDRY_PROJECT_ENDPOINT` is intentionally separate from `FOUNDRY_ENDPOINT`; there is no fallback to the account/model endpoint.
 

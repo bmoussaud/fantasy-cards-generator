@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextvars
 import logging
 import os
 import re
@@ -45,8 +46,12 @@ SAFE_EVENTS = {
     "persistence.failed",
     "compensation.completed",
     "compensation.failed",
+    "agent.invocation",
+    "agent.fallback",
+    "generation.text_path",
 }
 SAFE_OPERATIONS = {"generate", "artwork_retry", "fetch_image", "text", "image"}
+SAFE_GENERATION_PATHS = {"agent", "direct", "agent_fallback"}
 SAFE_OUTCOMES = {
     "started",
     "completed",
@@ -165,6 +170,7 @@ SAFE_ATTRIBUTE_KEYS = {
     "fcg.token_type",
     "fcg.duration_ms",
     "fcg.agent_version",
+    "fcg.generation_path",
     "http.route",
     "http.response.status_code",
 }
@@ -201,6 +207,12 @@ _dependency_timeout_counter: Any = None
 _moderation_counter: Any = None
 _persistence_counter: Any = None
 _token_counter: Any = None
+
+# Carries the generation path (agent/direct/agent_fallback) for the current async context
+# so _record_generation can include it as a bounded metric dimension.
+_generation_path_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "_generation_path_var", default=None
+)
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -398,6 +410,15 @@ def add_event(name: str, attributes: dict[str, Any] | None = None) -> None:
             span.add_event(name, safe_attributes(attributes or {}))
     except (AttributeError, ImportError):
         return
+
+
+def set_generation_path(path: str) -> None:
+    """Record the generation path for the current async context.
+
+    Must be called with one of the bounded values: 'agent', 'direct', 'agent_fallback'.
+    The value is picked up by _record_generation and added to fcg.generation.requests.
+    """
+    _generation_path_var.set(_bounded_value(path, SAFE_GENERATION_PATHS, "direct"))
 
 
 def safe_log(
@@ -733,6 +754,8 @@ def safe_attributes(attributes: dict[str, Any]) -> dict[str, Any]:
                 continue
         elif key == "fcg.agent_version":
             safe[key] = normalize_agent_version(value)
+        elif key == "fcg.generation_path":
+            safe[key] = _bounded_value(value, SAFE_GENERATION_PATHS, "direct")
         elif key == "http.route":
             safe[key] = normalize_route(str(value))
         elif key == "http.response.status_code" and isinstance(value, int):
@@ -770,6 +793,9 @@ def _record_generation(
     attributes = {"fcg.operation": operation, "fcg.outcome": outcome}
     if agent_version is not None:
         attributes["fcg.agent_version"] = normalize_agent_version(agent_version)
+    path = _generation_path_var.get()
+    if path is not None:
+        attributes["fcg.generation_path"] = path
     _metric_add(_generation_counter, 1, attributes)
     _metric_record(_generation_duration, duration_ms, attributes)
 

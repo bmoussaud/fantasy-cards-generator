@@ -99,6 +99,18 @@ param foundryTextDeployment string = 'gpt-5-5'
 @description('Azure AI Foundry image deployment injected as FOUNDRY_IMAGE_DEPLOYMENT.')
 param foundryImageDeployment string = 'gpt-image-2'
 
+@description('Foundry hosted agent name injected as FOUNDRY_AGENT_NAME. Required when agentGenerationEnabled is true.')
+param foundryAgentName string = ''
+
+@description('Expected agent version for metadata check injected as FOUNDRY_AGENT_EXPECTED_VERSION. Optional.')
+param foundryAgentExpectedVersion string = ''
+
+@description('Agent API version injected as FOUNDRY_AGENT_API_VERSION.')
+param foundryAgentApiVersion string = 'v1'
+
+@description('Enable agentic text generation path injected as AGENT_GENERATION_ENABLED. Default false (direct model).')
+param agentGenerationEnabled bool = false
+
 @description('Cosmos DB endpoint injected as COSMOS_ENDPOINT.')
 param cosmosEndpoint string = ''
 
@@ -297,6 +309,22 @@ var containerAppEnv = concat(
     {
       name: 'FOUNDRY_IMAGE_DEPLOYMENT'
       value: foundryImageDeployment
+    }
+    {
+      name: 'FOUNDRY_AGENT_NAME'
+      value: foundryAgentName
+    }
+    {
+      name: 'FOUNDRY_AGENT_EXPECTED_VERSION'
+      value: foundryAgentExpectedVersion
+    }
+    {
+      name: 'FOUNDRY_AGENT_API_VERSION'
+      value: foundryAgentApiVersion
+    }
+    {
+      name: 'AGENT_GENERATION_ENABLED'
+      value: string(agentGenerationEnabled)
     }
     {
       name: 'COSMOS_ENDPOINT'

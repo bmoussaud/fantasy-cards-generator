@@ -122,6 +122,10 @@ def create_app(
             yield
         finally:
             await runtime_secret_provider.aclose()
+            if app_services.agent_client is not None and hasattr(
+                app_services.agent_client, "aclose"
+            ):
+                await app_services.agent_client.aclose()
 
     app = FastAPI(title="Fantasy Cards Generator", lifespan=lifespan)
     app.state.services = app_services

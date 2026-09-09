@@ -436,8 +436,9 @@ The repo already provisions a Foundry account, project, and model deployments, s
    - examples:
      - `FOUNDRY_PROJECT_ENDPOINT`
      - `FOUNDRY_AGENT_NAME`
-     - `FOUNDRY_AGENT_API_VERSION` (if the chosen client path needs it)
-     - `AGENT_GENERATION_MODE=off|shadow|live`
+     - `FOUNDRY_AGENT_API_VERSION` (defaults to `v1`)
+     - `FOUNDRY_AGENT_EXPECTED_VERSION` (optional; metadata check against agent response version)
+     - `AGENT_GENERATION_ENABLED=false|true` (boolean; default `false` = direct model path)
 
 4. **Optionally provision Foundry guardrail resources**
    - if the team wants managed RAI policies beyond the current heuristic/content-safety gates, define them in the Foundry account and reference them from the agent/model configuration
@@ -457,12 +458,13 @@ Recommended additions:
 
 Add env vars for the application-to-agent integration while keeping the current Foundry/OpenAI env vars intact.
 
-Suggested additions:
+Implemented additions (as of PR #126):
 
-- `FOUNDRY_PROJECT_ENDPOINT`
+- `FOUNDRY_PROJECT_ENDPOINT` (already present)
 - `FOUNDRY_AGENT_NAME`
-- `AGENT_GENERATION_MODE`
-- optional timeout override for the agent call if it differs from text-generation timeout
+- `FOUNDRY_AGENT_EXPECTED_VERSION`
+- `FOUNDRY_AGENT_API_VERSION`
+- `AGENT_GENERATION_ENABLED`
 
 ## Changes to `azure.yaml`
 

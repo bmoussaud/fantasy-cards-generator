@@ -35,6 +35,7 @@ from app.telemetry import (
     record_retry,
     record_token_usage,
     safe_persistence_log,
+    set_generation_path,
     telemetry_span,
 )
 
@@ -1662,6 +1663,7 @@ class AppServices:
     photo_asset_store: AbstractAssetStore | None = None
     photo_moderation_service: Any | None = None
     deletion_audit_repository: Any | None = None
+    agent_client: Any | None = None
 
 
 class CardGenerationService:
@@ -1973,46 +1975,20 @@ class CardGenerationService:
             raise problem
 
         progress.stage = "foundry-text"
-        try:
-            text_result = await self._retry_upstream(
-                lambda: self.services.ai_client.generate_card(prompt, request_id=request_id),
-                service_name="foundry-text",
-                request_id=request_id,
-            )
-            record_token_usage("text", text_result.usage)
-        except ProblemDetails as exc:
-            await self.services.card_repository.delete(owner.owner_id, card_id)
-            await self._save_audit_failure(
-                owner.owner_id,
-                card_id,
-                request_id,
-                idempotency_key,
-                request_hash,
-                exc.error_code,
-                problem=exc,
-            )
-            raise
-        try:
-            validated_payload = GeneratedCardModel.model_validate(text_result.payload)
-        except ValidationError as exc:
-            problem = ProblemDetails(
-                status_code=502,
-                title="Bad Gateway",
-                detail="The text model returned invalid structured output.",
-                type="/problems/invalid-model-output",
-                error_code="invalid_model_output",
-            )
-            await self.services.card_repository.delete(owner.owner_id, card_id)
-            await self._save_audit_failure(
-                owner.owner_id,
-                card_id,
-                request_id,
-                idempotency_key,
-                request_hash,
-                problem.error_code,
-                problem=problem,
-            )
-            raise problem from exc
+        (
+            generation_path,
+            text_result,
+            validated_payload,
+            agent_art_prompt,
+        ) = await self._generate_text(
+            owner_id=owner.owner_id,
+            card_id=card_id,
+            prompt=prompt,
+            request_hash=request_hash,
+            idempotency_key=idempotency_key,
+            request_id=request_id,
+        )
+        set_generation_path(generation_path)
 
         progress.stage = "post-text-moderation"
         post_text = await self.services.moderation_service.moderate_text(
@@ -2047,7 +2023,11 @@ class CardGenerationService:
             )
             raise problem
 
-        derived_art_prompt = derive_art_prompt(validated_payload)
+        derived_art_prompt = (
+            agent_art_prompt
+            if agent_art_prompt is not None
+            else derive_art_prompt(validated_payload)
+        )
         progress.stage = "art-prompt-moderation"
         post_art_prompt = await self.services.moderation_service.moderate_text(
             derived_art_prompt,
@@ -2175,6 +2155,223 @@ class CardGenerationService:
             image_result=image_result,
         )
         return self._as_response(completed)
+
+    async def _generate_text(
+        self,
+        *,
+        owner_id: str,
+        card_id: str,
+        prompt: str,
+        request_hash: str,
+        idempotency_key: str,
+        request_id: str,
+    ) -> tuple[str, AITextResult, GeneratedCardModel, str | None]:
+        """Generate card text via agent (if enabled) or direct model path.
+
+        Returns (generation_path, text_result, validated_payload, agent_art_prompt) where
+        generation_path is one of "agent", "agent_fallback", or "direct" and
+        agent_art_prompt is the pre-crafted art prompt from the agent (or None).
+        """
+        settings = self.services.settings
+        if settings.agent_generation_enabled and self.services.agent_client is not None:
+            return await self._generate_text_via_agent(
+                owner_id=owner_id,
+                card_id=card_id,
+                prompt=prompt,
+                request_hash=request_hash,
+                idempotency_key=idempotency_key,
+                request_id=request_id,
+            )
+        return await self._generate_text_direct(
+            owner_id=owner_id,
+            card_id=card_id,
+            prompt=prompt,
+            request_hash=request_hash,
+            idempotency_key=idempotency_key,
+            request_id=request_id,
+            generation_path="direct",
+        )
+
+    async def _generate_text_via_agent(
+        self,
+        *,
+        owner_id: str,
+        card_id: str,
+        prompt: str,
+        request_hash: str,
+        idempotency_key: str,
+        request_id: str,
+    ) -> tuple[str, AITextResult, GeneratedCardModel, str | None]:
+        """Invoke the Foundry hosted agent for card text generation.
+
+        On retryable/routing_defer outcomes, falls back once to the direct path.
+        On non-retryable failures (auth, policy, config, schema), raises ProblemDetails.
+        """
+        from app.foundry_agent_client import FoundryAgentInvocationResult  # noqa: F401
+
+        started = time.perf_counter()
+        agent_result = await self.services.agent_client.invoke(prompt)
+        duration_ms = (time.perf_counter() - started) * 1000
+
+        agent_version = agent_result.agent_version
+
+        add_event(
+            "agent.invocation",
+            {
+                "fcg.dependency": "foundry-agent",
+                "fcg.outcome": agent_result.status,
+                "fcg.error_code": agent_result.error_code or "none",
+                "fcg.duration_ms": int(duration_ms),
+                "fcg.generation_path": "agent",
+                **({"fcg.agent_version": agent_version} if agent_version else {}),
+            },
+        )
+
+        if (
+            agent_result.success
+            and agent_result.card is not None
+            and agent_result.art_prompt is not None
+        ):
+            text_result = AITextResult(
+                payload=agent_result.card.model_dump(),
+                metadata=ModelMetadata(
+                    provider="foundry-agent",
+                    deployment=self.services.settings.foundry_agent_name or "card-orchestrator",
+                    model="foundry-agent",
+                    mode="live",
+                ),
+                usage=UsageAudit(
+                    inputTokens=0,
+                    outputTokens=0,
+                    totalTokens=0,
+                    latencyMs=int(duration_ms),
+                ),
+            )
+            return "agent", text_result, agent_result.card, agent_result.art_prompt
+
+        # Determine whether to fall back or hard-fail.
+        is_fallback_eligible = agent_result.retryable or agent_result.status in (
+            "routing_defer",
+            "transient_error",
+        )
+
+        if not is_fallback_eligible:
+            # Non-retryable: do not silently bypass the agent.
+            error_code = agent_result.error_code or "agent_failure"
+            if agent_result.status in ("auth_error", "configuration_error"):
+                problem = ProblemDetails(
+                    status_code=503,
+                    title="Service Unavailable",
+                    detail="The card generation agent is temporarily unavailable.",
+                    type="/problems/agent-unavailable",
+                    error_code="agent_unavailable",
+                )
+            elif agent_result.status == "policy_refusal":
+                problem = ProblemDetails(
+                    status_code=422,
+                    title="Prompt Rejected",
+                    detail="The prompt was rejected by the generation agent policy.",
+                    type="/problems/prompt-rejected",
+                    error_code="prompt_rejected",
+                )
+            else:
+                problem = ProblemDetails(
+                    status_code=502,
+                    title="Bad Gateway",
+                    detail="The card generation agent returned a non-retryable error.",
+                    type="/problems/agent-failure",
+                    error_code=error_code,
+                )
+            await self.services.card_repository.delete(owner_id, card_id)
+            await self._save_audit_failure(
+                owner_id,
+                card_id,
+                request_id,
+                idempotency_key,
+                request_hash,
+                error_code,
+                problem=problem,
+            )
+            set_generation_path("agent")
+            raise problem
+
+        # Retryable/routing_defer: fall back to direct path once.
+        add_event(
+            "agent.fallback",
+            {
+                "fcg.dependency": "foundry-agent",
+                "fcg.outcome": agent_result.status,
+                "fcg.error_code": agent_result.error_code or "none",
+                "fcg.generation_path": "agent_fallback",
+            },
+        )
+        return await self._generate_text_direct(
+            owner_id=owner_id,
+            card_id=card_id,
+            prompt=prompt,
+            request_hash=request_hash,
+            idempotency_key=idempotency_key,
+            request_id=request_id,
+            generation_path="agent_fallback",
+        )
+
+    async def _generate_text_direct(
+        self,
+        *,
+        owner_id: str,
+        card_id: str,
+        prompt: str,
+        request_hash: str,
+        idempotency_key: str,
+        request_id: str,
+        generation_path: str,
+    ) -> tuple[str, AITextResult, GeneratedCardModel, str | None]:
+        """Generate card text via the direct AzureFoundryAI model call."""
+        try:
+            text_result = await self._retry_upstream(
+                lambda: self.services.ai_client.generate_card(prompt, request_id=request_id),
+                service_name="foundry-text",
+                request_id=request_id,
+            )
+            record_token_usage("text", text_result.usage)
+        except ProblemDetails as exc:
+            await self.services.card_repository.delete(owner_id, card_id)
+            await self._save_audit_failure(
+                owner_id,
+                card_id,
+                request_id,
+                idempotency_key,
+                request_hash,
+                exc.error_code,
+                problem=exc,
+            )
+            raise
+        try:
+            validated_payload = GeneratedCardModel.model_validate(text_result.payload)
+        except ValidationError as exc:
+            problem = ProblemDetails(
+                status_code=502,
+                title="Bad Gateway",
+                detail="The text model returned invalid structured output.",
+                type="/problems/invalid-model-output",
+                error_code="invalid_model_output",
+            )
+            await self.services.card_repository.delete(owner_id, card_id)
+            await self._save_audit_failure(
+                owner_id,
+                card_id,
+                request_id,
+                idempotency_key,
+                request_hash,
+                problem.error_code,
+                problem=problem,
+            )
+            raise problem from exc
+        add_event(
+            "generation.text_path",
+            {"fcg.generation_path": generation_path},
+        )
+        return generation_path, text_result, validated_payload, None
 
     async def _complete_artwork(
         self,
@@ -2865,6 +3062,11 @@ def create_services(settings: AppSettings) -> AppServices:
     ai_client = (
         MockAIClient(settings) if settings.ai_mode == "mock" else AzureFoundryAIClient(settings)
     )
+    agent_client = None
+    if settings.agent_generation_enabled and settings.ai_mode == "live":
+        from app.foundry_agent_client import FoundryAgentClient
+
+        agent_client = FoundryAgentClient(settings)
     return AppServices(
         settings=settings,
         card_repository=card_repository,
@@ -2880,6 +3082,7 @@ def create_services(settings: AppSettings) -> AppServices:
         photo_asset_store=photo_asset_store,
         photo_moderation_service=ContentSafetyPhotoModerationService(settings),
         deletion_audit_repository=deletion_audit_repository,
+        agent_client=agent_client,
     )
 
 

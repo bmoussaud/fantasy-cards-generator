@@ -1,0 +1,8 @@
+name: smoke-core
+agent:
+    name: card-orchestrator
+    kind: hosted
+    config: .agent_configs/baseline/metadata.yaml
+options:
+    eval_model: gpt-5-5
+max_samples: 15

@@ -1,0 +1,1 @@
+Bounded text-only concept, lore and art-direction orchestration.
