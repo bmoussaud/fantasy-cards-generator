@@ -1,5 +1,57 @@
 # Card-orchestrator operations
 
+## Exact-source runtime failure — 2026-09-09
+
+Working as Gimli (DevOps / Infra), exact reviewed source
+`d2de0b358a9d665a2d63d5b5fb74119b4a77edec` was deployed once to the existing
+dev Foundry project. This is the latest live E2E result and supersedes the prior
+failure as the current status; the older attempts below remain historical facts.
+No production, web-app, RBAC, network, secret, model-capacity, provisioning or
+evaluation change was made.
+
+The corrected strict boundary accepted the platform `agent_reference`: the
+ACA-managed-identity request passed session creation/readiness and returned HTTP
+200 from the Responses endpoint. The response was nevertheless a failed
+envelope, not a schema-valid domain result:
+`outcome:"failed"`, `schemaValid:false`, `invocationVerified:false`. No card,
+held result or refusal was returned, and application/hosted response-version
+matching therefore could not be established. This proves the prior
+`unsupported_field/agent_reference` boundary is fixed live, but it does not
+prove successful model orchestration.
+
+| Evidence | Observed result (2026-09-09 UTC) |
+| --- | --- |
+| Exact source / image tag | `d2de0b358a9d665a2d63d5b5fb74119b4a77edec` |
+| Image | `fcagdevqhg3qc4rlbt4gacr.azurecr.io/card-orchestrator:d2de0b358a9d665a2d63d5b5fb74119b4a77edec` |
+| ACR digest / created | `sha256:28031d04a6cfcefe54efdee3cab99bf32a0b68097097afdd966a0aa57b8bb767` / `08:25:21.7308694Z` |
+| Preparation | Expected ACA system MI and persisted endpoint matched; agents GET HTTP 200; parser/request/local-fixture gates passed; zero POSTs |
+| Deployment | `08:25:03.527Z`–`08:26:08.294Z`, **64.677 monotonic seconds**; 0.5 CPU / 1 GiB |
+| Owned hosted version | `card-orchestrator:1`, active; exact image and application SHA verified |
+| Pre-recorded session | `smoke-109-7bd0b9c6bf73420584f32c19c09e15be`; exact GET 404 before deployment |
+| ACA target | Revision `fcag-dev-app--endpoint-ea77f0bf2596`, replica `fcag-dev-app--endpoint-ea77f0bf2596-5f75998d86-nwvzw`, container `web` |
+| Invocation | `08:26:31.624Z`–`08:27:02.446Z`, **30.780 monotonic seconds**; one session create and one Responses POST, zero retries |
+| Result | HTTP 200; failed envelope; no valid card, held result or refusal; schema/version verification false |
+| Run-scoped diagnostics | Console/system logs contained none of the allowlisted auth, timeout, quota, runtime-failure, model-not-found, HTTP 4xx or HTTP 5xx classes; the response-ID-filtered App Insights query returned no rows |
+| Cleanup | Session stop/delete and exact version deletion completed `08:28:07.623Z`–`08:28:18.584Z` |
+| Absence verification | Exact session GET 404 and exact version GET 404 |
+| Final web verification | Same image, revision, system MI, Single/100%-latest traffic and persisted endpoint; `/healthz` HTTP 200 at `08:28:38.492Z` |
+| Hosted lifetime through final health | **214.965 UTC seconds**, below the 30-minute limit; no local probe/azd/exec process remained |
+
+Exact sanitized result marker:
+
+```json
+{"accessVerified":true,"applicationVersion":"d2de0b358a9d665a2d63d5b5fb74119b4a77edec","endpointPersisted":true,"endpointSource":"aca_environment","hostedVersion":"1","httpStatus":200,"invocationVerified":false,"invocationsAttempted":1,"outcome":"failed","phase":"invoke","principalMatched":true,"responseId":"caresp_011c8c59d7b18d60001mM36LHXR7pW4rpMhTyL0gnsTJ8C2o3z","schemaValid":false,"sessionCleanupRequired":true,"sessionCreateAttempted":true,"sessionCreated":true,"sessionReady":true,"status":"failed","tokenAcquired":true}
+```
+
+The runtime intentionally converts every dependency exception into the same
+payload-free failed envelope. The bounded diagnostics exposed no safe narrower
+cause, so an unchanged paid retry would not add evidence and was not sent.
+The next backend step is to add a reviewed, fixed-enum runtime failure
+classification at the dependency boundary (without exception text, model/user
+content or raw bodies), then use another bounded dev E2E to distinguish model
+authorization, timeout and model-response/schema failure. Do not broaden roles
+from this result.
+
 ## Exact strict-boundary rejection — 2026-09-09
 
 Working as Gimli (DevOps / Infra), source

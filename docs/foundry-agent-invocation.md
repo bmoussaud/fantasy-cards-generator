@@ -93,6 +93,18 @@ boundary diagnostic `card_boundary_invalid_request`,
 session and hosted version were then deleted. See the
 [exact execution record](foundry-agent-operations.md#exact-strict-boundary-rejection--2026-09-09).
 
+The next exact-source E2E deployed reviewed source
+`d2de0b358a9d665a2d63d5b5fb74119b4a77edec` and proved the correction live:
+the actual ACA MI created and readied its exact-version session, the Responses
+POST passed the corrected `agent_reference` boundary, and the service returned
+HTTP 200. The envelope itself had `outcome:"failed"`,
+`schemaValid:false`, and `invocationVerified:false`; it contained no valid card,
+held result or refusal, so neither application nor hosted response-version
+matching was established. Exactly one Responses POST was sent with no retry.
+The owned session/version were deleted and both exact GETs returned 404; the web
+baseline and `/healthz` HTTP 200 were preserved. See the
+[latest exact execution record](foundry-agent-operations.md#exact-source-runtime-failure--2026-09-09).
+
 Un **troisième smoke, nouvellement autorisé**, a depuis déployé la correction
 à identité unique depuis `dc1925942c42756690f7dd5321cbdbf892cf7182`.
 Sa préparation ACA a réussi (MI attendue, HTTP 200, imports/contrat/fixture prêts,
