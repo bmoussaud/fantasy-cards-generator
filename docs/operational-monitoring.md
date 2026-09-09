@@ -5,6 +5,15 @@ configuration for the Azure Container Apps deployment. Infrastructure is defined
 `infra/modules/monitoring.bicep` and `infra/modules/operational-monitoring.bicep`.
 No Azure resources were deployed as part of this change.
 
+For hosted-agent (`card-orchestrator`) operational ownership, alert definitions, and
+rollout/rollback procedure, see [docs/agent-operational-ownership.md](agent-operational-ownership.md).
+Agent monitoring is deployed by
+`deployments/card-orchestrator/infra/modules/agent-monitoring.bicep` and is separate
+from the web app monitoring stack. Root Bicep links the shared workspace-based
+Application Insights resource to the Foundry account and project; Foundry then
+injects its reserved connection setting into hosted versions. The connection string
+is not copied through azd state or declared in the hosted manifest.
+
 ## Defaults and configuration
 
 | Setting | Default | Deployment variable |

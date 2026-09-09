@@ -786,7 +786,11 @@ That leaves roughly **36.70 seconds** inside the current 225-second request ceil
    The current app uses the account endpoint for model inference. Agent operations need project-aware configuration and RBAC.
 
 4. **Operational ownership**  
-   The team will now operate two runtimes: the public web app and the hosted agent runtime. Dashboards, alerts, and rollout procedures must reflect that.
+   The team operates two independently deployed runtimes: the public web app and the
+   hosted agent runtime. The implemented monitoring contract, project-level
+   Application Insights linkage, and restore-first version-selector rollback are
+   defined in
+   [agent-operational-ownership.md](agent-operational-ownership.md).
 
 5. **Evaluation readiness**  
    The team needs a stable prompt set and review rubric before changing production generation behavior.

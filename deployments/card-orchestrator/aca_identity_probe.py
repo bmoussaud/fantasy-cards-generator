@@ -586,7 +586,7 @@ def execute(
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--environment", choices=("dev",), required=True)
+    parser.add_argument("--environment", choices=("dev", "prod"), required=True)
     for name in (
         "subscription",
         "resource-group",
@@ -600,6 +600,11 @@ def main(argv=None):
         parser.add_argument("--" + name, required=True)
     parser.add_argument("--execute", action="store_true")
     parser.add_argument(
+        "--approve-prod",
+        action="store_true",
+        help="Required for any production probe; never inferred.",
+    )
+    parser.add_argument(
         "--require-persisted-endpoint",
         action="store_true",
         help="Require ACA's environment endpoint to exactly match the verified project endpoint",
@@ -611,6 +616,8 @@ def main(argv=None):
     parser.add_argument("--expected-version")
     parser.add_argument("--session-id")
     args = parser.parse_args(argv)
+    if args.environment == "prod" and not args.approve_prod:
+        parser.error("prod requires --approve-prod after separate production review")
     if not args.invoke_once and any(
         value is not None for value in (args.hosted_version, args.expected_version, args.session_id)
     ):
