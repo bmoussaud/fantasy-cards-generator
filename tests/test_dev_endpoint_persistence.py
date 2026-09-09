@@ -391,6 +391,110 @@ def test_project_endpoint_requires_exact_arm_contract(monkeypatch):
         endpoint.verify_project()
 
 
+@pytest.mark.parametrize(
+    "result",
+    [
+        {},
+        {"error": {"code": "InvalidTemplate"}},
+        {"properties": {"provisioningState": "Failed"}},
+        {"properties": {"provisioningState": "Running"}},
+    ],
+)
+def test_real_resource_validation_fails_closed(raw, compiled, monkeypatch, result):
+    monkeypatch.setattr(endpoint, "command", lambda *a: copy.deepcopy(compiled))
+    body = endpoint.deployment_body(endpoint.snapshot(raw), "new", "persist")
+    monkeypatch.setattr(endpoint, "get_app", lambda: raw)
+    monkeypatch.setattr(endpoint, "rest", lambda *a: result)
+    with pytest.raises(endpoint.GateError, match="ARM validation"):
+        endpoint.validate_deployment(body, endpoint.fingerprint(raw))
+
+
+def test_real_resource_validation_posts_unchanged_secure_graph(raw, compiled, monkeypatch):
+    monkeypatch.setattr(endpoint, "command", lambda *a: copy.deepcopy(compiled))
+    body = endpoint.deployment_body(endpoint.snapshot(raw), "new", "persist")
+    monkeypatch.setattr(endpoint, "get_app", lambda: raw)
+    calls = []
+
+    def rest(method, path, payload):
+        calls.append((method, path, payload))
+        return {"properties": {"provisioningState": "Succeeded"}}
+
+    monkeypatch.setattr(endpoint, "rest", rest)
+    endpoint.validate_deployment(body, endpoint.fingerprint(raw))
+    assert len(calls) == 1
+    method, path, payload = calls[0]
+    assert method == "post" and path.endswith("/validate?api-version=2025-04-01")
+    assert payload is body
+    assert payload["properties"]["debugSetting"] == {"detailLevel": "none"}
+    assert payload["properties"]["template"] == compiled
+
+
+def test_failed_graph_validation_prevents_apply(raw, monkeypatch):
+    monkeypatch.setattr(endpoint, "verify_project", lambda: None)
+    monkeypatch.setattr(endpoint, "get_app", lambda: raw)
+    monkeypatch.setattr(endpoint, "deployment_body", lambda *a: {})
+    monkeypatch.setattr(endpoint, "preview", lambda *a: {})
+    monkeypatch.setattr(endpoint, "inspect_plan", lambda *a: {})
+    monkeypatch.setattr(endpoint, "validate_guard", lambda *a: None)
+    monkeypatch.setattr(endpoint, "rest", lambda *a: pytest.fail("No app deployment allowed"))
+
+    def failed_validation(*args):
+        raise endpoint.GateError("Resource graph failed")
+
+    monkeypatch.setattr(endpoint, "validate_deployment", failed_validation)
+    with pytest.raises(endpoint.GateError, match="Resource graph failed"):
+        endpoint.run(
+            argparse.Namespace(
+                expect_fingerprint=endpoint.fingerprint(raw), remove=False, apply=True
+            )
+        )
+
+
+def test_apply_once_only_after_all_gates_and_verifies_deployment(raw, monkeypatch, capsys):
+    baseline = endpoint.fingerprint(raw)
+    suffix = f"endpoint-{baseline[:12]}"
+    current = endpoint.snapshot(raw)
+    after = copy.deepcopy(raw)
+    after["properties"]["template"] = endpoint.desired(current, suffix)["properties"]["template"]
+    after["properties"]["latestRevisionName"] = f"fcag-dev-app--{suffix}"
+    after["properties"]["latestReadyRevisionName"] = f"fcag-dev-app--{suffix}"
+    calls = []
+    monkeypatch.setattr(endpoint, "verify_project", lambda: calls.append("project"))
+    monkeypatch.setattr(endpoint, "get_app", lambda: after if "put" in calls else raw)
+    monkeypatch.setattr(endpoint, "deployment_body", lambda *a: {})
+    monkeypatch.setattr(endpoint, "preview", lambda *a: calls.append("preview"))
+    monkeypatch.setattr(endpoint, "inspect_plan", lambda *a: {})
+    monkeypatch.setattr(endpoint, "validate_guard", lambda *a: calls.append("guard"))
+    monkeypatch.setattr(endpoint, "validate_deployment", lambda *a: calls.append("validate"))
+    monkeypatch.setattr(endpoint, "healthz", lambda *a: True)
+
+    def rest(method, path, payload=None):
+        calls.append(method)
+        return {"properties": {"provisioningState": "Succeeded"}}
+
+    monkeypatch.setattr(endpoint, "rest", rest)
+    endpoint.run(argparse.Namespace(expect_fingerprint=baseline, remove=False, apply=True))
+    assert calls == ["project", "preview", "guard", "validate", "project", "put", "get"]
+    result = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert result["applied"] and result["allWritableMetadataMatched"]
+    assert result["deploymentState"] == "Succeeded" and result["healthz"] == 200
+
+
+def test_provider_diagnostics_only_export_fixed_classifications(monkeypatch):
+    monkeypatch.setattr(
+        endpoint.subprocess,
+        "run",
+        lambda *a, **k: argparse.Namespace(
+            returncode=1,
+            stdout="",
+            stderr="InvalidTemplate: circular dependency PRIVATE-SENTINEL",
+        ),
+    )
+    with pytest.raises(endpoint.GateError) as error:
+        endpoint.command(["az", "rest"])
+    assert str(error.value) == "Azure/tool command failed: InvalidTemplate; circular=True"
+
+
 @pytest.fixture(scope="module")
 def compiled():
     return endpoint.command(
@@ -421,19 +525,36 @@ def test_compiled_projection_and_literal_escaping(raw, monkeypatch, compiled):
         endpoint.scope_preview_template(body)
 
 
-def test_compiled_guard_is_resource_input_without_self_dependency_or_outputs(compiled):
+def test_compiled_guard_precedes_secure_child_without_self_dependency_or_outputs(compiled):
     endpoint.verify_compiled(compiled)
-    resource = compiled["resources"][0]
-    assert "dependsOn" not in resource and "condition" not in resource
+    module = compiled["resources"][0]
+    assert module["type"] == "Microsoft.Resources/deployments"
+    assert module["name"] == "dev-endpoint-app"
+    assert "dependsOn" not in module and "condition" not in module
     assert not compiled.get("outputs") and not compiled.get("functions")
-    assert resource["properties"].startswith("[if(")
+    properties = module["properties"]
+    assert properties["expressionEvaluationOptions"] == {"scope": "inner"}
+    assert properties["mode"] == "Incremental"
+    assert "debugSetting" not in properties and "templateLink" not in properties
+    parameter = properties["parameters"]["snapshot"]
+    assert parameter.startswith("[if(")
     assert "json(concat('ENDPOINT_SECRET_INVENTORY_MISMATCH', take(resourceGroup().id, 0)))" in (
-        resource["properties"]
+        parameter
     )
     lookup = "listSecrets(resourceId('Microsoft.App/containerApps', 'fcag-dev-app'), '2025-01-01')"
-    assert lookup in resource["properties"]
+    assert lookup in parameter
     assert "reference(" not in json.dumps(compiled)
-    for key in ("location", "tags", "identity"):
+    child = properties["template"]
+    assert not child.get("outputs") and not child.get("variables") and not child.get("functions")
+    assert lookup not in json.dumps(child)
+    assert len(child["resources"]) == 1
+    resource = child["resources"][0]
+    assert "dependsOn" not in resource and "condition" not in resource
+    for scope in (compiled, child):
+        assert set(scope["parameters"]) == {"snapshot"}
+        assert scope["parameters"]["snapshot"]["type"] == "secureObject"
+        assert "defaultValue" not in scope["parameters"]["snapshot"]
+    for key in ("location", "tags", "identity", "properties"):
         assert resource[key] == f"[parameters('snapshot').{key}]"
 
 
@@ -450,6 +571,95 @@ def test_compiled_contract_rejects_any_executable_change(compiled, mutation):
         candidate["resources"].append({"type": "Microsoft.Authorization/roleAssignments"})
     with pytest.raises(endpoint.GateError):
         endpoint.verify_compiled(candidate)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "child-output",
+        "child-default",
+        "parent-default",
+        "child-object",
+        "parent-object",
+        "child-lookup",
+        "child-dependency",
+        "child-resource",
+        "child-name",
+        "module-name",
+        "module-scope",
+        "outer-evaluation",
+        "complete-mode",
+        "linked-template",
+        "child-debug",
+        "module-output",
+        "unguarded-parameter",
+        "parameter-plaintext",
+    ],
+)
+def test_secure_boundary_tampering_is_rejected(compiled, mutation):
+    candidate = copy.deepcopy(compiled)
+    module = candidate["resources"][0]
+    properties = module["properties"]
+    child = properties["template"]
+    if mutation == "child-output":
+        child["outputs"] = {"leak": {"type": "object", "value": "[parameters('snapshot')]"}}
+    elif mutation.endswith("-default"):
+        scope = child if mutation == "child-default" else candidate
+        scope["parameters"]["snapshot"]["defaultValue"] = {"value": "FAKE-SECRET"}
+    elif mutation.endswith("-object"):
+        scope = child if mutation == "child-object" else candidate
+        scope["parameters"]["snapshot"]["type"] = "object"
+    elif mutation == "child-lookup":
+        child["resources"][0]["properties"] = "[listSecrets('x', 'y')]"
+    elif mutation == "child-dependency":
+        child["resources"][0]["dependsOn"] = ["fcag-dev-app"]
+    elif mutation == "child-resource":
+        child["resources"].append({"type": "Microsoft.Authorization/roleAssignments"})
+    elif mutation == "child-name":
+        child["resources"][0]["name"] = "other-app"
+    elif mutation == "module-name":
+        module["name"] = "other-deployment"
+    elif mutation == "module-scope":
+        module["resourceGroup"] = "other-group"
+    elif mutation == "outer-evaluation":
+        properties["expressionEvaluationOptions"]["scope"] = "outer"
+    elif mutation == "complete-mode":
+        properties["mode"] = "Complete"
+    elif mutation == "linked-template":
+        properties["templateLink"] = {"uri": "https://untrusted.invalid/template"}
+    elif mutation == "child-debug":
+        properties["debugSetting"] = {"detailLevel": "requestContent,responseContent"}
+    elif mutation == "module-output":
+        candidate["outputs"] = {"leak": {"type": "object", "value": "[reference('x')]"}}
+    elif mutation == "unguarded-parameter":
+        properties["parameters"]["snapshot"] = {"value": "[parameters('snapshot')]"}
+    else:
+        properties["parameters"]["snapshot"] = {"value": {"secret": "FAKE-SECRET"}}
+    with pytest.raises(endpoint.GateError):
+        endpoint.verify_compiled(candidate)
+
+
+@pytest.mark.parametrize("kind", ["Create", "Deploy", "Modify"])
+def test_scope_preview_allows_only_fixed_module_record(raw, kind):
+    current = endpoint.snapshot(raw)
+    expected = endpoint.desired(current, "new")
+    actual = plan(current, expected)
+    actual["changes"].append({"resourceId": endpoint.MODULE, "changeType": kind})
+    assert endpoint.inspect_plan(actual, current, expected)["moduleRecords"] == 1
+    actual["changes"][-1]["resourceId"] += "-untrusted"
+    with pytest.raises(endpoint.GateError):
+        endpoint.inspect_plan(actual, current, expected)
+
+
+def test_scope_preview_requires_app_even_with_module(raw):
+    current = endpoint.snapshot(raw)
+    expected = endpoint.desired(current, "new")
+    actual = {
+        "status": "Succeeded",
+        "changes": [{"resourceId": endpoint.MODULE, "changeType": "Deploy"}],
+    }
+    with pytest.raises(endpoint.GateError):
+        endpoint.inspect_plan(actual, current, expected)
 
 
 def test_scope_preview_never_requests_payloads(raw, monkeypatch, compiled):
@@ -476,7 +686,9 @@ def test_resource_free_diagnostic_uses_actual_compiled_predicate(raw, monkeypatc
         output = template["outputs"]["inventoryValid"]
         assert output["type"] == "bool"
         predicate = output["value"][1:-1]
-        assert compiled["resources"][0]["properties"].startswith(f"[if({predicate}, ")
+        assert compiled["resources"][0]["properties"]["parameters"]["snapshot"].startswith(
+            f"[if({predicate}, "
+        )
         assert "listSecrets(" in predicate
         secrets = probe["properties"]["parameters"]["snapshot"]["value"]["properties"][
             "configuration"
@@ -541,7 +753,7 @@ def test_guard_diagnostic_valid_invalid_and_baseline(raw, monkeypatch, compiled,
     assert len(calls) == 2
 
 
-def evaluate_guarded_properties(compiled, snapshot, live):
+def evaluate_guarded_snapshot(compiled, snapshot, live):
     """Small offline interpreter for this pinned ARM expression, not Azure proof."""
 
     def parse(text):
@@ -637,7 +849,9 @@ def evaluate_guarded_properties(compiled, snapshot, live):
         }
         return functions[name](*values)
 
-    return evaluate(parse(compiled["resources"][0]["properties"][1:-1]))
+    return evaluate(parse(compiled["resources"][0]["properties"]["parameters"]["snapshot"][1:-1]))[
+        "value"
+    ]
 
 
 def test_compiled_native_identity_and_kv_metadata_preservation(raw, compiled):
@@ -645,11 +859,11 @@ def test_compiled_native_identity_and_kv_metadata_preservation(raw, compiled):
     metadata = current["properties"]["configuration"]["secrets"]
     metadata.append({"name": "native"})
     live = [{**metadata[0], "value": "FAKE-KV-RESOLUTION"}, {"name": "native", "value": "FAKE"}]
-    result = evaluate_guarded_properties(compiled, current, live)
-    expected = copy.deepcopy(current["properties"])
-    expected["configuration"]["secrets"][1]["value"] = "FAKE"
+    result = evaluate_guarded_snapshot(compiled, current, live)
+    expected = copy.deepcopy(current)
+    expected["properties"]["configuration"]["secrets"][1]["value"] = "FAKE"
     assert result == expected
-    assert "value" not in result["configuration"]["secrets"][0]
+    assert "value" not in result["properties"]["configuration"]["secrets"][0]
 
 
 @pytest.mark.parametrize(
@@ -703,7 +917,7 @@ def test_compiled_inventory_guard_fails_before_resource_input_exists(raw, compil
         metadata[0]["future"] = None
     writes = []
     with pytest.raises(ValueError):
-        properties = evaluate_guarded_properties(compiled, current, live)
+        properties = evaluate_guarded_snapshot(compiled, current, live)
         writes.append(properties)
     assert writes == []
 

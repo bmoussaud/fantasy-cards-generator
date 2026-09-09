@@ -18,6 +18,7 @@ from pathlib import Path
 SUBSCRIPTION = "b8ff3e15-7e2d-4fac-a773-992fb59ccedd"
 GROUP = f"/subscriptions/{SUBSCRIPTION}/resourceGroups/rg-fcag-dev"
 APP = f"{GROUP}/providers/Microsoft.App/containerApps/fcag-dev-app"
+MODULE = f"{GROUP}/providers/Microsoft.Resources/deployments/dev-endpoint-app"
 PROJECT = (
     f"{GROUP}/providers/Microsoft.CognitiveServices/accounts/"
     "aifcagdevqhg3qc4rlbt4g/projects/fantasy-cards-dev"
@@ -29,7 +30,7 @@ KEY = "FOUNDRY_PROJECT_ENDPOINT"
 HERE = Path(__file__).resolve().parent
 # Pin the entire compiled executable contract, excluding compiler provenance.
 # Any expression/resource/parameter change requires independent re-review.
-COMPILED_CONTRACT = "56505e8c7bfe5512c58bdc8846ea0fb2fc735a357152d865732bb0ebaabf5af1"
+COMPILED_CONTRACT = "9580d826cab45019ec406344272776d32a15a633e508d6ce7f5334cf2844bd38"
 
 
 class GateError(Exception):
@@ -280,6 +281,52 @@ def verify_compiled(template):
         == COMPILED_CONTRACT,
         "Compiled Azure pass-through contract changed; independent review required",
     )
+    modules = template["resources"]
+    require(len(modules) == 1, "Unexpected parent resource count")
+    module = modules[0]
+    require(
+        set(module) == {"type", "apiVersion", "name", "properties"}
+        and module["type"] == "Microsoft.Resources/deployments"
+        and module["name"] == "dev-endpoint-app"
+        and module["apiVersion"] == "2025-04-01",
+        "Unexpected nested deployment scope",
+    )
+    properties = module["properties"]
+    require(
+        set(properties) == {"expressionEvaluationOptions", "mode", "parameters", "template"}
+        and properties["expressionEvaluationOptions"] == {"scope": "inner"}
+        and properties["mode"] == "Incremental"
+        and set(properties["parameters"]) == {"snapshot"}
+        and isinstance(properties["parameters"]["snapshot"], str)
+        and properties["parameters"]["snapshot"].startswith("[if("),
+        "Unsafe nested deployment evaluation boundary",
+    )
+    child = properties["template"]
+    for scope in (template, child):
+        require(
+            set(scope["parameters"]) == {"snapshot"}
+            and set(scope["parameters"]["snapshot"]) == {"type", "metadata"}
+            and scope["parameters"]["snapshot"]["type"] == "secureObject"
+            and not scope.get("outputs")
+            and not scope.get("functions"),
+            "Insecure snapshot parameter, default, or outputs",
+        )
+    require(
+        not child.get("variables")
+        and child["resources"]
+        == [
+            {
+                "type": "Microsoft.App/containerApps",
+                "apiVersion": API,
+                "name": "fcag-dev-app",
+                **{
+                    key: f"[parameters('snapshot').{key}]"
+                    for key in ("location", "tags", "identity", "properties")
+                },
+            }
+        ],
+        "Child must only replay the resolved snapshot to the fixed app",
+    )
 
 
 def command(args, payload=None):
@@ -290,7 +337,24 @@ def command(args, payload=None):
         text=True,
         timeout=180,
     )
-    require(result.returncode == 0, "Azure/tool command failed; raw diagnostics suppressed")
+    if result.returncode != 0:
+        # Only fixed classifications cross this boundary, never provider text.
+        diagnostic = result.stderr + result.stdout
+        code = next(
+            (
+                code
+                for code in (
+                    "InvalidTemplate",
+                    "InvalidTemplateDeployment",
+                    "AuthorizationFailed",
+                    "ContainerAppSecretInvalid",
+                )
+                if re.search(r"\b" + code + r"\b", diagnostic)
+            ),
+            "unclassified",
+        )
+        circular = "circular" in diagnostic.lower()
+        raise GateError(f"Azure/tool command failed: {code}; circular={circular}")
     return json.loads(result.stdout)
 
 
@@ -326,19 +390,10 @@ def deployment_body(current, suffix, operation):
         ["az", "bicep", "build", "--file", str(HERE / "infra/main.bicep"), "--stdout"]
     )
     verify_compiled(template)
-    resources = template["resources"]
-    require(
-        len(resources) == 1
-        and resources[0]["type"] == "Microsoft.App/containerApps"
-        and resources[0]["name"] == "fcag-dev-app"
-        and resources[0]["apiVersion"] == API
-        and template["parameters"]["snapshot"]["type"] == "secureObject"
-        and not template.get("outputs"),
-        "Unexpected compiled resource scope or insecure parameters",
-    )
     return {
         "properties": {
             "mode": "Incremental",
+            "debugSetting": {"detailLevel": "none"},
             "template": template,
             "parameters": {
                 "snapshot": {"value": desired(current, suffix, operation)},
@@ -387,10 +442,18 @@ def inspect_plan(plan, current, expected):
     )
     ignored = sum(c.get("changeType") == "Ignore" for c in changes)
     changes = [c for c in changes if c.get("changeType") != "Ignore"]
+    module_changes = [c for c in changes if c.get("resourceId", "").lower() == MODULE.lower()]
     require(
-        len(changes) == 1, "What-if is empty, expanded incorrectly, or includes unrelated resources"
+        len(module_changes) <= 1
+        and all(c.get("changeType") in ("Create", "Deploy", "Modify") for c in module_changes),
+        "Unexpected fixed deployment-record operation",
     )
-    change = changes[0]
+    app_changes = [c for c in changes if c not in module_changes]
+    require(
+        len(app_changes) == 1,
+        "What-if is empty, expanded incorrectly, or includes unrelated resources",
+    )
+    change = app_changes[0]
     require(change.get("resourceId", "").lower() == APP.lower(), "What-if has unrelated resource")
     require(
         change.get("changeType") in ("Deploy", "Modify"),
@@ -455,6 +518,7 @@ def inspect_plan(plan, current, expected):
         "localMetadataPreservationMatched": True,
         "nativeValues": "Azure-only guarded identity pass-through; not operator inspected",
         "ignoredResources": ignored,
+        "moduleRecords": len(module_changes),
     }
 
 
@@ -509,7 +573,7 @@ def guard_diagnostic_body(body, invalid=False):
     result = copy.deepcopy(body)
     template = result["properties"]["template"]
     verify_compiled(template)
-    expression = template["resources"][0]["properties"]
+    expression = template["resources"][0]["properties"]["parameters"]["snapshot"]
     require(expression.startswith("[if("), "Missing compiled input guard")
     # Bicep inlines runtime list calls. Extract the first if argument, respecting
     # nested calls and ARM string literals (including doubled quote escapes).
@@ -580,8 +644,34 @@ def validate_guard(body, baseline):
         )
         require(fingerprint(get_app()) == baseline, "Baseline changed during guard diagnostic")
         print(
-            json.dumps({"guardDiagnostic": variant, "inventoryValid": not invalid, "resources": 0})
+            json.dumps(
+                {
+                    "guardDiagnostic": variant,
+                    "inventoryValid": not invalid,
+                    "resources": 0,
+                    "deployment": path.split("?")[0],
+                    "state": "Succeeded",
+                }
+            )
         )
+
+
+def validate_deployment(body, baseline):
+    """Validate the actual resource graph without submitting an app deployment."""
+    verify_compiled(body["properties"]["template"])
+    require(fingerprint(get_app()) == baseline, "Baseline changed before ARM validation")
+    path = (
+        f"{GROUP}/providers/Microsoft.Resources/deployments/"
+        f"dev-endpoint-{baseline[:12]}/validate?api-version=2025-04-01"
+    )
+    result = rest("post", path, body)
+    require(
+        not result.get("error")
+        and result.get("properties", {}).get("provisioningState") == "Succeeded",
+        "Resource-bearing ARM validation did not succeed",
+    )
+    require(fingerprint(get_app()) == baseline, "Baseline changed during ARM validation")
+    print(json.dumps({"armValidation": "Succeeded", "resourceWrites": 0}), flush=True)
 
 
 def healthy(raw):
@@ -626,9 +716,11 @@ def run(args):
     if not args.apply:
         if args.validate_guard:
             validate_guard(body, baseline)
+            validate_deployment(body, baseline)
         return
     require(bool(args.expect_fingerprint), "Apply requires the independently reviewed fingerprint")
     validate_guard(body, baseline)
+    validate_deployment(body, baseline)
     verify_project()
     require(fingerprint(get_app()) == baseline, "Baseline changed immediately before apply")
     # No ETag is returned by this ACA API. Immediate re-read is an optimistic
@@ -637,9 +729,16 @@ def run(args):
     rest("put", f"{path}?api-version=2025-04-01", body)
     deadline = time.monotonic() + 300
     while time.monotonic() < deadline:
+        deployment = rest("get", f"{path}?api-version=2025-04-01")
+        state = deployment["properties"]["provisioningState"]
+        require(
+            state in ("Accepted", "Running", "Succeeded"),
+            "App deployment failed; inspect actual state before any recovery",
+        )
         after = get_app()
         if (
-            comparable(snapshot(after)) == comparable(expected)
+            state == "Succeeded"
+            and comparable(snapshot(after)) == comparable(expected)
             and healthy(after)
             and after["properties"]["latestRevisionName"] == f"fcag-dev-app--{suffix}"
             and healthz(after)
@@ -655,6 +754,9 @@ def run(args):
                         "systemPrincipalMatched": after["identity"]["principalId"] == PRINCIPAL,
                         "allWritableMetadataMatched": True,
                         "healthz": 200,
+                        "deployment": path,
+                        "moduleDeployment": MODULE,
+                        "deploymentState": state,
                     }
                 )
             )

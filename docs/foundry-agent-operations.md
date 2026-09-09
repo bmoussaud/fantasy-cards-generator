@@ -1,22 +1,21 @@
 # Card-orchestrator operations
 
-## Endpoint persistence follow-up gate (2026-09-08)
+## Endpoint persistence follow-up gate (2026-09-09)
 
 PR #121 is merged at `0cf7acc`. PR #122 now implements guarded **Azure-side**
-secret pass-through; no operator secret-value lookup is authorized. Actual
-`ResourceIdOnly` preview returned one existing app `Deploy` and 40 `Ignore`
-resources, not the currently required `Modify`. Microsoft documents that
-`Modify` requires full-payload format, which is prohibited here. The helper
-retains that fail-closed gate. A separate negative validation was inconclusive:
-it failed without observable guard marker or allowlisted ARM code, so Azure
-guard evaluation is not proven. **No app apply or new E2E invocation occurred.**
-Endpoint persistence remains blocked, not completed; final GET fingerprint is
-unchanged and the existing revision is healthy.
+secret pass-through; no operator secret-value lookup is authorized.
+The earlier approved direct-resource apply failed with an ARM circular
+dependency before any app write. The replacement parent/secure-child graph
+passed actual resource-bearing ARM validation. Fresh `ResourceIdOnly` preview
+returned the exact existing app `Deploy` and 40 `Ignore` resources; real
+resource-free guard diagnostics returned true/false for valid/invalid inputs.
+The baseline remains unchanged. Persistence is not yet claimed: independent
+execution review and fresh application gates must succeed first.
 See the [candidate and exact diagnostic evidence](../deployments/dev-endpoint/README.md).
 Do not run root provisioning, retrieve secret values into operator context, or
 treat scope-only preview as cloud verification of property/value equality.
-Independent review must resolve the scope authorization and actual Azure guard
-proof before application and the subsequently authorized bounded smoke.
+Only after successful endpoint persistence may the separately authorized
+bounded E2E smoke proceed; no hosted compute or model call accompanies this change.
 
 Related: #109 (hosting), #99 (operations), #117 (merged client/RBAC wiring),
 #118 (read-only preflight). This package does **not** deploy or enable the web

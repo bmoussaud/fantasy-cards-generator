@@ -4,7 +4,7 @@ targetScope = 'resourceGroup'
 @description('Validated desired PUT snapshot; helper changes only endpoint and revision suffix. Never persist this input.')
 param snapshot object
 
-// Resource-ID list calls do not introduce a dependency on this resource's PUT.
+// Resolve the existing secrets in the parent, which declares no Container App.
 var liveSecrets = listSecrets(resourceId('Microsoft.App/containerApps', 'fcag-dev-app'), '2025-01-01').value
 var metadataSecrets = snapshot.properties.configuration.secrets
 var metadataNames = map(metadataSecrets, secret => secret.name)
@@ -18,14 +18,15 @@ var inventoryValid = length(metadataNames) == length(union(metadataNames, metada
 
 var preservedSecrets = map(metadataSecrets, metadata => !empty(metadata.?keyVaultUrl ?? '') ? metadata : union(metadata, {value: first(filter(liveSecrets, candidate => candidate.name == metadata.name)).value}))
 
-resource app 'Microsoft.App/containerApps@2025-01-01' = {
-  name: 'fcag-dev-app'
-  location: snapshot.location
-  tags: snapshot.tags
-  identity: snapshot.identity
+module app './app.bicep' = {
+  name: 'dev-endpoint-app'
   // Invalid JSON is a constant, non-sensitive fail-closed expression. It is in
-  // the resource input (not an output): ARM must evaluate it before any app PUT.
-  properties: inventoryValid ? union(snapshot.properties, {
-    configuration: union(snapshot.properties.configuration, {secrets: preservedSecrets})
-  }) : json(concat('ENDPOINT_SECRET_INVENTORY_MISMATCH', take(resourceGroup().id, 0)))
+  // the secure module input: ARM evaluates it before submitting the child.
+  params: {
+    snapshot: inventoryValid ? union(snapshot, {
+      properties: union(snapshot.properties, {
+        configuration: union(snapshot.properties.configuration, {secrets: preservedSecrets})
+      })
+    }) : json(concat('ENDPOINT_SECRET_INVENTORY_MISMATCH', take(resourceGroup().id, 0)))
+  }
 }
