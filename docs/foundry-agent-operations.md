@@ -26,6 +26,85 @@ Related: #109 (hosting), #99 (operations), #117 (merged client/RBAC wiring),
 generation path. It contains no web hooks, model deployment, new registry,
 new Foundry account/project, or monitoring resource.
 
+## Corrected-routing ACA MI E2E — 2026-09-09
+
+Working as Gimli (DevOps / Infra), using the requester `@bmoussaud`'s fresh
+bounded authorization (explicit "ok pour un nouvel essai" at
+`2026-09-09T07:34:40Z`) after being informed the corrected image was undeployed
+and one bounded trial remained. Source `a7a1e2f03d089eeb489ad1614383c889a32894ce`
+independently reviewed (PR #122 comment). **That SHA is the deployed application
+and image source; subsequent evidence commits are not the deployed image.**
+
+Routing boundary fix: `validate_wire()` now accepts a validated `agent_session_id`
+field and discards it before SDK normalization; canonical request to SDK contains
+only `store`, `stream`, `input`. No re-provisioning or permission change.
+
+**Result: deployment and same-identity session creation/readiness succeeded;
+the one Responses POST returned HTTP 400 `invalid_request`. E2E domain success
+remains blocked. `serviceCode:"invalid_request"` is a new finding compared to
+the prior run's `serviceCode:"unknown"`, indicating the platform now returns an
+explicit error code in the response body.**
+
+Fresh GET-only `--prepare-invocation` was NOT re-run separately for this trial;
+endpoint persistence, session creation and readiness were confirmed live by the
+`--invoke-once` result: `endpointPersisted:true`, `endpointSource:"aca_environment"`,
+`sessionCreated:true`, `sessionReady:true`, `principalMatched:true`,
+`tokenAcquired:true`, `invocationsAttempted:1`.
+
+| Evidence | Observed result (2026-09-09 UTC) |
+| --- | --- |
+| Image / source SHA | `fcagdevqhg3qc4rlbt4gacr.azurecr.io/card-orchestrator:a7a1e2f03d089eeb489ad1614383c889a32894ce` |
+| ACR digest | `sha256:c8d813c4d5aeaa6402f2c945cdeef9775bb629280f8365e7cbaa9cf126140aab` |
+| ACR image created | `2026-09-09T07:39:25.789Z` |
+| Pre-recorded session | `smoke-109-44ca46e57cd64e19a3a7e3752c49b5de`; exact GET 404 at `07:38:44.852Z` |
+| Initial version inventory | Zero existing versions; no reuse |
+| Deploy submission / runtime clock start | `07:39:00.228Z`; 0.5 CPU / 1 GiB, dedicated azd project, one deployment |
+| Deploy return | Exit 0 at `07:40:19.194Z`, **78.977 monotonic seconds** |
+| New owned version | `card-orchestrator:1`, status `active`, `created_at:2026-09-09T07:39:39Z`; version/image/application ownership verified |
+| ACA target | Revision `fcag-dev-app--endpoint-ea77f0bf2596`, replica `fcag-dev-app--endpoint-ea77f0bf2596-5f75998d86-nwvzw`, container `web` |
+| Expected ACA system MI | `946d8701-48f2-4fa5-8efd-bf053c7b4e4c`; audience `https://ai.azure.com/.default` |
+| Single probe submission / return | `07:41:01.168Z` / `07:41:53.246Z`, exit 1, **52.087 monotonic seconds** |
+| Session and inference counters | One session-create attempt, created and ready; **one Responses POST**, zero retries |
+| Finally begins | `07:41:53.247Z`, **173.041 seconds** after deployment submission |
+| Session stop / delete | Exit 0 at `07:42:02.894Z` / `07:42:12.065Z` |
+| New version deletion | Exact version `1` only, exit 0 at `07:42:19.984Z`, **203.620 seconds** after submission |
+| Independent absence verification | Exact session GET **not found** and version GET **"agent version could not be resolved"** at `07:42:33.115Z` |
+| Cleanup complete | `07:42:23.823Z`, **203.620 seconds** after submission |
+| Final web verification | `07:43:15.046Z`, unchanged image `web-nat-dev:azd-deploy-1788775195`, revision `fcag-dev-app--endpoint-ea77f0bf2596`, Single/100%-latest, `/healthz` HTTP 200, `FOUNDRY_PROJECT_ENDPOINT` persisted |
+| Entire run | `07:44:09.387Z`, **309.195 seconds**; well below 30 minutes |
+
+Exact sanitized probe result:
+
+```json
+{"accessVerified": false, "endpointPersisted": true, "endpointSource": "aca_environment", "httpStatus": 400, "invocationVerified": false, "invocationsAttempted": 1, "phase": "invoke", "principalMatched": true, "reason": "http_error", "schemaValid": false, "serviceCode": "invalid_request", "sessionCleanupRequired": true, "sessionCreateAttempted": true, "sessionCreated": true, "sessionReady": true, "status": "failed", "tokenAcquired": true}
+```
+
+`sessionCleanupRequired:true` describes the marker at invocation return; the subsequent operator cleanup above completed successfully. `accessVerified:false` here does not negate the successful session creation or endpoint persistence; the invocation branch only sets it after a successful Responses reply.
+
+**Changed from prior run:** `serviceCode` is now `"invalid_request"` (was `"unknown"` from source `aad771477c34fb4c699d2bc63e279aa2be1badd7`). The `service_code()` allowlist in `aca_identity_payload.py` permits `invalid_request` as a recognized platform error code; this means the response body contained `{"error":{"code":"invalid_request"}}`. The routing fix successfully prevents `validate_wire()` from rejecting the inbound request, and the canonical outbound SDK request no longer includes `agent_session_id`. The platform's explicit `invalid_request` at invocation may indicate a different aspect of the request is invalid, or the session routing contract differs. This is a backend investigation item for Aragorn; no speculative fix or re-run is authorized.
+
+Exact probe flags, run from the repository root:
+
+```bash
+python deployments/card-orchestrator/aca_identity_probe.py \
+  --environment dev \
+  --subscription b8ff3e15-7e2d-4fac-a773-992fb59ccedd \
+  --resource-group rg-fcag-dev --app fcag-dev-app \
+  --revision fcag-dev-app--endpoint-ea77f0bf2596 \
+  --replica fcag-dev-app--endpoint-ea77f0bf2596-5f75998d86-nwvzw \
+  --container web \
+  --project-endpoint https://aifcagdevqhg3qc4rlbt4g.services.ai.azure.com/api/projects/fantasy-cards-dev \
+  --expected-principal 946d8701-48f2-4fa5-8efd-bf053c7b4e4c \
+  --require-persisted-endpoint --invoke-once --hosted-version 1 \
+  --expected-version a7a1e2f03d089eeb489ad1614383c889a32894ce \
+  --session-id smoke-109-44ca46e57cd64e19a3a7e3752c49b5de --execute
+```
+
+This is an execution record, **not permission to rerun**. Cloud writes: ACR image publication, one hosted version, one ACA-MI-created session and one Responses POST, followed by session stop/delete and exact-version deletion. No app PUT, identity/RBAC/network/secret/model-capacity change, production action, web activation, image generation or shared-resource deletion. Serving web image remained unchanged. No operator process remains running.
+Post-run regression tests: **225 passed** (`python -m pytest --noconftest tests/test_aca_identity_probe.py tests/test_foundry_agent_client.py -q`). `git diff --check` passed. No application or infrastructure source changed during this E2E workstream.
+
+**#109 remains open:** routing fix verified locally and deployed; platform `invalid_request` at invocation is not schema-valid domain success. PR #122 is not merged by this operation.
+
 ## Persisted-endpoint ACA MI E2E — 2026-09-09
 
 Working as Gimli (DevOps / Infra), using the requester's fresh, bounded
