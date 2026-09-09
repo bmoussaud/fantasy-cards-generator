@@ -84,6 +84,15 @@ is now also consumed, with no retry authorized. The earlier
 App Insights deployment gate was incorrect (linkage is needed for tracing only),
 as corrected in the operations runbook.
 
+Those per-attempt statements are historical records, not the current
+authorization state. The requester subsequently authorized continued bounded dev
+diagnostics. Source `45c03cbfda5a4667d36a73aee0184bcb908bc9f3`
+was deployed once and the actual ACA-MI request returned the exact sanitized
+boundary diagnostic `card_boundary_invalid_request`,
+`serviceReason:"unsupported_field"`, `serviceParam:"agent_reference"`. The owned
+session and hosted version were then deleted. See the
+[exact execution record](foundry-agent-operations.md#exact-strict-boundary-rejection--2026-09-09).
+
 Un **troisième smoke, nouvellement autorisé**, a depuis déployé la correction
 à identité unique depuis `dc1925942c42756690f7dd5321cbdbf892cf7182`.
 Sa préparation ACA a réussi (MI attendue, HTTP 200, imports/contrat/fixture prêts,
@@ -231,8 +240,10 @@ launch for connection, terminal settling and complete payload delivery, followed
 by **100 seconds** for a result, with a hard **130-second** local transport cap.
 The earlier 10-second setup cap produced `exec_setup_timeout` during the latest
 live attempt. Setup now matches the successful preparation path without reducing
-the result budget. This correction has only been exercised offline; no further
-live invocation is implied.
+the result budget. The deadline correction was initially exercised only offline. It was later used
+successfully by the bounded live diagnostic recorded above; transport completed
+and the strict application boundary identified `agent_reference` as an
+unsupported top-level field.
 Its remote budget is **95 seconds**: at most **30 seconds** for decoding,
 parser/import, MI, session creation and readiness, separately reserving the
 **65-second** invocation guard (including response parsing). Setup failure never

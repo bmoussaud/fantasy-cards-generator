@@ -1,5 +1,62 @@
 # Card-orchestrator operations
 
+## Exact strict-boundary rejection — 2026-09-09
+
+Working as Gimli (DevOps / Infra), source
+`45c03cbfda5a4667d36a73aee0184bcb908bc9f3` was deployed to the existing dev
+Foundry project after independent review. The requester's instruction to
+continue investigating #122 supersedes the historical per-attempt authorization
+notes below. This run made no production, web-app, RBAC, network, model,
+provisioning, secret, or evaluation change.
+
+**Exact cause observed:** the one ACA-managed-identity Responses POST reached
+the hosted application's strict boundary. That boundary returned
+`card_boundary_invalid_request` with `serviceReason:"unsupported_field"` and
+`serviceParam:"agent_reference"`. This is direct application-boundary evidence,
+not an inference from the earlier generic `invalid_request`. It proves that the
+live platform-to-container envelope included the top-level `agent_reference`
+field and that `StatelessBoundary.validate_wire()` rejected that field before
+SDK normalization or model orchestration. The diagnostic intentionally did not
+export its value, any user/model content, raw body, headers, token, or exception.
+
+Fresh GET-only preparation against the pinned serving ACA replica succeeded
+before deployment: persisted endpoint and expected system MI matched, agents
+access returned HTTP 200, parser/request/local-fixture gates passed, and zero
+POSTs were sent.
+
+| Evidence | Observed result (2026-09-09 UTC) |
+| --- | --- |
+| Source / image tag | `45c03cbfda5a4667d36a73aee0184bcb908bc9f3` |
+| Image | `fcagdevqhg3qc4rlbt4gacr.azurecr.io/card-orchestrator:45c03cbfda5a4667d36a73aee0184bcb908bc9f3` |
+| ACR digest / created | `sha256:2bb4c0b8fcad79a9a16bb056c4b45dbf25b5a0ed9c9ea325feaaeefdac08db5b` / `08:08:52.9697442Z` |
+| Deployment clock start | `08:08:32Z`; 0.5 CPU / 1 GiB |
+| Owned hosted version | `card-orchestrator:1`, active, created `08:09:05Z`; exact image and application SHA verified |
+| Pre-recorded session | `smoke-109-3a551997b5f44314924754257d39f092`; confirmed absent before invocation |
+| ACA target | Revision `fcag-dev-app--endpoint-ea77f0bf2596`, replica `fcag-dev-app--endpoint-ea77f0bf2596-5f75998d86-nwvzw`, container `web` |
+| Expected ACA system MI | `946d8701-48f2-4fa5-8efd-bf053c7b4e4c`; audience `https://ai.azure.com/.default` |
+| Diagnostic invocation | Submitted `08:10:03.480Z`, returned `08:10:24.246Z`; one session create and one Responses POST, zero retries |
+| Exact rejection | HTTP 400, `card_boundary_invalid_request`, `unsupported_field`, `agent_reference` |
+| Session evidence | Created/ready against exact version `1`; created `08:10:15Z` |
+| Cleanup | Exact session stop/delete and version `1` deletion succeeded from `08:10:33.390Z` through `08:10:48.205Z` |
+| Absence verification | Exact session not found; deleted agent version no longer resolves |
+| Final web verification | Same image, revision, system MI, Single/100%-latest traffic and persisted endpoint; `/healthz` HTTP 200 |
+| Entire hosted lifetime | **146.532 monotonic seconds**, `08:08:32Z`–`08:10:59Z`; no diagnostic process remained |
+
+Exact sanitized marker:
+
+```json
+{"accessVerified":false,"endpointPersisted":true,"endpointSource":"aca_environment","httpStatus":400,"invocationVerified":false,"invocationsAttempted":1,"phase":"invoke","principalMatched":true,"reason":"http_error","schemaValid":false,"serviceCode":"card_boundary_invalid_request","serviceParam":"agent_reference","serviceReason":"unsupported_field","sessionCleanupRequired":true,"sessionCreateAttempted":true,"sessionCreated":true,"sessionReady":true,"status":"failed","tokenAcquired":true}
+```
+
+Evidence stops at the strict boundary: it does not prove the inner SDK or model
+would accept the envelope after that field is handled, and it records no model
+call or token count. Aragorn's next backend step is to verify the hosted
+platform/SDK contract for `agent_reference` and add an exact-envelope regression
+before proposing the smallest validated routing-only handling. Do not weaken
+unrelated strict validation, persistence, history, identity, or content-safety
+controls. Further dev diagnostic deployment remains authorized when a reviewed,
+hypothesis-driven source is ready; do not blindly repeat this unchanged call.
+
 ## Endpoint persistence follow-up gate (2026-09-09)
 
 PR #121 is merged at `0cf7acc`. PR #122 now implements guarded **Azure-side**
