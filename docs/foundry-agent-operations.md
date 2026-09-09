@@ -9,13 +9,16 @@ dependency before any app write. The replacement parent/secure-child graph
 passed actual resource-bearing ARM validation. Fresh `ResourceIdOnly` preview
 returned the exact existing app `Deploy` and 40 `Ignore` resources; real
 resource-free guard diagnostics returned true/false for valid/invalid inputs.
-The baseline remains unchanged. Persistence is not yet claimed: independent
-execution review and fresh application gates must succeed first.
+Samwise independently **approved execution under gates** at executable
+`0f9e33a7ec77a5db9b7cdb5cdc972c354ea820bd`. The authorized helper repeated
+all gates and successfully persisted the endpoint: parent/child deployments
+both `Succeeded`, new revision `fcag-dev-app--endpoint-ea77f0bf2596`
+Healthy/Running, `/healthz` HTTP 200, unchanged image and other writable metadata.
 See the [candidate and exact diagnostic evidence](../deployments/dev-endpoint/README.md).
 Do not run root provisioning, retrieve secret values into operator context, or
 treat scope-only preview as cloud verification of property/value equality.
-Only after successful endpoint persistence may the separately authorized
-bounded E2E smoke proceed; no hosted compute or model call accompanies this change.
+Endpoint persistence is complete. The separately authorized bounded E2E smoke
+is the remaining step; no hosted compute or model call accompanied this change.
 
 Related: #109 (hosting), #99 (operations), #117 (merged client/RBAC wiring),
 #118 (read-only preflight). This package does **not** deploy or enable the web

@@ -4,6 +4,45 @@ Refs #109; PR #121 merged at `0cf7acc`. This reusable dev-only leaf deploys
 the canonical Foundry project endpoint without root provisioning hooks,
 image changes, credential rotation, or model/hosted-compute calls.
 
+## Verified persistence outcome, 2026-09-09
+
+Samwise's actual independent whole-PR `code-review` invocation returned:
+**APPROVE execution under gates** and **No significant issues found in the
+reviewed changes**, for executable SHA
+`0f9e33a7ec77a5db9b7cdb5cdc972c354ea820bd`. The reviewer independently reran
+145 targeted tests, Ruff, and compiled-contract verification. The
+[review record](https://github.com/bmoussaud/fantasy-cards-generator/pull/122#issuecomment-5596864920)
+preceded the authorized application.
+
+The helper then repeated the exact scope preview, real true/false diagnostics,
+successful resource-bearing ARM validation, project verification, and unchanged
+fingerprint checks. **One application deployment succeeded.** Both parent
+`dev-endpoint-ea77f0bf2596` and child `dev-endpoint-app` report `Succeeded`.
+Their full IDs share this prefix:
+`/subscriptions/b8ff3e15-7e2d-4fac-a773-992fb59ccedd/resourceGroups/rg-fcag-dev/providers/Microsoft.Resources/deployments/`.
+
+The new revision `fcag-dev-app--endpoint-ea77f0bf2596` is **Healthy / Running**,
+latest equals latest-ready, and `/healthz` returned **HTTP 200**. The exact
+web endpoint is now persistently configured:
+`https://aifcagdevqhg3qc4rlbt4g.services.ai.azure.com/api/projects/fantasy-cards-dev`.
+
+All reviewed writable metadata matched the expected endpoint-and-suffix-only
+transform, including other env/secret references, both identity types and
+identity map, ingress, scale, and Single/100%-latest traffic. The system
+principal matches. Old/new revision container image strings match exactly:
+web remains
+`fcagdevqhg3qc4rlbt4gacr.azurecr.io/fantasy-cards-generator/web-nat-dev:azd-deploy-1788775195`.
+This is the existing tagged image, not a newly built image or a claim of
+independently inspected runtime digest bytes. Native secret values passed
+through the guarded Azure boundary and were never operator-read.
+
+Post-application GET fingerprint:
+`bebc01d94367133127acbccb2a0913f796cf4ee441306692665f4d3b70d7ce86`.
+Resource writes: one existing Container App PUT through the child, plus ARM
+deployment records (including the two resource-free guard records). No other
+infrastructure was targeted. No rollback was needed. **The separately
+authorized live E2E remains pending; no hosted compute or model call ran here.**
+
 ## Secure deployment boundary
 
 `infra/main.bicep` owns **only** the fixed nested deployment `dev-endpoint-app`.
@@ -46,9 +85,8 @@ for a deliberately duplicated inventory. No app write occurred during these gate
 
 The full GET fingerprint remained
 `ea77f0bf259648a25fd2171f61ab2354c1989f9301ae6d2984c187cf15e0b3de`.
-This records pre-application evidence, not persistence success or execution
-approval. Independent review of the current candidate and fresh gates are
-required before application.
+This records the pre-application baseline. The independently approved
+application and resulting new fingerprint are recorded above.
 
 Diagnostic deployment names in `rg-fcag-dev`:
 `dev-endpoint-guard-valid-ea77f0bf2596` and
