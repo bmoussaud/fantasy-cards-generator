@@ -161,6 +161,167 @@ that exact host.
 > Then store the secret securely, ideally in Azure Key Vault, before wiring it
 > into your runtime environment.
 
+## Direct redeploy with an existing Entra registration (false-mode)
+
+Use this path when you need to redeploy infra **without** re-provisioning the
+Entra app registration — for example when the Graph Bicep extension is
+unavailable, or when you manage the registration separately.
+
+Use the **direct Azure CLI** commands below for this flow, not `azd provision`
+or `azd up`. The resolved client ID is also exported as `ENTRA_CLIENT_ID`;
+azd's existing postprovision hook uses that output to rotate an Entra client
+secret even when registration provisioning is disabled. Direct ARM deployments
+do not run azd hooks. Deploy-only web updates remain a separate operation.
+
+### Safety contract
+
+`deployEntraAppRegistration=false` with a blank or whitespace-only
+`entraClientIdOverride` **fails the ARM deployment before any Container App is
+mutated**. This is enforced by `infra/modules/entra-auth-guard.bicep`: the
+value is trimmed at the guard module call (`trim(entraClientIdOverride)`), so a
+whitespace-only input (e.g. an env var that expands to spaces) normalises to
+`''` before the `@minLength(1)` ARM
+parameter constraint is evaluated. ARM validates this constraint when the nested
+deployment is created, before the container-apps module runs. The Container Apps
+module is in the compiled dependency graph of the guard's output, so it never
+executes if the guard deployment fails. There is no silent auth erase and no
+success-shaped fallback.
+
+Two explicit modes are available via the `entraAuthMode` parameter (only
+consulted when `deployEntraAppRegistration=false`):
+
+| `entraAuthMode` | Effect |
+|---|---|
+| `existing` (default) | Preserves auth. Requires non-empty, non-whitespace `entraClientIdOverride`. The value is trimmed before the `minLength:1` check — blank or whitespace-only fails with `InvalidTemplate / minLength`. |
+| `disabled` | Explicit operator opt-in to deploy without Entra authentication. No `ENTRA_CLIENT_ID`, `ENTRA_REDIRECT_URI`, or `ENTRA_POST_LOGOUT_REDIRECT_URI` are injected into the Container App. |
+
+### Required non-secret metadata for `existing` mode
+
+Before running a direct false-mode redeploy, gather these values (none are
+secrets):
+
+| Value | Where to find it |
+|---|---|
+| **Application (client) ID** | Azure Portal → Entra ID → App registrations → your app → Overview, or `az ad app list --display-name <name> --query '[0].appId' -o tsv` |
+| **Resource group name** | `az group list --query "[?starts_with(name,'rg-')].name" -o tsv` or the value you set during provisioning |
+| **Subscription ID** | `az account show --query id -o tsv` |
+| **Other param values** | Previous deployment's non-secret parameters, reviewed without displaying secure values |
+
+The deployed redirect URI (`ENTRA_REDIRECT_URI`) is derived automatically from
+the Container Apps environment default domain — you do **not** pass it as a
+parameter. Verify that the registered redirect URI on your Entra app
+registration matches `https://<container-app-domain>/auth/callback`. If the
+Container Apps environment was replaced (e.g. during the NAT cutover), update
+the registered URI before running this redeploy.
+
+### Safe `az deployment group what-if` command
+
+Run the following as a pre-flight check before any direct false-mode redeploy.
+First prepare an ignored, resolved ARM parameter file containing the existing
+deployment's non-secret settings, including its container image, resource naming,
+network, model, and feature settings. Do not rely on template defaults to preserve
+those settings. Use the previous deployment's **parameters**, not its outputs,
+as the reference, and omit the two secret-value parameters to avoid rotating them.
+Do not copy secret values into this file or print them to the terminal.
+
+The commands below use `resolved.parameters.json` for that operator-prepared file.
+Do **not** pass `infra/main.parameters.json` directly to Azure CLI: its `${...}`
+expressions are expanded by **azd**, not by `az deployment group`. Unresolved
+expressions can fail validation or be sent as literal values, including secret
+values. Replace the example variables below with the verified target and client ID.
+
+```bash
+az deployment group what-if \
+  --resource-group "$RESOURCE_GROUP" \
+  --template-file infra/main.bicep \
+  --parameters @resolved.parameters.json \
+  --parameters \
+    deployEntraAppRegistration=false \
+    entraAuthMode=existing \
+    entraClientIdOverride="$ENTRA_CLIENT_ID"
+```
+
+> ⚠️ **PENDING** — no isolated sandbox has been used to validate a full
+> false-mode `what-if` and subsequent `deployment group create` + login +
+> protected-API smoke test end to end. This section documents the intended
+> operator flow. Before using in production, a sandbox approval gate must be
+> satisfied: run the `what-if` against an isolated resource group, review the
+> diff, and confirm no unexpected auth env var removals appear in the output.
+
+### Operator deployment example (gated on sandbox approval)
+
+After the `what-if` diff has been reviewed and approved in sandbox:
+
+```bash
+az deployment group create \
+  --resource-group "$RESOURCE_GROUP" \
+  --template-file infra/main.bicep \
+  --parameters @resolved.parameters.json \
+  --parameters \
+    deployEntraAppRegistration=false \
+    entraAuthMode=existing \
+    entraClientIdOverride="$ENTRA_CLIENT_ID"
+```
+
+**Do not** pass `appSessionSecretKeyValue` or `entraClientSecretValue` on the
+command line or in the resolved file. Their empty Bicep defaults leave the
+corresponding existing Key Vault secrets unchanged. This is a full infrastructure
+redeploy, not a partial patch: the client ID override does not preserve unrelated
+settings automatically. Stop if the preview changes the image, network posture,
+authentication metadata, or any other setting unexpectedly.
+
+**If `entraClientIdOverride` is omitted, blank, or whitespace-only**, the guard's
+minimum-length constraint is intended to reject the deployment with an error
+similar to:
+```
+InvalidTemplate: Deployment template validation failed: The template parameter
+'entraClientIdOverride' has an invalid value: The value '' is below the
+minimum length constraint of '1'.
+```
+The override is trimmed before this check, so a value of `"   "` (spaces only)
+is normalised to `""` and fails the same way. No Container App mutation occurs.
+
+### Intentional no-auth deploys (`entraAuthMode=disabled`)
+
+If you deliberately want to deploy the app without Entra authentication (e.g.
+during initial infrastructure bootstrapping before any app registration exists):
+
+```bash
+az deployment group create \
+  --resource-group "$RESOURCE_GROUP" \
+  --template-file infra/main.bicep \
+  --parameters @resolved.parameters.json \
+  --parameters \
+    deployEntraAppRegistration=false \
+    entraAuthMode=disabled
+```
+
+In this mode the Container App receives no `ENTRA_CLIENT_ID`,
+`ENTRA_REDIRECT_URI`, or `ENTRA_POST_LOGOUT_REDIRECT_URI` env vars. The app
+will start but all authenticated endpoints will be inaccessible until a
+subsequent redeploy with `entraAuthMode=existing` and a valid
+`entraClientIdOverride`.
+
+### Redirect URI registration requirement
+
+After any redeploy that changes the Container Apps environment (and therefore
+the default domain), update the registered redirect URI on the Entra app
+registration:
+
+1. Retrieve the new Container Apps URL from deployment outputs:
+   ```bash
+   az deployment group show -g <rg> -n <deployment-name> \
+     --query properties.outputs.deployedAuthRedirectUri.value -o tsv
+   ```
+2. Update the registration through its owning infrastructure deployment.
+3. Include the new `https://<new-domain>/auth/callback` value in its redirect URIs.
+4. Verify that `https://<new-domain>/` is also registered as the post-logout
+   redirect URI if the app is configured to redirect after logout.
+
+The `ENTRA_REDIRECT_URI` env var in the Container App is auto-derived from the
+Container Apps environment default domain — it will be correct for the new
+hostname as soon as the deployment completes. The Entra portal registration is
+the external artifact that must match.
 ## Rotating the Entra client secret
 
 This app can adopt a newer Key Vault version at runtime, but it does **not**
