@@ -67,29 +67,35 @@ string, or Cosmos keys.
 
 The root `azure.yaml` is the single operator entry point for both the `web-nat`
 Container App (port 8000) and the `card-orchestrator` Foundry hosted agent
-(port 8088). Both `azd up` and bare `azd deploy` target **only** `web-nat`;
-the hosted agent is never built, pushed, or deployed unless an operator
-explicitly opts in.
+(port 8088). `azd up` targets **only** `web-nat`; bare `azd deploy` uses azd's
+standard "all enabled services" behavior, with `card-orchestrator` disabled by
+default through a supported service `condition`.
 
 ### Deploy guards
 
 Three layers prevent accidental hosted-agent deployment:
 
-1. **`workflows.up` and `workflows.deploy`** — both custom workflows target
-   only `web-nat`. Bare `azd up` and bare `azd deploy` never touch
-   `card-orchestrator`.
-2. **Service-level `predeploy` hook** — `hooks/guard_agent_deploy.sh` runs
-   before any card-orchestrator deployment (including explicit
-   `azd deploy card-orchestrator`) and blocks unless
+1. **`workflows.up`** — azd 1.32 supports overriding only the `up` workflow, so
+   root `azd up` provisions and deploys `web-nat` only. There is no supported
+   `workflows.deploy` override in azd 1.32.
+2. **Service `condition`** — `card-orchestrator` has
+   `condition: ${CARD_ORCHESTRATOR_ENABLE_PREREQUISITES=false}`. Therefore raw
+   bare `azd deploy` sees only enabled services by default and does not select,
+   build, publish, or deploy the hosted agent unless the prerequisites flag is
+   explicitly set.
+3. **Service lifecycle hooks** — `hooks/guard_agent_deploy.sh` is registered as
+   `prebuild`, `prepackage`, `prepublish`, and `predeploy` for
+   `card-orchestrator`. These azd 1.32 service hooks run before the package →
+   publish → deploy phases, blocking agent build/package/push/deploy unless
    `CARD_ORCHESTRATOR_ENABLE_PREREQUISITES=true` in the azd environment.
-3. **Root orchestrator (`deploy.sh`)** — the documented production-safe entry
+4. **Root orchestrator (`deploy.sh`)** — the documented production-safe entry
    point preserving `--approve-change` / `--approve-prod` enforcement gates.
 
 ### Web-only workflow (default)
 
 ```bash
 azd up                        # provision + deploy web-nat only
-azd deploy                    # redeploy web-nat only (workflows.deploy)
+azd deploy                    # deploy all enabled services; by default this is web-nat only
 azd deploy web-nat            # explicit web redeploy
 ```
 
@@ -126,9 +132,15 @@ Or via the root orchestrator with approval gates:
 Both services can be deployed independently from the repository root:
 
 - `azd deploy web-nat` — redeploys the web Container App only.
-- `azd deploy card-orchestrator` — builds, pushes, and registers the hosted agent
-  only (requires prerequisites to have been provisioned; blocked by predeploy guard
-  otherwise).
+- `azd deploy card-orchestrator` — builds, pushes, and registers the hosted
+  agent only after `CARD_ORCHESTRATOR_ENABLE_PREREQUISITES=true`; otherwise azd
+  rejects the disabled service before package/publish/deploy, and the service
+  lifecycle hooks provide a second hard gate.
+
+Once the prerequisites flag is enabled, **do not use bare `azd deploy` as a
+web-only command**. azd 1.32 deploys all enabled services by default. Use
+`azd deploy web-nat` or `./deploy.sh web --approve-change` for web-only
+deployments in an agent-enabled environment.
 
 ### Agent opt-in variables
 
@@ -157,11 +169,12 @@ prints the planned azd commands and exits without starting azd.
 ./deploy.sh web --environment prod --approve-change --approve-prod
 ```
 
-**azd limitation:** The azd CLI (1.32.0) has no built-in `--approve-prod` or
-`--approve-change` flags. `deploy.sh` provides this enforcement as a thin
-wrapper. The service-level `predeploy` hook on card-orchestrator is the
-defense-in-depth guard ensuring the agent cannot be deployed even by raw
-`azd deploy card-orchestrator` without prerequisite opt-in.
+**azd limitations:** The azd CLI (1.32.0) has no built-in `--approve-prod` or
+`--approve-change` flags, and its schema supports `workflows.up` but not
+`workflows.deploy`. `deploy.sh` provides approval enforcement as a thin wrapper.
+The card-orchestrator service `condition` plus the service-level
+`prebuild`/`prepackage`/`prepublish`/`predeploy` hooks are the raw-azd guards
+that prevent build, package, push, and deploy before prerequisite opt-in.
 
 ### Deprecated files
 
@@ -172,11 +185,14 @@ defense-in-depth guard ensuring the agent cannot be deployed even by raw
 
 ### Technical notes
 
-The azd schema (v1.0) supports mixed `host` types per service. The
+The azd 1.32 service graph runs service phases as package → publish → deploy.
+The v1.0 schema supports service-level `prebuild`, `prepackage`, `prepublish`,
+and `predeploy` hooks, but only `workflows.up` at the workflow level. The
 `azure.ai.agents` extension (1.0.0-beta.13) registers `azure.ai.agent` as a
 service target provider. This has been verified against the installed azd 1.32.0
-schema and extension capabilities, but not against a live Azure deployment in this
-PR. A live provisioning preview should be reviewed before any real deployment.
+schema/source and extension capabilities, but not against a live Azure
+deployment in this PR. A live provisioning preview should be reviewed before any
+real deployment.
 
 ## Provisioning
 

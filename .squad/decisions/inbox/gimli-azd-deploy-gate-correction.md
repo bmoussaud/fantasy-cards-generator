@@ -1,0 +1,4 @@
+### 2026-09-10: Root agent deploy gate uses azd service condition plus lifecycle hooks
+**By:** Gimli
+**What:** Corrected the issue #130 root entrypoint design for azd 1.32: only `workflows.up` is supported, so the root manifest no longer declares `workflows.deploy` or claims that azd can override bare `azd deploy`. `card-orchestrator` is disabled by default with `condition: ${CARD_ORCHESTRATOR_ENABLE_PREREQUISITES=false}` and also guarded on `prebuild`, `prepackage`, `prepublish`, and `predeploy`.
+**Why:** azd 1.32 deploys all enabled services for bare `azd deploy`; unsupported workflow claims were safety-shaped but false. The service condition keeps raw bare deploy from selecting the hosted agent by default, and the lifecycle hooks block build, package, publish/push, and deploy before explicit prerequisite opt-in. Once the prerequisites flag is enabled, operators must use `azd deploy web-nat` or `./deploy.sh web --approve-change` for web-only deploys.

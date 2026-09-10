@@ -9,12 +9,16 @@ only.
 
 ### Deploy guards
 
-1. **`workflows.up` + `workflows.deploy`** — both constrain bare `azd up` and
-   bare `azd deploy` to web-nat only.
-2. **Service-level `predeploy` hook** — `hooks/guard_agent_deploy.sh` blocks
-   `azd deploy card-orchestrator` unless
-   `CARD_ORCHESTRATOR_ENABLE_PREREQUISITES=true`.
-3. **Root `deploy.sh`** — production-safe orchestrator with
+1. **`workflows.up`** — azd 1.32 supports only the `up` workflow override, so
+   root `azd up` provisions and deploys web-nat only.
+2. **Service `condition`** — `card-orchestrator` is disabled by default with
+   `condition: ${CARD_ORCHESTRATOR_ENABLE_PREREQUISITES=false}`, so raw bare
+   `azd deploy` deploys all enabled services but does not select the hosted
+   agent until the prerequisites flag is explicitly enabled.
+3. **Service lifecycle hooks** — `hooks/guard_agent_deploy.sh` is registered on
+   `prebuild`, `prepackage`, `prepublish`, and `predeploy` to block
+   build/package/push/deploy unless `CARD_ORCHESTRATOR_ENABLE_PREREQUISITES=true`.
+4. **Root `deploy.sh`** — production-safe orchestrator with
    `--approve-change` / `--approve-prod` enforcement gates.
 
 ### Unified deployment commands
@@ -22,9 +26,9 @@ only.
 | Workflow | Command | Notes |
 |---|---|---|
 | Web-only (default) | `azd up` | Provisions and deploys only web-nat |
-| Bare deploy | `azd deploy` | Deploys only web-nat (workflows.deploy) |
+| Bare deploy | `azd deploy` | Deploys all enabled services; by default only web-nat because the hosted agent condition is false |
 | Web redeploy | `azd deploy web-nat` | Does not trigger provision hooks |
-| Agent deploy | `azd deploy card-orchestrator` | Requires prerequisites enabled (predeploy guard) |
+| Agent deploy | `azd deploy card-orchestrator` | Requires prerequisites enabled (condition + lifecycle hooks) |
 | Full provision | `azd provision` | Deploys all infra including agent prereqs if enabled |
 | Approved deploy | `./deploy.sh agent --approve-change` | Plan-only by default |
 
@@ -70,8 +74,11 @@ Manual cleanup is required for existing Azure role assignments.
 | `cd ... && python deploy.py deploy --environment prod --execute --approve-change --approve-prod` | `./deploy.sh agent --environment prod --approve-change --approve-prod` |
 
 The root `deploy.sh` enforces approval gates natively. Raw `azd deploy
-card-orchestrator` is still available but guarded by the service-level
-`predeploy` hook that requires prerequisites to be enabled.
+card-orchestrator` is still available but guarded by the service condition and
+service-level lifecycle hooks that require prerequisites to be enabled before
+build, package, publish, or deploy. In an environment where
+`CARD_ORCHESTRATOR_ENABLE_PREREQUISITES=true`, do not use bare `azd deploy` as a
+web-only command; use `azd deploy web-nat` or `./deploy.sh web --approve-change`.
 
 ## Dev model-capacity correction and successful ACA-MI E2E — 2026-09-09
 

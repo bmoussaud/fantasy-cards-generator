@@ -387,32 +387,33 @@ def test_root_agent_prerequisites_reuses_card_orchestrator_canonical_patterns() 
 # ── Deploy guard and orchestration (reviewer findings) ───────────────
 
 
-def test_root_deploy_workflow_constrains_bare_azd_deploy_to_web_only() -> None:
-    """Both ``workflows.up`` and ``workflows.deploy`` in the root manifest
-    target only web-nat so bare ``azd up`` and bare ``azd deploy`` never
-    build or deploy the hosted agent."""
+def test_root_workflow_uses_only_supported_up_override() -> None:
+    """azd 1.32 supports ``workflows.up`` only; the root manifest must not
+    claim an unsupported bare ``azd deploy`` override."""
     azure_yaml = (ROOT / "azure.yaml").read_text()
     workflows_start = azure_yaml.index("workflows:")
     hooks_start = azure_yaml.rindex("\nhooks:")
     workflows_section = azure_yaml[workflows_start:hooks_start]
 
     assert "up:" in workflows_section
-    assert "deploy:" in workflows_section
+    assert "deploy:" not in workflows_section
     assert "card-orchestrator" not in workflows_section
     assert "package web-nat" in workflows_section
     assert "deploy web-nat" in workflows_section
 
 
-def test_card_orchestrator_service_predeploy_guard_exists() -> None:
-    """The card-orchestrator service in the root manifest declares a predeploy
-    hook that validates prerequisites before any agent deployment."""
+def test_card_orchestrator_service_lifecycle_guards_exist() -> None:
+    """The card-orchestrator service in the root manifest declares supported
+    lifecycle hooks that validate prerequisites before build/package/publish/deploy."""
     azure_yaml = (ROOT / "azure.yaml").read_text()
 
     # Extract the card-orchestrator service section
     co_start = azure_yaml.index("card-orchestrator:")
-    # Predeploy must be inside the card-orchestrator service, not at root
-    assert "predeploy:" in azure_yaml[co_start:]
-    assert "guard_agent_deploy" in azure_yaml
+    service_section = azure_yaml[co_start : azure_yaml.index("\nresources:", co_start)]
+    assert "condition: ${CARD_ORCHESTRATOR_ENABLE_PREREQUISITES=false}" in service_section
+    for hook in ("prebuild:", "prepackage:", "prepublish:", "predeploy:"):
+        assert hook in service_section
+    assert service_section.count("guard_agent_deploy") == 4
 
     # The guard script exists and is executable
     guard = ROOT / "hooks/guard_agent_deploy.sh"
@@ -460,3 +461,44 @@ def test_root_orchestrator_preserves_approval_gates() -> None:
     assert "--approve-change" in content
     assert "--approve-prod" in content
     assert "PLAN ONLY" in content
+
+
+def test_root_orchestrator_executes_azd_with_explicit_root_cwd(tmp_path: Path) -> None:
+    """The root wrapper scopes azd with --cwd to its own repo root even when
+    launched from a different current working directory."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    log = tmp_path / "azd.log"
+    fake_azd = fake_bin / "azd"
+    fake_azd.write_text(
+        f'#!/bin/sh\necho "pwd=$PWD" > "{log}"\necho "args=$*" >> "{log}"\nexit 17\n'
+    )
+    fake_azd.chmod(0o755)
+
+    result = subprocess.run(
+        ["bash", str(ROOT / "deploy.sh"), "agent", "--approve-change"],
+        cwd=tmp_path,
+        env={"PATH": f"{fake_bin}:/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 17
+    assert f"args=--cwd {ROOT} deploy card-orchestrator --environment dev --no-prompt" in (
+        log.read_text()
+    )
+
+
+def test_root_orchestrator_plan_is_root_relative_from_other_cwd(tmp_path: Path) -> None:
+    result = subprocess.run(
+        ["bash", str(ROOT / "deploy.sh"), "full"],
+        cwd=tmp_path,
+        env={"PATH": "/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert f"Project: {ROOT}" in result.stdout
+    assert f"azd --cwd {ROOT} deploy web-nat" in result.stdout
+    assert f"azd --cwd {ROOT} deploy card-orchestrator" in result.stdout

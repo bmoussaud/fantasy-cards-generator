@@ -6,7 +6,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.46.1.21595",
-      "templateHash": "3033416681856921210"
+      "templateHash": "8916791023119132500"
     }
   },
   "parameters": {
@@ -677,6 +677,48 @@
       "type": "int",
       "defaultValue": 3,
       "minValue": 1
+    },
+    "enableCardOrchestratorPrerequisites": {
+      "type": "bool",
+      "defaultValue": false,
+      "metadata": {
+        "description": "Enable card-orchestrator prerequisites: ACR pull for project MI, optional registry connection, and agent monitoring. Off by default so the web-only workflow never deploys agent infrastructure."
+      }
+    },
+    "createRegistryConnection": {
+      "type": "bool",
+      "defaultValue": false,
+      "metadata": {
+        "description": "Create the Foundry project → ACR registry connection. Only effective when enableCardOrchestratorPrerequisites is true. Enable only after confirming no existing registry connection."
+      }
+    },
+    "registryConnectionName": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Name of an existing registry connection discovered from the project connection inventory. Leave empty for auto-generated name. Never rename an existing connection."
+      }
+    },
+    "enableAgentAlerts": {
+      "type": "bool",
+      "defaultValue": false,
+      "metadata": {
+        "description": "Enable card-orchestrator agent monitoring alerts. Only effective when enableCardOrchestratorPrerequisites is true. Requires at least one agent alert receiver to take effect."
+      }
+    },
+    "agentAlertEmailReceivers": {
+      "type": "array",
+      "defaultValue": [],
+      "metadata": {
+        "description": "Action Group email receivers for card-orchestrator agent alerts."
+      }
+    },
+    "agentAlertWebhookReceivers": {
+      "type": "array",
+      "defaultValue": [],
+      "metadata": {
+        "description": "Action Group webhook receivers for card-orchestrator agent alerts. Do not embed credentials in serviceUri."
+      }
     }
   },
   "variables": {
@@ -8208,7 +8250,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.46.1.21595",
-              "templateHash": "5452053409055454895"
+              "templateHash": "16765409313379569992"
             }
           },
           "parameters": {
@@ -8605,6 +8647,10 @@
               "type": "string",
               "value": "[resourceId('Microsoft.CognitiveServices/accounts/projects', parameters('accountName'), parameters('projectName'))]"
             },
+            "aiFoundryProjectPrincipalId": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.CognitiveServices/accounts/projects', parameters('accountName'), parameters('projectName')), '2025-06-01', 'full').identity.principalId]"
+            },
             "aiFoundryTextDeploymentName": {
               "type": "string",
               "value": "[parameters('textDeploymentName')]"
@@ -8612,6 +8658,573 @@
             "aiFoundryImageDeploymentName": {
               "type": "string",
               "value": "[parameters('imageDeploymentName')]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "containerApps",
+        "monitoring"
+      ]
+    },
+    "agentPrerequisites": {
+      "condition": "[parameters('enableCardOrchestratorPrerequisites')]",
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "card-orchestrator-prerequisites",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "accountName": {
+            "value": "[variables('aiFoundryAccountName')]"
+          },
+          "projectName": {
+            "value": "[variables('resolvedAiFoundryProjectName')]"
+          },
+          "registryName": {
+            "value": "[variables('registryName')]"
+          },
+          "projectPrincipalId": {
+            "value": "[reference('aiFoundry').outputs.aiFoundryProjectPrincipalId.value]"
+          },
+          "createRegistryConnection": {
+            "value": "[parameters('createRegistryConnection')]"
+          },
+          "registryConnectionName": {
+            "value": "[parameters('registryConnectionName')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.46.1.21595",
+              "templateHash": "5437736205600952646"
+            }
+          },
+          "parameters": {
+            "registryName": {
+              "type": "string",
+              "minLength": 5,
+              "metadata": {
+                "description": "Azure Container Registry name for hosted-agent image pulls."
+              }
+            },
+            "accountName": {
+              "type": "string",
+              "minLength": 2,
+              "metadata": {
+                "description": "Azure AI Foundry account name."
+              }
+            },
+            "projectName": {
+              "type": "string",
+              "minLength": 2,
+              "metadata": {
+                "description": "Azure AI Foundry project name."
+              }
+            },
+            "projectPrincipalId": {
+              "type": "string",
+              "minLength": 1,
+              "metadata": {
+                "description": "Foundry project system-assigned managed-identity principal ID."
+              }
+            },
+            "createRegistryConnection": {
+              "type": "bool",
+              "defaultValue": false,
+              "metadata": {
+                "description": "Create the Foundry project → ACR registry connection. Only after confirming no existing registry connection."
+              }
+            },
+            "registryConnectionName": {
+              "type": "string",
+              "defaultValue": "",
+              "metadata": {
+                "description": "Name discovered from the project connection inventory; never rename an existing connection."
+              }
+            }
+          },
+          "variables": {
+            "acrPullRoleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')]"
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[resourceId('Microsoft.ContainerRegistry/registries', parameters('registryName'))]",
+              "name": "[guid(resourceId('Microsoft.ContainerRegistry/registries', parameters('registryName')), parameters('projectPrincipalId'), variables('acrPullRoleDefinitionId'))]",
+              "properties": {
+                "principalId": "[parameters('projectPrincipalId')]",
+                "principalType": "ServicePrincipal",
+                "roleDefinitionId": "[variables('acrPullRoleDefinitionId')]"
+              }
+            },
+            {
+              "condition": "[parameters('createRegistryConnection')]",
+              "type": "Microsoft.CognitiveServices/accounts/projects/connections",
+              "apiVersion": "2025-04-01-preview",
+              "name": "[format('{0}/{1}/{2}', parameters('accountName'), parameters('projectName'), if(empty(parameters('registryConnectionName')), format('{0}-conn', parameters('registryName')), parameters('registryConnectionName')))]",
+              "properties": {
+                "category": "ContainerRegistry",
+                "target": "[reference(resourceId('Microsoft.ContainerRegistry/registries', parameters('registryName')), '2023-07-01').loginServer]",
+                "authType": "ManagedIdentity",
+                "credentials": {
+                  "clientId": "[reference(resourceId('Microsoft.CognitiveServices/accounts/projects', parameters('accountName'), parameters('projectName')), '2025-06-01', 'full').identity.principalId]",
+                  "resourceId": "[resourceId('Microsoft.ContainerRegistry/registries', parameters('registryName'))]"
+                },
+                "isSharedToAll": true,
+                "metadata": {
+                  "ResourceId": "[resourceId('Microsoft.ContainerRegistry/registries', parameters('registryName'))]"
+                }
+              },
+              "dependsOn": [
+                "[extensionResourceId(resourceId('Microsoft.ContainerRegistry/registries', parameters('registryName')), 'Microsoft.Authorization/roleAssignments', guid(resourceId('Microsoft.ContainerRegistry/registries', parameters('registryName')), parameters('projectPrincipalId'), variables('acrPullRoleDefinitionId')))]"
+              ]
+            }
+          ],
+          "outputs": {
+            "registryConnectionName": {
+              "type": "string",
+              "value": "[if(and(parameters('createRegistryConnection'), empty(parameters('registryConnectionName'))), format('{0}-conn', parameters('registryName')), parameters('registryConnectionName'))]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "aiFoundry"
+      ]
+    },
+    "agentMonitoring": {
+      "condition": "[parameters('enableCardOrchestratorPrerequisites')]",
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "card-orchestrator-agent-monitoring",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "environmentName": {
+            "value": "[parameters('environmentName')]"
+          },
+          "containerAppName": {
+            "value": "[reference('containerApps').outputs.containerAppName.value]"
+          },
+          "appInsightsResourceId": {
+            "value": "[reference('monitoring').outputs.appInsightsResourceId.value]"
+          },
+          "logAnalyticsWorkspaceResourceId": {
+            "value": "[reference('monitoring').outputs.logAnalyticsWorkspaceResourceId.value]"
+          },
+          "enableAlerts": {
+            "value": "[parameters('enableAgentAlerts')]"
+          },
+          "actionGroupEmailReceivers": {
+            "value": "[parameters('agentAlertEmailReceivers')]"
+          },
+          "actionGroupWebhookReceivers": {
+            "value": "[parameters('agentAlertWebhookReceivers')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.46.1.21595",
+              "templateHash": "6408497062404921467"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "Deployment location for agent monitoring resources."
+              }
+            },
+            "environmentName": {
+              "type": "string",
+              "allowedValues": [
+                "dev",
+                "prod"
+              ],
+              "metadata": {
+                "description": "Environment isolated by this monitoring stack."
+              }
+            },
+            "agentServiceName": {
+              "type": "string",
+              "defaultValue": "card-orchestrator",
+              "metadata": {
+                "description": "Stable OpenTelemetry service name emitted by the hosted agent runtime."
+              }
+            },
+            "containerAppName": {
+              "type": "string",
+              "metadata": {
+                "description": "Container App name used to filter platform logs."
+              }
+            },
+            "appInsightsResourceId": {
+              "type": "string",
+              "minLength": 1,
+              "metadata": {
+                "description": "Existing workspace-based Application Insights resource ID."
+              }
+            },
+            "logAnalyticsWorkspaceResourceId": {
+              "type": "string",
+              "minLength": 1,
+              "metadata": {
+                "description": "Existing Log Analytics workspace resource ID."
+              }
+            },
+            "enableAlerts": {
+              "type": "bool",
+              "defaultValue": false,
+              "metadata": {
+                "description": "Master alert switch. Disabled by default; rules also require at least one configured receiver."
+              }
+            },
+            "actionGroupEmailReceivers": {
+              "type": "array",
+              "defaultValue": [],
+              "metadata": {
+                "description": "Action Group email receivers. Each item uses name, emailAddress, and useCommonAlertSchema."
+              }
+            },
+            "actionGroupWebhookReceivers": {
+              "type": "array",
+              "defaultValue": [],
+              "metadata": {
+                "description": "Action Group webhook receivers. Each item uses name, serviceUri, and useCommonAlertSchema. Do not embed credentials in serviceUri."
+              }
+            },
+            "invocationAdverseThreshold": {
+              "type": "int",
+              "defaultValue": 3,
+              "minValue": 1,
+              "maxValue": 100,
+              "metadata": {
+                "description": "Minimum invocation adverse outcomes per window to trigger the alert."
+              }
+            },
+            "modelThrottleThreshold": {
+              "type": "int",
+              "defaultValue": 3,
+              "minValue": 1,
+              "maxValue": 100,
+              "metadata": {
+                "description": "Minimum model provider throttles (HTTP 429) per window to trigger the alert."
+              }
+            },
+            "dependencyFailureThreshold": {
+              "type": "int",
+              "defaultValue": 3,
+              "minValue": 1,
+              "maxValue": 100,
+              "metadata": {
+                "description": "Minimum failed or timed-out model dependency attempts per window to trigger the alert."
+              }
+            },
+            "containerRestartThreshold": {
+              "type": "int",
+              "defaultValue": 3,
+              "minValue": 1,
+              "maxValue": 100,
+              "metadata": {
+                "description": "Minimum container restart/unhealthy/probe-failure events per window to trigger the alert."
+              }
+            },
+            "tags": {
+              "type": "object",
+              "defaultValue": {},
+              "metadata": {
+                "description": "Optional tags shared by agent monitoring resources."
+              }
+            }
+          },
+          "variables": {
+            "resourceToken": "[format('fcg-agent-{0}', parameters('environmentName'))]",
+            "hasAlertRouting": "[or(greater(length(parameters('actionGroupEmailReceivers')), 0), greater(length(parameters('actionGroupWebhookReceivers')), 0))]",
+            "alertsEnabled": "[and(parameters('enableAlerts'), variables('hasAlertRouting'))]",
+            "appInsightsHiddenLinkTag": "[format('hidden-link:{0}', parameters('appInsightsResourceId'))]",
+            "workbookData": {
+              "version": "Notebook/1.0",
+              "items": [
+                {
+                  "type": 1,
+                  "content": {
+                    "json": "[format('# card-orchestrator — {0} agent operations\nAgent-isolated workbook. No prompts, card text, art prompts, generated content, identity or raw client data are queried.', toUpper(parameters('environmentName')))]"
+                  },
+                  "name": "overview"
+                },
+                {
+                  "type": 9,
+                  "content": {
+                    "version": "KqlParameterItem/1.0",
+                    "parameters": [
+                      {
+                        "id": "[guid('workbook-agent-service', parameters('environmentName'))]",
+                        "version": "KqlParameterItem/1.0",
+                        "name": "AgentService",
+                        "type": 1,
+                        "isRequired": true,
+                        "value": "[parameters('agentServiceName')]"
+                      },
+                      {
+                        "id": "[guid('workbook-agent-version', parameters('environmentName'))]",
+                        "version": "KqlParameterItem/1.0",
+                        "name": "AgentVersion",
+                        "type": 1,
+                        "isRequired": true,
+                        "value": "*"
+                      },
+                      {
+                        "id": "[guid('workbook-agent-environment', parameters('environmentName'))]",
+                        "version": "KqlParameterItem/1.0",
+                        "name": "Environment",
+                        "type": 1,
+                        "isRequired": true,
+                        "value": "[parameters('environmentName')]"
+                      }
+                    ],
+                    "style": "pills",
+                    "queryType": 0,
+                    "resourceType": "microsoft.operationalinsights/workspaces"
+                  },
+                  "name": "filters"
+                },
+                {
+                  "type": 3,
+                  "content": {
+                    "version": "KqlItem/1.0",
+                    "title": "Invocation outcomes: completed, failed, timed_out, throttled",
+                    "query": "AppMetrics\n| where AppRoleName == '{AgentService}'\n| where Name == \"fcg.generation.requests\"\n| extend Outcome=tostring(Properties[\"fcg.outcome\"]), AgentVersion=tostring(Properties[\"fcg.agent_version\"])\n| where '{AgentVersion}' == '*' or AgentVersion == '{AgentVersion}'\n| summarize Invocations=sum(Sum) by Outcome, AgentVersion, bin(TimeGenerated, 1h)\n| order by TimeGenerated asc\n",
+                    "size": 0,
+                    "queryType": 0,
+                    "resourceType": "microsoft.operationalinsights/workspaces",
+                    "visualization": "timechart"
+                  },
+                  "name": "invocation-outcomes"
+                },
+                {
+                  "type": 3,
+                  "content": {
+                    "version": "KqlItem/1.0",
+                    "title": "Overall invocation latency by outcome and hosted version",
+                    "query": "AppMetrics\n| where AppRoleName == '{AgentService}'\n| where Name == \"fcg.generation.duration\"\n| extend Outcome=tostring(Properties[\"fcg.outcome\"]), AgentVersion=tostring(Properties[\"fcg.agent_version\"])\n| where '{AgentVersion}' == '*' or AgentVersion == '{AgentVersion}'\n| summarize TotalMs=sum(Sum), MeasurementCount=sum(ItemCount) by Outcome, AgentVersion, bin(TimeGenerated, 1h)\n| extend AvgMs=TotalMs / MeasurementCount\n| order by TimeGenerated asc\n",
+                    "size": 0,
+                    "queryType": 0,
+                    "resourceType": "microsoft.operationalinsights/workspaces",
+                    "visualization": "timechart"
+                  },
+                  "name": "stage-latency"
+                },
+                {
+                  "type": 3,
+                  "content": {
+                    "version": "KqlItem/1.0",
+                    "title": "Model dependency latency and outcomes by bounded orchestration stage",
+                    "query": "AppMetrics\n| where AppRoleName == '{AgentService}'\n| where Name == \"fcg.dependency.duration\"\n| extend Stage=tostring(Properties[\"fcg.stage\"]), Provider=tostring(Properties[\"fcg.dependency\"]), Outcome=tostring(Properties[\"fcg.outcome\"]), AgentVersion=tostring(Properties[\"fcg.agent_version\"])\n| where '{AgentVersion}' == '*' or AgentVersion == '{AgentVersion}'\n| summarize TotalMs=sum(Sum), AttemptCount=sum(ItemCount) by Stage, Provider, Outcome, AgentVersion, bin(TimeGenerated, 1h)\n| extend AvgMs=TotalMs / AttemptCount\n| order by TimeGenerated desc\n",
+                    "size": 0,
+                    "queryType": 0,
+                    "resourceType": "microsoft.operationalinsights/workspaces"
+                  },
+                  "name": "model-dependencies"
+                },
+                {
+                  "type": 3,
+                  "content": {
+                    "version": "KqlItem/1.0",
+                    "title": "Exceptions and bounded runtime errors",
+                    "query": "union isfuzzy=true\n  (AppExceptions | where AppRoleName == '{AgentService}' | project TimeGenerated, Signal=\"exception\", Type=ExceptionType, Severity=SeverityLevel),\n  (AppTraces | where AppRoleName == '{AgentService}' and SeverityLevel >= 3 | project TimeGenerated, Signal=\"trace\", Type=tostring(Properties[\"fcg.error_code\"]), Severity=SeverityLevel)\n| order by TimeGenerated desc\n| take 100\n",
+                    "size": 0,
+                    "queryType": 0,
+                    "resourceType": "microsoft.operationalinsights/workspaces"
+                  },
+                  "name": "errors"
+                },
+                {
+                  "type": 3,
+                  "content": {
+                    "version": "KqlItem/1.0",
+                    "title": "Moderation and safety signals",
+                    "query": "AppMetrics\n| where AppRoleName == '{AgentService}'\n| where Name == \"fcg.moderation.decisions\"\n| extend Stage=tostring(Properties[\"fcg.stage\"]), Reason=tostring(Properties[\"fcg.moderation_reason\"]), Outcome=tostring(Properties[\"fcg.outcome\"]), AgentVersion=tostring(Properties[\"fcg.agent_version\"])\n| where '{AgentVersion}' == '*' or AgentVersion == '{AgentVersion}'\n| summarize Decisions=sum(Sum) by Stage, Reason, Outcome, AgentVersion, bin(TimeGenerated, 1h)\n| order by TimeGenerated desc\n",
+                    "size": 0,
+                    "queryType": 0,
+                    "resourceType": "microsoft.operationalinsights/workspaces"
+                  },
+                  "name": "moderation"
+                },
+                {
+                  "type": 3,
+                  "content": {
+                    "version": "KqlItem/1.0",
+                    "title": "ACA container restart and unhealthy events",
+                    "query": "[replace('ContainerAppSystemLogs_CL\n| where ContainerAppName_s == ''__CONTAINER_APP_NAME__''\n| where Reason_s in (\"Restarting\", \"Unhealthy\", \"HealthProbeFailed\") or Log_s has_any (\"restart\", \"unhealthy\", \"probe failed\")\n| project TimeGenerated, RevisionName_s, Reason_s, Log_s\n| order by TimeGenerated desc\n| take 100\n', '__CONTAINER_APP_NAME__', parameters('containerAppName'))]",
+                    "size": 0,
+                    "queryType": 0,
+                    "resourceType": "microsoft.operationalinsights/workspaces"
+                  },
+                  "name": "aca-health"
+                }
+              ],
+              "isLocked": false,
+              "fallbackResourceIds": [
+                "[parameters('logAnalyticsWorkspaceResourceId')]"
+              ]
+            },
+            "invocationAdverseQuery": "[format('AppMetrics\n| where AppRoleName == ''{0}''\n| where Name == \"fcg.generation.requests\"\n| where tostring(Properties[\"fcg.outcome\"]) in (\"failed\", \"timed_out\", \"throttled\", \"held\", \"refused\", \"routing_defer\")\n| summarize AdverseOutcomes=sum(Sum)\n| where AdverseOutcomes >= {1}\n| project Breach=1\n', parameters('agentServiceName'), parameters('invocationAdverseThreshold'))]",
+            "modelThrottleQuery": "[format('AppMetrics\n| where AppRoleName == ''{0}''\n| where Name == \"fcg.dependency.attempts\"\n| where tostring(Properties[\"fcg.dependency\"]) == \"foundry_text\"\n| where tostring(Properties[\"fcg.outcome\"]) == \"throttled\"\n| summarize Throttles=sum(Sum)\n| where Throttles >= {1}\n| project Breach=1\n', parameters('agentServiceName'), parameters('modelThrottleThreshold'))]",
+            "dependencyFailureQuery": "[format('AppMetrics\n| where AppRoleName == ''{0}''\n| where Name == \"fcg.dependency.attempts\"\n| where tostring(Properties[\"fcg.dependency\"]) == \"foundry_text\"\n| where tostring(Properties[\"fcg.outcome\"]) in (\"failed\", \"timed_out\")\n| summarize DependencyFailures=sum(Sum)\n| where DependencyFailures >= {1}\n| project Breach=1\n', parameters('agentServiceName'), parameters('dependencyFailureThreshold'))]",
+            "containerRestartQuery": "[format('ContainerAppSystemLogs_CL\n| where ContainerAppName_s == ''{0}''\n| where Reason_s in (\"Restarting\", \"Unhealthy\", \"HealthProbeFailed\") or Log_s has_any (\"restart\", \"unhealthy\", \"probe failed\")\n| summarize RestartOrUnhealthyEvents=count()\n| where RestartOrUnhealthyEvents >= {1}\n| project Breach=1\n', parameters('containerAppName'), parameters('containerRestartThreshold'))]",
+            "alertDefinitions": [
+              {
+                "name": "agent-invocation-adverse",
+                "displayName": "Agent invocation adverse outcomes",
+                "description": "card-orchestrator invocation failures, timeouts, or throttled outcomes reached the configured threshold. Check model capacity and hosted-version health.",
+                "severity": 1,
+                "evaluationFrequency": "PT5M",
+                "windowSize": "PT15M",
+                "query": "[variables('invocationAdverseQuery')]"
+              },
+              {
+                "name": "agent-model-throttles",
+                "displayName": "Agent model provider throttling",
+                "description": "Foundry model provider returned HTTP 429 for card-orchestrator requests. Verify capacity allocation and quota for the text deployment.",
+                "severity": 1,
+                "evaluationFrequency": "PT5M",
+                "windowSize": "PT15M",
+                "query": "[variables('modelThrottleQuery')]"
+              },
+              {
+                "name": "agent-dependency-failures",
+                "displayName": "Agent model dependency failure burst",
+                "description": "card-orchestrator model dependency failures or timeouts reached the configured threshold.",
+                "severity": 1,
+                "evaluationFrequency": "PT5M",
+                "windowSize": "PT15M",
+                "query": "[variables('dependencyFailureQuery')]"
+              },
+              {
+                "name": "agent-container-restarts",
+                "displayName": "Agent container restart or unhealthy burst",
+                "description": "ACA restart, unhealthy, or probe-failure events for the card-orchestrator container reached the configured threshold.",
+                "severity": 1,
+                "evaluationFrequency": "PT5M",
+                "windowSize": "PT15M",
+                "query": "[variables('containerRestartQuery')]"
+              }
+            ]
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Insights/actionGroups",
+              "apiVersion": "2023-01-01",
+              "name": "[take(format('{0}-ag', variables('resourceToken')), 260)]",
+              "location": "global",
+              "tags": "[parameters('tags')]",
+              "properties": {
+                "enabled": "[variables('hasAlertRouting')]",
+                "groupShortName": "[take(format('fcgagt{0}', parameters('environmentName')), 12)]",
+                "emailReceivers": "[parameters('actionGroupEmailReceivers')]",
+                "webhookReceivers": "[parameters('actionGroupWebhookReceivers')]"
+              }
+            },
+            {
+              "type": "Microsoft.Insights/workbooks",
+              "apiVersion": "2022-04-01",
+              "name": "[guid(resourceGroup().id, parameters('environmentName'), 'card-orchestrator-agent-operations')]",
+              "location": "[parameters('location')]",
+              "kind": "shared",
+              "tags": "[union(parameters('tags'), createObject(format('{0}', variables('appInsightsHiddenLinkTag')), 'Resource'))]",
+              "properties": {
+                "displayName": "[format('card-orchestrator {0} Agent Operations', toUpper(parameters('environmentName')))]",
+                "serializedData": "[string(variables('workbookData'))]",
+                "version": "1.0",
+                "sourceId": "[parameters('logAnalyticsWorkspaceResourceId')]",
+                "category": "workbook"
+              }
+            },
+            {
+              "copy": {
+                "name": "alertRules",
+                "count": "[length(variables('alertDefinitions'))]"
+              },
+              "type": "Microsoft.Insights/scheduledQueryRules",
+              "apiVersion": "2023-12-01",
+              "name": "[take(format('{0}-{1}', variables('resourceToken'), variables('alertDefinitions')[copyIndex()].name), 260)]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "properties": {
+                "displayName": "[format('{0} {1}', toUpper(parameters('environmentName')), variables('alertDefinitions')[copyIndex()].displayName)]",
+                "description": "[variables('alertDefinitions')[copyIndex()].description]",
+                "severity": "[variables('alertDefinitions')[copyIndex()].severity]",
+                "enabled": "[variables('alertsEnabled')]",
+                "evaluationFrequency": "[variables('alertDefinitions')[copyIndex()].evaluationFrequency]",
+                "windowSize": "[variables('alertDefinitions')[copyIndex()].windowSize]",
+                "scopes": [
+                  "[parameters('logAnalyticsWorkspaceResourceId')]"
+                ],
+                "targetResourceTypes": [
+                  "Microsoft.OperationalInsights/workspaces"
+                ],
+                "criteria": {
+                  "allOf": [
+                    {
+                      "query": "[variables('alertDefinitions')[copyIndex()].query]",
+                      "timeAggregation": "Count",
+                      "operator": "GreaterThan",
+                      "threshold": 0,
+                      "failingPeriods": {
+                        "numberOfEvaluationPeriods": 1,
+                        "minFailingPeriodsToAlert": 1
+                      }
+                    }
+                  ]
+                },
+                "autoMitigate": true,
+                "skipQueryValidation": true,
+                "actions": {
+                  "actionGroups": [
+                    "[resourceId('Microsoft.Insights/actionGroups', take(format('{0}-ag', variables('resourceToken')), 260))]"
+                  ]
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Insights/actionGroups', take(format('{0}-ag', variables('resourceToken')), 260))]"
+              ]
+            }
+          ],
+          "outputs": {
+            "actionGroupName": {
+              "type": "string",
+              "value": "[take(format('{0}-ag', variables('resourceToken')), 260)]"
+            },
+            "alertsEnabled": {
+              "type": "bool",
+              "value": "[variables('alertsEnabled')]"
+            },
+            "workbookName": {
+              "type": "string",
+              "value": "[guid(resourceGroup().id, parameters('environmentName'), 'card-orchestrator-agent-operations')]"
+            },
+            "agentServiceName": {
+              "type": "string",
+              "value": "[parameters('agentServiceName')]"
             }
           }
         }
@@ -8850,6 +9463,34 @@
     "AZURE_APP_INSIGHTS_RESOURCE_ID": {
       "type": "string",
       "value": "[reference('monitoring').outputs.appInsightsResourceId.value]"
+    },
+    "AZURE_AI_PROJECT_ID": {
+      "type": "string",
+      "value": "[reference('aiFoundry').outputs.aiFoundryProjectResourceId.value]"
+    },
+    "AZURE_AI_PROJECT_ENDPOINT": {
+      "type": "string",
+      "value": "[reference('aiFoundry').outputs.aiFoundryProjectEndpoint.value]"
+    },
+    "FOUNDRY_PROJECT_ENDPOINT": {
+      "type": "string",
+      "value": "[reference('aiFoundry').outputs.aiFoundryProjectEndpoint.value]"
+    },
+    "AZURE_AI_ACCOUNT_NAME": {
+      "type": "string",
+      "value": "[reference('aiFoundry').outputs.aiFoundryAccountName.value]"
+    },
+    "AZURE_AI_PROJECT_NAME": {
+      "type": "string",
+      "value": "[reference('aiFoundry').outputs.aiFoundryProjectName.value]"
+    },
+    "AZURE_CONTAINER_REGISTRY_RESOURCE_ID": {
+      "type": "string",
+      "value": "[reference('registry').outputs.registryResourceId.value]"
+    },
+    "AZURE_AI_PROJECT_ACR_CONNECTION_NAME": {
+      "type": "string",
+      "value": "[if(and(and(parameters('enableCardOrchestratorPrerequisites'), parameters('createRegistryConnection')), empty(parameters('registryConnectionName'))), format('{0}-conn', variables('registryName')), parameters('registryConnectionName'))]"
     }
   }
 }

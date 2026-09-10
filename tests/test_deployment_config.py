@@ -1130,51 +1130,69 @@ def test_root_manifest_requires_azd_version_and_agent_extension() -> None:
     assert "=1.0.0-beta.13" in azure_yaml
 
 
-def test_root_manifest_safe_default_workflow_deploys_only_web() -> None:
-    """Both ``azd up`` and bare ``azd deploy`` target only web-nat.
+def test_root_manifest_safe_default_up_workflow_deploys_only_web() -> None:
+    """``azd up`` targets only web-nat via the only supported azd workflow.
 
     The card-orchestrator hosted agent is never built, pushed, or deployed
-    unless an operator explicitly runs ``azd deploy card-orchestrator`` after
-    enabling prerequisites and passing the service-level predeploy guard.
+    by ``azd up`` unless an operator removes the default web-only workflow.
+    azd 1.32 supports ``workflows.up`` only; there is no valid
+    ``workflows.deploy`` override for bare ``azd deploy``.
     """
     azure_yaml = (REPO_ROOT / "azure.yaml").read_text()
 
     assert "workflows:" in azure_yaml
     assert "deploy web-nat" in azure_yaml
     assert "deploy --all" not in azure_yaml
-    # Both up and deploy workflows constrain to web-nat only
     workflows_start = azure_yaml.index("workflows:")
     hooks_start = azure_yaml.rindex("\nhooks:")
     workflows_section = azure_yaml[workflows_start:hooks_start]
     assert "card-orchestrator" not in workflows_section
     assert "up:" in workflows_section
-    assert "deploy:" in workflows_section
-    # The deploy workflow must package and deploy web-nat only
+    assert "deploy:" not in workflows_section
     assert "package web-nat" in workflows_section
+
+
+def test_root_manifest_disables_card_orchestrator_by_default_for_raw_azd_deploy() -> None:
+    """A supported service condition, not an invalid deploy workflow, keeps
+    raw bare ``azd deploy`` from selecting card-orchestrator by default."""
+    azure_yaml = (REPO_ROOT / "azure.yaml").read_text()
+    service_start = azure_yaml.index("card-orchestrator:")
+    service_end = azure_yaml.index("\nresources:", service_start)
+    service_section = azure_yaml[service_start:service_end]
+
+    assert "condition: ${CARD_ORCHESTRATOR_ENABLE_PREREQUISITES=false}" in service_section
+    assert "prebuild:" in service_section
+    assert "prepackage:" in service_section
+    assert "prepublish:" in service_section
+    assert "predeploy:" in service_section
 
 
 def test_root_manifest_hooks_only_on_provision_not_deploy() -> None:
     """Root-level hooks run only during provision; deploy-only paths do not
-    rotate credentials.  The card-orchestrator service has a service-level
-    predeploy guard that validates prerequisites — this is intentional and
-    does not perform credential rotation."""
+    rotate credentials. The card-orchestrator service has service-level
+    lifecycle guards that validate prerequisites without credential rotation."""
     azure_yaml = (REPO_ROOT / "azure.yaml").read_text()
 
     assert "preprovision:" in azure_yaml
     assert "postprovision:" in azure_yaml
     # No root-level postdeploy hooks anywhere
     assert "postdeploy:" not in azure_yaml
-    # The only predeploy is the card-orchestrator prerequisite guard
+    # The only service lifecycle gates are the card-orchestrator prerequisite guards.
+    assert azure_yaml.count("prebuild:") == 1
+    assert azure_yaml.count("prepackage:") == 1
+    assert azure_yaml.count("prepublish:") == 1
     assert azure_yaml.count("predeploy:") == 1
     assert "guard_agent_deploy" in azure_yaml
 
 
-def test_card_orchestrator_predeploy_guard_validates_prerequisites() -> None:
-    """The card-orchestrator service-level predeploy hook blocks deployment
+def test_card_orchestrator_lifecycle_guard_validates_prerequisites() -> None:
+    """The card-orchestrator service-level lifecycle hooks block build, package,
+    publish, and deploy
     unless CARD_ORCHESTRATOR_ENABLE_PREREQUISITES is explicitly true."""
     guard = (REPO_ROOT / "hooks/guard_agent_deploy.sh").read_text()
 
     assert "CARD_ORCHESTRATOR_ENABLE_PREREQUISITES" in guard
+    assert "built, packaged, pushed, or deployed" in guard
     assert "exit 1" in guard
     assert (REPO_ROOT / "hooks/guard_agent_deploy.sh").stat().st_mode & 0o111
 

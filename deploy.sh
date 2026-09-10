@@ -18,6 +18,8 @@
 #   ./deploy.sh web --environment prod --approve-change --approve-prod
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 ACTION="${1:-}"
 shift || true
 
@@ -77,20 +79,20 @@ if [[ "$ENVIRONMENT" == "prod" && "$APPROVE_PROD" != "true" ]]; then
 fi
 
 if [[ "$ACTION" != "preview" && "$APPROVE_CHANGE" != "true" ]]; then
-    echo "Project: $(cd "$(dirname "$0")" && pwd)"
+    echo "Project: $ROOT"
     case "$ACTION" in
         web)
-            echo "Command: azd deploy web-nat --environment $ENVIRONMENT --no-prompt"
+            echo "Command: azd --cwd $ROOT deploy web-nat --environment $ENVIRONMENT --no-prompt"
             ;;
         agent)
-            echo "Command: azd deploy card-orchestrator --environment $ENVIRONMENT --no-prompt"
+            echo "Command: azd --cwd $ROOT deploy card-orchestrator --environment $ENVIRONMENT --no-prompt"
             ;;
         full)
-            echo "Command: azd deploy web-nat --environment $ENVIRONMENT --no-prompt"
-            echo "Command: azd deploy card-orchestrator --environment $ENVIRONMENT --no-prompt"
+            echo "Command: azd --cwd $ROOT deploy web-nat --environment $ENVIRONMENT --no-prompt"
+            echo "Command: azd --cwd $ROOT deploy card-orchestrator --environment $ENVIRONMENT --no-prompt"
             ;;
         provision)
-            echo "Command: azd provision --environment $ENVIRONMENT --no-prompt"
+            echo "Command: azd --cwd $ROOT provision --environment $ENVIRONMENT --no-prompt"
             ;;
     esac
     echo ""
@@ -100,19 +102,19 @@ fi
 
 case "$ACTION" in
     preview)
-        exec azd provision --preview --environment "$ENVIRONMENT" --no-prompt
+        exec azd --cwd "$ROOT" provision --preview --environment "$ENVIRONMENT" --no-prompt
         ;;
     web)
-        exec azd deploy web-nat --environment "$ENVIRONMENT" --no-prompt
+        exec azd --cwd "$ROOT" deploy web-nat --environment "$ENVIRONMENT" --no-prompt
         ;;
     agent)
-        exec azd deploy card-orchestrator --environment "$ENVIRONMENT" --no-prompt
+        exec azd --cwd "$ROOT" deploy card-orchestrator --environment "$ENVIRONMENT" --no-prompt
         ;;
     full)
-        azd deploy web-nat --environment "$ENVIRONMENT" --no-prompt
-        exec azd deploy card-orchestrator --environment "$ENVIRONMENT" --no-prompt
+        azd --cwd "$ROOT" deploy web-nat --environment "$ENVIRONMENT" --no-prompt
+        exec azd --cwd "$ROOT" deploy card-orchestrator --environment "$ENVIRONMENT" --no-prompt
         ;;
     provision)
-        exec azd provision --environment "$ENVIRONMENT" --no-prompt
+        exec azd --cwd "$ROOT" provision --environment "$ENVIRONMENT" --no-prompt
         ;;
 esac
