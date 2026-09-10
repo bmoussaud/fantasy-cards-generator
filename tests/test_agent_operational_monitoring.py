@@ -104,6 +104,7 @@ def test_manifest_enables_custom_metrics_without_redeclaring_reserved_values() -
     }
     assert environment["TELEMETRY_ENABLED"] == "true"
     assert environment["TELEMETRY_ENVIRONMENT"] == "${AZURE_ENV_NAME}"
+    assert environment["AZURE_EXPERIMENTAL_ENABLE_GENAI_TRACING"] == "true"
     assert "APPLICATIONINSIGHTS_CONNECTION_STRING" not in environment
     assert "OTEL_SERVICE_NAME" not in environment
 

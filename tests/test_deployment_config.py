@@ -872,6 +872,11 @@ def test_telemetry_reuses_single_workspace_app_insights_and_secret_wiring() -> N
     assert container_apps.count("name: 'applicationinsights-connection-string'") == 1
     assert container_apps.count("name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'") == 1
     assert "secretRef: 'applicationinsights-connection-string'" in container_apps
+    assert container_apps.count("name: 'AZURE_EXPERIMENTAL_ENABLE_GENAI_TRACING'") == 1
+    assert (
+        "name: 'AZURE_EXPERIMENTAL_ENABLE_GENAI_TRACING'\n      value: 'true'"
+        in container_apps
+    )
     assert "appInsightsResourceId: monitoring.outputs.appInsightsResourceId" in main_bicep
     assert (
         "logAnalyticsWorkspaceResourceId: monitoring.outputs.logAnalyticsWorkspaceResourceId"

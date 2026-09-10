@@ -28,7 +28,8 @@ Foundry project monitoring injects the reserved
 copied between environments. Root Bicep creates account- and project-level
 `AppInsights` connections to the existing workspace-based Application Insights
 resource. The hosted manifest explicitly sets only non-secret
-`TELEMETRY_ENABLED=true` and the environment name.
+`TELEMETRY_ENABLED=true`, the environment name, and the experimental
+`AZURE_EXPERIMENTAL_ENABLE_GENAI_TRACING=true` SDK tracing opt-in.
 
 Foundry fixes `service.name` to the agent name, so `AppRoleName ==
 "card-orchestrator"` is the service boundary. `OTEL_SERVICE_NAME` is not configured

@@ -49,13 +49,14 @@ def test_dedicated_azd_folder_resolves_root_context_and_agent_dockerfile() -> No
     assert service["docker"]["tag"] == "${CARD_ORCHESTRATOR_VERSION}"
 
 
-def test_only_nonreserved_model_and_build_variables_are_supplied() -> None:
+def test_only_nonreserved_runtime_variables_are_supplied() -> None:
     service = _manifest()["services"]["card-orchestrator"]
     assert service["environmentVariables"] == [
         {"name": "AZURE_AI_MODEL_DEPLOYMENT_NAME", "value": "${AZURE_AI_MODEL_DEPLOYMENT_NAME}"},
         {"name": "CARD_ORCHESTRATOR_VERSION", "value": "${CARD_ORCHESTRATOR_VERSION}"},
         {"name": "TELEMETRY_ENABLED", "value": "true"},
         {"name": "TELEMETRY_ENVIRONMENT", "value": "${AZURE_ENV_NAME}"},
+        {"name": "AZURE_EXPERIMENTAL_ENABLE_GENAI_TRACING", "value": "true"},
     ]
     assert "APPLICATIONINSIGHTS_CONNECTION_STRING" not in {
         item["name"] for item in service["environmentVariables"]

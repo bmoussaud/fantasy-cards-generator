@@ -44,15 +44,21 @@ For local work, telemetry is off by default:
 TELEMETRY_ENABLED=false
 OTEL_SERVICE_NAME=fantasy-cards-generator
 TELEMETRY_SAMPLING_RATIO=1.0
+AZURE_EXPERIMENTAL_ENABLE_GENAI_TRACING=
 APPLICATIONINSIGHTS_CONNECTION_STRING=
 ```
 
 Do not put a real connection string in source control. To exercise telemetry locally,
-set it only in an ignored `.env` and start the telemetry-first entry point:
+set it only in an ignored `.env`, set
+`AZURE_EXPERIMENTAL_ENABLE_GENAI_TRACING=true` to opt in to Azure SDK GenAI tracing
+while it remains experimental, and start the telemetry-first entry point:
 
 ```powershell
 uv run uvicorn app.entrypoint:app --reload
 ```
+
+This opt-in only enables GenAI span emission to the configured telemetry destination;
+it does not enable raw prompt, response, header, or body capture.
 
 ## Alert routing
 

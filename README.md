@@ -92,6 +92,9 @@ Application telemetry is disabled locally by default and enabled in Azure throug
 the existing Application Insights connection-string secret. Monitoring resources,
 safe defaults, alert routing, privacy exclusions, KQL, cost controls, and rollback
 are documented in [`docs/operational-monitoring.md`](docs/operational-monitoring.md).
+Azure SDK GenAI tracing is experimental; deployed runtimes set
+`AZURE_EXPERIMENTAL_ENABLE_GENAI_TRACING=true`, and local developers can set the
+same value in their ignored `.env` only when exercising telemetry.
 
 The default Foundry deployment aliases remain `gpt-5-5` and `gpt-image-2` for
 application compatibility. In `eastus2`, they target `gpt-5.5`

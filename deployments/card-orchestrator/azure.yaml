@@ -30,7 +30,8 @@
         {"name": "AZURE_AI_MODEL_DEPLOYMENT_NAME", "value": "${AZURE_AI_MODEL_DEPLOYMENT_NAME}"},
         {"name": "CARD_ORCHESTRATOR_VERSION", "value": "${CARD_ORCHESTRATOR_VERSION}"},
         {"name": "TELEMETRY_ENABLED", "value": "true"},
-        {"name": "TELEMETRY_ENVIRONMENT", "value": "${AZURE_ENV_NAME}"}
+        {"name": "TELEMETRY_ENVIRONMENT", "value": "${AZURE_ENV_NAME}"},
+        {"name": "AZURE_EXPERIMENTAL_ENABLE_GENAI_TRACING", "value": "true"}
       ]
     }
   }
