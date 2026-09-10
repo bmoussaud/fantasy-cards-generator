@@ -1,5 +1,19 @@
 # fantasy-cards-generator
 
+## Architecture
+
+[![Implemented architecture: FastAPI on Azure Container Apps, optional Foundry
+orchestration, and private data services](docs/images/architecture.png)](docs/images/architecture.svg)
+
+FastAPI owns authentication, moderation, image generation, and persistence.
+Text generation uses direct Azure OpenAI calls by default, with an opt-in
+Foundry hosted orchestrator. Cosmos DB, Blob Storage, and Key Vault are reached
+through private endpoints; browsers receive artwork through the backend.
+
+[Editable draw.io source](docs/architecture.drawio) |
+[Self-contained SVG](docs/images/architecture.svg) |
+[Architecture details and source evidence](docs/architecture.md)
+
 ## Prerequisites
 
 - [uv](https://docs.astral.sh/uv/)
@@ -64,27 +78,20 @@ Provision the application with Azure Developer CLI:
 ```bash
 azd env new dev
 azd env set AZURE_LOCATION eastus2
-azd env set LEGACY_COSMOS_IP_RULE 20.10.253.231
 azd up
 ```
 
 `azd up` provisions Azure Container Registry and Azure Container Apps, builds the
 production Docker image from `Dockerfile`, pushes it to the provisioned registry,
-and deploys the `web` service to Container Apps on port 8000.
+and deploys the `web-nat` service to Container Apps on port 8000.
 
-The current dev/MVP rollout uses a workload-profile Container Apps environment
-behind a dedicated VNet subnet + NAT Gateway so Cosmos DB can allowlist the
-stable NAT public IP instead of a platform-assigned ACA outbound IP. Keep
-`LEGACY_COSMOS_IP_RULE=20.10.253.231` for the first parallel cutover deploy so
-the existing incident stopgap remains in place until the NAT-backed environment
-passes smoke tests; clear it afterward with:
+The workload-profile Container Apps environment uses the delegated `aca-infra`
+subnet and a NAT Gateway with a static public IP for public-service egress.
+Cosmos DB, Blob Storage, and Key Vault have public network access disabled and
+use private endpoints in the `private-endpoints` subnet, with private DNS zones
+linked to the VNet. NAT allowlisting is not the Cosmos connectivity path.
 
-```bash
-azd env set LEGACY_COSMOS_IP_RULE ""
-azd provision
-```
-
-See `infra/README.md` for the NAT cutover, rollback, operational checks, and
+See `infra/README.md` for infrastructure configuration, historical NAT cutover notes, and
 the manual Entra redirect verification required when the replacement Container
 Apps domain changes.
 

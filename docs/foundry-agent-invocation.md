@@ -1,12 +1,16 @@
 # Foundry hosted-agent invocation smoke test
 
-This project has an invoke-only client and an opt-in text-only `card-orchestrator`
-runtime. Neither is wired into card generation startup or `/generate`; the existing
-direct Azure OpenAI flow remains unchanged.
+This project has an invocation client and an opt-in text-only `card-orchestrator`
+runtime. The web backend now wires the client into card generation when
+`AGENT_GENERATION_ENABLED=true`; direct Azure OpenAI remains the default and the
+bounded fallback for eligible agent failures. Authentication, deterministic
+moderation, image generation, and persistence remain in the web backend. See the
+[implemented architecture](architecture.md) for the current service boundaries.
 
 ## Configuration
 
-Set these only when an operator wants to smoke-test an already deployed agent:
+Configure these when smoke-testing an already deployed agent or explicitly
+enabling agent-backed text generation:
 
 - `FOUNDRY_PROJECT_ENDPOINT`: canonical project endpoint, for example `https://<account>.services.ai.azure.com/api/projects/<project>`
 - `FOUNDRY_AGENT_NAME`: hosted agent name, for example `card-orchestrator`
