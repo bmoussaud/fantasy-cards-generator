@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -1200,6 +1201,9 @@ def test_card_orchestrator_lifecycle_guard_validates_prerequisites() -> None:
 
 def test_installed_azd_help_confirms_bare_deploy_targets_all_services() -> None:
     """Use installed azd help as the behavior contract for raw deploy selection."""
+    if shutil.which("azd") is None:
+        pytest.skip("azd is not installed")
+
     result = subprocess.run(
         ["azd", "deploy", "--help"],
         capture_output=True,
