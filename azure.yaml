@@ -44,6 +44,10 @@ services:
         value: ${AZURE_ENV_NAME}
       - name: AZURE_EXPERIMENTAL_ENABLE_GENAI_TRACING
         value: "true"
+    hooks:
+      predeploy:
+        - shell: sh
+          run: ./hooks/guard_agent_deploy.sh
 resources:
   web-nat:
     type: host.containerapp
@@ -54,9 +58,14 @@ infra:
 # Default up workflow deploys only web-nat. The card-orchestrator hosted agent
 # requires explicit opt-in: azd deploy card-orchestrator (after enabling
 # prerequisites and approving the agent deployment).
+# The deploy workflow is also web-only so bare 'azd deploy' never builds or
+# deploys the hosted agent.  Use ./deploy.sh for approval-gated workflows.
 workflows:
   up:
     - azd: provision
+    - azd: package web-nat
+    - azd: deploy web-nat
+  deploy:
     - azd: package web-nat
     - azd: deploy web-nat
 hooks:

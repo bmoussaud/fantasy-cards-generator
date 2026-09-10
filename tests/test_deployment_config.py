@@ -1131,34 +1131,52 @@ def test_root_manifest_requires_azd_version_and_agent_extension() -> None:
 
 
 def test_root_manifest_safe_default_workflow_deploys_only_web() -> None:
-    """The default up workflow provisions and deploys only web-nat.
+    """Both ``azd up`` and bare ``azd deploy`` target only web-nat.
 
-    The card-orchestrator hosted agent is never built, pushed, or deployed by
-    ``azd up``.  An operator must explicitly run ``azd deploy card-orchestrator``
-    after enabling prerequisites and reviewing the agent deployment.
+    The card-orchestrator hosted agent is never built, pushed, or deployed
+    unless an operator explicitly runs ``azd deploy card-orchestrator`` after
+    enabling prerequisites and passing the service-level predeploy guard.
     """
     azure_yaml = (REPO_ROOT / "azure.yaml").read_text()
 
     assert "workflows:" in azure_yaml
     assert "deploy web-nat" in azure_yaml
-    # Safety: the default up workflow must never deploy all services
     assert "deploy --all" not in azure_yaml
-    # The workflows section must not contain a card-orchestrator deploy step
+    # Both up and deploy workflows constrain to web-nat only
     workflows_start = azure_yaml.index("workflows:")
-    hooks_start = azure_yaml.index("hooks:")
+    hooks_start = azure_yaml.rindex("\nhooks:")
     workflows_section = azure_yaml[workflows_start:hooks_start]
     assert "card-orchestrator" not in workflows_section
+    assert "up:" in workflows_section
+    assert "deploy:" in workflows_section
+    # The deploy workflow must package and deploy web-nat only
+    assert "package web-nat" in workflows_section
 
 
 def test_root_manifest_hooks_only_on_provision_not_deploy() -> None:
-    """Hooks run only during provision; deploy-only paths do not rotate credentials."""
+    """Root-level hooks run only during provision; deploy-only paths do not
+    rotate credentials.  The card-orchestrator service has a service-level
+    predeploy guard that validates prerequisites — this is intentional and
+    does not perform credential rotation."""
     azure_yaml = (REPO_ROOT / "azure.yaml").read_text()
 
     assert "preprovision:" in azure_yaml
     assert "postprovision:" in azure_yaml
-    # No deploy hooks that could trigger credential rotation on azd deploy
-    assert "predeploy:" not in azure_yaml
+    # No root-level postdeploy hooks anywhere
     assert "postdeploy:" not in azure_yaml
+    # The only predeploy is the card-orchestrator prerequisite guard
+    assert azure_yaml.count("predeploy:") == 1
+    assert "guard_agent_deploy" in azure_yaml
+
+
+def test_card_orchestrator_predeploy_guard_validates_prerequisites() -> None:
+    """The card-orchestrator service-level predeploy hook blocks deployment
+    unless CARD_ORCHESTRATOR_ENABLE_PREREQUISITES is explicitly true."""
+    guard = (REPO_ROOT / "hooks/guard_agent_deploy.sh").read_text()
+
+    assert "CARD_ORCHESTRATOR_ENABLE_PREREQUISITES" in guard
+    assert "exit 1" in guard
+    assert (REPO_ROOT / "hooks/guard_agent_deploy.sh").stat().st_mode & 0o111
 
 
 def test_card_orchestrator_docker_paths_are_root_relative() -> None:
@@ -1243,3 +1261,71 @@ def test_nested_launcher_is_deprecated() -> None:
     content = (REPO_ROOT / "deployments/card-orchestrator/deploy.py").read_text()
 
     assert "DEPRECATED" in content
+
+
+# ── Root deployment orchestrator (deploy.sh) ─────────────────────────
+
+
+def test_deploy_script_exists_and_is_executable() -> None:
+    """deploy.sh is present and executable at the repository root."""
+    script = REPO_ROOT / "deploy.sh"
+    assert script.is_file()
+    assert script.stat().st_mode & 0o111
+
+
+@pytest.mark.parametrize("action", ["web", "agent", "full", "provision"])
+def test_deploy_script_plan_only_by_default(action: str) -> None:
+    """deploy.sh is plan-only without --approve-change; azd is never started."""
+    result = subprocess.run(
+        ["bash", str(REPO_ROOT / "deploy.sh"), action],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "PLAN ONLY" in result.stdout
+
+
+def test_deploy_script_rejects_prod_without_approve_prod() -> None:
+    """Production deployments require --approve-prod after separate review."""
+    result = subprocess.run(
+        ["bash", str(REPO_ROOT / "deploy.sh"), "web", "--environment", "prod", "--approve-change"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 2
+    assert "approve-prod" in result.stderr
+
+
+def test_deploy_script_rejects_invalid_environment() -> None:
+    """Only dev and prod environments are supported."""
+    result = subprocess.run(
+        ["bash", str(REPO_ROOT / "deploy.sh"), "web", "--environment", "staging"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 2
+
+
+def test_deploy_script_rejects_invalid_action() -> None:
+    """Unknown actions produce a usage message."""
+    result = subprocess.run(
+        ["bash", str(REPO_ROOT / "deploy.sh"), "yolo"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 2
+    assert "Usage" in result.stderr
+
+
+def test_deploy_script_has_separately_gated_prod_path() -> None:
+    """--approve-prod + --approve-change on prod is plan-free (would exec azd).
+    Here we only verify that the validation passes without actually calling azd
+    by testing the plan path for prod with both flags absent."""
+    # Plan-only for prod (no --approve-change) should fail because prod needs --approve-prod
+    result = subprocess.run(
+        ["bash", str(REPO_ROOT / "deploy.sh"), "web", "--environment", "prod"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 2
+    assert "approve-prod" in result.stderr

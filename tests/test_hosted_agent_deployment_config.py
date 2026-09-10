@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -381,3 +382,81 @@ def test_root_agent_prerequisites_reuses_card_orchestrator_canonical_patterns() 
     # No credential leaks in either
     assert "listCredentials" not in root_prereqs
     assert "AcrPush" not in root_prereqs
+
+
+# ── Deploy guard and orchestration (reviewer findings) ───────────────
+
+
+def test_root_deploy_workflow_constrains_bare_azd_deploy_to_web_only() -> None:
+    """Both ``workflows.up`` and ``workflows.deploy`` in the root manifest
+    target only web-nat so bare ``azd up`` and bare ``azd deploy`` never
+    build or deploy the hosted agent."""
+    azure_yaml = (ROOT / "azure.yaml").read_text()
+    workflows_start = azure_yaml.index("workflows:")
+    hooks_start = azure_yaml.rindex("\nhooks:")
+    workflows_section = azure_yaml[workflows_start:hooks_start]
+
+    assert "up:" in workflows_section
+    assert "deploy:" in workflows_section
+    assert "card-orchestrator" not in workflows_section
+    assert "package web-nat" in workflows_section
+    assert "deploy web-nat" in workflows_section
+
+
+def test_card_orchestrator_service_predeploy_guard_exists() -> None:
+    """The card-orchestrator service in the root manifest declares a predeploy
+    hook that validates prerequisites before any agent deployment."""
+    azure_yaml = (ROOT / "azure.yaml").read_text()
+
+    # Extract the card-orchestrator service section
+    co_start = azure_yaml.index("card-orchestrator:")
+    # Predeploy must be inside the card-orchestrator service, not at root
+    assert "predeploy:" in azure_yaml[co_start:]
+    assert "guard_agent_deploy" in azure_yaml
+
+    # The guard script exists and is executable
+    guard = ROOT / "hooks/guard_agent_deploy.sh"
+    assert guard.is_file()
+    assert guard.stat().st_mode & 0o111
+
+
+def test_predeploy_guard_rejects_unset_prerequisites() -> None:
+    """The guard script exits non-zero when CARD_ORCHESTRATOR_ENABLE_PREREQUISITES
+    is not 'true', preventing accidental agent deployment."""
+    guard = ROOT / "hooks/guard_agent_deploy.sh"
+
+    # Unset → blocked
+    result = subprocess.run(
+        ["bash", str(guard)],
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin"},
+    )
+    assert result.returncode == 1
+    assert "blocked" in result.stderr.lower()
+
+
+def test_predeploy_guard_allows_enabled_prerequisites() -> None:
+    """The guard script exits zero when CARD_ORCHESTRATOR_ENABLE_PREREQUISITES=true."""
+    guard = ROOT / "hooks/guard_agent_deploy.sh"
+
+    result = subprocess.run(
+        ["bash", str(guard)],
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin", "CARD_ORCHESTRATOR_ENABLE_PREREQUISITES": "true"},
+    )
+    assert result.returncode == 0
+
+
+def test_root_orchestrator_preserves_approval_gates() -> None:
+    """deploy.sh at the repository root is the production-safe entry point,
+    preserving --approve-change / --approve-prod semantics from the deprecated
+    launcher."""
+    script = ROOT / "deploy.sh"
+    assert script.is_file()
+    assert script.stat().st_mode & 0o111
+    content = script.read_text()
+    assert "--approve-change" in content
+    assert "--approve-prod" in content
+    assert "PLAN ONLY" in content

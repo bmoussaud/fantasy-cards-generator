@@ -7,14 +7,26 @@ The root `azure.yaml` is now the single entry point for both `web-nat` and
 and `deployments/card-orchestrator/deploy.py` are retained as legacy references
 only.
 
+### Deploy guards
+
+1. **`workflows.up` + `workflows.deploy`** — both constrain bare `azd up` and
+   bare `azd deploy` to web-nat only.
+2. **Service-level `predeploy` hook** — `hooks/guard_agent_deploy.sh` blocks
+   `azd deploy card-orchestrator` unless
+   `CARD_ORCHESTRATOR_ENABLE_PREREQUISITES=true`.
+3. **Root `deploy.sh`** — production-safe orchestrator with
+   `--approve-change` / `--approve-prod` enforcement gates.
+
 ### Unified deployment commands
 
 | Workflow | Command | Notes |
 |---|---|---|
 | Web-only (default) | `azd up` | Provisions and deploys only web-nat |
+| Bare deploy | `azd deploy` | Deploys only web-nat (workflows.deploy) |
 | Web redeploy | `azd deploy web-nat` | Does not trigger provision hooks |
-| Agent deploy | `azd deploy card-orchestrator` | Requires prerequisites enabled |
+| Agent deploy | `azd deploy card-orchestrator` | Requires prerequisites enabled (predeploy guard) |
 | Full provision | `azd provision` | Deploys all infra including agent prereqs if enabled |
+| Approved deploy | `./deploy.sh agent --approve-change` | Plan-only by default |
 
 ### Agent prerequisite opt-in
 
@@ -26,6 +38,13 @@ azd env set CARD_ORCHESTRATOR_ENABLE_PREREQUISITES true
 azd env set CARD_ORCHESTRATOR_CREATE_REGISTRY_CONNECTION true
 azd provision
 azd deploy card-orchestrator
+```
+
+Or via the root orchestrator:
+
+```bash
+./deploy.sh provision --approve-change
+./deploy.sh agent --approve-change
 ```
 
 ### Rollback
@@ -45,13 +64,14 @@ Manual cleanup is required for existing Azure role assignments.
 
 | Old command | New equivalent |
 |---|---|
-| `cd deployments/card-orchestrator && python deploy.py preview` | `azd provision --preview` |
-| `cd deployments/card-orchestrator && python deploy.py provision --execute --approve-change` | `azd provision` |
-| `cd deployments/card-orchestrator && python deploy.py deploy --execute --approve-change` | `azd deploy card-orchestrator` |
+| `cd deployments/card-orchestrator && python deploy.py preview` | `./deploy.sh preview` or `azd provision --preview` |
+| `cd deployments/card-orchestrator && python deploy.py provision --execute --approve-change` | `./deploy.sh provision --approve-change` |
+| `cd deployments/card-orchestrator && python deploy.py deploy --execute --approve-change` | `./deploy.sh agent --approve-change` |
+| `cd ... && python deploy.py deploy --environment prod --execute --approve-change --approve-prod` | `./deploy.sh agent --environment prod --approve-change --approve-prod` |
 
-**Unsupported gate:** The old launcher's `--approve-prod` / `--approve-change`
-flags have no direct `azd` equivalent. Production approval must be enforced via
-external gates (GitHub Environment protection rules, manual review).
+The root `deploy.sh` enforces approval gates natively. Raw `azd deploy
+card-orchestrator` is still available but guarded by the service-level
+`predeploy` hook that requires prerequisites to be enabled.
 
 ## Dev model-capacity correction and successful ACA-MI E2E — 2026-09-09
 
