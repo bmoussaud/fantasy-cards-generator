@@ -197,9 +197,10 @@ independently with `az deployment group what-if` followed by
 `az deployment group create`, supplying only the existing vault, subnet and VNet
 resource IDs plus the vault name and location. Review the incremental change set
 before applying it. This avoids unrelated full-provision effects: the current
-`postprovision` hook creates a new Entra client credential, and provisioning
-without `containerImage` selects the bootstrap image. Normal full-environment
-orchestration remains `azd`.
+`postprovision` hook creates a new Entra client credential only when Bicep
+explicitly reports that the deployment manages the registration, and
+provisioning without `containerImage` selects the bootstrap image. Normal
+full-environment orchestration remains `azd`.
 
 Why the extra env var:
 

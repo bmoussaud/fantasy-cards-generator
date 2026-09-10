@@ -6,7 +6,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.46.1.21595",
-      "templateHash": "14778107551654772257"
+      "templateHash": "3033416681856921210"
     }
   },
   "parameters": {
@@ -8838,6 +8838,10 @@
     "ENTRA_CLIENT_ID": {
       "type": "string",
       "value": "[if(parameters('deployEntraAppRegistration'), reference('appRegistration').outputs.appId.value, if(equals(parameters('entraAuthMode'), 'existing'), reference('entraAuthGuard').outputs.validatedClientId.value, ''))]"
+    },
+    "ENTRA_APP_REGISTRATION_MANAGED": {
+      "type": "bool",
+      "value": "[parameters('deployEntraAppRegistration')]"
     },
     "AZURE_LOG_ANALYTICS_WORKSPACE_RESOURCE_ID": {
       "type": "string",

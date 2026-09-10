@@ -709,5 +709,6 @@ output AZURE_CONTAINER_APPS_ENVIRONMENT_NAME string = containerAppsEnvironment.o
 output AZURE_CONTAINER_REGISTRY_ENDPOINT string = registry.outputs.registryLoginServer
 output AZURE_CONTAINER_REGISTRY_NAME string = registry.outputs.registryName
 output ENTRA_CLIENT_ID string = entraClientId
+output ENTRA_APP_REGISTRATION_MANAGED bool = deployEntraAppRegistration
 output AZURE_LOG_ANALYTICS_WORKSPACE_RESOURCE_ID string = monitoring.outputs.logAnalyticsWorkspaceResourceId
 output AZURE_APP_INSIGHTS_RESOURCE_ID string = monitoring.outputs.appInsightsResourceId

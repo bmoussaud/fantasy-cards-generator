@@ -22,7 +22,7 @@ hooks:
     - shell: sh
       run: ./hooks/ensure_session_secret.sh
   postprovision:
-    # This hook is a no-op only when ENTRA_CLIENT_ID is absent. Existing-registration
-    # redeploys also output a client ID; use direct ARM deployment to avoid rotation.
+    # Mint a credential only when Bicep explicitly reports that this deployment
+    # manages the Entra registration; external/disabled modes fail closed.
     - shell: sh
-      run: ./hooks/gen_client_secret.sh ENTRA_CLIENT_ID ENTRA_CLIENT_SECRET
+      run: ./hooks/gen_client_secret.sh ENTRA_CLIENT_ID ENTRA_CLIENT_SECRET ENTRA_APP_REGISTRATION_MANAGED

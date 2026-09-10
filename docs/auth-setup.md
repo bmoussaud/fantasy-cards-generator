@@ -136,12 +136,17 @@ To use it:
 4. Read the deployment outputs for `entraClientId`, `entraAppObjectId`,
    `entraServicePrincipalId`, and `ENTRA_CLIENT_ID`.
 5. If you use `azd provision`, the `postprovision` hook automatically runs
-   `./hooks/gen_client_secret.sh ENTRA_CLIENT_ID ENTRA_CLIENT_SECRET`. That
-   hook uses `az ad app credential reset` to mint a short-lived client secret
-   (3-month expiry) and stores it in the active azd environment as
+   `./hooks/gen_client_secret.sh ENTRA_CLIENT_ID ENTRA_CLIENT_SECRET
+   ENTRA_APP_REGISTRATION_MANAGED`. The authoritative Bicep output
+   `ENTRA_APP_REGISTRATION_MANAGED` must be `true` before the hook uses
+   `az ad app credential reset` to mint a short-lived client secret (3-month
+   expiry) and stores it in the active azd environment as
    `ENTRA_CLIENT_SECRET`.
-6. If `deployEntraAppRegistration=false`, the hook detects that
-   `ENTRA_CLIENT_ID` is absent and exits without error.
+6. If `deployEntraAppRegistration=false`, Bicep exports
+   `ENTRA_APP_REGISTRATION_MANAGED=false` and the hook exits without error,
+   even when `ENTRA_CLIENT_ID` contains an external registration ID. An unset
+   flag also skips safely; an unexpected value fails without rotating a
+   credential.
 
 If you are **not** using the Bicep-managed app registration, treat the
 replacement Container Apps hostname as a manual follow-up: after the first live
@@ -167,11 +172,13 @@ Use this path when you need to redeploy infra **without** re-provisioning the
 Entra app registration — for example when the Graph Bicep extension is
 unavailable, or when you manage the registration separately.
 
-Use the **direct Azure CLI** commands below for this flow, not `azd provision`
-or `azd up`. The resolved client ID is also exported as `ENTRA_CLIENT_ID`;
-azd's existing postprovision hook uses that output to rotate an Entra client
-secret even when registration provisioning is disabled. Direct ARM deployments
-do not run azd hooks. Deploy-only web updates remain a separate operation.
+Use the **direct Azure CLI** commands below for this targeted flow rather than
+`azd provision` or `azd up`, so unrelated full-provision effects remain out of
+scope. Direct ARM deployments do not run azd hooks. If full azd provisioning is
+used separately, the postprovision hook consumes
+`ENTRA_APP_REGISTRATION_MANAGED=false` and will not rotate the external
+registration even though its resolved client ID is exported as
+`ENTRA_CLIENT_ID`. Deploy-only web updates remain a separate operation.
 
 ### Safety contract
 

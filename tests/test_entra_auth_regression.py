@@ -74,6 +74,12 @@ def test_outputs_expose_resolved_existing_registration(arm: dict, name: str) -> 
     assert "reference('appRegistration').outputs.appId.value" in expression
 
 
+def test_output_exposes_authoritative_registration_ownership(arm: dict) -> None:
+    output = arm["outputs"]["ENTRA_APP_REGISTRATION_MANAGED"]
+    assert output["type"] == "bool"
+    assert output["value"] == "[parameters('deployEntraAppRegistration')]"
+
+
 def test_azd_exposes_explicit_auth_intent_and_client_override() -> None:
     parameters = json.loads((REPO_ROOT / "infra/main.parameters.json").read_text())["parameters"]
     assert parameters["entraAuthMode"]["value"] == "${ENTRA_AUTH_MODE=existing}"
