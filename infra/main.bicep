@@ -20,6 +20,16 @@ param serviceName string = 'web-nat'
 @description('Set to true to provision the Microsoft Entra ID app registration via the Graph Bicep extension.')
 param deployEntraAppRegistration bool = true
 
+@description('Microsoft Entra ID application (client) ID of an existing app registration. Required when deployEntraAppRegistration=false and entraAuthMode="existing". Ignored when deployEntraAppRegistration=true (the freshly-provisioned appId takes precedence). An empty value with entraAuthMode="existing" causes a hard deployment failure before any ACA mutation — it is never silently omitted.')
+param entraClientIdOverride string = ''
+
+@allowed([
+  'existing'
+  'disabled'
+])
+@description('Entra auth intent when deployEntraAppRegistration=false. "existing": redeploy preserving an existing registration — requires non-empty entraClientIdOverride, enforced by an ARM minLength guard before any ACA mutation. "disabled": explicit operator opt-in to deploy without Entra authentication (no auth env vars injected). This param is ignored when deployEntraAppRegistration=true.')
+param entraAuthMode string = 'existing'
+
 @description('Display name used for the Microsoft Entra ID app registration when deployEntraAppRegistration is true.')
 param entraAppRegistrationName string = take('Fantasy Cards Generator (${toUpper(environmentName)})', 120)
 
@@ -432,7 +442,18 @@ module appRegistration './modules/app-registration.bicep' = if (deployEntraAppRe
   }
 }
 
-var entraClientId = deployEntraAppRegistration ? appRegistration!.outputs.appId : ''
+// Consuming the guard output makes the Container App wait for validation.
+// Trim first so whitespace-only overrides also fail the minimum-length constraint.
+module entraAuthGuard './modules/entra-auth-guard.bicep' = if (!deployEntraAppRegistration && entraAuthMode == 'existing') {
+  name: 'entra-auth-guard'
+  params: {
+    entraClientIdOverride: trim(entraClientIdOverride)
+  }
+}
+
+var entraClientId = deployEntraAppRegistration
+  ? appRegistration!.outputs.appId
+  : (entraAuthMode == 'existing' ? entraAuthGuard!.outputs.validatedClientId : '')
 
 module containerApps './modules/container-apps.bicep' = {
   name: 'container-apps'
@@ -455,8 +476,8 @@ module containerApps './modules/container-apps.bicep' = {
     cosmosEndpoint: 'https://${cosmosAccountName}.documents.azure.com:443/'
     deploymentEnvironment: environmentName
     entraClientId: entraClientId
-    entraPostLogoutRedirectUri: deployEntraAppRegistration ? deployedPostLogoutRedirectUri : ''
-    entraRedirectUri: deployEntraAppRegistration ? deployedAuthRedirectUri : ''
+    entraPostLogoutRedirectUri: empty(entraClientId) ? '' : deployedPostLogoutRedirectUri
+    entraRedirectUri: empty(entraClientId) ? '' : deployedAuthRedirectUri
     contentSafetyApiVersion: contentSafetyApiVersion
     contentSafetyEndpoint: resolvedContentSafetyEndpoint
     contentSafetyMaxHateSeverity: contentSafetyMaxHateSeverity
@@ -688,5 +709,6 @@ output AZURE_CONTAINER_APPS_ENVIRONMENT_NAME string = containerAppsEnvironment.o
 output AZURE_CONTAINER_REGISTRY_ENDPOINT string = registry.outputs.registryLoginServer
 output AZURE_CONTAINER_REGISTRY_NAME string = registry.outputs.registryName
 output ENTRA_CLIENT_ID string = entraClientId
+output ENTRA_APP_REGISTRATION_MANAGED bool = deployEntraAppRegistration
 output AZURE_LOG_ANALYTICS_WORKSPACE_RESOURCE_ID string = monitoring.outputs.logAnalyticsWorkspaceResourceId
 output AZURE_APP_INSIGHTS_RESOURCE_ID string = monitoring.outputs.appInsightsResourceId

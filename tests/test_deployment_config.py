@@ -691,6 +691,71 @@ def test_container_apps_wire_key_vault_backed_auth_env_vars() -> None:
     assert "containerAppsEnvironmentDefaultDomain" in main_bicep
 
 
+def test_entra_client_id_override_wires_false_mode_redeploy() -> None:
+    """Existing-registration redeploys must validate the override before updating ACA."""
+    main_bicep = (REPO_ROOT / "infra" / "main.bicep").read_text()
+    main_parameters = (REPO_ROOT / "infra" / "main.parameters.json").read_text()
+
+    # Override param must exist with an empty-string default (non-breaking for managed mode).
+    assert "param entraClientIdOverride string = ''" in main_bicep
+
+    # Reading the raw override would bypass the guard's deployment dependency.
+    old_ternary = (
+        "var entraClientId = deployEntraAppRegistration"
+        " ? appRegistration!.outputs.appId : entraClientIdOverride"
+    )
+    assert old_ternary not in main_bicep, (
+        "Old two-branch ternary still present — silent auth erase not fixed. "
+        "Expected three-branch expression routing through guard for existing mode."
+    )
+
+    # Three-branch entraClientId resolution must be present:
+    # managed → appRegistration!.outputs.appId (unchanged)
+    # existing → entraAuthGuard!.outputs.validatedClientId (forces ARM dependency on guard)
+    # disabled → '' (explicit opt-in, no guard needed)
+    assert "var entraClientId = deployEntraAppRegistration" in main_bicep
+    assert "appRegistration!.outputs.appId" in main_bicep
+    assert "entraAuthGuard!.outputs.validatedClientId" in main_bicep
+    assert "entraAuthMode == 'existing'" in main_bicep
+
+    # Guard module deployed only when false+existing — fail-closed sentinel.
+    expected_guard_condition = (
+        "module entraAuthGuard './modules/entra-auth-guard.bicep'"
+        " = if (!deployEntraAppRegistration && entraAuthMode == 'existing')"
+    )
+    assert expected_guard_condition in main_bicep
+
+    # Redirect URIs still guarded on entraClientId being non-empty (not on the flag).
+    assert "empty(entraClientId) ? '' : deployedPostLogoutRedirectUri" in main_bicep
+    assert "empty(entraClientId) ? '' : deployedAuthRedirectUri" in main_bicep
+    assert "deployEntraAppRegistration ? deployedPostLogoutRedirectUri : ''" not in main_bicep
+    assert "deployEntraAppRegistration ? deployedAuthRedirectUri : ''" not in main_bicep
+
+    # parameters.json must wire both override and auth-mode from environment.
+    assert '"entraClientIdOverride"' in main_parameters
+    assert '"value": "${ENTRA_CLIENT_ID_OVERRIDE=}"' in main_parameters
+    assert '"entraAuthMode"' in main_parameters
+    assert '"value": "${ENTRA_AUTH_MODE=existing}"' in main_parameters
+
+
+def test_entra_false_mode_redirect_uris_computed_not_hardcoded() -> None:
+    """Redirect URIs are deterministic from the ACA environment domain.
+
+    They must not be suppressed by the deployEntraAppRegistration flag when
+    a client ID override is present.  The container-apps module receives computed
+    URIs whenever entraClientId is non-empty, regardless of the registration mode.
+    """
+    main_bicep = (REPO_ROOT / "infra" / "main.bicep").read_text()
+
+    # deployedAuthRedirectUri is constructed from the ACA environment domain — always.
+    assert "var deployedAuthRedirectUri = " in main_bicep
+    assert "var deployedPostLogoutRedirectUri = " in main_bicep
+
+    # The guard that gates redirect URI on client ID presence must appear exactly once each.
+    assert main_bicep.count("empty(entraClientId) ? '' : deployedAuthRedirectUri") == 1
+    assert main_bicep.count("empty(entraClientId) ? '' : deployedPostLogoutRedirectUri") == 1
+
+
 def test_cosmos_container_enables_item_level_ttl() -> None:
     cosmos_bicep = (REPO_ROOT / "infra" / "modules" / "cosmos-db.bicep").read_text()
 

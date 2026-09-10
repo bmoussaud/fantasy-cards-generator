@@ -6,7 +6,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.46.1.21595",
-      "templateHash": "16908177773898492903"
+      "templateHash": "3033416681856921210"
     }
   },
   "parameters": {
@@ -53,6 +53,24 @@
       "defaultValue": true,
       "metadata": {
         "description": "Set to true to provision the Microsoft Entra ID app registration via the Graph Bicep extension."
+      }
+    },
+    "entraClientIdOverride": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Microsoft Entra ID application (client) ID of an existing app registration. Required when deployEntraAppRegistration=false and entraAuthMode=\"existing\". Ignored when deployEntraAppRegistration=true (the freshly-provisioned appId takes precedence). An empty value with entraAuthMode=\"existing\" causes a hard deployment failure before any ACA mutation — it is never silently omitted."
+      }
+    },
+    "entraAuthMode": {
+      "type": "string",
+      "defaultValue": "existing",
+      "allowedValues": [
+        "existing",
+        "disabled"
+      ],
+      "metadata": {
+        "description": "Entra auth intent when deployEntraAppRegistration=false. \"existing\": redeploy preserving an existing registration — requires non-empty entraClientIdOverride, enforced by an ARM minLength guard before any ACA mutation. \"disabled\": explicit operator opt-in to deploy without Entra authentication (no auth env vars injected). This param is ignored when deployEntraAppRegistration=true."
       }
     },
     "entraAppRegistrationName": {
@@ -1681,6 +1699,53 @@
         "containerAppsEnvironment"
       ]
     },
+    "entraAuthGuard": {
+      "condition": "[and(not(parameters('deployEntraAppRegistration')), equals(parameters('entraAuthMode'), 'existing'))]",
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "entra-auth-guard",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "entraClientIdOverride": {
+            "value": "[trim(parameters('entraClientIdOverride'))]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.46.1.21595",
+              "templateHash": "16764297838276426784"
+            }
+          },
+          "parameters": {
+            "entraClientIdOverride": {
+              "type": "string",
+              "minLength": 1,
+              "metadata": {
+                "description": "Microsoft Entra ID application (client) ID of an existing app registration. Must be non-empty when entraAuthMode is \"existing\". Bicep compiles this to an ARM minLength:1 constraint validated before any ACA resource is mutated."
+              }
+            }
+          },
+          "resources": [],
+          "outputs": {
+            "validatedClientId": {
+              "type": "string",
+              "metadata": {
+                "description": "The validated client ID, passed through to the caller to establish an implicit ARM dependency on this guard completing successfully."
+              },
+              "value": "[parameters('entraClientIdOverride')]"
+            }
+          }
+        }
+      }
+    },
     "containerApps": {
       "type": "Microsoft.Resources/deployments",
       "apiVersion": "2025-04-01",
@@ -1731,9 +1796,9 @@
           "deploymentEnvironment": {
             "value": "[parameters('environmentName')]"
           },
-          "entraClientId": "[if(parameters('deployEntraAppRegistration'), createObject('value', reference('appRegistration').outputs.appId.value), createObject('value', ''))]",
-          "entraPostLogoutRedirectUri": "[if(parameters('deployEntraAppRegistration'), createObject('value', format('{0}{1}', format('https://{0}.{1}', variables('containerAppName'), reference('containerAppsEnvironment').outputs.containerAppsEnvironmentDefaultDomain.value), parameters('entraPostLogoutRedirectPath'))), createObject('value', ''))]",
-          "entraRedirectUri": "[if(parameters('deployEntraAppRegistration'), createObject('value', format('{0}{1}', format('https://{0}.{1}', variables('containerAppName'), reference('containerAppsEnvironment').outputs.containerAppsEnvironmentDefaultDomain.value), parameters('entraRedirectPath'))), createObject('value', ''))]",
+          "entraClientId": "[if(parameters('deployEntraAppRegistration'), createObject('value', reference('appRegistration').outputs.appId.value), if(equals(parameters('entraAuthMode'), 'existing'), createObject('value', reference('entraAuthGuard').outputs.validatedClientId.value), createObject('value', '')))]",
+          "entraPostLogoutRedirectUri": "[if(empty(if(parameters('deployEntraAppRegistration'), reference('appRegistration').outputs.appId.value, if(equals(parameters('entraAuthMode'), 'existing'), reference('entraAuthGuard').outputs.validatedClientId.value, ''))), createObject('value', ''), createObject('value', format('{0}{1}', format('https://{0}.{1}', variables('containerAppName'), reference('containerAppsEnvironment').outputs.containerAppsEnvironmentDefaultDomain.value), parameters('entraPostLogoutRedirectPath'))))]",
+          "entraRedirectUri": "[if(empty(if(parameters('deployEntraAppRegistration'), reference('appRegistration').outputs.appId.value, if(equals(parameters('entraAuthMode'), 'existing'), reference('entraAuthGuard').outputs.validatedClientId.value, ''))), createObject('value', ''), createObject('value', format('{0}{1}', format('https://{0}.{1}', variables('containerAppName'), reference('containerAppsEnvironment').outputs.containerAppsEnvironmentDefaultDomain.value), parameters('entraRedirectPath'))))]",
           "contentSafetyApiVersion": {
             "value": "[parameters('contentSafetyApiVersion')]"
           },
@@ -1889,7 +1954,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.46.1.21595",
-              "templateHash": "9640508393535411958"
+              "templateHash": "2939549981802306384"
             }
           },
           "parameters": {
@@ -2394,7 +2459,7 @@
           },
           "variables": {
             "containerAppSecrets": "[concat(createArray(createObject('name', 'applicationinsights-connection-string', 'value', parameters('appInsightsConnectionString'))))]",
-            "containerAppEnv": "[concat(createArray(createObject('name', 'APPLICATIONINSIGHTS_CONNECTION_STRING', 'secretRef', 'applicationinsights-connection-string'), createObject('name', 'TELEMETRY_ENABLED', 'value', 'true'), createObject('name', 'APP_ENV', 'value', parameters('deploymentEnvironment')), createObject('name', 'TELEMETRY_SAMPLING_RATIO', 'value', parameters('telemetrySamplingRatio')), createObject('name', 'OTEL_SERVICE_NAME', 'value', parameters('telemetryServiceName')), createObject('name', 'OTEL_RESOURCE_ATTRIBUTES', 'value', format('deployment.environment.name={0},cloud.platform=azure_container_apps', parameters('telemetryEnvironmentName'))), createObject('name', 'OTEL_TRACES_SAMPLER', 'value', 'parentbased_trace_id_ratio'), createObject('name', 'OTEL_TRACES_SAMPLER_ARG', 'value', parameters('telemetrySamplingRatio')), createObject('name', 'AI_MODE', 'value', parameters('aiMode')), createObject('name', 'PERSISTENCE_MODE', 'value', parameters('persistenceMode')), createObject('name', 'FOUNDRY_ENDPOINT', 'value', parameters('foundryEndpoint')), createObject('name', 'FOUNDRY_PROJECT_ENDPOINT', 'value', parameters('foundryProjectEndpoint')), createObject('name', 'FOUNDRY_API_VERSION', 'value', parameters('foundryApiVersion')), createObject('name', 'FOUNDRY_TEXT_DEPLOYMENT', 'value', parameters('foundryTextDeployment')), createObject('name', 'FOUNDRY_IMAGE_DEPLOYMENT', 'value', parameters('foundryImageDeployment')), createObject('name', 'FOUNDRY_AGENT_NAME', 'value', parameters('foundryAgentName')), createObject('name', 'FOUNDRY_AGENT_EXPECTED_VERSION', 'value', parameters('foundryAgentExpectedVersion')), createObject('name', 'FOUNDRY_AGENT_API_VERSION', 'value', parameters('foundryAgentApiVersion')), createObject('name', 'AGENT_GENERATION_ENABLED', 'value', string(parameters('agentGenerationEnabled'))), createObject('name', 'COSMOS_ENDPOINT', 'value', parameters('cosmosEndpoint')), createObject('name', 'COSMOS_DATABASE_NAME', 'value', parameters('cosmosDatabaseName')), createObject('name', 'COSMOS_CONTAINER_NAME', 'value', parameters('cosmosContainerName')), createObject('name', 'BLOB_ENDPOINT', 'value', parameters('blobEndpoint')), createObject('name', 'BLOB_CONTAINER_NAME', 'value', parameters('blobContainerName')), createObject('name', 'PROFILE_PHOTOS_CONTAINER_NAME', 'value', parameters('profilePhotosContainerName')), createObject('name', 'CONTENT_SAFETY_ENDPOINT', 'value', parameters('contentSafetyEndpoint')), createObject('name', 'CONTENT_SAFETY_API_VERSION', 'value', parameters('contentSafetyApiVersion')), createObject('name', 'CONTENT_SAFETY_MAX_HATE_SEVERITY', 'value', string(parameters('contentSafetyMaxHateSeverity'))), createObject('name', 'CONTENT_SAFETY_MAX_SELF_HARM_SEVERITY', 'value', string(parameters('contentSafetyMaxSelfHarmSeverity'))), createObject('name', 'CONTENT_SAFETY_MAX_SEXUAL_SEVERITY', 'value', string(parameters('contentSafetyMaxSexualSeverity'))), createObject('name', 'CONTENT_SAFETY_MAX_VIOLENCE_SEVERITY', 'value', string(parameters('contentSafetyMaxViolenceSeverity'))), createObject('name', 'HEALTHZ_COSMOS_TIMEOUT_MS', 'value', string(parameters('healthzCosmosTimeoutMs'))), createObject('name', 'HEALTHZ_BLOB_TIMEOUT_MS', 'value', string(parameters('healthzBlobTimeoutMs'))), createObject('name', 'MODERATION_SERVICE', 'value', parameters('moderationService')), createObject('name', 'MODERATION_POLICY_NAME', 'value', parameters('moderationPolicyName')), createObject('name', 'RATE_LIMIT_USER_REQUESTS', 'value', string(parameters('rateLimitUserRequests'))), createObject('name', 'RATE_LIMIT_USER_WINDOW_SECONDS', 'value', string(parameters('rateLimitUserWindowSeconds'))), createObject('name', 'RATE_LIMIT_IP_REQUESTS', 'value', string(parameters('rateLimitIpRequests'))), createObject('name', 'RATE_LIMIT_IP_WINDOW_SECONDS', 'value', string(parameters('rateLimitIpWindowSeconds'))), createObject('name', 'TRUSTED_PROXY_HOPS', 'value', string(parameters('trustedProxyHops'))), createObject('name', 'UPSTREAM_MAX_RETRIES', 'value', string(parameters('upstreamMaxRetries'))), createObject('name', 'IMAGE_MAX_RETRIES', 'value', string(parameters('imageMaxRetries'))), createObject('name', 'UPSTREAM_BASE_BACKOFF_SECONDS', 'value', parameters('upstreamBaseBackoffSeconds')), createObject('name', 'TEXT_TIMEOUT_SECONDS', 'value', parameters('textTimeoutSeconds')), createObject('name', 'IMAGE_TIMEOUT_SECONDS', 'value', parameters('imageTimeoutSeconds')), createObject('name', 'OVERALL_TIMEOUT_SECONDS', 'value', parameters('overallTimeoutSeconds')), createObject('name', 'AUDIT_RETENTION_DAYS', 'value', string(parameters('auditRetentionDays'))), createObject('name', 'IMAGE_SIZE', 'value', parameters('imageSize')), createObject('name', 'IMAGE_QUALITY', 'value', parameters('imageQuality')), createObject('name', 'SAVED_PHOTO_MAX_COUNT', 'value', string(parameters('savedPhotoMaxCount'))), createObject('name', 'SAVED_PHOTO_MAX_BYTES', 'value', parameters('savedPhotoMaxBytes')), createObject('name', 'SAVED_PHOTO_THUMBNAIL_SIZE', 'value', string(parameters('savedPhotoThumbnailSize'))), createObject('name', 'SECRET_PROVIDER_BACKEND', 'value', parameters('keyVaultProviderBackend')), createObject('name', 'KEY_VAULT_URI', 'value', parameters('keyVaultUri')), createObject('name', 'SECRET_PROVIDER_CACHE_TTL_SECONDS', 'value', parameters('keyVaultCacheTtlSeconds')), createObject('name', 'SECRET_PROVIDER_REQUEST_TIMEOUT_SECONDS', 'value', parameters('keyVaultRequestTimeoutSeconds')), createObject('name', 'SECRET_PROVIDER_MAX_RETRIES', 'value', string(parameters('keyVaultMaxRetries'))), createObject('name', 'SECRET_PROVIDER_RETRY_BACKOFF_SECONDS', 'value', parameters('keyVaultRetryBackoffSeconds')), createObject('name', 'SECRET_PROVIDER_MAX_STALE_SECONDS', 'value', parameters('keyVaultMaxStaleSeconds'))), if(not(empty(parameters('entraClientId'))), createArray(createObject('name', 'ENTRA_CLIENT_ID', 'value', parameters('entraClientId'))), createArray()), if(not(empty(parameters('entraRedirectUri'))), createArray(createObject('name', 'ENTRA_REDIRECT_URI', 'value', parameters('entraRedirectUri'))), createArray()), if(not(empty(parameters('entraPostLogoutRedirectUri'))), createArray(createObject('name', 'ENTRA_POST_LOGOUT_REDIRECT_URI', 'value', parameters('entraPostLogoutRedirectUri'))), createArray()))]"
+            "containerAppEnv": "[concat(createArray(createObject('name', 'APPLICATIONINSIGHTS_CONNECTION_STRING', 'secretRef', 'applicationinsights-connection-string'), createObject('name', 'TELEMETRY_ENABLED', 'value', 'true'), createObject('name', 'AZURE_EXPERIMENTAL_ENABLE_GENAI_TRACING', 'value', 'true'), createObject('name', 'APP_ENV', 'value', parameters('deploymentEnvironment')), createObject('name', 'TELEMETRY_SAMPLING_RATIO', 'value', parameters('telemetrySamplingRatio')), createObject('name', 'OTEL_SERVICE_NAME', 'value', parameters('telemetryServiceName')), createObject('name', 'OTEL_RESOURCE_ATTRIBUTES', 'value', format('deployment.environment.name={0},cloud.platform=azure_container_apps', parameters('telemetryEnvironmentName'))), createObject('name', 'OTEL_TRACES_SAMPLER', 'value', 'parentbased_trace_id_ratio'), createObject('name', 'OTEL_TRACES_SAMPLER_ARG', 'value', parameters('telemetrySamplingRatio')), createObject('name', 'AI_MODE', 'value', parameters('aiMode')), createObject('name', 'PERSISTENCE_MODE', 'value', parameters('persistenceMode')), createObject('name', 'FOUNDRY_ENDPOINT', 'value', parameters('foundryEndpoint')), createObject('name', 'FOUNDRY_PROJECT_ENDPOINT', 'value', parameters('foundryProjectEndpoint')), createObject('name', 'FOUNDRY_API_VERSION', 'value', parameters('foundryApiVersion')), createObject('name', 'FOUNDRY_TEXT_DEPLOYMENT', 'value', parameters('foundryTextDeployment')), createObject('name', 'FOUNDRY_IMAGE_DEPLOYMENT', 'value', parameters('foundryImageDeployment')), createObject('name', 'FOUNDRY_AGENT_NAME', 'value', parameters('foundryAgentName')), createObject('name', 'FOUNDRY_AGENT_EXPECTED_VERSION', 'value', parameters('foundryAgentExpectedVersion')), createObject('name', 'FOUNDRY_AGENT_API_VERSION', 'value', parameters('foundryAgentApiVersion')), createObject('name', 'AGENT_GENERATION_ENABLED', 'value', string(parameters('agentGenerationEnabled'))), createObject('name', 'COSMOS_ENDPOINT', 'value', parameters('cosmosEndpoint')), createObject('name', 'COSMOS_DATABASE_NAME', 'value', parameters('cosmosDatabaseName')), createObject('name', 'COSMOS_CONTAINER_NAME', 'value', parameters('cosmosContainerName')), createObject('name', 'BLOB_ENDPOINT', 'value', parameters('blobEndpoint')), createObject('name', 'BLOB_CONTAINER_NAME', 'value', parameters('blobContainerName')), createObject('name', 'PROFILE_PHOTOS_CONTAINER_NAME', 'value', parameters('profilePhotosContainerName')), createObject('name', 'CONTENT_SAFETY_ENDPOINT', 'value', parameters('contentSafetyEndpoint')), createObject('name', 'CONTENT_SAFETY_API_VERSION', 'value', parameters('contentSafetyApiVersion')), createObject('name', 'CONTENT_SAFETY_MAX_HATE_SEVERITY', 'value', string(parameters('contentSafetyMaxHateSeverity'))), createObject('name', 'CONTENT_SAFETY_MAX_SELF_HARM_SEVERITY', 'value', string(parameters('contentSafetyMaxSelfHarmSeverity'))), createObject('name', 'CONTENT_SAFETY_MAX_SEXUAL_SEVERITY', 'value', string(parameters('contentSafetyMaxSexualSeverity'))), createObject('name', 'CONTENT_SAFETY_MAX_VIOLENCE_SEVERITY', 'value', string(parameters('contentSafetyMaxViolenceSeverity'))), createObject('name', 'HEALTHZ_COSMOS_TIMEOUT_MS', 'value', string(parameters('healthzCosmosTimeoutMs'))), createObject('name', 'HEALTHZ_BLOB_TIMEOUT_MS', 'value', string(parameters('healthzBlobTimeoutMs'))), createObject('name', 'MODERATION_SERVICE', 'value', parameters('moderationService')), createObject('name', 'MODERATION_POLICY_NAME', 'value', parameters('moderationPolicyName')), createObject('name', 'RATE_LIMIT_USER_REQUESTS', 'value', string(parameters('rateLimitUserRequests'))), createObject('name', 'RATE_LIMIT_USER_WINDOW_SECONDS', 'value', string(parameters('rateLimitUserWindowSeconds'))), createObject('name', 'RATE_LIMIT_IP_REQUESTS', 'value', string(parameters('rateLimitIpRequests'))), createObject('name', 'RATE_LIMIT_IP_WINDOW_SECONDS', 'value', string(parameters('rateLimitIpWindowSeconds'))), createObject('name', 'TRUSTED_PROXY_HOPS', 'value', string(parameters('trustedProxyHops'))), createObject('name', 'UPSTREAM_MAX_RETRIES', 'value', string(parameters('upstreamMaxRetries'))), createObject('name', 'IMAGE_MAX_RETRIES', 'value', string(parameters('imageMaxRetries'))), createObject('name', 'UPSTREAM_BASE_BACKOFF_SECONDS', 'value', parameters('upstreamBaseBackoffSeconds')), createObject('name', 'TEXT_TIMEOUT_SECONDS', 'value', parameters('textTimeoutSeconds')), createObject('name', 'IMAGE_TIMEOUT_SECONDS', 'value', parameters('imageTimeoutSeconds')), createObject('name', 'OVERALL_TIMEOUT_SECONDS', 'value', parameters('overallTimeoutSeconds')), createObject('name', 'AUDIT_RETENTION_DAYS', 'value', string(parameters('auditRetentionDays'))), createObject('name', 'IMAGE_SIZE', 'value', parameters('imageSize')), createObject('name', 'IMAGE_QUALITY', 'value', parameters('imageQuality')), createObject('name', 'SAVED_PHOTO_MAX_COUNT', 'value', string(parameters('savedPhotoMaxCount'))), createObject('name', 'SAVED_PHOTO_MAX_BYTES', 'value', parameters('savedPhotoMaxBytes')), createObject('name', 'SAVED_PHOTO_THUMBNAIL_SIZE', 'value', string(parameters('savedPhotoThumbnailSize'))), createObject('name', 'SECRET_PROVIDER_BACKEND', 'value', parameters('keyVaultProviderBackend')), createObject('name', 'KEY_VAULT_URI', 'value', parameters('keyVaultUri')), createObject('name', 'SECRET_PROVIDER_CACHE_TTL_SECONDS', 'value', parameters('keyVaultCacheTtlSeconds')), createObject('name', 'SECRET_PROVIDER_REQUEST_TIMEOUT_SECONDS', 'value', parameters('keyVaultRequestTimeoutSeconds')), createObject('name', 'SECRET_PROVIDER_MAX_RETRIES', 'value', string(parameters('keyVaultMaxRetries'))), createObject('name', 'SECRET_PROVIDER_RETRY_BACKOFF_SECONDS', 'value', parameters('keyVaultRetryBackoffSeconds')), createObject('name', 'SECRET_PROVIDER_MAX_STALE_SECONDS', 'value', parameters('keyVaultMaxStaleSeconds'))), if(not(empty(parameters('entraClientId'))), createArray(createObject('name', 'ENTRA_CLIENT_ID', 'value', parameters('entraClientId'))), createArray()), if(not(empty(parameters('entraRedirectUri'))), createArray(createObject('name', 'ENTRA_REDIRECT_URI', 'value', parameters('entraRedirectUri'))), createArray()), if(not(empty(parameters('entraPostLogoutRedirectUri'))), createArray(createObject('name', 'ENTRA_POST_LOGOUT_REDIRECT_URI', 'value', parameters('entraPostLogoutRedirectUri'))), createArray()))]"
           },
           "resources": [
             {
@@ -2516,6 +2581,7 @@
       "dependsOn": [
         "appRegistration",
         "containerAppsEnvironment",
+        "entraAuthGuard",
         "monitoring",
         "registry",
         "security"
@@ -8735,7 +8801,7 @@
     },
     "entraClientId": {
       "type": "string",
-      "value": "[if(parameters('deployEntraAppRegistration'), reference('appRegistration').outputs.appId.value, '')]"
+      "value": "[if(parameters('deployEntraAppRegistration'), reference('appRegistration').outputs.appId.value, if(equals(parameters('entraAuthMode'), 'existing'), reference('entraAuthGuard').outputs.validatedClientId.value, ''))]"
     },
     "entraAppObjectId": {
       "type": "string",
@@ -8771,7 +8837,11 @@
     },
     "ENTRA_CLIENT_ID": {
       "type": "string",
-      "value": "[if(parameters('deployEntraAppRegistration'), reference('appRegistration').outputs.appId.value, '')]"
+      "value": "[if(parameters('deployEntraAppRegistration'), reference('appRegistration').outputs.appId.value, if(equals(parameters('entraAuthMode'), 'existing'), reference('entraAuthGuard').outputs.validatedClientId.value, ''))]"
+    },
+    "ENTRA_APP_REGISTRATION_MANAGED": {
+      "type": "bool",
+      "value": "[parameters('deployEntraAppRegistration')]"
     },
     "AZURE_LOG_ANALYTICS_WORKSPACE_RESOURCE_ID": {
       "type": "string",
