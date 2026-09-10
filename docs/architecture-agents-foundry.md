@@ -4,15 +4,17 @@ This document proposes how `fantasy-cards-generator` can introduce agent-based c
 
 The direction is intentionally conservative: keep authentication, rate limiting, persistence, and HTTP/UI behavior in the existing web application, and add a Foundry-hosted agent layer only where agent reasoning adds value.
 
-> **Implementation status (issue #109, offline candidate):** the optional
-> `hosted_agents/card_orchestrator` runtime now implements three sequential MAF
-> specialists under one stable Responses host. The [runtime/invocation
-> contract](foundry-agent-invocation.md#opt-in-runtime-offline-candidate-issue-109)
-> is authoritative for its narrow text-only request, settings and safety evidence.
-> It has not been deployed or activated in the web app. Its bounded 20-second
-> stages / 65-second overall candidate deadline do not satisfy or supersede the
-> production latency proposal below. Earlier deployment inventories in this
-> document remain historical observations, not live verification.
+> **Current implementation:** the optional `hosted_agents/card_orchestrator`
+> runtime implements three sequential MAF specialists under one Responses host.
+> The web backend now integrates it behind `AGENT_GENERATION_ENABLED` (default
+> `false`), with bounded fallback to direct text generation for eligible failures.
+> See the [implemented architecture and diagram](architecture.md) and
+> [invocation contract](foundry-agent-invocation.md). Deployment observations are
+> recorded separately in the [operations runbook](foundry-agent-operations.md);
+> they are not fresh live verification. The proposal and earlier inventories
+> below are historical design context, not the current implementation inventory.
+> The runtime's 20-second stages / 65-second overall deadline do not supersede
+> the production latency proposal below.
 
 ## Executive summary
 

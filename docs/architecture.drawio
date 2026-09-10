@@ -1,0 +1,160 @@
+<mxfile host="app.diagrams.net" type="device">
+  <diagram id="implemented-architecture" name="Implemented architecture">
+    <mxGraphModel dx="2080" dy="1530" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2080" pageHeight="1530" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="title" value="Fantasy Cards Generator | implemented architecture" style="text;html=0;align=left;fontSize=32;fontStyle=1;fontColor=#172B4D;" vertex="1" parent="1">
+          <mxGeometry x="40" y="35" width="2000" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="subtitle" value="Repository topology, not a live Azure inventory | direct models by default; hosted text orchestration is opt-in" style="text;html=0;align=left;fontSize=20;fontColor=#42526E;" vertex="1" parent="1">
+          <mxGeometry x="40" y="92" width="2000" height="36" as="geometry"/>
+        </mxCell>
+        <mxCell id="clients" value="CLIENT &amp; IDENTITY" style="rounded=0;dashed=1;fillColor=#F0F5FA;strokeColor=#61758A;fontColor=#263B50;align=left;verticalAlign=top;spacing=16;fontSize=20;fontStyle=1;container=1;collapsible=0;" vertex="1" parent="1">
+          <mxGeometry x="40" y="250" width="260" height="750" as="geometry"/>
+        </mxCell>
+        <mxCell id="entra" value="Microsoft Entra ID&#10;Organizations OIDC&#10;Auth code + PKCE" style="shape=label;rounded=0;fillColor=#DCE8FA;strokeColor=#40699A;fontColor=#172B4D;fontSize=17;align=center;verticalAlign=top;spacingTop=52;imageAlign=center;imageVerticalAlign=top;imageWidth=34;imageHeight=34;image=https://tomkiljo.github.io/ms-icons/icons/Microsoft_Entra_architecture_icons/Microsoft%20Entra%20color%20icons%20SVG/Microsoft%20Entra%20ID%20color%20icon.svg;" vertex="1" parent="clients">
+          <mxGeometry x="20" y="50" width="220" height="130" as="geometry"/>
+        </mxCell>
+        <mxCell id="browser" value="Browser&#10;Jinja2 + HTMX UI&#10;HTTPS / cookies" style="shape=label;rounded=0;fillColor=#E4EDF7;strokeColor=#40699A;fontColor=#172B4D;fontSize=17;align=center;verticalAlign=top;spacingTop=52;imageAlign=center;imageVerticalAlign=top;imageWidth=34;imageHeight=34;image=https://tomkiljo.github.io/ms-icons/icons/Azure_Public_Service_Icons/Icons/general/10783-icon-service-Browser.svg;" vertex="1" parent="clients">
+          <mxGeometry x="20" y="240" width="220" height="130" as="geometry"/>
+        </mxCell>
+        <mxCell id="client-note" value="Artwork and photos&#10;stream via the backend.&#10;No browser-to-Blob&#10;or browser-to-agent calls." style="text;html=0;align=center;fontSize=17;fontColor=#42526E;" vertex="1" parent="clients">
+          <mxGeometry x="20" y="475" width="220" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="vnet" value="AZURE VNET | 10.42.0.0/16" style="rounded=0;dashed=1;fillColor=#EFF7FF;strokeColor=#377CB6;fontColor=#174D77;align=left;verticalAlign=top;spacing=16;fontSize=20;fontStyle=1;container=1;collapsible=0;" vertex="1" parent="1">
+          <mxGeometry x="400" y="250" width="760" height="750" as="geometry"/>
+        </mxCell>
+        <mxCell id="aca-subnet" value="aca-infra | /23" style="rounded=0;dashed=1;fillColor=#E4F0FC;strokeColor=#6A9BC4;fontColor=#174D77;align=left;verticalAlign=top;spacing=12;fontSize=18;fontStyle=1;container=1;collapsible=0;" vertex="1" parent="vnet">
+          <mxGeometry x="20" y="50" width="310" height="510" as="geometry"/>
+        </mxCell>
+        <mxCell id="identity" value="System-assigned identity&#10;Runtime RBAC" style="shape=label;rounded=0;fillColor=#CDE3FA;strokeColor=#377CB6;fontColor=#172B4D;fontSize=17;align=center;verticalAlign=top;spacingTop=52;imageAlign=center;imageVerticalAlign=top;imageWidth=34;imageHeight=34;image=https://tomkiljo.github.io/ms-icons/icons/Azure_Public_Service_Icons/Icons/identity/10227-icon-service-Managed-Identities.svg;" vertex="1" parent="aca-subnet">
+          <mxGeometry x="20" y="50" width="270" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="web" value="Container App: web-nat&#10;FastAPI / port 8000&#10;Auth, CSRF, ownership&#10;Moderation + generation&#10;Library, photos, deletion&#10;Health + asset proxy" style="shape=label;rounded=0;fillColor=#BCDDF7;strokeColor=#286BA2;fontColor=#102D46;fontSize=17;align=center;verticalAlign=top;spacingTop=52;imageAlign=center;imageVerticalAlign=top;imageWidth=34;imageHeight=34;image=https://tomkiljo.github.io/ms-icons/icons/Azure_Public_Service_Icons/Icons/other/02884-icon-service-Worker-Container-App.svg;" vertex="1" parent="aca-subnet">
+          <mxGeometry x="20" y="190" width="270" height="200" as="geometry"/>
+        </mxCell>
+        <mxCell id="pe-subnet" value="private-endpoints | /24" style="rounded=0;dashed=1;fillColor=#E4F0FC;strokeColor=#6A9BC4;fontColor=#174D77;align=left;verticalAlign=top;spacing=12;fontSize=18;fontStyle=1;container=1;collapsible=0;" vertex="1" parent="vnet">
+          <mxGeometry x="420" y="50" width="320" height="510" as="geometry"/>
+        </mxCell>
+        <mxCell id="dns" value="Private DNS zones&#10;3 zones + VNet links" style="shape=label;rounded=0;fillColor=#D9EAFB;strokeColor=#377CB6;fontColor=#172B4D;fontSize=17;align=center;verticalAlign=top;spacingTop=52;imageAlign=center;imageVerticalAlign=top;imageWidth=34;imageHeight=34;image=https://tomkiljo.github.io/ms-icons/icons/Azure_Public_Service_Icons/Icons/networking/10064-icon-service-DNS-Zones.svg;" vertex="1" parent="pe-subnet">
+          <mxGeometry x="20" y="50" width="280" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="pe" value="Three private endpoints&#10;Key Vault: vault&#10;Cosmos DB: Sql&#10;Storage: blob&#10;Private data-plane access" style="shape=label;rounded=0;fillColor=#C7E4F4;strokeColor=#377CB6;fontColor=#172B4D;fontSize=17;align=center;verticalAlign=top;spacingTop=52;imageAlign=center;imageVerticalAlign=top;imageWidth=34;imageHeight=34;image=https://tomkiljo.github.io/ms-icons/icons/Azure_Public_Service_Icons/Icons/other/02579-icon-service-Private-Endpoints.svg;" vertex="1" parent="pe-subnet">
+          <mxGeometry x="20" y="190" width="280" height="200" as="geometry"/>
+        </mxCell>
+        <mxCell id="nat" value="NAT Gateway + static IP&#10;Public-service egress" style="shape=label;rounded=0;fillColor=#D7E9F8;strokeColor=#377CB6;fontColor=#172B4D;fontSize=17;align=center;verticalAlign=top;spacingTop=52;imageAlign=center;imageVerticalAlign=top;imageWidth=34;imageHeight=34;image=https://tomkiljo.github.io/ms-icons/icons/Azure_Public_Service_Icons/Icons/networking/10310-icon-service-NAT.svg;" vertex="1" parent="vnet">
+          <mxGeometry x="40" y="620" width="270" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="foundry" value="MICROSOFT FOUNDRY | AI Services account + project" style="rounded=0;dashed=1;fillColor=#F6F0FC;strokeColor=#8651B0;fontColor=#592C7A;align=left;verticalAlign=top;spacing=16;fontSize=20;fontStyle=1;container=1;collapsible=0;" vertex="1" parent="1">
+          <mxGeometry x="1280" y="250" width="760" height="750" as="geometry"/>
+        </mxCell>
+        <mxCell id="agent" value="Hosted card-orchestrator&#10;Opt-in, text-only Responses&#10;MAF: concept &gt; lore &gt; art&#10;No image or data-store tools" style="shape=label;rounded=0;fillColor=#E7D3F7;strokeColor=#8651B0;fontColor=#38214B;fontSize=17;align=center;verticalAlign=top;spacingTop=52;imageAlign=center;imageVerticalAlign=top;imageWidth=34;imageHeight=34;image=https://tomkiljo.github.io/ms-icons/icons/Azure_Public_Service_Icons/Icons/ai%20+%20machine%20learning/10165-icon-service-Bot-Services.svg;" vertex="1" parent="foundry">
+          <mxGeometry x="30" y="90" width="320" height="150" as="geometry"/>
+        </mxCell>
+        <mxCell id="text-model" value="Azure OpenAI text&#10;gpt-5.5 / alias gpt-5-5&#10;Direct: chat completions&#10;Agent: FoundryChatClient" style="shape=label;rounded=0;fillColor=#E4D9F5;strokeColor=#8651B0;fontColor=#38214B;fontSize=17;align=center;verticalAlign=top;spacingTop=52;imageAlign=center;imageVerticalAlign=top;imageWidth=34;imageHeight=34;image=https://tomkiljo.github.io/ms-icons/icons/Azure_Public_Service_Icons/Icons/ai%20+%20machine%20learning/03438-icon-service-Azure-OpenAI.svg;" vertex="1" parent="foundry">
+          <mxGeometry x="430" y="90" width="300" height="150" as="geometry"/>
+        </mxCell>
+        <mxCell id="image-model" value="Azure OpenAI images&#10;gpt-image-2&#10;Generations / photo edits" style="shape=label;rounded=0;fillColor=#EEDDF7;strokeColor=#8651B0;fontColor=#38214B;fontSize=17;align=center;verticalAlign=top;spacingTop=52;imageAlign=center;imageVerticalAlign=top;imageWidth=34;imageHeight=34;image=https://tomkiljo.github.io/ms-icons/icons/Azure_Public_Service_Icons/Icons/ai%20+%20machine%20learning/03438-icon-service-Azure-OpenAI.svg;" vertex="1" parent="foundry">
+          <mxGeometry x="430" y="350" width="300" height="130" as="geometry"/>
+        </mxCell>
+        <mxCell id="content-safety" value="Azure AI Content Safety&#10;Saved-photo moderation" style="shape=label;rounded=0;fillColor=#F0E4FA;strokeColor=#8651B0;fontColor=#38214B;fontSize=17;align=center;verticalAlign=top;spacingTop=52;imageAlign=center;imageVerticalAlign=top;imageWidth=34;imageHeight=34;image=https://tomkiljo.github.io/ms-icons/icons/Azure_Public_Service_Icons/Icons/ai%20+%20machine%20learning/10162-icon-service-Cognitive-Services.svg;" vertex="1" parent="foundry">
+          <mxGeometry x="430" y="580" width="300" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="foundry-note" value="Public AI endpoints&#10;Entra tokens; no keys&#10;Agent: separate opt-ins" style="text;html=0;align=left;fontSize=17;fontColor=#592C7A;" vertex="1" parent="foundry">
+          <mxGeometry x="30" y="680" width="220" height="65" as="geometry"/>
+        </mxCell>
+        <mxCell id="delivery" value="AZURE / DELIVERY" style="rounded=0;dashed=1;fillColor=#F0F5FA;strokeColor=#61758A;fontColor=#263B50;align=left;verticalAlign=bottom;spacing=16;fontSize=20;fontStyle=1;container=1;collapsible=0;" vertex="1" parent="1">
+          <mxGeometry x="40" y="1130" width="260" height="280" as="geometry"/>
+        </mxCell>
+        <mxCell id="acr" value="Container Registry&#10;azd builds / pushes web&#10;AcrPull via dedicated&#10;user-assigned identity" style="shape=label;rounded=0;fillColor=#DCE8F3;strokeColor=#61758A;fontColor=#172B4D;fontSize=17;align=center;verticalAlign=top;spacingTop=52;imageAlign=center;imageVerticalAlign=top;imageWidth=34;imageHeight=34;image=https://tomkiljo.github.io/ms-icons/icons/Azure_Public_Service_Icons/Icons/containers/10105-icon-service-Container-Registries.svg;" vertex="1" parent="delivery">
+          <mxGeometry x="20" y="70" width="220" height="150" as="geometry"/>
+        </mxCell>
+        <mxCell id="data" value="AZURE / PRIVATE SERVICES | public network access disabled" style="rounded=0;dashed=1;fillColor=#EFF8F0;strokeColor=#4C8A59;fontColor=#2C6337;align=left;verticalAlign=bottom;spacing=16;fontSize=20;fontStyle=1;container=1;collapsible=0;" vertex="1" parent="1">
+          <mxGeometry x="400" y="1130" width="760" height="280" as="geometry"/>
+        </mxCell>
+        <mxCell id="vault" value="Key Vault&#10;Session + OIDC secrets&#10;Secrets User (runtime)" style="shape=label;rounded=0;fillColor=#DBEEDC;strokeColor=#4C8A59;fontColor=#213E27;fontSize=17;align=center;verticalAlign=top;spacingTop=52;imageAlign=center;imageVerticalAlign=top;imageWidth=34;imageHeight=34;image=https://tomkiljo.github.io/ms-icons/icons/Azure_Public_Service_Icons/Icons/security/10245-icon-service-Key-Vaults.svg;" vertex="1" parent="data">
+          <mxGeometry x="20" y="70" width="210" height="140" as="geometry"/>
+        </mxCell>
+        <mxCell id="cosmos" value="Cosmos DB (NoSQL)&#10;Cards / photos / audits&#10;Owner-partitioned data&#10;TTL deletion audits" style="shape=label;rounded=0;fillColor=#CDE8D2;strokeColor=#4C8A59;fontColor=#213E27;fontSize=17;align=center;verticalAlign=top;spacingTop=52;imageAlign=center;imageVerticalAlign=top;imageWidth=34;imageHeight=34;image=https://tomkiljo.github.io/ms-icons/icons/Azure_Public_Service_Icons/Icons/databases/10121-icon-service-Azure-Cosmos-DB.svg;" vertex="1" parent="data">
+          <mxGeometry x="280" y="70" width="210" height="140" as="geometry"/>
+        </mxCell>
+        <mxCell id="blob" value="Blob Storage&#10;card-assets&#10;profile-photos&#10;Container-scoped RBAC" style="shape=label;rounded=0;fillColor=#E2F0D9;strokeColor=#4C8A59;fontColor=#213E27;fontSize=17;align=center;verticalAlign=top;spacingTop=52;imageAlign=center;imageVerticalAlign=top;imageWidth=34;imageHeight=34;image=https://tomkiljo.github.io/ms-icons/icons/Azure_Public_Service_Icons/Icons/storage/10086-icon-service-Storage-Accounts.svg;" vertex="1" parent="data">
+          <mxGeometry x="540" y="70" width="200" height="140" as="geometry"/>
+        </mxCell>
+        <mxCell id="monitoring" value="AZURE MONITOR | telemetry and operations" style="rounded=0;dashed=1;fillColor=#FFF7E8;strokeColor=#B38736;fontColor=#78541A;align=left;verticalAlign=bottom;spacing=16;fontSize=20;fontStyle=1;container=1;collapsible=0;" vertex="1" parent="1">
+          <mxGeometry x="1280" y="1130" width="760" height="280" as="geometry"/>
+        </mxCell>
+        <mxCell id="insights" value="Application Insights&#10;Web + hosted telemetry&#10;Foundry account/project links&#10;Content-free instrumentation" style="shape=label;rounded=0;fillColor=#F9E6BC;strokeColor=#B38736;fontColor=#59421C;fontSize=17;align=center;verticalAlign=top;spacingTop=52;imageAlign=center;imageVerticalAlign=top;imageWidth=34;imageHeight=34;image=https://tomkiljo.github.io/ms-icons/icons/Azure_Public_Service_Icons/Icons/management%20+%20governance/00012-icon-service-Application-Insights.svg;" vertex="1" parent="monitoring">
+          <mxGeometry x="30" y="70" width="320" height="140" as="geometry"/>
+        </mxCell>
+        <mxCell id="logs" value="Log Analytics workspace&#10;ACA environment logs&#10;Workbooks / availability&#10;Alerts off by default" style="shape=label;rounded=0;fillColor=#FBECD0;strokeColor=#B38736;fontColor=#59421C;fontSize=17;align=center;verticalAlign=top;spacingTop=52;imageAlign=center;imageVerticalAlign=top;imageWidth=34;imageHeight=34;image=https://tomkiljo.github.io/ms-icons/icons/Azure_Public_Service_Icons/Icons/analytics/00009-icon-service-Log-Analytics-Workspaces.svg;" vertex="1" parent="monitoring">
+          <mxGeometry x="430" y="70" width="300" height="140" as="geometry"/>
+        </mxCell>
+        <mxCell id="legend" value="Solid: runtime / data access    Purple dashed: opt-in agent    Grey dashed: identity, delivery or telemetry    Arrows show calls/dependencies; responses omitted." style="text;html=0;align=left;fontSize=18;fontColor=#42526E;" vertex="1" parent="1">
+          <mxGeometry x="40" y="1435" width="2000" height="36" as="geometry"/>
+        </mxCell>
+        <mxCell id="footer" value="Generation safety and persistence stay in FastAPI. Retryable agent errors / routing_defer can fall back once to direct text; auth, policy and schema failures do not." style="text;html=0;align=left;fontSize=18;fontColor=#42526E;" vertex="1" parent="1">
+          <mxGeometry x="40" y="1480" width="2000" height="36" as="geometry"/>
+        </mxCell>
+        <mxCell id="e-login" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#40699A;strokeWidth=2;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="1" source="browser" target="entra">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="170" y="460"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e-ui" value="HTTPS" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#40699A;strokeWidth=2;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.325;entryDx=0;entryDy=0;fontSize=15;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="browser" target="web">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="390" y="555"/></Array><mxPoint x="25" y="-15" as="offset"/></mxGeometry>
+        </mxCell>
+        <mxCell id="e-token" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#40699A;strokeWidth=2;exitX=0;exitY=0.25;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="web" target="entra">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="340" y="540"/><mxPoint x="340" y="365"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e-identity" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#61758A;strokeWidth=2;dashed=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="identity" target="web">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="575" y="475"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e-private" value="Private access" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#377CB6;strokeWidth=2;exitX=1;exitY=0.6;exitDx=0;exitDy=0;entryX=0;entryY=0.6;entryDx=0;entryDy=0;fontSize=15;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="web" target="pe">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="790" y="610"/></Array><mxPoint y="-15" as="offset"/></mxGeometry>
+        </mxCell>
+        <mxCell id="e-dns" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#377CB6;strokeWidth=2;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="1" source="pe" target="dns">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="980" y="475"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e-agent" value="Opt-in text orchestration" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#8651B0;strokeWidth=2;dashed=1;exitX=1;exitY=0.15;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontSize=16;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="web" target="agent">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="770" y="520"/><mxPoint x="770" y="210"/><mxPoint x="1250" y="210"/><mxPoint x="1250" y="415"/></Array><mxPoint y="20" as="offset"/></mxGeometry>
+        </mxCell>
+        <mxCell id="e-direct" value="Default text path / bounded fallback" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#8651B0;strokeWidth=2;exitX=1;exitY=0.3;exitDx=0;exitDy=0;entryX=0.9;entryY=0;entryDx=0;entryDy=0;fontSize=16;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="web" target="text-model">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="790" y="550"/><mxPoint x="790" y="170"/><mxPoint x="1980" y="170"/></Array><mxPoint y="-18" as="offset"/></mxGeometry>
+        </mxCell>
+        <mxCell id="e-specialists" value="3 calls" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#8651B0;strokeWidth=2;dashed=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontSize=15;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="agent" target="text-model">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="1670" y="415"/></Array><mxPoint y="-15" as="offset"/></mxGeometry>
+        </mxCell>
+        <mxCell id="e-image" value="Artwork / reference-photo edits" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#8651B0;strokeWidth=2;exitX=0.8;exitY=1;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontSize=16;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="web" target="image-model">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="656" y="830"/><mxPoint x="1210" y="830"/><mxPoint x="1210" y="665"/></Array><mxPoint x="150" y="-18" as="offset"/></mxGeometry>
+        </mxCell>
+        <mxCell id="e-safety" value="Analyze before saving photos" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#8651B0;strokeWidth=2;exitX=0.9;exitY=1;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontSize=16;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="web" target="content-safety">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="683" y="850"/><mxPoint x="1230" y="850"/><mxPoint x="1230" y="885"/></Array><mxPoint x="185" y="35" as="offset"/></mxGeometry>
+        </mxCell>
+        <mxCell id="e-nat" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#377CB6;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="web" target="nat">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="575" y="815"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e-vault" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#4C8A59;strokeWidth=2;exitX=0.15;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="pe" target="vault">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="882" y="1030"/><mxPoint x="525" y="1030"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e-cosmos" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#4C8A59;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="pe" target="cosmos">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="980" y="1060"/><mxPoint x="785" y="1060"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e-blob" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#4C8A59;strokeWidth=2;exitX=0.85;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="pe" target="blob">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="1078" y="1090"/><mxPoint x="1040" y="1090"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e-pull" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#61758A;strokeWidth=2;dashed=1;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0;entryY=0.9;entryDx=0;entryDy=0;" edge="1" parent="1" source="acr" target="web">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="170" y="1060"/><mxPoint x="320" y="1060"/><mxPoint x="320" y="670"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e-web-telemetry" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#61758A;strokeWidth=2;dashed=1;exitX=0;exitY=0.8;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="web" target="insights">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="360" y="650"/><mxPoint x="360" y="1100"/><mxPoint x="1470" y="1100"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e-agent-telemetry" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#61758A;strokeWidth=2;dashed=1;exitX=0.75;exitY=1;exitDx=0;exitDy=0;entryX=0.75;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="agent" target="insights">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="1550" y="1040"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="e-workspace" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#B38736;strokeWidth=2;dashed=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="insights" target="logs">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="1670" y="1270"/></Array></mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
