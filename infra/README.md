@@ -67,36 +67,32 @@ string, or Cosmos keys.
 
 The root `azure.yaml` is the single operator entry point for both the `web-nat`
 Container App (port 8000) and the `card-orchestrator` Foundry hosted agent
-(port 8088). `azd up` targets **only** `web-nat`; bare `azd deploy` uses azd's
-standard "all enabled services" behavior, with `card-orchestrator` disabled by
-default through a supported service `condition`.
+(port 8088). `azd up` targets **only** `web-nat`. Bare `azd deploy` is
+**unsupported** for this manifest because azd 1.32 deploys all declared
+services by default and no verified root-hook context distinguishes bare from
+targeted deploys before service hooks run.
 
 ### Deploy guards
 
-Three layers prevent accidental hosted-agent deployment:
+Three layers keep hosted-agent deployment explicit:
 
 1. **`workflows.up`** — azd 1.32 supports overriding only the `up` workflow, so
    root `azd up` provisions and deploys `web-nat` only. There is no supported
    `workflows.deploy` override in azd 1.32.
-2. **Service `condition`** — `card-orchestrator` has
-   `condition: ${CARD_ORCHESTRATOR_ENABLE_PREREQUISITES=false}`. Therefore raw
-   bare `azd deploy` sees only enabled services by default and does not select,
-   build, publish, or deploy the hosted agent unless the prerequisites flag is
-   explicitly set.
-3. **Service lifecycle hooks** — `hooks/guard_agent_deploy.sh` is registered as
+2. **Service lifecycle hooks** — `hooks/guard_agent_deploy.sh` is registered as
    `prebuild`, `prepackage`, `prepublish`, and `predeploy` for
    `card-orchestrator`. These azd 1.32 service hooks run before the package →
    publish → deploy phases, blocking agent build/package/push/deploy unless
    `CARD_ORCHESTRATOR_ENABLE_PREREQUISITES=true` in the azd environment.
-4. **Root orchestrator (`deploy.sh`)** — the documented production-safe entry
+3. **Root orchestrator (`deploy.sh`)** — the documented production-safe entry
    point preserving `--approve-change` / `--approve-prod` enforcement gates.
 
 ### Web-only workflow (default)
 
 ```bash
 azd up                        # provision + deploy web-nat only
-azd deploy                    # deploy all enabled services; by default this is web-nat only
 azd deploy web-nat            # explicit web redeploy
+./deploy.sh web --approve-change
 ```
 
 ### Full deployment (explicit opt-in)
@@ -133,14 +129,12 @@ Both services can be deployed independently from the repository root:
 
 - `azd deploy web-nat` — redeploys the web Container App only.
 - `azd deploy card-orchestrator` — builds, pushes, and registers the hosted
-  agent only after `CARD_ORCHESTRATOR_ENABLE_PREREQUISITES=true`; otherwise azd
-  rejects the disabled service before package/publish/deploy, and the service
-  lifecycle hooks provide a second hard gate.
+  agent only after `CARD_ORCHESTRATOR_ENABLE_PREREQUISITES=true`; otherwise the
+  service lifecycle hooks fail closed before package/publish/deploy.
 
-Once the prerequisites flag is enabled, **do not use bare `azd deploy` as a
-web-only command**. azd 1.32 deploys all enabled services by default. Use
-`azd deploy web-nat` or `./deploy.sh web --approve-change` for web-only
-deployments in an agent-enabled environment.
+Do not use bare `azd deploy` with this manifest. Supported entrypoints are
+`./deploy.sh {web|agent|full|provision|preview}` and fully targeted
+`azd deploy <service-name>` commands.
 
 ### Agent opt-in variables
 
@@ -172,9 +166,9 @@ prints the planned azd commands and exits without starting azd.
 **azd limitations:** The azd CLI (1.32.0) has no built-in `--approve-prod` or
 `--approve-change` flags, and its schema supports `workflows.up` but not
 `workflows.deploy`. `deploy.sh` provides approval enforcement as a thin wrapper.
-The card-orchestrator service `condition` plus the service-level
-`prebuild`/`prepackage`/`prepublish`/`predeploy` hooks are the raw-azd guards
-that prevent build, package, push, and deploy before prerequisite opt-in.
+The service-level `prebuild`/`prepackage`/`prepublish`/`predeploy`
+hooks are the raw-azd guards that prevent build, package, push, and deploy
+before prerequisite opt-in.
 
 ### Deprecated files
 

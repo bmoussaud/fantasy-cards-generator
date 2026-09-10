@@ -14,7 +14,6 @@ services:
   card-orchestrator:
     project: .
     host: azure.ai.agent
-    condition: ${CARD_ORCHESTRATOR_ENABLE_PREREQUISITES=false}
     language: docker
     kind: hosted
     name: card-orchestrator
@@ -65,11 +64,11 @@ resources:
 infra:
   provider: bicep
   path: infra
-# Default up workflow deploys only web-nat. The card-orchestrator hosted agent
-# requires explicit opt-in: azd deploy card-orchestrator (after enabling
-# prerequisites and approving the agent deployment).
-# azd 1.32 only supports workflows.up; it does not support workflows.deploy.
-# Use ./deploy.sh or targeted azd commands for approval-gated workflows.
+# Default up workflow deploys only web-nat.
+# azd 1.32 bare `deploy` targets all declared services, and no verified root-hook
+# context distinguishes bare from targeted deploys before service hooks run.
+# Bare `azd deploy` is therefore unsupported for this manifest.
+# Use ./deploy.sh or targeted `azd deploy <service-name>` commands instead.
 workflows:
   up:
     - azd: provision

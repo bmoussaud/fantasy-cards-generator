@@ -402,20 +402,17 @@ def test_root_workflow_uses_only_supported_up_override() -> None:
     assert "deploy web-nat" in workflows_section
 
 
-def test_card_orchestrator_service_lifecycle_guards_exist() -> None:
-    """The card-orchestrator service in the root manifest declares supported
-    lifecycle hooks that validate prerequisites before build/package/publish/deploy."""
+def test_card_orchestrator_service_lifecycle_guards_exist_without_fake_condition_gate() -> None:
+    """The root manifest keeps real lifecycle hooks and drops the unsupported condition."""
     azure_yaml = (ROOT / "azure.yaml").read_text()
 
-    # Extract the card-orchestrator service section
     co_start = azure_yaml.index("card-orchestrator:")
     service_section = azure_yaml[co_start : azure_yaml.index("\nresources:", co_start)]
-    assert "condition: ${CARD_ORCHESTRATOR_ENABLE_PREREQUISITES=false}" in service_section
+    assert "condition:" not in service_section
     for hook in ("prebuild:", "prepackage:", "prepublish:", "predeploy:"):
         assert hook in service_section
     assert service_section.count("guard_agent_deploy") == 4
 
-    # The guard script exists and is executable
     guard = ROOT / "hooks/guard_agent_deploy.sh"
     assert guard.is_file()
     assert guard.stat().st_mode & 0o111

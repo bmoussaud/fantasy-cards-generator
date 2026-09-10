@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -1152,19 +1153,19 @@ def test_root_manifest_safe_default_up_workflow_deploys_only_web() -> None:
     assert "package web-nat" in workflows_section
 
 
-def test_root_manifest_disables_card_orchestrator_by_default_for_raw_azd_deploy() -> None:
-    """A supported service condition, not an invalid deploy workflow, keeps
-    raw bare ``azd deploy`` from selecting card-orchestrator by default."""
+def test_root_manifest_marks_bare_azd_deploy_unsupported_and_keeps_service_hooks() -> None:
+    """The manifest must not claim unsupported raw-bare-deploy gating semantics."""
     azure_yaml = (REPO_ROOT / "azure.yaml").read_text()
     service_start = azure_yaml.index("card-orchestrator:")
     service_end = azure_yaml.index("\nresources:", service_start)
     service_section = azure_yaml[service_start:service_end]
 
-    assert "condition: ${CARD_ORCHESTRATOR_ENABLE_PREREQUISITES=false}" in service_section
+    assert "condition:" not in service_section
     assert "prebuild:" in service_section
     assert "prepackage:" in service_section
     assert "prepublish:" in service_section
     assert "predeploy:" in service_section
+    assert "Bare `azd deploy` is therefore unsupported for this manifest." in azure_yaml
 
 
 def test_root_manifest_hooks_only_on_provision_not_deploy() -> None:
@@ -1197,6 +1198,20 @@ def test_card_orchestrator_lifecycle_guard_validates_prerequisites() -> None:
     assert (REPO_ROOT / "hooks/guard_agent_deploy.sh").stat().st_mode & 0o111
 
 
+def test_installed_azd_help_confirms_bare_deploy_targets_all_services() -> None:
+    """Use installed azd help as the behavior contract for raw deploy selection."""
+    result = subprocess.run(
+        ["azd", "deploy", "--help"],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "AZURE_DEV_USER_AGENT": "microsoft_foundry_skill"},
+    )
+
+    assert result.returncode == 0
+    assert "By default, deploys all services listed in 'azure.yaml'" in result.stdout
+    assert "When <service> is set, only the specific service is deployed." in result.stdout
+
+
 def test_card_orchestrator_docker_paths_are_root_relative() -> None:
     """Root-relative Docker paths resolve to the same Dockerfile as the nested manifest."""
     azure_yaml = (REPO_ROOT / "azure.yaml").read_text()
@@ -1209,7 +1224,7 @@ def test_card_orchestrator_docker_paths_are_root_relative() -> None:
 
 
 def test_card_orchestrator_prerequisites_default_off_in_root_bicep() -> None:
-    """Hosted-agent prerequisites are off by default; web-only workflow is safe."""
+    """Hosted-agent prerequisites stay default-off even though bare deploy is unsupported."""
     main = (REPO_ROOT / "infra/main.bicep").read_text()
     params = json.loads((REPO_ROOT / "infra/main.parameters.json").read_text())["parameters"]
 
