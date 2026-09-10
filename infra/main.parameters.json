@@ -139,6 +139,24 @@
     },
     "monitoringContainerRestartThreshold": {
       "value": "${MONITORING_CONTAINER_RESTART_THRESHOLD=3}"
+    },
+    "enableCardOrchestratorPrerequisites": {
+      "value": "${CARD_ORCHESTRATOR_ENABLE_PREREQUISITES=false}"
+    },
+    "createRegistryConnection": {
+      "value": "${CARD_ORCHESTRATOR_CREATE_REGISTRY_CONNECTION=false}"
+    },
+    "registryConnectionName": {
+      "value": "${AZURE_AI_PROJECT_ACR_CONNECTION_NAME=}"
+    },
+    "enableAgentAlerts": {
+      "value": "${CARD_ORCHESTRATOR_ENABLE_AGENT_ALERTS=false}"
+    },
+    "agentAlertEmailReceivers": {
+      "value": "${CARD_ORCHESTRATOR_ALERT_EMAIL_RECEIVERS=[]}"
+    },
+    "agentAlertWebhookReceivers": {
+      "value": "${CARD_ORCHESTRATOR_ALERT_WEBHOOK_RECEIVERS=[]}"
     }
   }
 }

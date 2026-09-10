@@ -1,4 +1,5 @@
 {
+  "_comment": "DEPRECATED: This nested manifest is superseded by the root azure.yaml (issue #130). Use 'azd deploy card-orchestrator' from the repository root. Retained as a legacy reference only.",
   "$schema": "https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json",
   "name": "fantasy-cards-card-orchestrator",
   "resourceGroup": "${AZURE_RESOURCE_GROUP}",

@@ -1,4 +1,14 @@
-"""Explicit hosted-agent launcher. Planning is the default; prod needs a second gate."""
+"""DEPRECATED: Superseded by the root azure.yaml consolidated entry point (issue #130).
+
+Equivalent root commands:
+  Preview:   azd provision --preview
+  Provision: azd provision
+  Deploy:    azd deploy card-orchestrator
+
+This launcher is retained as a legacy reference.  See docs/foundry-agent-operations.md.
+
+Original description: Explicit hosted-agent launcher.
+Planning is the default; prod needs a second gate."""
 
 from __future__ import annotations
 

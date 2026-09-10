@@ -328,6 +328,26 @@ param monitoringGenerationAdverseOutcomeThreshold int = 3
 @minValue(1)
 param monitoringContainerRestartThreshold int = 3
 
+// ── card-orchestrator hosted-agent prerequisites ──
+
+@description('Enable card-orchestrator prerequisites: ACR pull for project MI, optional registry connection, and agent monitoring. Off by default so the web-only workflow never deploys agent infrastructure.')
+param enableCardOrchestratorPrerequisites bool = false
+
+@description('Create the Foundry project → ACR registry connection. Only effective when enableCardOrchestratorPrerequisites is true. Enable only after confirming no existing registry connection.')
+param createRegistryConnection bool = false
+
+@description('Name of an existing registry connection discovered from the project connection inventory. Leave empty for auto-generated name. Never rename an existing connection.')
+param registryConnectionName string = ''
+
+@description('Enable card-orchestrator agent monitoring alerts. Only effective when enableCardOrchestratorPrerequisites is true. Requires at least one agent alert receiver to take effect.')
+param enableAgentAlerts bool = false
+
+@description('Action Group email receivers for card-orchestrator agent alerts.')
+param agentAlertEmailReceivers array = []
+
+@description('Action Group webhook receivers for card-orchestrator agent alerts. Do not embed credentials in serviceUri.')
+param agentAlertWebhookReceivers array = []
+
 var namePrefix = 'fcag'
 var deployerPrincipalId = deployer().objectId
 var resourceToken = toLower('${namePrefix}-${environmentName}')
@@ -655,6 +675,34 @@ module aiFoundry './modules/ai-foundry.bicep' = {
   }
 }
 
+// ── card-orchestrator hosted-agent prerequisites and monitoring ──
+
+module agentPrerequisites './modules/agent-prerequisites.bicep' = if (enableCardOrchestratorPrerequisites) {
+  name: 'card-orchestrator-prerequisites'
+  params: {
+    accountName: aiFoundryAccountName
+    projectName: resolvedAiFoundryProjectName
+    registryName: registryName
+    projectPrincipalId: aiFoundry.outputs.aiFoundryProjectPrincipalId
+    createRegistryConnection: createRegistryConnection
+    registryConnectionName: registryConnectionName
+  }
+}
+
+module agentMonitoring './modules/agent-monitoring.bicep' = if (enableCardOrchestratorPrerequisites) {
+  name: 'card-orchestrator-agent-monitoring'
+  params: {
+    location: location
+    environmentName: environmentName
+    containerAppName: containerApps.outputs.containerAppName
+    appInsightsResourceId: monitoring.outputs.appInsightsResourceId
+    logAnalyticsWorkspaceResourceId: monitoring.outputs.logAnalyticsWorkspaceResourceId
+    enableAlerts: enableAgentAlerts
+    actionGroupEmailReceivers: agentAlertEmailReceivers
+    actionGroupWebhookReceivers: agentAlertWebhookReceivers
+  }
+}
+
 output applicationInsightsName string = monitoring.outputs.appInsightsName
 output monitoringActionGroupName string = operationalMonitoring.outputs.actionGroupName
 output monitoringAlertsEnabled bool = operationalMonitoring.outputs.alertsEnabled
@@ -712,3 +760,14 @@ output ENTRA_CLIENT_ID string = entraClientId
 output ENTRA_APP_REGISTRATION_MANAGED bool = deployEntraAppRegistration
 output AZURE_LOG_ANALYTICS_WORKSPACE_RESOURCE_ID string = monitoring.outputs.logAnalyticsWorkspaceResourceId
 output AZURE_APP_INSIGHTS_RESOURCE_ID string = monitoring.outputs.appInsightsResourceId
+
+// ── card-orchestrator hosted-agent extension outputs ──
+output AZURE_AI_PROJECT_ID string = aiFoundry.outputs.aiFoundryProjectResourceId
+output AZURE_AI_PROJECT_ENDPOINT string = aiFoundry.outputs.aiFoundryProjectEndpoint
+output FOUNDRY_PROJECT_ENDPOINT string = aiFoundry.outputs.aiFoundryProjectEndpoint
+output AZURE_AI_ACCOUNT_NAME string = aiFoundry.outputs.aiFoundryAccountName
+output AZURE_AI_PROJECT_NAME string = aiFoundry.outputs.aiFoundryProjectName
+output AZURE_CONTAINER_REGISTRY_RESOURCE_ID string = registry.outputs.registryResourceId
+output AZURE_AI_PROJECT_ACR_CONNECTION_NAME string = enableCardOrchestratorPrerequisites && createRegistryConnection && empty(registryConnectionName)
+  ? '${registryName}-conn'
+  : registryConnectionName

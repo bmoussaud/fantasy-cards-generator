@@ -291,3 +291,93 @@ def test_launcher_has_separately_gated_prod_path(monkeypatch) -> None:
         == 0
     )
     assert calls[0][0][-3:] == ["--environment", "prod", "--no-prompt"]
+
+
+# ── Consolidated root entry point (issue #130) ──────────────────────
+
+
+def test_root_manifest_card_orchestrator_matches_nested_contract() -> None:
+    """Root and nested manifests declare equivalent card-orchestrator service contracts."""
+    root_yaml = (ROOT / "azure.yaml").read_text()
+    nested_service = _manifest()["services"]["card-orchestrator"]
+
+    # Host type and kind match
+    assert "host: azure.ai.agent" in root_yaml
+    assert "kind: hosted" in root_yaml
+
+    # Docker paths resolve to the same Dockerfile
+    root_dockerfile = ROOT / "hosted_agents/card_orchestrator/Dockerfile"
+    nested_dockerfile = (DEPLOYMENT / nested_service["docker"]["path"]).resolve()
+    assert root_dockerfile.resolve() == nested_dockerfile
+
+    # Environment variables match
+    for env_var in nested_service["environmentVariables"]:
+        assert env_var["name"] in root_yaml
+
+
+def test_root_manifest_card_orchestrator_container_contract() -> None:
+    """Root card-orchestrator matches the nested container and protocol contracts."""
+    root_yaml = (ROOT / "azure.yaml").read_text()
+
+    assert 'cpu: "0.5"' in root_yaml
+    assert "memory: 1Gi" in root_yaml
+    assert "protocol: responses" in root_yaml
+    assert "image: card-orchestrator" in root_yaml
+    assert "tag: ${CARD_ORCHESTRATOR_VERSION}" in root_yaml
+    assert "platform: linux/amd64" in root_yaml
+    assert "remoteBuild: false" in root_yaml
+
+
+def test_nested_manifest_has_deprecation_notice() -> None:
+    """The deprecated nested manifest must document its superseded status."""
+    content = (DEPLOYMENT / "azure.yaml").read_text()
+    assert "DEPRECATED" in content
+    assert "root azure.yaml" in content.lower() or "root" in content.lower()
+
+
+def test_nested_launcher_has_deprecation_notice() -> None:
+    """The deprecated launcher must document its superseded status."""
+    content = (DEPLOYMENT / "deploy.py").read_text()
+    assert "DEPRECATED" in content
+    assert "azd deploy card-orchestrator" in content
+
+
+def test_root_bicep_card_orchestrator_prerequisites_conditional() -> None:
+    """Root Bicep gates agent prerequisites and monitoring on explicit opt-in."""
+    main = (ROOT / "infra/main.bicep").read_text()
+
+    # Prerequisites module is conditional
+    prereqs_module = _bicep_block(main, "module agentPrerequisites")
+    assert "if (enableCardOrchestratorPrerequisites)" in prereqs_module
+
+    # Agent monitoring module is conditional
+    monitoring_module = _bicep_block(main, "module agentMonitoring")
+    assert "if (enableCardOrchestratorPrerequisites)" in monitoring_module
+
+    # Shares the same monitoring and registry resources
+    assert "monitoring.outputs.appInsightsResourceId" in monitoring_module
+    assert "monitoring.outputs.logAnalyticsWorkspaceResourceId" in monitoring_module
+    assert "registryName: registryName" in prereqs_module
+
+
+def test_root_agent_prerequisites_reuses_card_orchestrator_canonical_patterns() -> None:
+    """Root and card-orchestrator prerequisites use identical ACR Pull role IDs
+    and registry connection patterns."""
+    root_prereqs = (ROOT / "infra/modules/agent-prerequisites.bicep").read_text()
+    nested_prereqs = (DEPLOYMENT / "infra/modules/prerequisites.bicep").read_text()
+
+    # Same canonical AcrPull role ID
+    assert "'7f951dda-4ed3-4680-a7ca-43fe172d538d'" in root_prereqs
+    assert "'7f951dda-4ed3-4680-a7ca-43fe172d538d'" in nested_prereqs
+
+    # Same registry connection API version and patterns
+    assert "projects/connections@2025-04-01-preview" in root_prereqs
+    assert "projects/connections@2025-04-01-preview" in nested_prereqs
+    assert "category: 'ContainerRegistry'" in root_prereqs
+    assert "authType: 'ManagedIdentity'" in root_prereqs
+    assert "clientId: aiFoundryProject.identity.principalId" in root_prereqs
+    assert "resourceId: registry.id" in root_prereqs
+
+    # No credential leaks in either
+    assert "listCredentials" not in root_prereqs
+    assert "AcrPush" not in root_prereqs

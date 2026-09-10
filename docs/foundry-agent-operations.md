@@ -1,5 +1,58 @@
 # Card-orchestrator operations
 
+## Consolidated root entry point — issue #130
+
+The root `azure.yaml` is now the single entry point for both `web-nat` and
+`card-orchestrator`. The deprecated `deployments/card-orchestrator/azure.yaml`
+and `deployments/card-orchestrator/deploy.py` are retained as legacy references
+only.
+
+### Unified deployment commands
+
+| Workflow | Command | Notes |
+|---|---|---|
+| Web-only (default) | `azd up` | Provisions and deploys only web-nat |
+| Web redeploy | `azd deploy web-nat` | Does not trigger provision hooks |
+| Agent deploy | `azd deploy card-orchestrator` | Requires prerequisites enabled |
+| Full provision | `azd provision` | Deploys all infra including agent prereqs if enabled |
+
+### Agent prerequisite opt-in
+
+Before deploying the card-orchestrator for the first time:
+
+```bash
+azd env set ENABLE_FOUNDRY_AGENT_ACCESS true
+azd env set CARD_ORCHESTRATOR_ENABLE_PREREQUISITES true
+azd env set CARD_ORCHESTRATOR_CREATE_REGISTRY_CONNECTION true
+azd provision
+azd deploy card-orchestrator
+```
+
+### Rollback
+
+To disable agent infrastructure after a failed deployment:
+
+```bash
+azd env set CARD_ORCHESTRATOR_ENABLE_PREREQUISITES false
+azd env set ENABLE_FOUNDRY_AGENT_ACCESS false
+azd provision
+```
+
+Note: Setting flags to `false` does not revoke already-created RBAC assignments.
+Manual cleanup is required for existing Azure role assignments.
+
+### Deprecated launcher equivalents
+
+| Old command | New equivalent |
+|---|---|
+| `cd deployments/card-orchestrator && python deploy.py preview` | `azd provision --preview` |
+| `cd deployments/card-orchestrator && python deploy.py provision --execute --approve-change` | `azd provision` |
+| `cd deployments/card-orchestrator && python deploy.py deploy --execute --approve-change` | `azd deploy card-orchestrator` |
+
+**Unsupported gate:** The old launcher's `--approve-prod` / `--approve-change`
+flags have no direct `azd` equivalent. Production approval must be enforced via
+external gates (GitHub Environment protection rules, manual review).
+
 ## Dev model-capacity correction and successful ACA-MI E2E — 2026-09-09
 
 Safe management-plane inspection after the classified HTTP 429 found the exact

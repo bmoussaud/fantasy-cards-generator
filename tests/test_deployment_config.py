@@ -1103,3 +1103,143 @@ def test_session_secret_flows_only_into_key_vault_not_container_app() -> None:
     # The azd parameter sentinel defaults to empty (not to a static value)
     # so a missing azd env var skips the Key Vault secret instead of hardcoding one.
     assert '"value": "${APP_SESSION_SECRET_KEY=}"' in main_parameters
+
+
+# ── Consolidated root entry point (issue #130) ──────────────────────
+
+
+def test_root_manifest_declares_both_services() -> None:
+    """Root azure.yaml is the single manifest for web-nat and card-orchestrator."""
+    azure_yaml = (REPO_ROOT / "azure.yaml").read_text()
+
+    assert "web-nat:" in azure_yaml
+    assert "host: containerapp" in azure_yaml
+    assert "card-orchestrator:" in azure_yaml
+    assert "host: azure.ai.agent" in azure_yaml
+    assert "kind: hosted" in azure_yaml
+    assert "name: card-orchestrator" in azure_yaml
+    assert "port: 8000" in azure_yaml
+
+
+def test_root_manifest_requires_azd_version_and_agent_extension() -> None:
+    azure_yaml = (REPO_ROOT / "azure.yaml").read_text()
+
+    assert "requiredVersions:" in azure_yaml
+    assert ">= 1.32.0" in azure_yaml
+    assert "azure.ai.agents:" in azure_yaml
+    assert "=1.0.0-beta.13" in azure_yaml
+
+
+def test_root_manifest_safe_default_workflow_deploys_only_web() -> None:
+    """The default up workflow provisions and deploys only web-nat.
+
+    The card-orchestrator hosted agent is never built, pushed, or deployed by
+    ``azd up``.  An operator must explicitly run ``azd deploy card-orchestrator``
+    after enabling prerequisites and reviewing the agent deployment.
+    """
+    azure_yaml = (REPO_ROOT / "azure.yaml").read_text()
+
+    assert "workflows:" in azure_yaml
+    assert "deploy web-nat" in azure_yaml
+    # Safety: the default up workflow must never deploy all services
+    assert "deploy --all" not in azure_yaml
+    # The workflows section must not contain a card-orchestrator deploy step
+    workflows_start = azure_yaml.index("workflows:")
+    hooks_start = azure_yaml.index("hooks:")
+    workflows_section = azure_yaml[workflows_start:hooks_start]
+    assert "card-orchestrator" not in workflows_section
+
+
+def test_root_manifest_hooks_only_on_provision_not_deploy() -> None:
+    """Hooks run only during provision; deploy-only paths do not rotate credentials."""
+    azure_yaml = (REPO_ROOT / "azure.yaml").read_text()
+
+    assert "preprovision:" in azure_yaml
+    assert "postprovision:" in azure_yaml
+    # No deploy hooks that could trigger credential rotation on azd deploy
+    assert "predeploy:" not in azure_yaml
+    assert "postdeploy:" not in azure_yaml
+
+
+def test_card_orchestrator_docker_paths_are_root_relative() -> None:
+    """Root-relative Docker paths resolve to the same Dockerfile as the nested manifest."""
+    azure_yaml = (REPO_ROOT / "azure.yaml").read_text()
+
+    assert "hosted_agents/card_orchestrator/Dockerfile" in azure_yaml
+    assert (REPO_ROOT / "hosted_agents/card_orchestrator/Dockerfile").is_file()
+    # Port 8088 is the hosted agent container port (in the Dockerfile), not in
+    # the root manifest resources.  Port 8000 is the web service.
+    assert "EXPOSE 8088" in (REPO_ROOT / "hosted_agents/card_orchestrator/Dockerfile").read_text()
+
+
+def test_card_orchestrator_prerequisites_default_off_in_root_bicep() -> None:
+    """Hosted-agent prerequisites are off by default; web-only workflow is safe."""
+    main = (REPO_ROOT / "infra/main.bicep").read_text()
+    params = json.loads((REPO_ROOT / "infra/main.parameters.json").read_text())["parameters"]
+
+    assert "param enableCardOrchestratorPrerequisites bool = false" in main
+    assert "param createRegistryConnection bool = false" in main
+    assert "= if (enableCardOrchestratorPrerequisites)" in main
+    assert params["enableCardOrchestratorPrerequisites"]["value"].endswith("=false}")
+    assert params["createRegistryConnection"]["value"].endswith("=false}")
+    assert params["enableAgentAlerts"]["value"].endswith("=false}")
+
+
+def test_root_bicep_exports_hosted_agent_extension_outputs() -> None:
+    """Root Bicep provides all outputs the azure.ai.agent extension needs."""
+    main = (REPO_ROOT / "infra/main.bicep").read_text()
+
+    for output_name in (
+        "AZURE_AI_PROJECT_ID",
+        "AZURE_AI_PROJECT_ENDPOINT",
+        "FOUNDRY_PROJECT_ENDPOINT",
+        "AZURE_AI_ACCOUNT_NAME",
+        "AZURE_AI_PROJECT_NAME",
+        "AZURE_CONTAINER_REGISTRY_RESOURCE_ID",
+        "AZURE_AI_PROJECT_ACR_CONNECTION_NAME",
+    ):
+        assert f"output {output_name}" in main
+
+
+def test_root_agent_prerequisites_use_canonical_acr_pull_role_and_connection() -> None:
+    """Root agent-prerequisites module uses the same canonical ACR role ID and
+    registry-connection pattern as the card-orchestrator repair facade."""
+    prereqs = (REPO_ROOT / "infra/modules/agent-prerequisites.bicep").read_text()
+
+    # Canonical AcrPull role ID
+    assert "'7f951dda-4ed3-4680-a7ca-43fe172d538d'" in prereqs
+    assert "guid(registry.id, projectPrincipalId, acrPullRoleDefinitionId)" in prereqs
+    # Registry connection contract
+    assert "category: 'ContainerRegistry'" in prereqs
+    assert "authType: 'ManagedIdentity'" in prereqs
+    assert "clientId: aiFoundryProject.identity.principalId" in prereqs
+    assert "resourceId: registry.id" in prereqs
+    assert "= if (createRegistryConnection)" in prereqs
+    # No duplicate Foundry RBAC — those are in ai-foundry.bicep
+    assert "foundryUserRoleDefinitionId" not in prereqs
+    assert "foundryAgentConsumerRoleDefinitionId" not in prereqs
+
+
+def test_root_agent_monitoring_is_gated_and_alerts_default_off() -> None:
+    """Agent monitoring deploys only when prerequisites are enabled; alerts default off."""
+    main = (REPO_ROOT / "infra/main.bicep").read_text()
+    params = json.loads((REPO_ROOT / "infra/main.parameters.json").read_text())["parameters"]
+
+    assert "module agentMonitoring" in main
+    assert "enableAgentAlerts" in main
+    assert "param enableAgentAlerts bool = false" in main
+    assert params["enableAgentAlerts"]["value"] == "${CARD_ORCHESTRATOR_ENABLE_AGENT_ALERTS=false}"
+
+
+def test_nested_manifest_is_deprecated() -> None:
+    """The deployments/card-orchestrator/azure.yaml has a deprecation notice."""
+    content = (REPO_ROOT / "deployments/card-orchestrator/azure.yaml").read_text()
+
+    assert "DEPRECATED" in content
+
+
+def test_nested_launcher_is_deprecated() -> None:
+    """The deployments/card-orchestrator/deploy.py has a deprecation notice."""
+    content = (REPO_ROOT / "deployments/card-orchestrator/deploy.py").read_text()
+
+    assert "DEPRECATED" in content

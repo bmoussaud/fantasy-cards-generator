@@ -63,6 +63,86 @@ string, or Cosmos keys.
 > [#37](https://github.com/bmoussaud/fantasy-cards-generator/issues/37), which
 > upgrades the Cosmos trust model to subnet-scoped service-endpoint rules.
 
+## Consolidated root entry point (issue #130)
+
+The root `azure.yaml` is the single operator entry point for both the `web-nat`
+Container App (port 8000) and the `card-orchestrator` Foundry hosted agent
+(port 8088). The default `azd up` workflow provisions infrastructure and deploys
+**only** `web-nat`; the hosted agent is never built, pushed, or deployed unless an
+operator explicitly opts in.
+
+### Web-only workflow (default)
+
+```bash
+azd up                        # provision + deploy web-nat only
+azd deploy web-nat            # redeploy web only
+```
+
+### Full deployment (explicit opt-in)
+
+```bash
+# 1. Enable hosted-agent RBAC (if not already)
+azd env set ENABLE_FOUNDRY_AGENT_ACCESS true
+
+# 2. Enable card-orchestrator prerequisites (ACR pull, monitoring)
+azd env set CARD_ORCHESTRATOR_ENABLE_PREREQUISITES true
+
+# 3. Optionally create the registry connection
+azd env set CARD_ORCHESTRATOR_CREATE_REGISTRY_CONNECTION true
+
+# 4. Provision shared infrastructure
+azd provision
+
+# 5. Deploy card-orchestrator independently
+azd deploy card-orchestrator
+```
+
+### Targeted deployments
+
+Both services can be deployed independently from the repository root:
+
+- `azd deploy web-nat` — redeploys the web Container App only.
+- `azd deploy card-orchestrator` — builds, pushes, and registers the hosted agent
+  only (requires prerequisites to have been provisioned).
+
+### Agent opt-in variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `ENABLE_FOUNDRY_AGENT_ACCESS` | `false` | Foundry RBAC: project MI → Foundry User, ACA MI → Agent Consumer |
+| `CARD_ORCHESTRATOR_ENABLE_PREREQUISITES` | `false` | ACR pull for project MI, agent monitoring workbook/alerts |
+| `CARD_ORCHESTRATOR_CREATE_REGISTRY_CONNECTION` | `false` | Foundry project → ACR registry connection |
+| `CARD_ORCHESTRATOR_ENABLE_AGENT_ALERTS` | `false` | Enable agent monitoring alert rules |
+| `AGENT_GENERATION_ENABLED` | `false` | Runtime: use agent path vs direct model path |
+
+### Production approval
+
+Production activation requires explicit `azd env set` of all opt-in variables.
+No opt-in variable defaults to `true`. The `up` workflow never deploys the hosted
+agent. There is no single-command "deploy everything" default.
+
+**Limitation:** The current `azd` CLI (1.32.0) does not provide a built-in
+`--approve-prod` or `--approve-change` gate equivalent to the deprecated Python
+launcher (`deployments/card-orchestrator/deploy.py`). Operators must enforce
+production approval through external runbook gates (e.g., GitHub Environment
+protection rules, manual review before `azd deploy`). This is documented as an
+unsupported acceptance gate.
+
+### Deprecated files
+
+- `deployments/card-orchestrator/azure.yaml` — superseded by root manifest.
+  Retained as a legacy reference; do not use for new deployments.
+- `deployments/card-orchestrator/deploy.py` — superseded by root `azd` commands.
+  Retained as a legacy reference.
+
+### Technical notes
+
+The azd schema (v1.0) supports mixed `host` types per service. The
+`azure.ai.agents` extension (1.0.0-beta.13) registers `azure.ai.agent` as a
+service target provider. This has been verified against the installed azd 1.32.0
+schema and extension capabilities, but not against a live Azure deployment in this
+PR. A live provisioning preview should be reviewed before any real deployment.
+
 ## Provisioning
 
 Use the normal azd workflow:
