@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -291,3 +292,210 @@ def test_launcher_has_separately_gated_prod_path(monkeypatch) -> None:
         == 0
     )
     assert calls[0][0][-3:] == ["--environment", "prod", "--no-prompt"]
+
+
+# ── Consolidated root entry point (issue #130) ──────────────────────
+
+
+def test_root_manifest_card_orchestrator_matches_nested_contract() -> None:
+    """Root and nested manifests declare equivalent card-orchestrator service contracts."""
+    root_yaml = (ROOT / "azure.yaml").read_text()
+    nested_service = _manifest()["services"]["card-orchestrator"]
+
+    # Host type and kind match
+    assert "host: azure.ai.agent" in root_yaml
+    assert "kind: hosted" in root_yaml
+
+    # Docker paths resolve to the same Dockerfile
+    root_dockerfile = ROOT / "hosted_agents/card_orchestrator/Dockerfile"
+    nested_dockerfile = (DEPLOYMENT / nested_service["docker"]["path"]).resolve()
+    assert root_dockerfile.resolve() == nested_dockerfile
+
+    # Environment variables match
+    for env_var in nested_service["environmentVariables"]:
+        assert env_var["name"] in root_yaml
+
+
+def test_root_manifest_card_orchestrator_container_contract() -> None:
+    """Root card-orchestrator matches the nested container and protocol contracts."""
+    root_yaml = (ROOT / "azure.yaml").read_text()
+
+    assert 'cpu: "0.5"' in root_yaml
+    assert "memory: 1Gi" in root_yaml
+    assert "protocol: responses" in root_yaml
+    assert "image: card-orchestrator" in root_yaml
+    assert "tag: ${CARD_ORCHESTRATOR_VERSION}" in root_yaml
+    assert "platform: linux/amd64" in root_yaml
+    assert "remoteBuild: false" in root_yaml
+
+
+def test_nested_manifest_has_deprecation_notice() -> None:
+    """The deprecated nested manifest must document its superseded status."""
+    content = (DEPLOYMENT / "azure.yaml").read_text()
+    assert "DEPRECATED" in content
+    assert "root azure.yaml" in content.lower() or "root" in content.lower()
+
+
+def test_nested_launcher_has_deprecation_notice() -> None:
+    """The deprecated launcher must document its superseded status."""
+    content = (DEPLOYMENT / "deploy.py").read_text()
+    assert "DEPRECATED" in content
+    assert "azd deploy card-orchestrator" in content
+
+
+def test_root_bicep_card_orchestrator_prerequisites_conditional() -> None:
+    """Root Bicep gates agent prerequisites and monitoring on explicit opt-in."""
+    main = (ROOT / "infra/main.bicep").read_text()
+
+    # Prerequisites module is conditional
+    prereqs_module = _bicep_block(main, "module agentPrerequisites")
+    assert "if (enableCardOrchestratorPrerequisites)" in prereqs_module
+
+    # Agent monitoring module is conditional
+    monitoring_module = _bicep_block(main, "module agentMonitoring")
+    assert "if (enableCardOrchestratorPrerequisites)" in monitoring_module
+
+    # Shares the same monitoring and registry resources
+    assert "monitoring.outputs.appInsightsResourceId" in monitoring_module
+    assert "monitoring.outputs.logAnalyticsWorkspaceResourceId" in monitoring_module
+    assert "registryName: registryName" in prereqs_module
+
+
+def test_root_agent_prerequisites_reuses_card_orchestrator_canonical_patterns() -> None:
+    """Root and card-orchestrator prerequisites use identical ACR Pull role IDs
+    and registry connection patterns."""
+    root_prereqs = (ROOT / "infra/modules/agent-prerequisites.bicep").read_text()
+    nested_prereqs = (DEPLOYMENT / "infra/modules/prerequisites.bicep").read_text()
+
+    # Same canonical AcrPull role ID
+    assert "'7f951dda-4ed3-4680-a7ca-43fe172d538d'" in root_prereqs
+    assert "'7f951dda-4ed3-4680-a7ca-43fe172d538d'" in nested_prereqs
+
+    # Same registry connection API version and patterns
+    assert "projects/connections@2025-04-01-preview" in root_prereqs
+    assert "projects/connections@2025-04-01-preview" in nested_prereqs
+    assert "category: 'ContainerRegistry'" in root_prereqs
+    assert "authType: 'ManagedIdentity'" in root_prereqs
+    assert "clientId: aiFoundryProject.identity.principalId" in root_prereqs
+    assert "resourceId: registry.id" in root_prereqs
+
+    # No credential leaks in either
+    assert "listCredentials" not in root_prereqs
+    assert "AcrPush" not in root_prereqs
+
+
+# ── Deploy guard and orchestration (reviewer findings) ───────────────
+
+
+def test_root_workflow_uses_only_supported_up_override() -> None:
+    """azd 1.32 supports ``workflows.up`` only; the root manifest must not
+    claim an unsupported bare ``azd deploy`` override."""
+    azure_yaml = (ROOT / "azure.yaml").read_text()
+    workflows_start = azure_yaml.index("workflows:")
+    hooks_start = azure_yaml.rindex("\nhooks:")
+    workflows_section = azure_yaml[workflows_start:hooks_start]
+
+    assert "up:" in workflows_section
+    assert "deploy:" not in workflows_section
+    assert "card-orchestrator" not in workflows_section
+    assert "package web-nat" in workflows_section
+    assert "deploy web-nat" in workflows_section
+
+
+def test_card_orchestrator_service_lifecycle_guards_exist_without_fake_condition_gate() -> None:
+    """The root manifest keeps real lifecycle hooks and drops the unsupported condition."""
+    azure_yaml = (ROOT / "azure.yaml").read_text()
+
+    co_start = azure_yaml.index("card-orchestrator:")
+    service_section = azure_yaml[co_start : azure_yaml.index("\nresources:", co_start)]
+    assert "condition:" not in service_section
+    for hook in ("prebuild:", "prepackage:", "prepublish:", "predeploy:"):
+        assert hook in service_section
+    assert service_section.count("guard_agent_deploy") == 4
+
+    guard = ROOT / "hooks/guard_agent_deploy.sh"
+    assert guard.is_file()
+    assert guard.stat().st_mode & 0o111
+
+
+def test_predeploy_guard_rejects_unset_prerequisites() -> None:
+    """The guard script exits non-zero when CARD_ORCHESTRATOR_ENABLE_PREREQUISITES
+    is not 'true', preventing accidental agent deployment."""
+    guard = ROOT / "hooks/guard_agent_deploy.sh"
+
+    # Unset → blocked
+    result = subprocess.run(
+        ["bash", str(guard)],
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin"},
+    )
+    assert result.returncode == 1
+    assert "blocked" in result.stderr.lower()
+
+
+def test_predeploy_guard_allows_enabled_prerequisites() -> None:
+    """The guard script exits zero when CARD_ORCHESTRATOR_ENABLE_PREREQUISITES=true."""
+    guard = ROOT / "hooks/guard_agent_deploy.sh"
+
+    result = subprocess.run(
+        ["bash", str(guard)],
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin", "CARD_ORCHESTRATOR_ENABLE_PREREQUISITES": "true"},
+    )
+    assert result.returncode == 0
+
+
+def test_root_orchestrator_preserves_approval_gates() -> None:
+    """deploy.sh at the repository root is the production-safe entry point,
+    preserving --approve-change / --approve-prod semantics from the deprecated
+    launcher."""
+    script = ROOT / "deploy.sh"
+    assert script.is_file()
+    assert script.stat().st_mode & 0o111
+    content = script.read_text()
+    assert "--approve-change" in content
+    assert "--approve-prod" in content
+    assert "PLAN ONLY" in content
+
+
+def test_root_orchestrator_executes_azd_with_explicit_root_cwd(tmp_path: Path) -> None:
+    """The root wrapper scopes azd with --cwd to its own repo root even when
+    launched from a different current working directory."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    log = tmp_path / "azd.log"
+    fake_azd = fake_bin / "azd"
+    fake_azd.write_text(
+        f'#!/bin/sh\necho "pwd=$PWD" > "{log}"\necho "args=$*" >> "{log}"\nexit 17\n'
+    )
+    fake_azd.chmod(0o755)
+
+    result = subprocess.run(
+        ["bash", str(ROOT / "deploy.sh"), "agent", "--approve-change"],
+        cwd=tmp_path,
+        env={"PATH": f"{fake_bin}:/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 17
+    assert f"args=--cwd {ROOT} deploy card-orchestrator --environment dev --no-prompt" in (
+        log.read_text()
+    )
+
+
+def test_root_orchestrator_plan_is_root_relative_from_other_cwd(tmp_path: Path) -> None:
+    result = subprocess.run(
+        ["bash", str(ROOT / "deploy.sh"), "full"],
+        cwd=tmp_path,
+        env={"PATH": "/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert f"Project: {ROOT}" in result.stdout
+    assert f"azd --cwd {ROOT} deploy web-nat" in result.stdout
+    assert f"azd --cwd {ROOT} deploy card-orchestrator" in result.stdout

@@ -1,0 +1,5 @@
+### 2026-09-10: Bare azd deploy is unsupported for the consolidated root manifest
+
+**What:** Removed the unsupported `condition` field from root `azure.yaml`, documented bare `azd deploy` as unsupported, and kept explicit entrypoints limited to `./deploy.sh {web|agent|full|provision|preview}` plus targeted `azd deploy <service-name>` commands. The `card-orchestrator` service remains protected by its `prebuild`/`prepackage`/`prepublish`/`predeploy` guard hooks, while `workflows.up` continues to keep `azd up` web-only. This revision was produced independently because Gimli was locked out of the rejected artifact.
+
+**Why:** The installed azd 1.32.0 help states that bare `azd deploy` targets all services in `azure.yaml`, and a local hook probe (`azd hooks run predeploy` with and without `--service web`) exposed no verified `AZD_SERVICE_NAME` or equivalent selection signal in root hooks before service hooks ran. Leaving the inert `condition` key in place would keep a false safety claim in code, docs, and tests.

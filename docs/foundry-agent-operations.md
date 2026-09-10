@@ -1,5 +1,86 @@
 # Card-orchestrator operations
 
+## Consolidated root entry point — issue #130
+
+The root `azure.yaml` is now the single entry point for both `web-nat` and
+`card-orchestrator`. The deprecated `deployments/card-orchestrator/azure.yaml`
+and `deployments/card-orchestrator/deploy.py` are retained as legacy references
+only.
+
+### Deploy guards
+
+1. **`workflows.up`** — azd 1.32 supports only the `up` workflow override, so
+   root `azd up` provisions and deploys web-nat only.
+2. **Service lifecycle hooks** — `hooks/guard_agent_deploy.sh` is registered on
+   `prebuild`, `prepackage`, `prepublish`, and `predeploy` to block
+   build/package/push/deploy unless `CARD_ORCHESTRATOR_ENABLE_PREREQUISITES=true`.
+3. **Root `deploy.sh`** — production-safe orchestrator with
+   `--approve-change` / `--approve-prod` enforcement gates.
+
+Bare `azd deploy` is **unsupported** for this manifest. The installed azd 1.32
+help states that bare `azd deploy` targets all services in `azure.yaml`, and a
+local `azd hooks run predeploy` probe exposed no verified service-selection
+signal in root hooks before service hooks run. Use targeted `azd deploy
+<service-name>` commands or `./deploy.sh` instead.
+
+### Unified deployment commands
+
+| Workflow | Command | Notes |
+|---|---|---|
+| Web-only (default) | `azd up` | Provisions and deploys only web-nat |
+| Bare deploy | `azd deploy` | **Unsupported**: azd targets both declared services |
+| Web redeploy | `azd deploy web-nat` | Does not trigger provision hooks or the agent guard |
+| Agent deploy | `azd deploy card-orchestrator` | Requires prerequisites enabled via lifecycle hooks |
+| Full provision | `azd provision` | Deploys all infra including agent prereqs if enabled |
+| Approved deploy | `./deploy.sh agent --approve-change` | Plan-only by default |
+
+### Agent prerequisite opt-in
+
+Before deploying the card-orchestrator for the first time:
+
+```bash
+azd env set ENABLE_FOUNDRY_AGENT_ACCESS true
+azd env set CARD_ORCHESTRATOR_ENABLE_PREREQUISITES true
+azd env set CARD_ORCHESTRATOR_CREATE_REGISTRY_CONNECTION true
+azd provision
+azd deploy card-orchestrator
+```
+
+Or via the root orchestrator:
+
+```bash
+./deploy.sh provision --approve-change
+./deploy.sh agent --approve-change
+```
+
+### Rollback
+
+To disable agent infrastructure after a failed deployment:
+
+```bash
+azd env set CARD_ORCHESTRATOR_ENABLE_PREREQUISITES false
+azd env set ENABLE_FOUNDRY_AGENT_ACCESS false
+azd provision
+```
+
+Note: Setting flags to `false` does not revoke already-created RBAC assignments.
+Manual cleanup is required for existing Azure role assignments.
+
+### Deprecated launcher equivalents
+
+| Old command | New equivalent |
+|---|---|
+| `cd deployments/card-orchestrator && python deploy.py preview` | `./deploy.sh preview` or `azd provision --preview` |
+| `cd deployments/card-orchestrator && python deploy.py provision --execute --approve-change` | `./deploy.sh provision --approve-change` |
+| `cd deployments/card-orchestrator && python deploy.py deploy --execute --approve-change` | `./deploy.sh agent --approve-change` |
+| `cd ... && python deploy.py deploy --environment prod --execute --approve-change --approve-prod` | `./deploy.sh agent --environment prod --approve-change --approve-prod` |
+
+The root `deploy.sh` enforces approval gates natively. Raw targeted
+`azd deploy card-orchestrator` is still available, but the service-level
+lifecycle hooks require prerequisites to be enabled before build, package,
+publish, or deploy. Do not use bare `azd deploy`; use `azd deploy web-nat`,
+`azd deploy card-orchestrator`, or `./deploy.sh {web|agent|full}`.
+
 ## Dev model-capacity correction and successful ACA-MI E2E — 2026-09-09
 
 Safe management-plane inspection after the classified HTTP 429 found the exact

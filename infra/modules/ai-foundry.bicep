@@ -254,5 +254,6 @@ output aiFoundryAccountEndpoint string = foundryAccount.properties.endpoint
 output aiFoundryProjectName string = aiFoundryProject.name
 output aiFoundryProjectEndpoint string = 'https://${foundryAccount.name}.services.ai.azure.com/api/projects/${aiFoundryProject.name}'
 output aiFoundryProjectResourceId string = aiFoundryProject.id
+output aiFoundryProjectPrincipalId string = aiFoundryProject.identity.principalId
 output aiFoundryTextDeploymentName string = textDeploymentName
 output aiFoundryImageDeploymentName string = imageDeploymentName

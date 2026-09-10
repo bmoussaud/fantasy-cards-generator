@@ -63,6 +63,131 @@ string, or Cosmos keys.
 > [#37](https://github.com/bmoussaud/fantasy-cards-generator/issues/37), which
 > upgrades the Cosmos trust model to subnet-scoped service-endpoint rules.
 
+## Consolidated root entry point (issue #130)
+
+The root `azure.yaml` is the single operator entry point for both the `web-nat`
+Container App (port 8000) and the `card-orchestrator` Foundry hosted agent
+(port 8088). `azd up` targets **only** `web-nat`. Bare `azd deploy` is
+**unsupported** for this manifest because azd 1.32 deploys all declared
+services by default and no verified root-hook context distinguishes bare from
+targeted deploys before service hooks run.
+
+### Deploy guards
+
+Three layers keep hosted-agent deployment explicit:
+
+1. **`workflows.up`** — azd 1.32 supports overriding only the `up` workflow, so
+   root `azd up` provisions and deploys `web-nat` only. There is no supported
+   `workflows.deploy` override in azd 1.32.
+2. **Service lifecycle hooks** — `hooks/guard_agent_deploy.sh` is registered as
+   `prebuild`, `prepackage`, `prepublish`, and `predeploy` for
+   `card-orchestrator`. These azd 1.32 service hooks run before the package →
+   publish → deploy phases, blocking agent build/package/push/deploy unless
+   `CARD_ORCHESTRATOR_ENABLE_PREREQUISITES=true` in the azd environment.
+3. **Root orchestrator (`deploy.sh`)** — the documented production-safe entry
+   point preserving `--approve-change` / `--approve-prod` enforcement gates.
+
+### Web-only workflow (default)
+
+```bash
+azd up                        # provision + deploy web-nat only
+azd deploy web-nat            # explicit web redeploy
+./deploy.sh web --approve-change
+```
+
+### Full deployment (explicit opt-in)
+
+```bash
+# 1. Enable hosted-agent RBAC (if not already)
+azd env set ENABLE_FOUNDRY_AGENT_ACCESS true
+
+# 2. Enable card-orchestrator prerequisites (ACR pull, monitoring)
+azd env set CARD_ORCHESTRATOR_ENABLE_PREREQUISITES true
+
+# 3. Optionally create the registry connection
+azd env set CARD_ORCHESTRATOR_CREATE_REGISTRY_CONNECTION true
+
+# 4. Provision shared infrastructure
+azd provision
+
+# 5. Deploy card-orchestrator independently
+azd deploy card-orchestrator
+```
+
+Or via the root orchestrator with approval gates:
+
+```bash
+./deploy.sh provision --approve-change
+./deploy.sh agent --approve-change
+# For production:
+./deploy.sh agent --environment prod --approve-change --approve-prod
+```
+
+### Targeted deployments
+
+Both services can be deployed independently from the repository root:
+
+- `azd deploy web-nat` — redeploys the web Container App only.
+- `azd deploy card-orchestrator` — builds, pushes, and registers the hosted
+  agent only after `CARD_ORCHESTRATOR_ENABLE_PREREQUISITES=true`; otherwise the
+  service lifecycle hooks fail closed before package/publish/deploy.
+
+Do not use bare `azd deploy` with this manifest. Supported entrypoints are
+`./deploy.sh {web|agent|full|provision|preview}` and fully targeted
+`azd deploy <service-name>` commands.
+
+### Agent opt-in variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `ENABLE_FOUNDRY_AGENT_ACCESS` | `false` | Foundry RBAC: project MI → Foundry User, ACA MI → Agent Consumer |
+| `CARD_ORCHESTRATOR_ENABLE_PREREQUISITES` | `false` | ACR pull for project MI, agent monitoring workbook/alerts; also the predeploy gate |
+| `CARD_ORCHESTRATOR_CREATE_REGISTRY_CONNECTION` | `false` | Foundry project → ACR registry connection |
+| `CARD_ORCHESTRATOR_ENABLE_AGENT_ALERTS` | `false` | Enable agent monitoring alert rules |
+| `AGENT_GENERATION_ENABLED` | `false` | Runtime: use agent path vs direct model path |
+
+### Production approval — `deploy.sh`
+
+The root `deploy.sh` script is the production-safe entry point, preserving the
+`--approve-change` / `--approve-prod` enforcement semantics of the deprecated
+Python launcher. It is plan-only by default: without `--approve-change`, it
+prints the planned azd commands and exits without starting azd.
+
+```bash
+./deploy.sh web                                 # Plan only
+./deploy.sh web --approve-change                # Execute web deploy (dev)
+./deploy.sh agent --approve-change              # Execute agent deploy (dev)
+./deploy.sh full --approve-change               # Execute both (dev)
+./deploy.sh provision --approve-change          # Execute provision (dev)
+./deploy.sh preview                             # Provision preview (always safe)
+./deploy.sh web --environment prod --approve-change --approve-prod
+```
+
+**azd limitations:** The azd CLI (1.32.0) has no built-in `--approve-prod` or
+`--approve-change` flags, and its schema supports `workflows.up` but not
+`workflows.deploy`. `deploy.sh` provides approval enforcement as a thin wrapper.
+The service-level `prebuild`/`prepackage`/`prepublish`/`predeploy`
+hooks are the raw-azd guards that prevent build, package, push, and deploy
+before prerequisite opt-in.
+
+### Deprecated files
+
+- `deployments/card-orchestrator/azure.yaml` — superseded by root manifest.
+  Retained as a legacy reference; do not use for new deployments.
+- `deployments/card-orchestrator/deploy.py` — superseded by root `azd` commands.
+  Retained as a legacy reference.
+
+### Technical notes
+
+The azd 1.32 service graph runs service phases as package → publish → deploy.
+The v1.0 schema supports service-level `prebuild`, `prepackage`, `prepublish`,
+and `predeploy` hooks, but only `workflows.up` at the workflow level. The
+`azure.ai.agents` extension (1.0.0-beta.13) registers `azure.ai.agent` as a
+service target provider. This has been verified against the installed azd 1.32.0
+schema/source and extension capabilities, but not against a live Azure
+deployment in this PR. A live provisioning preview should be reviewed before any
+real deployment.
+
 ## Provisioning
 
 Use the normal azd workflow:

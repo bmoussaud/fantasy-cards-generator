@@ -1,4 +1,6 @@
 import json
+import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -1103,3 +1105,264 @@ def test_session_secret_flows_only_into_key_vault_not_container_app() -> None:
     # The azd parameter sentinel defaults to empty (not to a static value)
     # so a missing azd env var skips the Key Vault secret instead of hardcoding one.
     assert '"value": "${APP_SESSION_SECRET_KEY=}"' in main_parameters
+
+
+# ── Consolidated root entry point (issue #130) ──────────────────────
+
+
+def test_root_manifest_declares_both_services() -> None:
+    """Root azure.yaml is the single manifest for web-nat and card-orchestrator."""
+    azure_yaml = (REPO_ROOT / "azure.yaml").read_text()
+
+    assert "web-nat:" in azure_yaml
+    assert "host: containerapp" in azure_yaml
+    assert "card-orchestrator:" in azure_yaml
+    assert "host: azure.ai.agent" in azure_yaml
+    assert "kind: hosted" in azure_yaml
+    assert "name: card-orchestrator" in azure_yaml
+    assert "port: 8000" in azure_yaml
+
+
+def test_root_manifest_requires_azd_version_and_agent_extension() -> None:
+    azure_yaml = (REPO_ROOT / "azure.yaml").read_text()
+
+    assert "requiredVersions:" in azure_yaml
+    assert ">= 1.32.0" in azure_yaml
+    assert "azure.ai.agents:" in azure_yaml
+    assert "=1.0.0-beta.13" in azure_yaml
+
+
+def test_root_manifest_safe_default_up_workflow_deploys_only_web() -> None:
+    """``azd up`` targets only web-nat via the only supported azd workflow.
+
+    The card-orchestrator hosted agent is never built, pushed, or deployed
+    by ``azd up`` unless an operator removes the default web-only workflow.
+    azd 1.32 supports ``workflows.up`` only; there is no valid
+    ``workflows.deploy`` override for bare ``azd deploy``.
+    """
+    azure_yaml = (REPO_ROOT / "azure.yaml").read_text()
+
+    assert "workflows:" in azure_yaml
+    assert "deploy web-nat" in azure_yaml
+    assert "deploy --all" not in azure_yaml
+    workflows_start = azure_yaml.index("workflows:")
+    hooks_start = azure_yaml.rindex("\nhooks:")
+    workflows_section = azure_yaml[workflows_start:hooks_start]
+    assert "card-orchestrator" not in workflows_section
+    assert "up:" in workflows_section
+    assert "deploy:" not in workflows_section
+    assert "package web-nat" in workflows_section
+
+
+def test_root_manifest_marks_bare_azd_deploy_unsupported_and_keeps_service_hooks() -> None:
+    """The manifest must not claim unsupported raw-bare-deploy gating semantics."""
+    azure_yaml = (REPO_ROOT / "azure.yaml").read_text()
+    service_start = azure_yaml.index("card-orchestrator:")
+    service_end = azure_yaml.index("\nresources:", service_start)
+    service_section = azure_yaml[service_start:service_end]
+
+    assert "condition:" not in service_section
+    assert "prebuild:" in service_section
+    assert "prepackage:" in service_section
+    assert "prepublish:" in service_section
+    assert "predeploy:" in service_section
+    assert "Bare `azd deploy` is therefore unsupported for this manifest." in azure_yaml
+
+
+def test_root_manifest_hooks_only_on_provision_not_deploy() -> None:
+    """Root-level hooks run only during provision; deploy-only paths do not
+    rotate credentials. The card-orchestrator service has service-level
+    lifecycle guards that validate prerequisites without credential rotation."""
+    azure_yaml = (REPO_ROOT / "azure.yaml").read_text()
+
+    assert "preprovision:" in azure_yaml
+    assert "postprovision:" in azure_yaml
+    # No root-level postdeploy hooks anywhere
+    assert "postdeploy:" not in azure_yaml
+    # The only service lifecycle gates are the card-orchestrator prerequisite guards.
+    assert azure_yaml.count("prebuild:") == 1
+    assert azure_yaml.count("prepackage:") == 1
+    assert azure_yaml.count("prepublish:") == 1
+    assert azure_yaml.count("predeploy:") == 1
+    assert "guard_agent_deploy" in azure_yaml
+
+
+def test_card_orchestrator_lifecycle_guard_validates_prerequisites() -> None:
+    """The card-orchestrator service-level lifecycle hooks block build, package,
+    publish, and deploy
+    unless CARD_ORCHESTRATOR_ENABLE_PREREQUISITES is explicitly true."""
+    guard = (REPO_ROOT / "hooks/guard_agent_deploy.sh").read_text()
+
+    assert "CARD_ORCHESTRATOR_ENABLE_PREREQUISITES" in guard
+    assert "built, packaged, pushed, or deployed" in guard
+    assert "exit 1" in guard
+    assert (REPO_ROOT / "hooks/guard_agent_deploy.sh").stat().st_mode & 0o111
+
+
+def test_installed_azd_help_confirms_bare_deploy_targets_all_services() -> None:
+    """Use installed azd help as the behavior contract for raw deploy selection."""
+    if shutil.which("azd") is None:
+        pytest.skip("azd is not installed")
+
+    result = subprocess.run(
+        ["azd", "deploy", "--help"],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "AZURE_DEV_USER_AGENT": "microsoft_foundry_skill"},
+    )
+
+    assert result.returncode == 0
+    assert "By default, deploys all services listed in 'azure.yaml'" in result.stdout
+    assert "When <service> is set, only the specific service is deployed." in result.stdout
+
+
+def test_card_orchestrator_docker_paths_are_root_relative() -> None:
+    """Root-relative Docker paths resolve to the same Dockerfile as the nested manifest."""
+    azure_yaml = (REPO_ROOT / "azure.yaml").read_text()
+
+    assert "hosted_agents/card_orchestrator/Dockerfile" in azure_yaml
+    assert (REPO_ROOT / "hosted_agents/card_orchestrator/Dockerfile").is_file()
+    # Port 8088 is the hosted agent container port (in the Dockerfile), not in
+    # the root manifest resources.  Port 8000 is the web service.
+    assert "EXPOSE 8088" in (REPO_ROOT / "hosted_agents/card_orchestrator/Dockerfile").read_text()
+
+
+def test_card_orchestrator_prerequisites_default_off_in_root_bicep() -> None:
+    """Hosted-agent prerequisites stay default-off even though bare deploy is unsupported."""
+    main = (REPO_ROOT / "infra/main.bicep").read_text()
+    params = json.loads((REPO_ROOT / "infra/main.parameters.json").read_text())["parameters"]
+
+    assert "param enableCardOrchestratorPrerequisites bool = false" in main
+    assert "param createRegistryConnection bool = false" in main
+    assert "= if (enableCardOrchestratorPrerequisites)" in main
+    assert params["enableCardOrchestratorPrerequisites"]["value"].endswith("=false}")
+    assert params["createRegistryConnection"]["value"].endswith("=false}")
+    assert params["enableAgentAlerts"]["value"].endswith("=false}")
+
+
+def test_root_bicep_exports_hosted_agent_extension_outputs() -> None:
+    """Root Bicep provides all outputs the azure.ai.agent extension needs."""
+    main = (REPO_ROOT / "infra/main.bicep").read_text()
+
+    for output_name in (
+        "AZURE_AI_PROJECT_ID",
+        "AZURE_AI_PROJECT_ENDPOINT",
+        "FOUNDRY_PROJECT_ENDPOINT",
+        "AZURE_AI_ACCOUNT_NAME",
+        "AZURE_AI_PROJECT_NAME",
+        "AZURE_CONTAINER_REGISTRY_RESOURCE_ID",
+        "AZURE_AI_PROJECT_ACR_CONNECTION_NAME",
+    ):
+        assert f"output {output_name}" in main
+
+
+def test_root_agent_prerequisites_use_canonical_acr_pull_role_and_connection() -> None:
+    """Root agent-prerequisites module uses the same canonical ACR role ID and
+    registry-connection pattern as the card-orchestrator repair facade."""
+    prereqs = (REPO_ROOT / "infra/modules/agent-prerequisites.bicep").read_text()
+
+    # Canonical AcrPull role ID
+    assert "'7f951dda-4ed3-4680-a7ca-43fe172d538d'" in prereqs
+    assert "guid(registry.id, projectPrincipalId, acrPullRoleDefinitionId)" in prereqs
+    # Registry connection contract
+    assert "category: 'ContainerRegistry'" in prereqs
+    assert "authType: 'ManagedIdentity'" in prereqs
+    assert "clientId: aiFoundryProject.identity.principalId" in prereqs
+    assert "resourceId: registry.id" in prereqs
+    assert "= if (createRegistryConnection)" in prereqs
+    # No duplicate Foundry RBAC — those are in ai-foundry.bicep
+    assert "foundryUserRoleDefinitionId" not in prereqs
+    assert "foundryAgentConsumerRoleDefinitionId" not in prereqs
+
+
+def test_root_agent_monitoring_is_gated_and_alerts_default_off() -> None:
+    """Agent monitoring deploys only when prerequisites are enabled; alerts default off."""
+    main = (REPO_ROOT / "infra/main.bicep").read_text()
+    params = json.loads((REPO_ROOT / "infra/main.parameters.json").read_text())["parameters"]
+
+    assert "module agentMonitoring" in main
+    assert "enableAgentAlerts" in main
+    assert "param enableAgentAlerts bool = false" in main
+    assert params["enableAgentAlerts"]["value"] == "${CARD_ORCHESTRATOR_ENABLE_AGENT_ALERTS=false}"
+
+
+def test_nested_manifest_is_deprecated() -> None:
+    """The deployments/card-orchestrator/azure.yaml has a deprecation notice."""
+    content = (REPO_ROOT / "deployments/card-orchestrator/azure.yaml").read_text()
+
+    assert "DEPRECATED" in content
+
+
+def test_nested_launcher_is_deprecated() -> None:
+    """The deployments/card-orchestrator/deploy.py has a deprecation notice."""
+    content = (REPO_ROOT / "deployments/card-orchestrator/deploy.py").read_text()
+
+    assert "DEPRECATED" in content
+
+
+# ── Root deployment orchestrator (deploy.sh) ─────────────────────────
+
+
+def test_deploy_script_exists_and_is_executable() -> None:
+    """deploy.sh is present and executable at the repository root."""
+    script = REPO_ROOT / "deploy.sh"
+    assert script.is_file()
+    assert script.stat().st_mode & 0o111
+
+
+@pytest.mark.parametrize("action", ["web", "agent", "full", "provision"])
+def test_deploy_script_plan_only_by_default(action: str) -> None:
+    """deploy.sh is plan-only without --approve-change; azd is never started."""
+    result = subprocess.run(
+        ["bash", str(REPO_ROOT / "deploy.sh"), action],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "PLAN ONLY" in result.stdout
+
+
+def test_deploy_script_rejects_prod_without_approve_prod() -> None:
+    """Production deployments require --approve-prod after separate review."""
+    result = subprocess.run(
+        ["bash", str(REPO_ROOT / "deploy.sh"), "web", "--environment", "prod", "--approve-change"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 2
+    assert "approve-prod" in result.stderr
+
+
+def test_deploy_script_rejects_invalid_environment() -> None:
+    """Only dev and prod environments are supported."""
+    result = subprocess.run(
+        ["bash", str(REPO_ROOT / "deploy.sh"), "web", "--environment", "staging"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 2
+
+
+def test_deploy_script_rejects_invalid_action() -> None:
+    """Unknown actions produce a usage message."""
+    result = subprocess.run(
+        ["bash", str(REPO_ROOT / "deploy.sh"), "yolo"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 2
+    assert "Usage" in result.stderr
+
+
+def test_deploy_script_has_separately_gated_prod_path() -> None:
+    """--approve-prod + --approve-change on prod is plan-free (would exec azd).
+    Here we only verify that the validation passes without actually calling azd
+    by testing the plan path for prod with both flags absent."""
+    # Plan-only for prod (no --approve-change) should fail because prod needs --approve-prod
+    result = subprocess.run(
+        ["bash", str(REPO_ROOT / "deploy.sh"), "web", "--environment", "prod"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 2
+    assert "approve-prod" in result.stderr
