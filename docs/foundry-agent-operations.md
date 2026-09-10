@@ -821,11 +821,13 @@ headers are exported. See the [wire and diagnostic contract](foundry-agent-invoc
 The platform supplies `FOUNDRY_PROJECT_ENDPOINT`, `FOUNDRY_AGENT_NAME`,
 `FOUNDRY_AGENT_VERSION`, and the Application Insights connection configuration.
 Do **not** redeclare reserved values in service `environmentVariables`.
-Only `AZURE_AI_MODEL_DEPLOYMENT_NAME` and `CARD_ORCHESTRATOR_VERSION` are supplied
-by this manifest. The latter is the full immutable application Git commit, not a
-Foundry version number. Runtime timeout/policy defaults belong to the runtime;
-inspect their bounded values during integration rather than adding guessed SDK
-settings here.
+Only non-secret runtime switches are supplied by this manifest:
+`AZURE_AI_MODEL_DEPLOYMENT_NAME`, `CARD_ORCHESTRATOR_VERSION`,
+`TELEMETRY_ENABLED`, `TELEMETRY_ENVIRONMENT`, and the experimental
+`AZURE_EXPERIMENTAL_ENABLE_GENAI_TRACING=true` SDK tracing opt-in. The version is
+the full immutable application Git commit, not a Foundry version number. Runtime
+timeout/policy defaults belong to the runtime; inspect their bounded values during
+integration rather than adding guessed SDK settings here.
 
 The implemented defaults/maxima are 20 seconds per specialist and 65 seconds
 overall. These are **offline candidate budgets**, not compliance with the

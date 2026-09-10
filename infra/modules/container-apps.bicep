@@ -259,6 +259,10 @@ var containerAppEnv = concat(
       value: 'true'
     }
     {
+      name: 'AZURE_EXPERIMENTAL_ENABLE_GENAI_TRACING'
+      value: 'true'
+    }
+    {
       name: 'APP_ENV'
       value: deploymentEnvironment
     }
