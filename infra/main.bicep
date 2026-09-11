@@ -8,6 +8,16 @@ param location string = resourceGroup().location
 ])
 param environmentName string
 
+@description('Opt-in dev-only metadata runner. Prefer the root runner commands for an additive deployment without shared credential hooks.')
+param enablePrivateMetadataRunner bool = false
+
+module privateMetadataRunner './modules/private-metadata-runner.bicep' = if (enablePrivateMetadataRunner && environmentName == 'dev') {
+  name: 'private-metadata-runner'
+  params: {
+    environmentName: 'dev'
+  }
+}
+
 @description('Optional tags shared by all deployed resources.')
 param tags object = {}
 
