@@ -206,8 +206,20 @@ def test_production_startup_fails_open_for_malformed_telemetry_configuration(
     }
 
 
+@pytest.mark.parametrize(
+    ("revision", "replica", "expected_revision", "expected_replica"),
+    [
+        ("revision-7", "replica-2", "revision-7", "replica-2"),
+        (SENSITIVE_SENTINEL, SENSITIVE_SENTINEL, "unknown", "unknown"),
+        ("x" * 129, "x" * 129, "unknown", "unknown"),
+    ],
+)
 def test_configured_telemetry_passes_bounded_resource_and_sampling_settings(
     monkeypatch: pytest.MonkeyPatch,
+    revision: str,
+    replica: str,
+    expected_revision: str,
+    expected_replica: str,
 ) -> None:
     captured: dict[str, Any] = {}
     import azure.monitor.opentelemetry
@@ -228,8 +240,8 @@ def test_configured_telemetry_passes_bounded_resource_and_sampling_settings(
         sampling_ratio=0.25,
         environment="production",
         service_version="release-42",
-        container_revision="revision-7",
-        container_replica="replica-2",
+        container_revision=revision,
+        container_replica=replica,
     )
 
     assert telemetry.configure_telemetry(settings) is True
@@ -244,8 +256,9 @@ def test_configured_telemetry_passes_bounded_resource_and_sampling_settings(
     assert resource["deployment.environment.name"] == "production"
     assert resource["cloud.platform"] == "azure_container_apps"
     assert resource["service.version"] == "release-42"
-    assert resource["service.instance.revision"] == "revision-7"
-    assert resource["service.instance.id"] == "replica-2"
+    assert resource["service.instance.revision"] == expected_revision
+    assert resource["service.instance.id"] == expected_replica
+    assert SENSITIVE_SENTINEL not in repr(resource)
     assert captured["span_processors"]
     assert httpx_instrumented == [True]
     from azure.monitor.opentelemetry.exporter import _utils
