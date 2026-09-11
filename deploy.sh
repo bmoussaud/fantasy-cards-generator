@@ -26,11 +26,18 @@ shift || true
 ENVIRONMENT="dev"
 APPROVE_CHANGE=false
 APPROVE_PROD=false
+ENVIRONMENT_EXPLICIT=false
+SUBSCRIPTION=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --environment)
             ENVIRONMENT="${2:-}"
+            ENVIRONMENT_EXPLICIT=true
+            shift 2
+            ;;
+        --subscription)
+            SUBSCRIPTION="${2:-}"
             shift 2
             ;;
         --approve-change)
@@ -49,7 +56,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$ACTION" in
-    web|agent|full|provision|preview) ;;
+    web|agent|full|provision|preview|runner-preview|runner-provision|runner-start) ;;
     *)
         echo "Usage: $0 {web|agent|full|provision|preview} [OPTIONS]" >&2
         echo "" >&2
@@ -59,14 +66,34 @@ case "$ACTION" in
         echo "  full       Deploy both web-nat and card-orchestrator" >&2
         echo "  provision  Provision shared infrastructure" >&2
         echo "  preview    Provision preview (safe, no mutations)" >&2
+        echo "  runner-preview|runner-provision|runner-start  Isolated dev metadata runner" >&2
         echo "" >&2
         echo "Options:" >&2
         echo "  --environment dev|prod  Target environment (default: dev)" >&2
         echo "  --approve-change        Required for all mutations" >&2
         echo "  --approve-prod          Required for prod (after separate review)" >&2
+        echo "  --subscription ID       Required for runner commands only" >&2
         exit 2
         ;;
 esac
+
+# This additive path must never enter azd's shared credential-minting hooks.
+if [[ "$ACTION" == runner-* ]]; then
+    if [[ "$ENVIRONMENT_EXPLICIT" != true || "$ENVIRONMENT" != dev || -z "$SUBSCRIPTION" ]]; then
+        echo "ERROR: Runner requires explicit --environment dev and --subscription ID." >&2
+        exit 2
+    fi
+    RUNNER_ARGS=("$ACTION" "--subscription" "$SUBSCRIPTION")
+    if [[ "$APPROVE_CHANGE" == true ]]; then
+        RUNNER_ARGS+=("--approve-change")
+    fi
+    exec python3 "$ROOT/scripts/private_runner/control.py" "${RUNNER_ARGS[@]}"
+fi
+
+if [[ -n "$SUBSCRIPTION" ]]; then
+    echo "ERROR: --subscription is supported only by runner commands." >&2
+    exit 2
+fi
 
 if [[ "$ENVIRONMENT" != "dev" && "$ENVIRONMENT" != "prod" ]]; then
     echo "ERROR: Only dev and prod environments are supported." >&2

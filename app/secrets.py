@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
 import os
 import time
@@ -18,6 +17,8 @@ from azure.core.exceptions import (
 )
 from azure.identity.aio import DefaultAzureCredential
 from azure.keyvault.secrets.aio import SecretClient
+
+from app.rotation_observability import SECRET_ALIASES, emit_observation, version_hash
 
 SecretSource = Literal["azure", "env"]
 Clock = Callable[[], datetime]
@@ -162,20 +163,43 @@ class EnvSecretProvider:
         self._environ = environ if environ is not None else os.environ
         self._secret_references = dict(secret_references or DEFAULT_SECRET_REFERENCES)
         self._clock = clock
+        self._observed_values: dict[str, str] = {}
 
     async def get_secret(self, name: str) -> SecretValue:
         reference = resolve_secret_reference(name, self._secret_references)
         for env_name in reference.env_names:
             value = self._environ.get(env_name)
             if value not in (None, ""):
-                return SecretValue(
+                secret = SecretValue(
                     name=reference.logical_name,
                     value=value,
                     version=None,
                     fetched_at=self._clock(),
                     source="env",
                 )
+                emit_observation(
+                    name=reference.logical_name,
+                    source="env",
+                    stage="provider",
+                    result=(
+                        "unchanged"
+                        if self._observed_values.get(reference.logical_name) == value
+                        else "adopted"
+                    ),
+                    version=None,
+                )
+                if reference.logical_name in SECRET_ALIASES:
+                    self._observed_values[reference.logical_name] = value
+                return secret
         searched = ", ".join(reference.env_names)
+        emit_observation(
+            name=reference.logical_name,
+            source="env",
+            stage="provider",
+            result="failed",
+            version=None,
+            error_category="not_found",
+        )
         raise SecretNotFoundError(f"Secret '{reference.logical_name}' was not found in {searched}.")
 
     async def get_secret_version(self, name: str, *, version: str | None = None) -> SecretValue:
@@ -200,7 +224,7 @@ class EnvSecretProvider:
         ]
 
     async def aclose(self) -> None:
-        return None
+        self._observed_values.clear()
 
 
 class AzureSecretProvider:
@@ -404,6 +428,20 @@ class AzureSecretProvider:
             async with asyncio.timeout(self._refresh_timeout_seconds):
                 await self._refresh_snapshot(reference)
             self._cache[name] = replace(self._cache[name], retry_after=None, error_category=None)
+            current = self._cache[name].current
+            emit_observation(
+                name=name,
+                source="azure",
+                stage="provider",
+                result=(
+                    "unchanged"
+                    if cached.current is not None
+                    and current is not None
+                    and cached.current.version == current.version
+                    else "adopted"
+                ),
+                version=current.version if current else None,
+            )
             self._log_refresh_outcome("success", secret=self._cache[name].current)
         except (SecretProviderError, AzureError, TimeoutError) as exc:
             error_category = _normalize_secret_refresh_error(exc)
@@ -414,6 +452,14 @@ class AzureSecretProvider:
                 error_category=error_category,
             )
             snapshot = self._cache[name]
+            emit_observation(
+                name=name,
+                source="azure",
+                stage="provider",
+                result="stale" if self._eligible(snapshot.current, snapshot) else "failed",
+                version=snapshot.current.version if snapshot.current else None,
+                error_category=error_category,
+            )
             if self._eligible(snapshot.current, snapshot):
                 self._log_refresh_outcome(
                     "stale", secret=snapshot.current, error_category=error_category
@@ -956,9 +1002,7 @@ def _secret_age_seconds(secret: SecretValue, now: datetime) -> int:
 
 
 def _secret_version_hash(version: str | None) -> str:
-    if version is None:
-        return "none"
-    return hashlib.sha256(version.encode("utf-8")).hexdigest()[:12]
+    return version_hash(version) if version is not None else "none"
 
 
 def _optional_env(values: Mapping[str, str], name: str) -> str | None:

@@ -14,6 +14,7 @@ from authlib.integrations.starlette_client import OAuth, StarletteOAuth2App
 from fastapi import HTTPException, Request, status
 
 from app.generation import AuthenticatedOwner
+from app.rotation_observability import emit_observation
 from app.secrets import (
     AzureSecretProvider,
     SecretNotFoundError,
@@ -21,6 +22,7 @@ from app.secrets import (
     SecretProviderError,
     SecretValue,
     SecretVersionUnavailableError,
+    classify_secret_error,
     load_secret_provider_config,
     utc_now,
 )
@@ -272,6 +274,31 @@ class EntraOAuthClientManager:
             return previous.binding.client
 
     async def _refresh_current_binding(self) -> _OAuthClientBinding:
+        completed = False
+        error_category = "binding_error"
+        try:
+            binding = await self._build_current_binding()
+            completed = True
+            return binding
+        except SecretProviderError as exc:
+            error_category = classify_secret_error(exc)
+            raise
+        except asyncio.CancelledError:
+            completed = True
+            raise
+        finally:
+            if not completed:
+                current = self._current_binding
+                emit_observation(
+                    name="ENTRA_CLIENT_SECRET",
+                    source=current.secret.source if current else "unknown",
+                    stage="entra_binding",
+                    result="failed",
+                    version=current.secret.version if current else None,
+                    error_category=error_category,
+                )
+
+    async def _build_current_binding(self) -> _OAuthClientBinding:
         snapshot = None
         if isinstance(self._secret_provider, AzureSecretProvider):
             snapshot = await self._secret_provider.get_snapshot("ENTRA_CLIENT_SECRET")
@@ -333,6 +360,22 @@ class EntraOAuthClientManager:
             ):
                 self._previous_binding = None
             self._current_binding = new_binding
+            emit_observation(
+                name="ENTRA_CLIENT_SECRET",
+                source=new_binding.secret.source,
+                stage="entra_binding",
+                result=(
+                    "stale"
+                    if snapshot is not None and snapshot.error_category
+                    else (
+                        "unchanged"
+                        if current is not None and _secret_cache_key(current.secret) == secret_key
+                        else "adopted"
+                    )
+                ),
+                version=new_binding.secret.version,
+                error_category=(snapshot.error_category or "none") if snapshot else "none",
+            )
             return new_binding
 
 

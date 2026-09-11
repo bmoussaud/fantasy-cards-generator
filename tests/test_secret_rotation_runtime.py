@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import FrozenInstanceError, replace
 from datetime import timedelta
 from itertools import permutations
@@ -656,7 +657,9 @@ def test_cancelled_waiter_does_not_cancel_shared_refresh_but_close_does():
 
 
 @pytest.mark.parametrize("auth_enabled", [False, True])
-def test_lifespan_preloads_and_owns_independent_workers_and_shutdown(auth_enabled, monkeypatch):
+def test_lifespan_preloads_and_owns_independent_workers_and_shutdown(
+    auth_enabled, monkeypatch, capsys
+):
     async def scenario():
         clock, kv, provider = pair_provider(close_client=True)
         old = make_version(clock, "v1")
@@ -699,6 +702,17 @@ def test_lifespan_preloads_and_owns_independent_workers_and_shutdown(auth_enable
 
         async with app.router.lifespan_context(app):
             await asyncio.sleep(0)
+            initial_events = [
+                json.loads(line)
+                for line in capsys.readouterr().err.splitlines()
+                if line.startswith("{")
+            ]
+            assert [(event["logical_secret"], event["stage"]) for event in initial_events] == (
+                [("session", "provider"), ("entra", "provider"), ("entra", "entra_binding")]
+                if auth_enabled
+                else [("session", "provider")]
+            )
+            assert all(event["result"] == "adopted" for event in initial_events)
             assert set(sleeps) == ({NAME, "ENTRA_CLIENT_SECRET"} if auth_enabled else {NAME})
             assert provider.snapshot_for_read(NAME).current.version == "v2"
             kv.set_response(VAULT_NAME, None, blocked)
@@ -724,6 +738,16 @@ def test_lifespan_preloads_and_owns_independent_workers_and_shutdown(auth_enable
         assert cancelled.is_set()
         assert kv.close_calls == 1
         assert not provider._inflight
+        if auth_enabled:
+            events = [
+                json.loads(line)
+                for line in capsys.readouterr().err.splitlines()
+                if line.startswith("{")
+            ]
+            assert [event["result"] for event in events if event["stage"] == "entra_binding"] == [
+                "adopted",
+                "unchanged",
+            ]
 
     asyncio.run(scenario())
 

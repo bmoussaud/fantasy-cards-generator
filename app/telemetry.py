@@ -9,6 +9,15 @@ from contextlib import contextmanager
 from functools import wraps
 from typing import Any, Awaitable, Callable, ParamSpec, TypeVar
 
+from app.rotation_observability import (
+    LOGGER_NAME as ROTATION_LOGGER_NAME,
+)
+from app.rotation_observability import (
+    configure_rotation_logging,
+    envelope_json,
+    safe_platform_id,
+    sanitize_log_body,
+)
 from app.settings import TelemetrySettings, load_telemetry_settings
 
 LOGGER_NAME = "fantasy_cards_generator.telemetry"
@@ -261,6 +270,16 @@ class PrivacySpanProcessor:
 class PrivacyLogRecordProcessor:
     def on_emit(self, log_data: Any) -> None:
         log_record = getattr(log_data, "log_record", log_data)
+        scope = getattr(log_data, "instrumentation_scope", None)
+        if getattr(scope, "name", None) == ROTATION_LOGGER_NAME:
+            envelope = sanitize_log_body(getattr(log_record, "body", None))
+            log_record.body = (
+                envelope_json(envelope) if envelope else "rotation.observation_rejected"
+            )
+            log_record.attributes = (
+                {f"rotation.{key}": value for key, value in envelope.items()} if envelope else {}
+            )
+            return
         attributes = getattr(log_record, "attributes", None)
         if attributes is None or not hasattr(attributes, "clear"):
             return
@@ -303,9 +322,13 @@ def configure_telemetry(settings: TelemetrySettings | None = None) -> bool:
         if telemetry_settings.service_version:
             resource_attributes["service.version"] = telemetry_settings.service_version
         if telemetry_settings.container_revision:
-            resource_attributes["service.instance.revision"] = telemetry_settings.container_revision
+            resource_attributes["service.instance.revision"] = safe_platform_id(
+                telemetry_settings.container_revision
+            )
         if telemetry_settings.container_replica:
-            resource_attributes["service.instance.id"] = telemetry_settings.container_replica
+            resource_attributes["service.instance.id"] = safe_platform_id(
+                telemetry_settings.container_replica
+            )
 
         _configure_parent_based_sampling(telemetry_settings.sampling_ratio)
         configure_azure_monitor(
@@ -318,6 +341,13 @@ def configure_telemetry(settings: TelemetrySettings | None = None) -> bool:
             span_processors=[PrivacySpanProcessor()],
             log_record_processors=[PrivacyLogRecordProcessor()],
         )
+        from opentelemetry.instrumentation.logging.handler import LoggingHandler
+
+        # Share the distro's registered exporter without propagating console events
+        # through root handlers (which would duplicate or reformat the JSON).
+        for handler in _logger.handlers:
+            if isinstance(handler, LoggingHandler):
+                configure_rotation_logging(handler)
         _instrument_httpx()
         from opentelemetry import trace
 
