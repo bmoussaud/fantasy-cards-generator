@@ -99,6 +99,10 @@ def summarize_preview(result):
     ]
 
 
+def same_arm_id(actual: object, expected: str) -> bool:
+    return isinstance(actual, str) and actual.casefold() == expected.casefold()
+
+
 def validate_job():
     job = azure(
         [
@@ -125,9 +129,13 @@ def validate_job():
     prefix = f"/subscriptions/{SUBSCRIPTION}/resourceGroups/{GROUP}/providers/"
     identity_id = prefix + f"Microsoft.ManagedIdentity/userAssignedIdentities/{JOB}-id"
     identity = job.get("identity", {})
-    if identity.get("type") != "UserAssigned" or set(
-        identity.get("userAssignedIdentities", {})
-    ) != {identity_id}:
+    assigned = identity.get("userAssignedIdentities", {})
+    if (
+        identity.get("type") != "UserAssigned"
+        or not isinstance(assigned, dict)
+        or len(assigned) != 1
+        or not same_arm_id(next(iter(assigned)), identity_id)
+    ):
         raise RunnerError("job_identity_drift")
     client_id = azure(["identity", "show", "-g", GROUP, "-n", f"{JOB}-id", "--query", "clientId"])
     containers = job.get("containers", [])
@@ -151,7 +159,9 @@ def validate_job():
         ]
         or container.get("resources", {}).get("cpu") != 0.25
         or container.get("resources", {}).get("memory") != "0.5Gi"
-        or job.get("environment") != prefix + "Microsoft.App/managedEnvironments/fcag-dev-cae"
+        or not same_arm_id(
+            job.get("environment"), prefix + "Microsoft.App/managedEnvironments/fcag-dev-cae"
+        )
         or job.get("profile") != "Consumption"
         or job.get("trigger") != "Manual"
         or job.get("manual") != {"parallelism": 1, "replicaCompletionCount": 1}

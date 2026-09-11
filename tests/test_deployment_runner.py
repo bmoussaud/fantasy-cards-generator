@@ -393,13 +393,37 @@ def deployed_job(control):
     }
 
 
-@pytest.mark.parametrize("drift", [None, "command", "identity", "secret", "parallelism"])
+@pytest.mark.parametrize(
+    "drift",
+    [
+        None,
+        "case_variant",
+        "command",
+        "identity",
+        "identity_resource",
+        "environment",
+        "environment_invalid",
+        "secret",
+        "parallelism",
+    ],
+)
 def test_start_checks_fixed_job_and_refuses_drift(control, monkeypatch, drift):
     job = deployed_job(control)
-    if drift == "command":
+    if drift == "case_variant":
+        job["environment"] = job["environment"].lower()
+        job["identity"]["userAssignedIdentities"] = {
+            key.upper(): value for key, value in job["identity"]["userAssignedIdentities"].items()
+        }
+    elif drift == "command":
         job["containers"][0]["command"] = ["bash"]
     elif drift == "identity":
         job["identity"]["type"] = "SystemAssigned"
+    elif drift == "identity_resource":
+        job["identity"]["userAssignedIdentities"] = {"/different/identity": {}}
+    elif drift == "environment":
+        job["environment"] = job["environment"].replace("fcag-dev-cae", "different-cae")
+    elif drift == "environment_invalid":
+        job["environment"] = None
     elif drift == "secret":
         job["secretCount"] = 1
     elif drift == "parallelism":
@@ -422,9 +446,10 @@ def test_start_checks_fixed_job_and_refuses_drift(control, monkeypatch, drift):
     result = control.main(
         ["runner-start", "--subscription", control.SUBSCRIPTION, "--approve-change"]
     )
-    assert result == (0 if drift is None else 1)
+    accepted = drift in (None, "case_variant")
+    assert result == (0 if accepted else 1)
     starts = [call for call in calls if call[:3] == ["containerapp", "job", "start"]]
-    assert len(starts) == (1 if drift is None else 0)
+    assert len(starts) == (1 if accepted else 0)
     assert all("--command" not in call and "--args" not in call for call in starts)
 
 
