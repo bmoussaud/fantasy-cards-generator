@@ -4,8 +4,9 @@ import asyncio
 import hashlib
 import logging
 import os
+import time
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, Protocol
 
@@ -28,6 +29,10 @@ DEFAULT_SECRET_REQUEST_TIMEOUT_SECONDS = 2.0
 DEFAULT_SECRET_MAX_RETRIES = 2
 DEFAULT_SECRET_RETRY_BACKOFF_SECONDS = 0.25
 DEFAULT_SECRET_MAX_STALE_SECONDS = 300.0
+DEFAULT_SECRET_REFRESH_INTERVAL_SECONDS = 20.0
+DEFAULT_SECRET_REFRESH_TIMEOUT_SECONDS = 25.0
+SECRET_REFRESH_FAILURE_COOLDOWN_SECONDS = 5.0
+MAX_SECRET_SNAPSHOTS = 32
 
 LOGGER = logging.getLogger(__name__)
 
@@ -50,6 +55,13 @@ class SecretValue:
     version: str | None
     fetched_at: datetime
     source: SecretSource
+    expires_on: datetime | None = None
+    not_before: datetime | None = None
+
+    def is_valid_at(self, now: datetime) -> bool:
+        return (self.not_before is None or self.not_before <= now) and (
+            self.expires_on is None or now < self.expires_on
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,10 +72,20 @@ class SecretVersion:
     created_on: datetime | None
     updated_on: datetime | None
     source: SecretSource
+    expires_on: datetime | None = None
+    not_before: datetime | None = None
 
     @property
     def activated_on(self) -> datetime | None:
-        return self.updated_on or self.created_on
+        # Metadata edits must not reorder key history or reopen an elapsed overlap.
+        return self.created_on
+
+    def is_valid_at(self, now: datetime) -> bool:
+        return (
+            self.enabled
+            and (self.not_before is None or self.not_before <= now)
+            and (self.expires_on is None or now < self.expires_on)
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,16 +99,14 @@ class SecretProviderConfig:
     max_stale_seconds: float = DEFAULT_SECRET_MAX_STALE_SECONDS
 
 
-@dataclass(slots=True)
-class _CachedSecret:
-    secret: SecretValue
-    expires_at: datetime
-
-
 @dataclass(frozen=True, slots=True)
-class _SecretVersionCandidate:
-    version: str
-    sort_key: datetime | None
+class SecretSnapshot:
+    current: SecretValue | None = None
+    previous: SecretValue | None = None
+    versions: tuple[SecretVersion, ...] = ()
+    metadata_fetched_at: datetime | None = None
+    retry_after: datetime | None = None
+    error_category: str | None = None
 
 
 DEFAULT_SECRET_REFERENCES: dict[str, SecretReference] = {
@@ -200,6 +220,7 @@ class AzureSecretProvider:
         max_stale: timedelta | float = DEFAULT_SECRET_MAX_STALE_SECONDS,
         clock: Clock = utc_now,
         sleep: Sleep = asyncio.sleep,
+        refresh_timeout_seconds: float = DEFAULT_SECRET_REFRESH_TIMEOUT_SECONDS,
     ) -> None:
         self._secret_references = dict(secret_references or DEFAULT_SECRET_REFERENCES)
         self._cache_ttl = _coerce_timedelta(cache_ttl)
@@ -209,8 +230,9 @@ class AzureSecretProvider:
         self._max_stale = _coerce_timedelta(max_stale)
         self._clock = clock
         self._sleep = sleep
-        self._cache: dict[str, _CachedSecret] = {}
-        self._inflight: dict[str, asyncio.Task[SecretValue]] = {}
+        self._refresh_timeout_seconds = refresh_timeout_seconds
+        self._cache: dict[str, SecretSnapshot] = {}
+        self._inflight: dict[str, asyncio.Task[None]] = {}
         self._lock = asyncio.Lock()
         self._closed = False
 
@@ -243,243 +265,304 @@ class AzureSecretProvider:
             raise ValueError("retry_backoff_seconds must be >= 0.")
         if self._max_stale.total_seconds() < 0:
             raise ValueError("max_stale must be >= 0.")
+        if self._refresh_timeout_seconds <= 0:
+            raise ValueError("refresh_timeout_seconds must be greater than zero.")
 
     async def get_secret(self, name: str) -> SecretValue:
+        snapshot = await self.get_snapshot(name)
+        assert snapshot.current is not None
+        return snapshot.current
+
+    async def refresh_secret(self, name: str) -> SecretValue:
+        await self._ensure_snapshot(name, force=True)
+        snapshot = self.snapshot_for_read(name)
+        assert snapshot.current is not None
+        return snapshot.current
+
+    async def get_snapshot(self, name: str) -> SecretSnapshot:
+        await self._ensure_snapshot(name)
+        return self.snapshot_for_read(name)
+
+    def snapshot_for_read(self, name: str) -> SecretSnapshot:
+        """Recheck deadlines and observed revocations without issuing SDK work."""
         if self._closed:
             raise RuntimeError("Secret provider is already closed.")
+        name = resolve_secret_reference(name, self._secret_references).logical_name
+        snapshot = self._cache.get(name, SecretSnapshot())
+        if not self._eligible(snapshot.current, snapshot):
+            category = snapshot.error_category or "not_found"
+            error_type = (
+                SecretStaleValueExpiredError
+                if snapshot.current is not None
+                else SecretVersionUnavailableError
+            )
+            raise error_type(
+                f"Secret '{name}' has no eligible current value (error_category={category}).",
+                error_category=category,
+            )
+        return replace(
+            snapshot,
+            previous=(
+                snapshot.previous
+                if self._eligible(snapshot.previous, snapshot)
+                and snapshot.previous is not None
+                and snapshot.current is not None
+                and snapshot.previous.version != snapshot.current.version
+                else None
+            ),
+        )
 
+    def _eligible(self, secret: SecretValue | None, snapshot: SecretSnapshot) -> bool:
+        now = self._clock()
+        if secret is None or not secret.is_valid_at(now):
+            return False
+        if now >= secret.fetched_at + self._cache_ttl + self._max_stale:
+            return False
+        if snapshot.metadata_fetched_at is not None:
+            if now >= snapshot.metadata_fetched_at + self._cache_ttl + self._max_stale:
+                return False
+        metadata = next((v for v in snapshot.versions if v.version == secret.version), None)
+        if snapshot.versions and metadata is None:
+            return False
+        return metadata is None or metadata.is_valid_at(now)
+
+    async def _ensure_snapshot(self, name: str, *, force: bool = False) -> None:
+        if self._closed:
+            raise RuntimeError("Secret provider is already closed.")
         reference = resolve_secret_reference(name, self._secret_references)
-        cached = await self._get_cached(reference.logical_name)
-        if cached is not None:
-            return cached
-
+        name = reference.logical_name
         async with self._lock:
-            cached = self._cache.get(reference.logical_name)
-            if cached is not None and cached.expires_at > self._clock():
-                return cached.secret
-
-            refresh = self._inflight.get(reference.logical_name)
+            snapshot = self._cache.get(name)
+            now = self._clock()
+            refresh = self._inflight.get(name)
             if refresh is None:
+                if snapshot is not None:
+                    if snapshot.retry_after is not None and now < snapshot.retry_after:
+                        return
+                    if (
+                        not force
+                        and self._eligible(snapshot.current, snapshot)
+                        and snapshot.current is not None
+                        and now < snapshot.current.fetched_at + self._cache_ttl
+                        and snapshot.metadata_fetched_at is not None
+                        and now < snapshot.metadata_fetched_at + self._cache_ttl
+                    ):
+                        return
+                if name not in self._cache:
+                    if len(self._cache) >= MAX_SECRET_SNAPSHOTS:
+                        victim = next(
+                            (key for key in self._cache if key not in self._inflight), None
+                        )
+                        if victim is None:
+                            raise SecretProviderError("Secret snapshot capacity is exhausted.")
+                        del self._cache[victim]
+                    self._cache[name] = SecretSnapshot()
                 refresh = asyncio.create_task(
-                    self._refresh_and_cache(reference),
-                    name=f"secret-refresh:{reference.logical_name}",
+                    self._refresh_and_cache(reference), name=f"secret-refresh:{name}"
                 )
-                self._inflight[reference.logical_name] = refresh
-
-        return await asyncio.shield(refresh)
+                refresh.add_done_callback(_observe_refresh_result)
+                self._inflight[name] = refresh
+        await asyncio.shield(refresh)
 
     async def get_secret_version(self, name: str, *, version: str | None = None) -> SecretValue:
-        if self._closed:
-            raise RuntimeError("Secret provider is already closed.")
-
-        if version is None:
-            return await self.get_secret(name)
-
-        reference = resolve_secret_reference(name, self._secret_references)
-        try:
-            secret = await self._run_with_timeout_and_retry(
-                lambda: self._client.get_secret(reference.key_vault_name, version=version),
-                timeout_context=(f"loading secret '{reference.logical_name}' version '{version}'"),
-            )
-        except ResourceNotFoundError as exc:
-            raise SecretVersionUnavailableError(
-                f"Secret '{reference.logical_name}' version '{version}' is unavailable."
-            ) from exc
-
-        properties = getattr(secret, "properties", None)
-        if getattr(properties, "enabled", True) is False:
-            raise SecretVersionUnavailableError(
-                f"Secret '{reference.logical_name}' version '{version}' is disabled."
-            )
-
-        return SecretValue(
-            name=reference.logical_name,
-            value=str(getattr(secret, "value", "")),
-            version=_optional_text(getattr(properties, "version", None)) or version,
-            fetched_at=self._clock(),
-            source="azure",
+        snapshot = await self.get_snapshot(name)
+        for secret in (snapshot.current, snapshot.previous):
+            if secret is not None and version in (None, secret.version):
+                return secret
+        raise SecretVersionUnavailableError(
+            f"Secret '{name}' requested version is unavailable.", error_category="not_found"
         )
 
     async def list_secret_versions(self, name: str) -> list[SecretVersion]:
-        if self._closed:
-            raise RuntimeError("Secret provider is already closed.")
-
-        reference = resolve_secret_reference(name, self._secret_references)
-        try:
-            return await self._run_with_timeout_and_retry(
-                lambda: self._collect_version_metadata(reference),
-                timeout_context=f"listing versions for secret '{reference.logical_name}'",
-            )
-        except ResourceNotFoundError:
-            raise SecretNotFoundError(
-                f"Secret '{reference.logical_name}' does not exist in Key Vault.",
-                error_category="not_found",
-            ) from None
+        return list((await self.get_snapshot(name)).versions)
 
     async def aclose(self) -> None:
         if self._closed:
             return
         self._closed = True
 
-        close_error: Exception | None = None
-        if self._owns_client and hasattr(self._client, "close"):
-            try:
-                await self._client.close()
-            except Exception as exc:  # pragma: no cover - defensive cleanup path
-                close_error = exc
-
-        if (
-            self._owns_credential
-            and self._credential is not None
-            and hasattr(self._credential, "close")
-        ):
-            try:
-                await self._credential.close()
-            except Exception as exc:  # pragma: no cover - defensive cleanup path
-                if close_error is None:
-                    close_error = exc
-
-        if close_error is not None:
-            raise close_error
-
-    async def _get_cached(self, name: str) -> SecretValue | None:
-        async with self._lock:
-            cached = self._cache.get(name)
-            if cached is None:
-                return None
-            if cached.expires_at <= self._clock():
-                return None
-            return cached.secret
-
-    async def _get_cached_entry(self, name: str) -> _CachedSecret | None:
-        async with self._lock:
-            return self._cache.get(name)
-
-    async def _set_cached(self, secret: SecretValue) -> None:
-        async with self._lock:
-            self._cache[secret.name] = _CachedSecret(
-                secret=secret,
-                expires_at=secret.fetched_at + self._cache_ttl,
-            )
-
-    async def _refresh_and_cache(self, reference: SecretReference) -> SecretValue:
-        cached = await self._get_cached_entry(reference.logical_name)
+        tasks = tuple(self._inflight.values())
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        self._cache.clear()
         try:
-            secret = await self._refresh_secret(reference)
-            await self._set_cached(secret)
-            self._log_refresh_outcome("success", secret=secret)
-            return secret
-        except Exception as exc:
-            error_category = _normalize_secret_refresh_error(exc)
-            stale_secret = self._get_stale_secret(cached)
-            if stale_secret is not None:
-                self._log_refresh_outcome(
-                    "stale",
-                    secret=stale_secret,
-                    error_category=error_category,
-                )
-                return stale_secret
+            if self._owns_client and hasattr(self._client, "close"):
+                await self._client.close()
+        finally:
+            if (
+                self._owns_credential
+                and self._credential is not None
+                and hasattr(self._credential, "close")
+            ):
+                await self._credential.close()
 
-            self._log_refresh_outcome(
-                "failed",
-                secret=cached.secret if cached is not None else None,
+    async def _refresh_and_cache(self, reference: SecretReference) -> None:
+        name = reference.logical_name
+        cached = self._cache[name]
+        try:
+            async with asyncio.timeout(self._refresh_timeout_seconds):
+                await self._refresh_snapshot(reference)
+            self._cache[name] = replace(self._cache[name], retry_after=None, error_category=None)
+            self._log_refresh_outcome("success", secret=self._cache[name].current)
+        except (SecretProviderError, AzureError, TimeoutError) as exc:
+            error_category = _normalize_secret_refresh_error(exc)
+            self._cache[name] = replace(
+                self._cache[name],
+                retry_after=self._clock()
+                + timedelta(seconds=SECRET_REFRESH_FAILURE_COOLDOWN_SECONDS),
                 error_category=error_category,
             )
-            if cached is None and isinstance(
-                exc,
-                (SecretNotFoundError, SecretRefreshTimeout, SecretVersionUnavailableError),
-            ):
-                raise type(exc)(str(exc)) from None
-            if cached is None:
-                raise SecretProviderError(
-                    f"Secret '{reference.logical_name}' refresh failed without a known-good cached "
-                    f"value (error_category={error_category})."
+            snapshot = self._cache[name]
+            if self._eligible(snapshot.current, snapshot):
+                self._log_refresh_outcome(
+                    "stale", secret=snapshot.current, error_category=error_category
+                )
+                return
+            self._log_refresh_outcome(
+                "failed",
+                secret=cached.current,
+                error_category=error_category,
+            )
+            if cached.current is None:
+                error_type = SecretProviderError
+                if isinstance(exc, ResourceNotFoundError):
+                    error_type = SecretNotFoundError
+                elif isinstance(exc, (SecretRefreshTimeout, TimeoutError)):
+                    error_type = SecretRefreshTimeout
+                elif isinstance(exc, SecretVersionUnavailableError):
+                    error_type = SecretVersionUnavailableError
+                raise error_type(
+                    f"Secret '{name}' refresh failed without a known-good cached value "
+                    f"(error_category={error_category}).",
+                    error_category=error_category,
                 ) from None
             raise SecretStaleValueExpiredError(
-                f"Secret '{reference.logical_name}' refresh failed after cached value exceeded "
-                f"max stale (age_seconds={_secret_age_seconds(cached.secret, self._clock())}, "
-                f"error_category={error_category})."
+                f"Secret '{name}' has no eligible cached value "
+                f"(error_category={error_category}).",
+                error_category=error_category,
             ) from None
         finally:
             async with self._lock:
                 self._inflight.pop(reference.logical_name, None)
 
-    async def _refresh_secret(self, reference: SecretReference) -> SecretValue:
+    async def _fetch_value(
+        self, reference: SecretReference, version: str | None = None
+    ) -> SecretValue:
         try:
             secret = await self._run_with_timeout_and_retry(
-                lambda: self._client.get_secret(reference.key_vault_name),
+                lambda: self._client.get_secret(reference.key_vault_name, version=version),
                 timeout_context=f"loading secret '{reference.logical_name}'",
             )
         except ResourceNotFoundError:
-            raise SecretNotFoundError(
-                f"Secret '{reference.logical_name}' does not exist in Key Vault.",
+            snapshot = self._cache[reference.logical_name]
+            self._cache[reference.logical_name] = replace(
+                snapshot, current=None if version is None else snapshot.current, previous=None
+            )
+            raise SecretVersionUnavailableError(
+                f"Secret '{reference.logical_name}' requested version is unavailable.",
                 error_category="not_found",
             ) from None
-
         properties = getattr(secret, "properties", None)
         candidate = _validated_secret_value(
             reference.logical_name,
             value=getattr(secret, "value", None),
             version=_optional_text(getattr(properties, "version", None)),
             fetched_at=self._clock(),
+            expires_on=getattr(properties, "expires_on", None),
+            not_before=getattr(properties, "not_before", None),
         )
-        if getattr(properties, "enabled", True) is not False and candidate is not None:
-            return candidate
-
-        versions = await self._load_latest_enabled_versions(reference)
-        last_error: Exception | None = None
-        for version in versions:
-            try:
-                secret = await self._run_with_timeout_and_retry(
-                    lambda version=version.version: self._client.get_secret(
-                        reference.key_vault_name,
-                        version=version,
-                    ),
-                    timeout_context=f"loading secret '{reference.logical_name}'",
-                )
-            except ResourceNotFoundError as exc:
-                last_error = exc
-                continue
-
-            properties = getattr(secret, "properties", None)
-            if getattr(properties, "enabled", True) is False:
-                continue
-
-            candidate = _validated_secret_value(
-                reference.logical_name,
-                value=getattr(secret, "value", None),
-                version=_optional_text(getattr(properties, "version", None)) or version.version,
-                fetched_at=self._clock(),
+        if (
+            getattr(properties, "enabled", True) is False
+            or candidate is None
+            or candidate.version is None
+            or (version is not None and candidate.version != version)
+        ):
+            snapshot = self._cache[reference.logical_name]
+            # An invalid latest value is never replaced by an arbitrary historical key.
+            self._cache[reference.logical_name] = replace(
+                snapshot,
+                current=None if version is None else snapshot.current,
+                previous=None,
             )
-            if candidate is not None:
-                return candidate
-
-        if last_error is not None:
             raise SecretVersionUnavailableError(
-                f"Secret '{reference.logical_name}' has no readable enabled version."
-            ) from last_error
+                f"Secret '{reference.logical_name}' requested version is invalid.",
+                error_category="not_found",
+            )
+        return candidate
 
-        raise SecretVersionUnavailableError(
-            f"Secret '{reference.logical_name}' has no enabled version in Key Vault."
+    async def _refresh_snapshot(self, reference: SecretReference) -> None:
+        name = reference.logical_name
+        history = tuple(
+            await self._run_with_timeout_and_retry(
+                lambda: self._collect_version_metadata(reference),
+                timeout_context=f"listing versions for secret '{name}'",
+            )
         )
-
-    async def _load_latest_enabled_versions(
-        self,
-        reference: SecretReference,
-    ) -> list[_SecretVersionCandidate]:
-        versions = [
-            _SecretVersionCandidate(
-                version=version.version,
-                sort_key=version.activated_on,
-            )
-            for version in await self.list_secret_versions(reference.logical_name)
-            if version.enabled and version.version is not None
-        ]
-        if not versions:
+        snapshot = self._cache[name]
+        order_known = all(v.version is not None and v.created_on is not None for v in history)
+        order_known = order_known and all(
+            newer.created_on != older.created_on for newer, older in zip(history[:2], history[1:3])
+        )
+        # Do not discard unplaced versions before proving adjacency. Even an
+        # invalid historical version can lie between two otherwise usable keys.
+        versions = (
+            history[:2]
+            if order_known
+            else tuple(
+                v for v in history if snapshot.current and v.version == snapshot.current.version
+            )[:1]
+        )
+        previous = snapshot.previous
+        if (
+            snapshot.current is not None
+            and len(versions) == 2
+            and snapshot.current.version == versions[1].version
+        ):
+            previous = snapshot.current
+        if previous is not None and (len(versions) < 2 or previous.version != versions[1].version):
+            previous = None
+        self._cache[name] = replace(
+            snapshot, versions=versions, previous=previous, metadata_fetched_at=self._clock()
+        )
+        if order_known and versions and not versions[0].is_valid_at(self._clock()):
+            self._cache[name] = replace(self._cache[name], current=None, previous=None)
             raise SecretVersionUnavailableError(
-                f"Secret '{reference.logical_name}' has no enabled versions in Key Vault."
+                f"Secret '{name}' latest version is invalid.", error_category="not_found"
             )
-        return versions
+        current = await self._fetch_value(reference)
+        current_metadata = next((v for v in history if v.version == current.version), None)
+        if (
+            (history and current_metadata is None)
+            or (current_metadata is not None and not current_metadata.is_valid_at(self._clock()))
+            or (order_known and versions and current.version != versions[0].version)
+        ):
+            self._cache[name] = replace(self._cache[name], current=None, previous=None)
+            raise SecretVersionUnavailableError(
+                f"Secret '{name}' latest version metadata changed during refresh.",
+                error_category="not_found",
+            )
+        if not order_known:
+            versions = (current_metadata,) if current_metadata is not None else ()
+        self._cache[name] = replace(self._cache[name], current=current, versions=versions)
+        if (
+            len(versions) < 2
+            or versions[0].created_on is None
+            or versions[1].created_on is None
+            or versions[0].created_on <= versions[1].created_on
+        ):
+            self._cache[name] = replace(self._cache[name], previous=None)
+            LOGGER.warning(
+                "secret.previous_version_resolution_degraded",
+                extra={"error_category": "version_metadata_missing"},
+            )
+            return
+        predecessor = versions[1]
+        if not predecessor.is_valid_at(self._clock()):
+            self._cache[name] = replace(self._cache[name], previous=None)
+            return
+        previous = await self._fetch_value(reference, predecessor.version)
+        self._cache[name] = replace(self._cache[name], previous=previous)
 
     async def _collect_version_metadata(
         self,
@@ -489,18 +572,64 @@ class AzureSecretProvider:
         iterator = self._client.list_properties_of_secret_versions(reference.key_vault_name)
         async for properties in iterator:
             version = _optional_text(getattr(properties, "version", None))
-            if version is None:
-                continue
-            versions.append(
-                SecretVersion(
-                    name=reference.logical_name,
-                    version=version,
-                    enabled=getattr(properties, "enabled", True) is not False,
-                    created_on=getattr(properties, "created_on", None),
-                    updated_on=getattr(properties, "updated_on", None),
-                    source="azure",
+            metadata = SecretVersion(
+                name=reference.logical_name,
+                version=version,
+                enabled=getattr(properties, "enabled", True) is not False,
+                created_on=getattr(properties, "created_on", None),
+                updated_on=getattr(properties, "updated_on", None),
+                source="azure",
+                expires_on=getattr(properties, "expires_on", None),
+                not_before=getattr(properties, "not_before", None),
+            )
+            # Apply observations before another page/value fetch can fail, without
+            # advancing the successful metadata or value fetch timestamps.
+            snapshot = self._cache[reference.logical_name]
+            order_unknown = (
+                metadata.version is None
+                or metadata.created_on is None
+                or any(
+                    v.version != metadata.version and v.created_on == metadata.created_on
+                    for v in snapshot.versions
                 )
             )
+            if order_unknown and snapshot.previous is not None:
+                LOGGER.warning(
+                    "secret.previous_version_resolution_degraded",
+                    extra={"error_category": "version_metadata_missing"},
+                )
+            observed_latest_invalid = (
+                not metadata.is_valid_at(self._clock())
+                and metadata.created_on is not None
+                and bool(snapshot.versions)
+                and snapshot.versions[0].created_on is not None
+                and metadata.created_on >= snapshot.versions[0].created_on
+            )
+            self._cache[reference.logical_name] = replace(
+                snapshot,
+                versions=tuple(metadata if v.version == version else v for v in snapshot.versions),
+                current=(
+                    None
+                    if observed_latest_invalid
+                    or (
+                        not metadata.is_valid_at(self._clock())
+                        and snapshot.current
+                        and snapshot.current.version == version
+                    )
+                    else snapshot.current
+                ),
+                previous=(
+                    None
+                    if order_unknown
+                    or (
+                        not metadata.is_valid_at(self._clock())
+                        and snapshot.previous
+                        and snapshot.previous.version == version
+                    )
+                    else snapshot.previous
+                ),
+            )
+            versions.append(metadata)
         versions.sort(
             key=lambda candidate: candidate.activated_on or datetime.min.replace(tzinfo=UTC),
             reverse=True,
@@ -552,13 +681,6 @@ class AzureSecretProvider:
         if delay > 0:
             await self._sleep(delay)
 
-    def _get_stale_secret(self, cached: _CachedSecret | None) -> SecretValue | None:
-        if cached is None or self._max_stale.total_seconds() <= 0:
-            return None
-        if self._clock() > cached.expires_at + self._max_stale:
-            return None
-        return cached.secret
-
     def _log_refresh_outcome(
         self,
         outcome: Literal["success", "stale", "failed"],
@@ -582,6 +704,35 @@ class AzureSecretProvider:
                 "error_category": error_category,
             },
         )
+
+
+def _observe_refresh_result(task: asyncio.Task[None]) -> None:
+    if not task.cancelled():
+        task.exception()
+
+
+async def run_secret_refresh_worker(
+    provider: AzureSecretProvider,
+    name: str,
+    *,
+    on_refresh: Callable[[], Awaitable[Any]] | None = None,
+    sleep: Sleep = asyncio.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> None:
+    delay = DEFAULT_SECRET_REFRESH_INTERVAL_SECONDS
+    while True:
+        await sleep(delay)
+        started = monotonic()
+        try:
+            await provider.refresh_secret(name)
+            if on_refresh is not None:
+                await on_refresh()
+        except SecretProviderError as exc:
+            LOGGER.warning(
+                "secret.background_refresh_degraded",
+                extra={"error_category": classify_secret_error(exc)},
+            )
+        delay = max(0.0, DEFAULT_SECRET_REFRESH_INTERVAL_SECONDS - (monotonic() - started))
 
 
 def build_secret_provider_from_environment(
@@ -725,18 +876,22 @@ def _validated_secret_value(
     value: object,
     version: str | None,
     fetched_at: datetime,
+    expires_on: datetime | None = None,
+    not_before: datetime | None = None,
 ) -> SecretValue | None:
-    normalized_value = _optional_text(value)
     normalized_version = _optional_text(version)
-    if normalized_value is None or normalized_version is None:
+    if not isinstance(value, str) or not value.strip() or normalized_version is None:
         return None
-    return SecretValue(
+    secret = SecretValue(
         name=name,
-        value=normalized_value,
+        value=value,
         version=normalized_version,
         fetched_at=fetched_at,
         source="azure",
+        expires_on=expires_on,
+        not_before=not_before,
     )
+    return secret if secret.is_valid_at(fetched_at) else None
 
 
 def _sanitized_secret_error(

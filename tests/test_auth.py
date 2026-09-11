@@ -20,7 +20,6 @@ from joserfc.jwk import OctKey
 from app import main as main_module
 from app.auth import (
     DEFAULT_ENTRA_AUTHORITY,
-    DEFAULT_ENTRA_CLIENT_SECRET_OVERLAP,
     AuthSettings,
     EntraOAuthClientManager,
     build_claims_options,
@@ -233,67 +232,6 @@ def test_entra_oauth_client_manager_rebuilds_client_when_secret_version_changes(
     assert first_client is second_client
     assert rotated_client is not first_client
     assert factory.created_secrets == ["old-secret", "new-secret"]
-
-
-def test_entra_oauth_client_manager_uses_previous_secret_during_overlap() -> None:
-    clock = FakeClock()
-    provider = FakeRuntimeSecretProvider(
-        make_runtime_secret(clock, value="old-secret", version="v1")
-    )
-    factory = RecordingOAuthClientFactory()
-    previous_client = RecordingOAuthClient("old-secret")
-    current_client = RecordingOAuthClient(
-        "new-secret",
-        authorize_results=[OAuthError(error="invalid_client")],
-    )
-    factory.queue_client("old-secret", previous_client)
-    factory.queue_client("new-secret", current_client)
-    manager = EntraOAuthClientManager(
-        settings=load_auth_settings(),
-        secret_provider=provider,
-        client_factory=factory,
-        clock=clock.now,
-    )
-
-    asyncio_run(manager.get_client())
-    provider.set_secret(make_runtime_secret(clock, value="new-secret", version="v2"))
-    token = asyncio_run(manager.authorize_access_token(object()))
-
-    assert token["userinfo"]["email"] == "aragorn@example.com"
-    assert current_client.authorize_calls == 1
-    assert previous_client.authorize_calls == 1
-
-
-def test_entra_oauth_client_manager_expires_previous_secret_after_overlap_window() -> None:
-    clock = FakeClock()
-    provider = FakeRuntimeSecretProvider(
-        make_runtime_secret(clock, value="old-secret", version="v1")
-    )
-    factory = RecordingOAuthClientFactory()
-    previous_client = RecordingOAuthClient("old-secret")
-    current_client = RecordingOAuthClient(
-        "new-secret",
-        authorize_results=[OAuthError(error="invalid_client")],
-    )
-    factory.queue_client("old-secret", previous_client)
-    factory.queue_client("new-secret", current_client)
-    manager = EntraOAuthClientManager(
-        settings=load_auth_settings(),
-        secret_provider=provider,
-        client_factory=factory,
-        clock=clock.now,
-    )
-
-    asyncio_run(manager.get_client())
-    provider.set_secret(make_runtime_secret(clock, value="new-secret", version="v2"))
-    asyncio_run(manager.get_client())
-    clock.advance(DEFAULT_ENTRA_CLIENT_SECRET_OVERLAP + timedelta(seconds=1))
-
-    with pytest.raises(OAuthError, match="invalid_client"):
-        asyncio_run(manager.authorize_access_token(object()))
-
-    assert current_client.authorize_calls == 1
-    assert previous_client.authorize_calls == 0
 
 
 def test_protected_shell_redirects_anonymous_users_to_login() -> None:

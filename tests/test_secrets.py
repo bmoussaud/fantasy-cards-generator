@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import traceback
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -23,6 +24,7 @@ from app.secrets import (
     SecretVersionUnavailableError,
     build_secret_provider_from_environment,
     load_secret_provider_config,
+    utc_now,
 )
 
 
@@ -43,11 +45,13 @@ class FakeSecretProperties:
     enabled: bool = True
     created_on: datetime | None = None
     updated_on: datetime | None = None
+    expires_on: datetime | None = None
+    not_before: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class FakeSecretBundle:
-    value: str
+    value: object
     properties: FakeSecretProperties
 
 
@@ -185,7 +189,7 @@ def test_azure_secret_provider_caches_before_ttl_expiry() -> None:
     assert first.value == "first-value"
     assert second == first
     assert first.version == "v2"
-    assert client.list_calls == []
+    assert client.list_calls == ["app-session-secret-key"]
     assert client.get_calls == [("app-session-secret-key", None)]
 
 
@@ -208,6 +212,7 @@ def test_azure_secret_provider_refreshes_after_ttl_and_tracks_new_version() -> N
     new_version = make_version(clock, "v2")
     client._versions["entra-client-secret"] = [new_version, old_version]
     client.set_response("entra-client-secret", None, FakeSecretBundle("new", new_version))
+    client.set_response("entra-client-secret", "v1", FakeSecretBundle("old", old_version))
 
     second = run_async(provider.get_secret("ENTRA_CLIENT_SECRET"))
 
@@ -215,11 +220,15 @@ def test_azure_secret_provider_refreshes_after_ttl_and_tracks_new_version() -> N
     assert first.version == "v1"
     assert second.value == "new"
     assert second.version == "v2"
-    assert client.list_calls == []
-    assert client.get_calls == [("entra-client-secret", None), ("entra-client-secret", None)]
+    assert client.list_calls == ["entra-client-secret"] * 2
+    assert client.get_calls == [
+        ("entra-client-secret", None),
+        ("entra-client-secret", None),
+        ("entra-client-secret", "v1"),
+    ]
 
 
-def test_azure_secret_provider_skips_disabled_or_invalid_versions() -> None:
+def test_azure_secret_provider_never_promotes_history_after_invalid_latest() -> None:
     clock = FakeClock()
     invalid = make_version(clock, "v3")
     disabled = make_version(clock, "v2", enabled=False, age_seconds=10)
@@ -244,15 +253,9 @@ def test_azure_secret_provider_skips_disabled_or_invalid_versions() -> None:
         sleep=fake_sleep,
     )
 
-    secret = run_async(provider.get_secret("APP_SESSION_SECRET_KEY"))
-
-    assert secret.value == "fallback-value"
-    assert secret.version == "v1"
-    assert client.get_calls == [
-        ("app-session-secret-key", None),
-        ("app-session-secret-key", "v3"),
-        ("app-session-secret-key", "v1"),
-    ]
+    with pytest.raises(SecretVersionUnavailableError):
+        run_async(provider.get_secret("APP_SESSION_SECRET_KEY"))
+    assert client.get_calls == [("app-session-secret-key", None)]
 
 
 def test_azure_secret_provider_coalesces_concurrent_refreshes() -> None:
@@ -286,7 +289,7 @@ def test_azure_secret_provider_coalesces_concurrent_refreshes() -> None:
     results = run_async(run_test())
 
     assert [result.value for result in results] == ["shared-value"] * 5
-    assert client.list_calls == []
+    assert client.list_calls == ["app-session-secret-key"]
     assert client.get_calls == [("app-session-secret-key", None)]
 
 
@@ -506,16 +509,13 @@ def test_azure_secret_provider_does_not_replace_known_good_value_with_empty_secr
         FakeSecretBundle("known-good", good_version),
     )
 
-    refreshed = run_async(provider.get_secret("APP_SESSION_SECRET_KEY"))
-
+    with pytest.raises(SecretProviderError):
+        run_async(provider.get_secret("APP_SESSION_SECRET_KEY"))
     assert initial.value == "known-good"
-    assert refreshed.value == "known-good"
-    assert refreshed.version == "v1"
+    assert provider._cache["APP_SESSION_SECRET_KEY"].current is None
     assert client.get_calls == [
         ("app-session-secret-key", None),
         ("app-session-secret-key", None),
-        ("app-session-secret-key", "v2"),
-        ("app-session-secret-key", "v1"),
     ]
 
 
@@ -536,10 +536,7 @@ def test_azure_secret_provider_classifies_list_versions_access_denied() -> None:
 
     with pytest.raises(
         SecretProviderError,
-        match=(
-            "listing versions for secret 'APP_SESSION_SECRET_KEY' "
-            "\\(error_category=access_denied\\)"
-        ),
+        match="error_category=access_denied",
     ):
         run_async(provider.list_secret_versions("APP_SESSION_SECRET_KEY"))
 
@@ -562,10 +559,7 @@ def test_azure_secret_provider_classifies_list_versions_network_errors() -> None
 
     with pytest.raises(
         SecretProviderError,
-        match=(
-            "listing versions for secret 'APP_SESSION_SECRET_KEY' "
-            "\\(error_category=network_error\\)"
-        ),
+        match="error_category=network_error",
     ):
         run_async(provider.list_secret_versions("APP_SESSION_SECRET_KEY"))
 
@@ -589,6 +583,165 @@ def test_azure_secret_provider_closes_owned_resources() -> None:
 
     assert client.close_calls == 1
     assert credential.close_calls == 1
+
+
+@pytest.mark.parametrize("value", [None, "", "   ", 42])
+def test_versioned_secret_rejects_malformed_values(value: object) -> None:
+    clock = FakeClock()
+    properties = make_version(clock, "v1")
+    current = make_version(clock, "v2", age_seconds=-1)
+    client = FakeSecretClient(versions={"app-session-secret-key": [current, properties]})
+    client.set_response("app-session-secret-key", None, FakeSecretBundle("current", current))
+    client.set_response("app-session-secret-key", "v1", FakeSecretBundle(value, properties))
+    provider = AzureSecretProvider(key_vault_uri="https://vault.example", client=client)
+
+    with pytest.raises(SecretVersionUnavailableError):
+        run_async(provider.get_secret_version("APP_SESSION_SECRET_KEY", version="v1"))
+
+
+@pytest.mark.parametrize("version", [None, "v1"])
+@pytest.mark.parametrize("invalid_date", ["expired", "future"])
+def test_secret_provider_rejects_versions_outside_validity(
+    version: str | None, invalid_date: str
+) -> None:
+    clock = FakeClock()
+    properties = FakeSecretProperties(
+        version="v1",
+        expires_on=clock.now() if invalid_date == "expired" else None,
+        not_before=clock.now() + timedelta(seconds=1) if invalid_date == "future" else None,
+    )
+    client = FakeSecretClient(versions={"app-session-secret-key": [properties]})
+    client.set_response("app-session-secret-key", None, FakeSecretBundle("key", properties))
+    provider = AzureSecretProvider(
+        key_vault_uri="https://vault.example", client=client, clock=clock.now
+    )
+
+    with pytest.raises(SecretVersionUnavailableError):
+        run_async(provider.get_secret_version("APP_SESSION_SECRET_KEY", version=version))
+
+
+@pytest.mark.parametrize("expiry_seconds", [30, 90])
+def test_cached_secret_expiration_overrides_ttl_and_stale_grace(expiry_seconds: int) -> None:
+    clock = FakeClock()
+    properties = FakeSecretProperties(
+        version="v1", expires_on=clock.now() + timedelta(seconds=expiry_seconds)
+    )
+    client = FakeSecretClient(versions={})
+    client.set_response("app-session-secret-key", None, FakeSecretBundle("key", properties))
+    provider = AzureSecretProvider(
+        key_vault_uri="https://vault.example",
+        client=client,
+        clock=clock.now,
+        cache_ttl=60,
+        max_stale=300,
+        max_retries=0,
+    )
+    run_async(provider.get_secret("APP_SESSION_SECRET_KEY"))
+    clock.advance(expiry_seconds)
+    client.set_response("app-session-secret-key", None, ServiceRequestError("outage"))
+
+    with pytest.raises(SecretStaleValueExpiredError):
+        run_async(provider.get_secret("APP_SESSION_SECRET_KEY"))
+
+
+def test_observed_disabled_current_version_is_not_served_stale() -> None:
+    clock = FakeClock()
+    current = make_version(clock, "v1")
+    client = FakeSecretClient(versions={"app-session-secret-key": [current]})
+    client.set_response("app-session-secret-key", None, FakeSecretBundle("key", current))
+    provider = AzureSecretProvider(
+        key_vault_uri="https://vault.example", client=client, clock=clock.now, max_retries=0
+    )
+    run_async(provider.get_secret("APP_SESSION_SECRET_KEY"))
+    clock.advance(61)
+    disabled = replace(current, enabled=False)
+    client._versions["app-session-secret-key"] = [disabled]
+    client.set_response("app-session-secret-key", None, FakeSecretBundle("key", disabled))
+
+    with pytest.raises(SecretProviderError):
+        run_async(provider.get_secret("APP_SESSION_SECRET_KEY"))
+    assert provider._cache["APP_SESSION_SECRET_KEY"].current is None
+
+
+def test_versioned_secret_not_found_does_not_chain_raw_sdk_error() -> None:
+    clock = FakeClock()
+    current, previous = make_version(clock, "v2"), make_version(clock, "v1", age_seconds=1)
+    client = FakeSecretClient(versions={"app-session-secret-key": [current, previous]})
+    client.set_response("app-session-secret-key", None, FakeSecretBundle("current", current))
+    client.set_response(
+        "app-session-secret-key", "v1", ResourceNotFoundError("synthetic-raw-sdk-detail")
+    )
+    provider = AzureSecretProvider(key_vault_uri="https://vault.example", client=client)
+
+    with pytest.raises(SecretVersionUnavailableError) as caught:
+        run_async(provider.get_secret_version("APP_SESSION_SECRET_KEY", version="v1"))
+
+    assert "synthetic-raw-sdk-detail" not in "".join(traceback.format_exception(caught.value))
+
+
+@pytest.mark.parametrize("requested_version", [None, "v1"])
+def test_valid_secret_preserves_value_and_accepts_not_before_boundary(
+    requested_version: str | None,
+) -> None:
+    clock = FakeClock()
+    properties = FakeSecretProperties(
+        version="v1",
+        not_before=clock.now(),
+        expires_on=clock.now() + timedelta(seconds=60),
+    )
+    client = FakeSecretClient(versions={})
+    client.set_response("app-session-secret-key", None, FakeSecretBundle(" key ", properties))
+    provider = AzureSecretProvider(
+        key_vault_uri="https://vault.example", client=client, clock=clock.now
+    )
+
+    secret = run_async(
+        provider.get_secret_version("APP_SESSION_SECRET_KEY", version=requested_version)
+    )
+
+    assert secret.value == " key "
+
+
+@pytest.mark.parametrize("returned_version", [None, "v2"])
+def test_versioned_secret_rejects_missing_or_mismatched_version(
+    returned_version: str | None,
+) -> None:
+    clock = FakeClock()
+    current, previous = make_version(clock, "v3"), make_version(clock, "v1", age_seconds=1)
+    client = FakeSecretClient(versions={"app-session-secret-key": [current, previous]})
+    client.set_response("app-session-secret-key", None, FakeSecretBundle("current", current))
+    client.set_response(
+        "app-session-secret-key",
+        "v1",
+        FakeSecretBundle("key", FakeSecretProperties(version=returned_version)),
+    )
+    provider = AzureSecretProvider(key_vault_uri="https://vault.example", client=client)
+
+    with pytest.raises(SecretVersionUnavailableError):
+        run_async(provider.get_secret_version("APP_SESSION_SECRET_KEY", version="v1"))
+
+
+def test_secret_metadata_updates_do_not_reorder_predecessors_or_restart_overlap() -> None:
+    clock = FakeClock()
+    previous = FakeSecretProperties(
+        version="v1",
+        created_on=clock.now() - timedelta(seconds=120),
+        updated_on=clock.now(),
+    )
+    current = FakeSecretProperties(
+        version="v2",
+        created_on=clock.now() - timedelta(seconds=60),
+        updated_on=clock.now(),
+    )
+    client = FakeSecretClient(versions={"app-session-secret-key": [previous, current]})
+    client.set_response("app-session-secret-key", None, FakeSecretBundle("current", current))
+    client.set_response("app-session-secret-key", "v1", FakeSecretBundle("previous", previous))
+    provider = AzureSecretProvider(key_vault_uri="https://vault.example", client=client)
+
+    versions = run_async(provider.list_secret_versions("APP_SESSION_SECRET_KEY"))
+
+    assert [version.version for version in versions] == ["v2", "v1"]
+    assert versions[0].activated_on == current.created_on
 
 
 def test_build_secret_provider_from_environment_defaults_to_env_backend() -> None:
@@ -634,3 +787,44 @@ def test_create_app_closes_injected_secret_provider_on_shutdown() -> None:
         assert response.status_code == 200
 
     assert provider.closed is True
+
+
+@pytest.mark.parametrize("entra_available", [False, True])
+@pytest.mark.parametrize("auth_enabled", [False, True])
+def test_azure_startup_requires_both_auth_secrets_and_closes_provider(
+    entra_available: bool, auth_enabled: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class StartupProvider:
+        def __init__(self) -> None:
+            self.closed = False
+            self.calls: list[str] = []
+
+        async def get_secret(self, name: str) -> SecretValue:
+            self.calls.append(name)
+            if name == "ENTRA_CLIENT_SECRET" and not entra_available:
+                raise SecretNotFoundError("Required authentication secret is unavailable.")
+            return SecretValue(
+                name=name, value="synthetic", version=None, fetched_at=utc_now(), source="azure"
+            )
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    if not auth_enabled:
+        monkeypatch.delenv("ENTRA_CLIENT_ID")
+        monkeypatch.delenv("ENTRA_REDIRECT_URI")
+    provider = StartupProvider()
+    app = create_app(secret_provider=provider)
+    if entra_available or not auth_enabled:
+        with TestClient(app, base_url="https://testserver"):
+            pass
+    else:
+        with pytest.raises(SecretNotFoundError):
+            with TestClient(app, base_url="https://testserver"):
+                pytest.fail("Azure startup must not yield without the Entra secret.")
+    assert provider.calls == (
+        ["APP_SESSION_SECRET_KEY", "ENTRA_CLIENT_SECRET"]
+        if auth_enabled
+        else ["APP_SESSION_SECRET_KEY"]
+    )
+    assert provider.closed
