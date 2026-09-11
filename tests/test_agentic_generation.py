@@ -109,6 +109,63 @@ def _agent_client(monkeypatch: pytest.MonkeyPatch, services: AppServices) -> Tes
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    ("agent_status", "expected_status", "expected_code"),
+    [
+        ("completed", 200, None),
+        ("policy_refusal", 422, "prompt_rejected"),
+        ("http_error", 502, "internal_error"),
+    ],
+)
+def test_ui_multipart_reaches_agent_and_preserves_error_semantics(
+    monkeypatch: pytest.MonkeyPatch,
+    agent_status: str,
+    expected_status: int,
+    expected_code: str | None,
+) -> None:
+    calls = []
+
+    class StubAgentClient:
+        async def invoke(self, query: str) -> FoundryAgentInvocationResult:
+            calls.append(query)
+            if agent_status == "completed":
+                return _make_agent_success()
+            return FoundryAgentInvocationResult(
+                status=agent_status,
+                error_code="refusal" if agent_status == "policy_refusal" else "http_422",
+            )
+
+    services = _build_services_with_agent(StubAgentClient(), monkeypatch=monkeypatch)
+    client = _agent_client(monkeypatch, services)
+    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
+    prompt = "A moonlit guardian of the forest"
+    response = client.post(
+        "/ui/cards/generate",
+        files=[
+            ("prompt", (None, prompt)),
+            ("csrf_token", (None, csrf_token)),
+            ("idempotency_key", (None, "idem-ui-agent-contract")),
+            ("saved_photo_id", (None, "")),
+        ],
+        headers={"HX-Request": "true"},
+    )
+
+    assert calls == [prompt]
+    assert response.status_code == expected_status
+    assert response.headers.get("X-Generation-Error") == expected_code
+    if agent_status == "completed":
+        assert "Frost Warden" in response.text
+        assert len(services.card_repository._records) == 1
+    else:
+        assert 'role="alert"' in response.text
+        assert prompt not in response.text
+        assert not services.card_repository._records
+        if agent_status == "policy_refusal":
+            assert "rejected by the generation agent policy" in response.text
+        else:
+            assert "non-retryable error" in response.text
+
+
 def test_agent_generation_disabled_by_default() -> None:
     settings = load_app_settings()
     assert settings.agent_generation_enabled is False

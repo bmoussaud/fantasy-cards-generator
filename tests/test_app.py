@@ -1,4 +1,5 @@
 import re
+import subprocess
 
 import pytest
 from fastapi.testclient import TestClient
@@ -75,6 +76,87 @@ def test_ping_partial_still_serves_htmx_check() -> None:
 
     assert response.status_code == 200
     assert "HTMX is wired." in response.text
+
+
+def test_generator_browser_validation_and_error_swapping() -> None:
+    script = client.get("/static/js/app.js").text
+    harness = r"""
+const assert = require("node:assert/strict");
+const vm = require("node:vm");
+const fs = require("node:fs");
+const handlers = {};
+const promptHandlers = {};
+const prompt = {
+  value: "", minLength: 12, maxLength: 400,
+  setCustomValidity(message) { this.validationMessage = message; },
+  addEventListener(name, handler) { promptHandlers[name] = handler; }
+};
+const form = {
+  dataset: {},
+  querySelector(selector) { return selector === '[name="prompt"]' ? prompt : null; }
+};
+const document = {
+  querySelector(selector) {
+    return selector === "[data-card-generator-form]" ? form : null;
+  },
+  addEventListener() {},
+  body: { addEventListener(name, handler) { handlers[name] = handler; } }
+};
+vm.runInNewContext(fs.readFileSync(0, "utf8"), { document });
+assert.equal(typeof promptHandlers.input, "function");
+for (const value of ["A wizard", "a          b", " ".repeat(20), "x".repeat(401)]) {
+  prompt.value = value;
+  promptHandlers.input();
+  assert.ok(prompt.validationMessage);
+}
+for (const value of ["A moonlit guardian", "x".repeat(12), "x".repeat(400)]) {
+  prompt.value = value;
+  promptHandlers.input();
+  assert.equal(prompt.validationMessage, "");
+}
+assert.equal(typeof handlers["htmx:beforeSwap"], "function");
+for (const status of [401, 403, 422, 429, 502, 503, 504]) {
+  const detail = {
+    target: { id: "generation-result" },
+    shouldSwap: false, isError: true,
+    xhr: {
+      status,
+      getResponseHeader(name) {
+        return name === "X-Generation-Error" ? "validation_error" : "text/html; charset=utf-8";
+      }
+    }
+  };
+  handlers["htmx:beforeSwap"]({ detail });
+  assert.equal(detail.shouldSwap, true);
+  assert.equal(detail.isError, true);
+  assert.equal(detail.xhr.status, status);
+}
+for (const [target, status, marker, contentType, initialSwap] of [
+  ["other", 422, "validation_error", "text/html", false],
+  ["generation-result", 500, null, "text/html", false],
+  ["generation-result", 422, "validation_error", "application/json", false],
+  ["generation-result", 200, null, "text/html", true],
+  ["generation-result", 302, null, "text/html", false]
+]) {
+  const detail = {
+    target: { id: target }, shouldSwap: initialSwap, isError: status >= 400,
+    xhr: {
+      status,
+      getResponseHeader(name) { return name === "X-Generation-Error" ? marker : contentType; }
+    }
+  };
+  handlers["htmx:beforeSwap"]({ detail });
+  assert.equal(detail.shouldSwap, initialSwap);
+}
+"""
+    result = subprocess.run(
+        ["node", "-e", harness],
+        input=script,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_static_stylesheet_is_mounted_and_served() -> None:

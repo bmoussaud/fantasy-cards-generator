@@ -179,6 +179,27 @@
     return article;
   }
 
+  function bindPromptValidation() {
+    var form = document.querySelector("[data-card-generator-form]");
+    var prompt = form && form.querySelector('[name="prompt"]');
+    if (!prompt) {
+      return;
+    }
+    function validatePrompt() {
+      var trimmed = prompt.value.trim();
+      var normalized = trimmed.replace(/\s+/g, " ");
+      var invalid =
+        Array.from(normalized).length < prompt.minLength ||
+        Array.from(trimmed).length > prompt.maxLength;
+      prompt.setCustomValidity(
+        invalid ? "Use 12 to 400 characters; repeated whitespace counts as one space." : ""
+      );
+    }
+    prompt.addEventListener("input", validatePrompt);
+    prompt.addEventListener("htmx:validation:validate", validatePrompt);
+    validatePrompt();
+  }
+
   function bindPhotoReferenceForm() {
     var form = document.querySelector("[data-card-generator-form]");
     if (!form || form.dataset.photoReferenceBound === "true") {
@@ -706,10 +727,29 @@
     modal.dataset.confirmModalBound = "true";
   }
 
+  bindPromptValidation();
   bindPhotoReferenceForm();
   bindPhotoLibraryManager();
   bindCardSelectionManager();
   bindConfirmModalForms();
+
+  // HTMX does not swap error responses by default. Only render our HTML error
+  // partials in the generation region, retaining the HTTP/error semantics.
+  document.body.addEventListener("htmx:beforeSwap", function (event) {
+    var detail = event.detail;
+    if (
+      detail &&
+      detail.target &&
+      detail.target.id === "generation-result" &&
+      detail.xhr &&
+      detail.xhr.status >= 400 &&
+      detail.xhr.status < 600 &&
+      detail.xhr.getResponseHeader("X-Generation-Error") &&
+      (detail.xhr.getResponseHeader("Content-Type") || "").startsWith("text/html")
+    ) {
+      detail.shouldSwap = true;
+    }
+  });
 
   /**
    * Runtime artwork failures (broken URL, network error) are not something

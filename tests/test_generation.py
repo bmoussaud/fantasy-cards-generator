@@ -94,6 +94,50 @@ def test_app_shell_renders_generation_form(authenticated_client: TestClient) -> 
     assert "up to 5 MB" in response.text
     assert "Pick from your library" in response.text
     assert "/my/photos/library" in response.text
+    assert 'minlength="12"' in response.text
+    assert "12 to 400 characters" in response.text
+
+
+@pytest.mark.parametrize(
+    ("prompt", "expected_status", "error_code"),
+    [
+        ("A moonlit guardian of the forest", 200, None),
+        ("A wizard", 422, "validation_error"),
+        ("a          b", 422, "invalid_prompt"),
+        ("create a graphic gore fantasy creature", 422, "prompt_rejected"),
+    ],
+)
+def test_ui_browser_multipart_generation_contract(
+    authenticated_client: TestClient,
+    prompt: str,
+    expected_status: int,
+    error_code: str | None,
+) -> None:
+    csrf_token = extract_hidden_value(authenticated_client.get("/app").text, "csrf_token")
+    # HTMX 2.0.6 omits the unnamed File for an unselected upload input.
+    response = authenticated_client.post(
+        "/ui/cards/generate",
+        files=[
+            ("prompt", (None, prompt)),
+            ("idempotency_key", (None, "idem-browser-form")),
+            ("csrf_token", (None, csrf_token)),
+            ("saved_photo_id", (None, "")),
+        ],
+        headers={"HX-Request": "true"},
+    )
+
+    assert response.status_code == expected_status
+    assert response.headers.get("X-Generation-Error") == error_code
+    if error_code:
+        assert 'role="alert"' in response.text
+        assert f"Error code: {error_code}" in response.text
+        assert prompt not in response.text
+        if error_code == "validation_error":
+            assert "12 to 400 characters" in response.text
+        assert not authenticated_client.app.state.services.card_repository._records
+    else:
+        assert 'class="card-face"' in response.text
+        assert len(authenticated_client.app.state.services.card_repository._records) == 1
 
 
 def test_api_requires_authentication() -> None:

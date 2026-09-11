@@ -61,6 +61,11 @@ Multipart `POST /api/v1/cards/generate` and `POST /ui/cards/generate` also accep
 `photo` and `saved_photo_id`/`savedPhotoId` are mutually exclusive. Sending both returns
 `422 photo_reference_conflict`.
 
+Prompts must contain 12 to 400 characters after trimming, and at least 12
+characters after collapsing repeated whitespace. The generator form enforces
+these bounds before submission; server-side validation remains authoritative.
+Blank optional string fields are treated as absent.
+
 ### `POST /api/v1/cards/{cardId}/artwork/retry`
 
 ```json
@@ -154,7 +159,7 @@ routes stream owner-scoped bytes and return `404` for non-owned or missing photo
 
 ## Error contract
 
-Errors return `application/problem+json`, for example:
+API errors return `application/problem+json`, for example:
 
 ```json
 {
@@ -167,6 +172,19 @@ Errors return `application/problem+json`, for example:
   "requestId": "request-correlation-id"
 }
 ```
+
+UI errors return an HTML error panel with the original HTTP status and an
+`X-Generation-Error` header containing an allowlisted error code (unknown codes
+become `internal_error`). HTMX displays these marked HTML responses only in the
+generation result region; it does not convert failures to successful responses.
+
+For a generation `422`, distinguish `validation_error` (request/schema validation)
+from `invalid_prompt` (normalized prompt length), photo-input errors, and
+`prompt_rejected` / `generated_text_rejected` / `generated_art_rejected` (policy).
+An upstream agent HTTP 422 is a non-retryable dependency failure surfaced as
+HTTP 502, not a request-validation 422. Agent policy refusals can return 422.
+For diagnostics, share only the HTTP status and the error panel's static
+title/detail/code, not form contents, cookies, tokens, or a HAR export.
 
 ## Moderation policy
 

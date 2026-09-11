@@ -21,13 +21,14 @@
                 <div class="field">
                     <label class="field__label" for="prompt">Card prompt</label>
                     <p class="field__hint" id="prompt-hint">
-                        Describe the hero, creature, artifact, or spell you want &mdash; up to 400 characters.
+                        Describe the hero, creature, artifact, or spell you want &mdash; 12 to 400 characters.
                     </p>
                     <textarea
                         class="field__control"
                         id="prompt"
                         name="prompt"
                         rows="6"
+                        minlength="12"
                         maxlength="400"
                         required
                         aria-describedby="prompt-hint"

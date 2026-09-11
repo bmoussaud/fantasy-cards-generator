@@ -636,6 +636,22 @@ def test_sensitive_values_are_removed_from_spans_events_logs_and_metrics(
     assert span._events[1].attributes == {"exception.type": "Exception"}
 
 
+@pytest.mark.parametrize(
+    "error_code",
+    [
+        "invalid_prompt",
+        "invalid_photo_upload",
+        "invalid_photo_label",
+        "photo_reference_conflict",
+        "saved_photo_requires_upload",
+        "saved_photo_rejected",
+    ],
+)
+def test_generation_input_error_codes_remain_distinguishable(error_code: str) -> None:
+    assert telemetry.normalize_error_code(error_code) == error_code
+    assert telemetry.normalize_error_code(SENSITIVE_SENTINEL) == "internal_error"
+
+
 def test_attribute_and_metric_dimensions_are_allowlisted_and_bounded(
     enabled_telemetry: dict[str, CapturingInstrument],
 ) -> None:

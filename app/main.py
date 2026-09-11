@@ -219,12 +219,14 @@ def create_app(
                     request,
                     error_title=exc.title,
                     error_detail=exc.detail,
+                    error_code=request.state.error_code,
                     next_idempotency_key=uuid4().hex,
                 ),
                 status_code=exc.status_code,
             )
             for key, value in exc.headers.items():
                 response.headers[key] = value
+            response.headers["X-Generation-Error"] = request.state.error_code
             return response
         return JSONResponse(
             exc.as_dict(request),
@@ -234,10 +236,15 @@ def create_app(
 
     @app.exception_handler(RequestValidationError)
     async def handle_validation_error(request: Request, exc: RequestValidationError):
+        detail = "The request body or form payload was invalid."
+        if request.url.path == "/ui/cards/generate" and any(
+            error.get("loc") in (("prompt",), ("body", "prompt")) for error in exc.errors()
+        ):
+            detail = "Use a card prompt of 12 to 400 characters."
         problem = ProblemDetails(
             status_code=422,
             title="Unprocessable Entity",
-            detail="The request body or form payload was invalid.",
+            detail=detail,
             type="/problems/validation-error",
             error_code="validation_error",
             extra={"errors": exc.errors()},
