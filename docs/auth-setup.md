@@ -62,7 +62,7 @@ azd env set APP_SESSION_SECRET_KEY "$(openssl rand -base64 48)"
 # ENTRA_CLIENT_SECRET is normally set automatically by the postprovision hook
 # (hooks/gen_client_secret.sh) after the first `azd provision` run when
 # deployEntraAppRegistration=true. Re-run `azd provision` afterwards so the
-# secret is written into Key Vault and wired into the Container App.
+# secret is written into Key Vault for the Container App's runtime lookup.
 ```
 
 Both values flow into Bicep via `infra/main.parameters.json`
@@ -348,11 +348,114 @@ Changing Key Vault alone does **not** mint a new Entra credential. If the new
 Key Vault value is not already registered on the Entra app registration,
 authentication will fail.
 
-The app keeps the previously used OAuth client secret in memory for a short,
-bounded overlap window (currently 15 minutes). New login attempts use the
-latest Key Vault version as soon as it is observed, while callbacks may fall
-back to the previous credential during that overlap to support a controlled
-rotation.
+The Azure provider retains only the current secret and its direct predecessor.
+The Entra overlap lasts 15 minutes from the current Key Vault version's creation
+time, not from a replica's first login or a metadata edit. New logins use the
+current binding. On a normalized `invalid_client` response, the callback retries
+the token exchange once with an eligible predecessor, rechecking overlap,
+validity and observed revocation immediately before retry. It reuses the code,
+redirect URI and PKCE verifier without mutating shared client credentials.
+Authlib's inherited callback runs once: state is consumed once and the ID token
+still undergoes nonce, signature and issuer validation. Network errors, other
+OAuth errors and token-validation errors do not trigger fallback. Unknown
+predecessor evidence disables fallback; do not retire credentials prematurely.
+
+### Runtime rotation limits and acceptance gates (#53 / #89)
+
+Each Azure-backed replica preloads its required secrets, then owns independent
+session and (when configured) Entra refresh workers, including on idle replicas.
+Workers target a **20-second start-to-start polling interval**; time spent
+refreshing is deducted from the next sleep, and cycles never overlap for the
+same secret. A **25-second whole-refresh timeout** includes paginated metadata,
+current/predecessor value reads, per-operation retries and backoff. The Entra
+worker also updates the OAuth binding without requiring an authentication request.
+Shutdown cancels and awaits workers and shared in-flight refreshes before closing
+the Azure SDK client and credential. The environment backend has no workers.
+
+The 20/25-second budgets leave headroom toward the 60-second propagation target
+under healthy scheduling and vault responses; they are **not a deterministic
+real-time guarantee or live acceptance evidence**. Event-loop stalls, SDK
+cancellation latency, throttling, outages, version-list/read races and platform
+scheduling can exceed it. A refresh interrupted after its current read can also
+defer discovery to the next cycle. The per-replica target still requires #89.
+
+Supported non-secret environment settings retain their existing defaults:
+
+| Setting | Default |
+|---|---|
+| `SECRET_PROVIDER_BACKEND` | `auto` (`azure` when `KEY_VAULT_URI` is set, otherwise `env`) |
+| `KEY_VAULT_URI` | Unset; required for the `azure` backend |
+| `SECRET_PROVIDER_CACHE_TTL_SECONDS` | 60 |
+| `SECRET_PROVIDER_REQUEST_TIMEOUT_SECONDS` | 2 per SDK operation |
+| `SECRET_PROVIDER_MAX_RETRIES` | 2 retries after the first attempt |
+| `SECRET_PROVIDER_RETRY_BACKOFF_SECONDS` | 0.25, multiplied by the retry number |
+| `SECRET_PROVIDER_MAX_STALE_SECONDS` | 300 additional seconds |
+| `SESSION_SIGNING_KEY_OVERLAP_SECONDS` | 3600 |
+
+The 20-second polling interval, 25-second whole-refresh budget and 5-second
+failure cooldown are internal defaults, not additional environment settings.
+Changing per-operation retry settings cannot extend the whole-refresh budget.
+
+Session cookies retain the `fantasy_cards_session` name, `HttpOnly`, `Secure`,
+`SameSite=Lax`, `/` path and 14-day maximum age. New cookies use the current
+key. The immediate predecessor is allowed only during
+`SESSION_SIGNING_KEY_OVERLAP_SECONDS` (default 3600 seconds) measured from the
+current version's creation time. Editing metadata does not restart overlap or
+reorder history. A missing creation time or version identifier anywhere in the
+enumerated history disables overlap, even on a disabled or expired version:
+that version's position cannot be proven. Equal timestamps involving the current
+version or predecessor also disable overlap. In these cases the validated
+current version remains usable, but no historical key is substituted. The predecessor
+must be enabled, at or after `not_before`, and strictly before `expires_on`.
+Older versions are not substituted when that direct predecessor is invalid.
+Expired current values are rejected even within the cache TTL or stale grace.
+A current version observed as disabled is evicted instead of served stale.
+Remote changes can only be acted on once fetched; this is not instant revocation.
+
+Session reads, explicit version reads, metadata helpers and background refresh
+share one flight per logical secret and one immutable snapshot. Requests within
+TTL do not independently enumerate or fetch predecessor values. At most two
+values (current/direct predecessor) are cached per secret, with at most 32
+logical-secret snapshots, including failed entries. A failed refresh imposes a
+5-second retry cooldown; reads still check deadlines during cooldown. Missing
+predecessor evidence produces a sanitized current-only degradation rather than
+searching further back in history. An observed invalid latest version fails
+closed rather than promoting an older version to signing current.
+
+Partial refreshes apply observed invalidation and disable uncertain overlap
+immediately, even if a later page or value read fails. Eligible known-good values
+can survive transient failures,
+but each value retains its own successful-fetch timestamp. Successful metadata
+reads do not reset value age; successful current reads do not reset predecessor
+age. Metadata and value validity/freshness are intersected on every read, and
+overlap/expiry/stale cutoffs are exclusive. Remote revocation is bounded by
+observation, not instantaneous. A metadata outage at cold startup fails closed;
+with a cached snapshot it preserves only still-eligible known-good material.
+
+Azure startup requires both current authentication secrets when Entra client
+metadata is configured. Intentional no-auth bootstrap deployments still start
+without an Entra secret; authenticated endpoints remain unavailable. Local
+development keeps the existing session-secret startup requirement and login-time
+Entra configuration checks. During a transient read failure, a valid known-good
+current value may be served for at most the cache TTL plus
+`SECRET_PROVIDER_MAX_STALE_SECONDS` (default 300 seconds of additional grace)
+from its successful fetch. An expired or observed-disabled key is not eligible.
+Cold startup without the required values and exhaustion of that grace fail
+closed. Provider diagnostics use normalized categories and hashed versions;
+unit-test samples do not establish absence of disclosure across all live logs,
+traces, outputs or repository history.
+
+The three runtime code gaps now have local regression coverage, including
+independently cached idle replicas and real Authlib callbacks against mocked
+HTTP endpoints with signed synthetic ID tokens. Before closing #53, obtain
+coordinator review and complete #89: measure every active replica
+without restart/deployment, exercise session overlap and rejection, validate
+Entra credential registration/overlap/retirement, perform an explicitly approved
+bounded-stale/fail-closed drill, and collect sanitized evidence. The September 4
+propagation failure is historical; the later startup/private-endpoint fixes
+(#107, #114) and network-posture fix (#106) do not constitute a successful
+post-fix rotation drill. Do not broaden vault networking or use provisioning
+hooks that create credentials merely to collect evidence.
 
 No External ID tenant, CIAM user flow, or tenant allow-list is required for the
 current MVP. Any partner organization's Entra work account can sign in as long

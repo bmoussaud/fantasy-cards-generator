@@ -16,6 +16,7 @@ from starlette.requests import HTTPConnection
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.secrets import (
+    AzureSecretProvider,
     Clock,
     SecretProvider,
     SecretProviderError,
@@ -63,6 +64,19 @@ async def load_session_signing_keys(
     overlap_window: timedelta,
     clock: Clock = utc_now,
 ) -> SessionSigningKeys:
+    if isinstance(provider, AzureSecretProvider):
+        snapshot = await provider.get_snapshot(SESSION_SECRET_NAME)
+        assert snapshot.current is not None
+        previous = None
+        if len(snapshot.versions) == 2 and _allows_previous_version(
+            current=snapshot.versions[0],
+            previous=snapshot.versions[1],
+            overlap_window=overlap_window,
+            clock=clock,
+        ):
+            previous = snapshot.previous
+        return SessionSigningKeys(current=snapshot.current, previous=previous)
+
     current_secret = await provider.get_secret(SESSION_SECRET_NAME)
     if overlap_window <= timedelta(0) or current_secret.version is None:
         return SessionSigningKeys(current=current_secret)
@@ -79,7 +93,12 @@ async def load_session_signing_keys(
     current_metadata: SecretVersion | None = None
     current_index: int | None = None
     for index, version in enumerate(versions):
-        if version.enabled and version.version == current_secret.version:
+        if version.version == current_secret.version:
+            if not version.is_valid_at(clock()):
+                raise SecretVersionUnavailableError(
+                    "The current session signing key is no longer valid.",
+                    error_category="not_found",
+                )
             current_metadata = version
             current_index = index
             break
@@ -118,7 +137,7 @@ def _allows_previous_version(
     overlap_window: timedelta,
     clock: Clock,
 ) -> bool:
-    if previous is None or previous.enabled is False or overlap_window <= timedelta(0):
+    if previous is None or not previous.is_valid_at(clock()) or overlap_window <= timedelta(0):
         return False
 
     rotation_started_at = current.activated_on
@@ -127,7 +146,7 @@ def _allows_previous_version(
 
     # Once the overlap window closes — or the direct predecessor version is disabled —
     # cookies signed with that predecessor stop authenticating and the user must sign in again.
-    return clock() <= rotation_started_at + overlap_window
+    return clock() < rotation_started_at + overlap_window
 
 
 class RotatingSessionMiddleware:

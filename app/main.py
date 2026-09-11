@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import secrets
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -49,7 +50,13 @@ from app.health import NotApplicableHealthProbe, build_healthz_payload, run_depe
 from app.library import CardLibraryService
 from app.photos import SavedPhotoListResponseModel, SavedPhotoResponseModel, SavedPhotoService
 from app.problems import ProblemDetails
-from app.secrets import SecretProvider, SecretProviderError, build_secret_provider_from_environment
+from app.secrets import (
+    AzureSecretProvider,
+    SecretProvider,
+    SecretProviderError,
+    build_secret_provider_from_environment,
+    run_secret_refresh_worker,
+)
 from app.session_middleware import (
     RotatingSessionMiddleware,
     load_session_cookie_settings,
@@ -115,17 +122,46 @@ def create_app(
     async def lifespan(app: FastAPI):
         app.state.secret_provider = runtime_secret_provider
         try:
-            await load_session_signing_keys(
+            session_keys = await load_session_signing_keys(
                 runtime_secret_provider,
                 overlap_window=session_cookie_settings.signing_key_overlap,
             )
-            yield
+            entra_configured = not auth_settings.missing_required(include_client_secret=False)
+            if session_keys.current.source == "azure" and entra_configured:
+                await app.state.entra_oauth_client_manager.get_client()
+            async with asyncio.TaskGroup() as workers:
+                tasks = []
+                if isinstance(runtime_secret_provider, AzureSecretProvider):
+                    tasks.append(
+                        workers.create_task(
+                            run_secret_refresh_worker(
+                                runtime_secret_provider, "APP_SESSION_SECRET_KEY"
+                            )
+                        )
+                    )
+                    if entra_configured:
+                        tasks.append(
+                            workers.create_task(
+                                run_secret_refresh_worker(
+                                    runtime_secret_provider,
+                                    "ENTRA_CLIENT_SECRET",
+                                    on_refresh=app.state.entra_oauth_client_manager.get_client,
+                                )
+                            )
+                        )
+                try:
+                    yield
+                finally:
+                    for task in tasks:
+                        task.cancel()
         finally:
-            await runtime_secret_provider.aclose()
-            if app_services.agent_client is not None and hasattr(
-                app_services.agent_client, "aclose"
-            ):
-                await app_services.agent_client.aclose()
+            try:
+                await runtime_secret_provider.aclose()
+            finally:
+                if app_services.agent_client is not None and hasattr(
+                    app_services.agent_client, "aclose"
+                ):
+                    await app_services.agent_client.aclose()
 
     app = FastAPI(title="Fantasy Cards Generator", lifespan=lifespan)
     app.state.services = app_services

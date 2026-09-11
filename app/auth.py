@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Any, TypedDict
@@ -15,6 +15,7 @@ from fastapi import HTTPException, Request, status
 
 from app.generation import AuthenticatedOwner
 from app.secrets import (
+    AzureSecretProvider,
     SecretNotFoundError,
     SecretProvider,
     SecretProviderError,
@@ -165,6 +166,7 @@ def create_oauth_client(settings: AuthSettings) -> StarletteOAuth2App:
     oauth = OAuth()
     oauth.register(
         name="entra_id",
+        client_cls=RotatingStarletteOAuth2App,
         client_id=settings.client_id,
         client_secret=settings.client_secret,
         server_metadata_url=settings.metadata_url,
@@ -178,6 +180,27 @@ def create_oauth_client(settings: AuthSettings) -> StarletteOAuth2App:
     if client is None:
         raise RuntimeError("Failed to create the Entra ID OAuth client.")
     return client
+
+
+class RotatingStarletteOAuth2App(StarletteOAuth2App):
+    async def fetch_access_token(self, redirect_uri=None, **kwargs):
+        previous_client: Callable[[], Awaitable[StarletteOAuth2App | None]] | None = kwargs.pop(
+            "_previous_client", None
+        )
+        try:
+            return await super().fetch_access_token(redirect_uri=redirect_uri, **kwargs)
+        except OAuthError as exc:
+            if not _should_retry_with_previous_secret(exc) or previous_client is None:
+                raise
+            previous = await previous_client()
+            if previous is None:
+                raise
+            await previous.load_server_metadata()
+            if await previous_client() is not previous:
+                raise
+            # Retry only the exchange. The inherited callback consumes state and validates
+            # the ID token exactly once, with its original nonce and PKCE parameters.
+            return await previous.fetch_access_token(redirect_uri=redirect_uri, **kwargs)
 
 
 class EntraOAuthClientManager:
@@ -206,58 +229,109 @@ class EntraOAuthClientManager:
         return binding.client
 
     async def authorize_access_token(self, request: Request) -> dict[str, Any]:
-        last_error: OAuthError | None = None
-        for binding in await self._candidate_bindings():
-            server_metadata = await binding.client.load_server_metadata()
-            claims_options = build_claims_options(server_metadata.get("issuer"))
-            try:
-                return await binding.client.authorize_access_token(
-                    request,
-                    claims_options=claims_options,
-                )
-            except OAuthError as exc:
-                if not _should_retry_with_previous_secret(exc) or last_error is not None:
-                    raise
-                last_error = exc
-
-        if last_error is not None:
-            raise last_error
-        raise RuntimeError("No Entra OAuth client is available.")
-
-    async def _candidate_bindings(self) -> tuple[_OAuthClientBinding, ...]:
         current_binding = await self._refresh_current_binding()
+        server_metadata = await current_binding.client.load_server_metadata()
+        claims_options = build_claims_options(server_metadata.get("issuer"))
+
+        async def previous_client() -> StarletteOAuth2App | None:
+            return await self._eligible_previous_client(current_binding)
+
+        return await current_binding.client.authorize_access_token(
+            request, claims_options=claims_options, _previous_client=previous_client
+        )
+
+    async def _eligible_previous_client(
+        self, current: _OAuthClientBinding
+    ) -> StarletteOAuth2App | None:
         async with self._lock:
             previous = self._previous_binding
-            if previous is not None and previous.expires_at <= self._clock():
+            if (
+                previous is None
+                or previous.expires_at <= self._clock()
+                or not previous.binding.secret.is_valid_at(self._clock())
+            ):
                 self._previous_binding = None
-                previous = None
-
-            if previous is None:
-                return (current_binding,)
-            return (current_binding, previous.binding)
+                return None
+            if self._current_binding is None or (
+                _secret_cache_key(self._current_binding.secret) != _secret_cache_key(current.secret)
+            ):
+                return None
+            if isinstance(self._secret_provider, AzureSecretProvider):
+                try:
+                    snapshot = self._secret_provider.snapshot_for_read("ENTRA_CLIENT_SECRET")
+                except SecretProviderError:
+                    return None
+                if (
+                    snapshot.current is None
+                    or snapshot.previous is None
+                    or _secret_cache_key(snapshot.current) != _secret_cache_key(current.secret)
+                    or _secret_cache_key(snapshot.previous)
+                    != _secret_cache_key(previous.binding.secret)
+                ):
+                    return None
+            return previous.binding.client
 
     async def _refresh_current_binding(self) -> _OAuthClientBinding:
-        secret = await self._secret_provider.get_secret("ENTRA_CLIENT_SECRET")
+        snapshot = None
+        if isinstance(self._secret_provider, AzureSecretProvider):
+            snapshot = await self._secret_provider.get_snapshot("ENTRA_CLIENT_SECRET")
+            assert snapshot.current is not None
+            secret = snapshot.current
+        else:
+            secret = await self._secret_provider.get_secret("ENTRA_CLIENT_SECRET")
         secret_key = _secret_cache_key(secret)
 
         async with self._lock:
             current = self._current_binding
-            if current is not None and _secret_cache_key(current.secret) == secret_key:
-                return current
-
             new_binding = _OAuthClientBinding(
                 secret=secret,
-                client=self._client_factory(self._settings.with_client_secret(secret.value)),
+                client=(
+                    current.client
+                    if current is not None and _secret_cache_key(current.secret) == secret_key
+                    else self._client_factory(self._settings.with_client_secret(secret.value))
+                ),
             )
-            if current is not None:
-                # Updating Key Vault to a new value does not create or retire the corresponding
-                # Entra application credential. Keep the previous OAuth client around briefly so
-                # active replicas can overlap old/new credentials during rotation, and only remove
-                # the old credential in Entra after the rollout window has elapsed everywhere.
+            if snapshot is not None:
+                prior = snapshot.previous
+                activated = snapshot.versions[0].activated_on if snapshot.versions else None
+                deadline = activated + self._previous_secret_overlap if activated else None
+                if prior is None or deadline is None or self._clock() >= deadline:
+                    self._previous_binding = None
+                else:
+                    retained = self._previous_binding
+                    candidates = (current, retained.binding if retained is not None else None)
+                    existing = next(
+                        (
+                            b
+                            for b in candidates
+                            if b is not None
+                            and _secret_cache_key(b.secret) == _secret_cache_key(prior)
+                        ),
+                        None,
+                    )
+                    self._previous_binding = _RetainedOAuthClientBinding(
+                        binding=_OAuthClientBinding(
+                            secret=prior,
+                            client=(
+                                existing.client
+                                if existing
+                                else self._client_factory(
+                                    self._settings.with_client_secret(prior.value)
+                                )
+                            ),
+                        ),
+                        expires_at=deadline,
+                    )
+            elif current is not None and _secret_cache_key(current.secret) != secret_key:
                 self._previous_binding = _RetainedOAuthClientBinding(
                     binding=current,
                     expires_at=self._clock() + self._previous_secret_overlap,
                 )
+            if self._previous_binding is not None and (
+                self._clock() >= self._previous_binding.expires_at
+                or not self._previous_binding.binding.secret.is_valid_at(self._clock())
+            ):
+                self._previous_binding = None
             self._current_binding = new_binding
             return new_binding
 

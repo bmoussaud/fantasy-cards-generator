@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from base64 import b64encode
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -13,12 +13,15 @@ from fastapi.testclient import TestClient
 from itsdangerous import TimestampSigner
 
 from app.secrets import (
+    AzureSecretProvider,
+    SecretProvider,
     SecretProviderError,
     SecretValue,
     SecretVersion,
     SecretVersionUnavailableError,
 )
 from app.session_middleware import LOGGER, RotatingSessionMiddleware, load_session_signing_keys
+from tests.test_secrets import FakeSecretBundle, FakeSecretClient, FakeSecretProperties
 
 
 class FakeClock:
@@ -141,7 +144,7 @@ def assert_cookie_is_signed_with(cookie_value: str, secret_key: str) -> None:
 
 def build_session_app(
     *,
-    provider: FakeSessionSecretProvider,
+    provider: SecretProvider,
     clock: FakeClock,
     overlap_seconds: float = 3600,
 ) -> FastAPI:
@@ -220,7 +223,10 @@ def test_rotating_session_middleware_accepts_previous_key_within_overlap_window(
     assert response.json() == {"user": "aragorn"}
 
 
-def test_rotating_session_middleware_rejects_previous_key_after_overlap_expires() -> None:
+@pytest.mark.parametrize("elapsed_seconds", [300, 301])
+def test_rotating_session_middleware_rejects_previous_key_after_overlap_expires(
+    elapsed_seconds: int,
+) -> None:
     clock = FakeClock()
     provider = FakeSessionSecretProvider(
         clock=clock,
@@ -240,7 +246,7 @@ def test_rotating_session_middleware_rejects_previous_key_after_overlap_expires(
             make_version(clock, "v1", "old-key", age_seconds=1800),
         ]
     )
-    clock.advance(301)
+    clock.advance(elapsed_seconds)
 
     response = client.get("/session")
 
@@ -272,6 +278,59 @@ def test_rotating_session_middleware_rejects_disabled_and_older_keys() -> None:
         response = client.get("/session")
         assert response.status_code == 200
         assert response.json() == {"user": None}
+
+
+@pytest.mark.parametrize("invalid_date", ["expired", "future"])
+def test_session_rejects_previous_key_outside_key_vault_validity(invalid_date: str) -> None:
+    clock = FakeClock()
+    current = FakeSecretProperties(version="v2", created_on=clock.now())
+    previous = FakeSecretProperties(
+        version="v1",
+        created_on=clock.now() - timedelta(seconds=60),
+        expires_on=clock.now() if invalid_date == "expired" else None,
+        not_before=clock.now() + timedelta(seconds=1) if invalid_date == "future" else None,
+    )
+    kv_client = FakeSecretClient(versions={"app-session-secret-key": [current, previous]})
+    kv_client.set_response("app-session-secret-key", None, FakeSecretBundle("new-key", current))
+    kv_client.set_response("app-session-secret-key", "v1", FakeSecretBundle("old-key", previous))
+    provider = AzureSecretProvider(
+        key_vault_uri="https://vault.example", client=kv_client, clock=clock.now
+    )
+    client = TestClient(
+        build_session_app(provider=provider, clock=clock), base_url="https://testserver"
+    )
+    client.cookies.set(
+        "fantasy_cards_session",
+        make_signed_session_cookie("old-key", {"user": "aragorn"}),
+        domain="testserver",
+        path="/",
+    )
+
+    assert client.get("/session").json() == {"user": None}
+    assert kv_client.get_calls == [("app-session-secret-key", None)]
+
+
+def test_session_rejects_cached_current_key_when_metadata_reports_disabled() -> None:
+    clock = FakeClock()
+    current = FakeSecretProperties(version="v1", created_on=clock.now())
+    kv_client = FakeSecretClient(versions={"app-session-secret-key": [current]})
+    kv_client.set_response("app-session-secret-key", None, FakeSecretBundle("key", current))
+    provider = AzureSecretProvider(
+        key_vault_uri="https://vault.example", client=kv_client, clock=clock.now
+    )
+
+    async def scenario() -> None:
+        await provider.get_secret("APP_SESSION_SECRET_KEY")
+        kv_client._versions["app-session-secret-key"] = [replace(current, enabled=False)]
+        with pytest.raises(SecretProviderError):
+            await provider.refresh_secret("APP_SESSION_SECRET_KEY")
+        with pytest.raises(SecretVersionUnavailableError):
+            await load_session_signing_keys(
+                provider, overlap_window=timedelta(seconds=3600), clock=clock.now
+            )
+        assert provider._cache["APP_SESSION_SECRET_KEY"].current is None
+
+    asyncio.run(scenario())
 
 
 def test_load_session_signing_keys_keeps_current_key_when_version_listing_is_denied(
