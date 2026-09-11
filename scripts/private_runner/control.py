@@ -177,7 +177,7 @@ def main(argv=None):
         "--resource-group",
         GROUP,
         "--name",
-        "private-metadata-runner",
+        "private-metadata-runner-bootstrap",
         "--template-file",
         str(ROOT / "infra/private-runner.bicep"),
         "--mode",

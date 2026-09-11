@@ -220,6 +220,11 @@ def test_provision_previews_before_create_and_does_not_start(control, monkeypatc
     assert calls[1][:3] == ["deployment", "group", "create"]
     assert "--mode" in calls[1] and "Incremental" in calls[1]
     assert "infra/private-runner.bicep" in " ".join(calls[1])
+    deployment_names = [call[call.index("--name") + 1] for call in calls]
+    assert deployment_names == ["private-metadata-runner-bootstrap"] * 2
+    leaf = (ROOT / "infra/private-runner.bicep").read_text()
+    assert "name: 'private-metadata-runner'" in leaf
+    assert f"name: '{deployment_names[0]}'" not in leaf
     assert not any("azd" in arg or "start" == arg for call in calls for arg in call)
 
 
