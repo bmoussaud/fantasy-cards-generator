@@ -51,6 +51,7 @@ def snapshot(helper):
         "properties": {
             "provisioningState": "Succeeded",
             "runningStatus": "Running",
+            "deploymentErrors": "",
             "latestRevisionName": "fcag-dev-app--before",
             "latestReadyRevisionName": "fcag-dev-app--before",
             "latestRevisionFqdn": "fcag-dev-app--before.example",
@@ -204,6 +205,7 @@ def app_records(snapshot):
         "identity": snapshot["identity"],
         "provisioningState": properties["provisioningState"],
         "runningStatus": properties["runningStatus"],
+        "deploymentErrors": properties["deploymentErrors"],
         "latestRevisionName": properties["latestRevisionName"],
         "latestReadyRevisionName": properties["latestReadyRevisionName"],
         "latestRevisionFqdn": properties["latestRevisionFqdn"],
@@ -316,9 +318,10 @@ def revision_list(*revisions, next_link=None):
 def rollout_snapshot(helper, snapshot, *, state):
     result = copy.deepcopy(snapshot)
     properties = result["properties"]
-    properties["latestRevisionName"] = "fcag-dev-app--after"
+    properties["latestRevisionName"] = f"{helper.APP}--{helper.TARGET_REVISION_SUFFIX}"
     properties["template"]["containers"][0]["image"] = helper.TARGET_IMAGE
-    properties["revisionState"]["name"] = "fcag-dev-app--after"
+    properties["template"]["revisionSuffix"] = helper.TARGET_REVISION_SUFFIX
+    properties["revisionState"]["name"] = properties["latestRevisionName"]
     if state == "progressing":
         properties["provisioningState"] = "InProgress"
         properties["runningStatus"] = "Progressing"
@@ -330,7 +333,7 @@ def rollout_snapshot(helper, snapshot, *, state):
             runningState="Processing",
         )
     elif state == "ready":
-        properties["latestReadyRevisionName"] = "fcag-dev-app--after"
+        properties["latestReadyRevisionName"] = properties["latestRevisionName"]
     elif state == "failed":
         properties["provisioningState"] = "Failed"
         properties["runningStatus"] = "Progressing"
@@ -344,21 +347,75 @@ def rollout_snapshot(helper, snapshot, *, state):
     return result
 
 
-def test_patch_payload_changes_only_web_image_and_omits_read_only_fields(helper, snapshot):
+def test_patch_payload_changes_only_web_image_and_revision_suffix(helper, snapshot):
     before = copy.deepcopy(snapshot)
+    snapshot["properties"]["template"]["revisionSuffix"] = "azd-1789130483"
     payload = helper.patch_payload(snapshot)
 
     assert set(payload) == {"location", "properties"}
     assert payload["location"] == before["location"]
     assert set(payload["properties"]) == {"template"}
-    assert set(payload["properties"]["template"]) == {"containers"}
+    assert set(payload["properties"]["template"]) == {"containers", "revisionSuffix"}
+    assert payload["properties"]["template"]["revisionSuffix"] == "pin-bb7c5c4e-c2f7448f"
     assert "configuration" not in json.dumps(payload)
 
     expected = copy.deepcopy(before["properties"]["template"]["containers"])
     expected[0]["image"] = helper.TARGET_IMAGE
     expected[0]["resources"].pop("ephemeralStorage")
     assert payload["properties"]["template"]["containers"] == expected
-    assert snapshot == before
+    assert snapshot["properties"]["template"]["revisionSuffix"] == "azd-1789130483"
+
+
+def test_failed_redeploy_recovery_requires_exact_collision_and_original_hashes(
+    helper, snapshot, registry, monkeypatch
+):
+    snapshot["properties"]["template"]["revisionSuffix"] = "azd-1789130483"
+    snapshot["properties"]["latestRevisionName"] = "fcag-dev-app--azd-1789130483"
+    snapshot["properties"]["latestReadyRevisionName"] = "fcag-dev-app--azd-1789130483"
+    snapshot["properties"]["revisionState"]["name"] = "fcag-dev-app--azd-1789130483"
+    snapshot["properties"]["provisioningState"] = "Failed"
+    snapshot["properties"]["deploymentErrors"] = helper.known_collision_error("azd-1789130483")
+    monkeypatch.setattr(
+        helper,
+        "ORIGINAL_PRESERVATION_HASH",
+        helper.canonical_hash(helper.preserved_contract(snapshot)),
+    )
+    monkeypatch.setattr(
+        helper,
+        "ORIGINAL_CONFIGURATION_HASH",
+        helper.canonical_hash(snapshot["properties"]["configuration"]),
+    )
+    monkeypatch.setattr(
+        helper,
+        "ORIGINAL_REGISTRY_HASH",
+        helper.canonical_hash(registry),
+    )
+
+    helper.validate_deployable_state(snapshot, registry)
+
+    unknown = copy.deepcopy(snapshot)
+    unknown["properties"]["deploymentErrors"] = "unknown failed deployment"
+    with pytest.raises(helper.PreflightError, match="app_failed_state_not_approved"):
+        helper.validate_deployable_state(unknown, registry)
+
+    drifted = copy.deepcopy(snapshot)
+    drifted["properties"]["template"]["scale"]["maxReplicas"] = 3
+    with pytest.raises(helper.PreflightError, match="recovery_preservation_drift"):
+        helper.validate_deployable_state(drifted, registry)
+
+
+def test_normal_healthy_state_remains_deployable(helper, snapshot, registry):
+    helper.validate_deployable_state(snapshot, registry)
+
+
+def test_target_revision_suffix_must_be_absent(helper, snapshot, monkeypatch):
+    existing = revision_response(helper, snapshot)
+    existing["name"] = f"{helper.APP}--{helper.TARGET_REVISION_SUFFIX}"
+    existing["id"] = f"{helper.APP_ID}/revisions/{existing['name']}"
+    monkeypatch.setattr(helper, "list_revisions", lambda _token: [existing])
+
+    with pytest.raises(helper.PreflightError, match="target_revision_suffix_exists"):
+        helper.require_target_revision_absent("opaque-test-token")
 
 
 def test_direct_patch_uses_exact_arm_request_without_reading_response(
@@ -421,7 +478,7 @@ def test_direct_revision_list_follows_only_expected_arm_pagination(helper, snaps
     monkeypatch.setattr(helper, "arm_request", fake_request)
     assert [item["name"] for item in helper.list_revisions("opaque-test-token")] == [
         "fcag-dev-app--before",
-        "fcag-dev-app--after",
+        f"{helper.APP}--{helper.TARGET_REVISION_SUFFIX}",
     ]
     assert urls == [helper.REVISIONS_URL, next_link]
 
@@ -630,7 +687,9 @@ def test_safe_snapshot_uses_direct_active_revision_when_resource_graph_is_stale(
     monkeypatch.setattr(helper, "read_revision", lambda _token, _name: copy.deepcopy(direct))
 
     result = helper.safe_snapshot("opaque-test-token")
-    assert result["properties"]["latestRevisionName"] == "fcag-dev-app--after"
+    assert result["properties"]["latestRevisionName"] == (
+        f"{helper.APP}--{helper.TARGET_REVISION_SUFFIX}"
+    )
     assert result["properties"]["template"] == direct["properties"]["template"]
     assert result["properties"]["configuration"] == snapshot["properties"]["configuration"]
 
@@ -652,16 +711,20 @@ def test_registry_and_pull_identity_are_fixed_case_insensitive_arm_ids(helper, s
         helper.validate_registry_contract(wrong, registry)
 
 
-def test_preservation_contract_ignores_only_revision_state_image_and_read_only_storage(
-    helper, snapshot
-):
+def test_rollout_preservation_allows_only_image_suffix_and_read_only_storage(helper, snapshot):
     after = rollout_snapshot(helper, snapshot, state="ready")
     after["properties"]["template"]["containers"][0]["resources"]["ephemeralStorage"] = "3Gi"
 
-    assert helper.preserved_contract(after) == helper.preserved_contract(snapshot)
+    assert helper.preserved_contract(
+        after,
+        revision_suffix_override=helper.template_revision_suffix(snapshot),
+    ) == helper.preserved_contract(snapshot)
 
     after["properties"]["template"]["containers"][0]["resources"]["cpu"] = 1
-    assert helper.preserved_contract(after) != helper.preserved_contract(snapshot)
+    assert helper.preserved_contract(
+        after,
+        revision_suffix_override=helper.template_revision_suffix(snapshot),
+    ) != helper.preserved_contract(snapshot)
 
 
 def test_nullable_init_containers_are_treated_as_empty_metadata(helper, snapshot):
@@ -761,6 +824,28 @@ def test_wait_for_rollout_fails_immediately_on_terminal_state(helper, snapshot, 
         helper.wait_for_rollout("opaque-test-token", snapshot)
 
 
+def test_wait_for_rollout_rejects_compatible_revision_with_unapproved_suffix(
+    helper, snapshot, monkeypatch
+):
+    other = rollout_snapshot(helper, snapshot, state="ready")
+    other["properties"]["latestRevisionName"] = f"{helper.APP}--another-deployment"
+    other["properties"]["template"]["revisionSuffix"] = "another-deployment"
+    other_revision = revision_response(helper, other, created_time="2026-09-14T08:01:00Z")
+    before_revision = revision_response(helper, snapshot)
+    monkeypatch.setattr(helper, "list_revisions", lambda _token: [before_revision, other_revision])
+    monkeypatch.setattr(
+        helper,
+        "read_revision",
+        lambda _token, name: (
+            before_revision
+            if name == before_revision["name"]
+            else pytest.fail("unapproved revision must not become the candidate")
+        ),
+    )
+    with pytest.raises(helper.PreflightError, match="unexpected_revision_churn"):
+        helper.wait_for_rollout("opaque-test-token", snapshot)
+
+
 def test_wait_for_rollout_fails_immediately_on_preservation_drift(helper, snapshot, monkeypatch):
     drifted = rollout_snapshot(helper, snapshot, state="progressing")
     drifted["properties"]["template"]["containers"][0]["resources"]["cpu"] = 1
@@ -853,7 +938,9 @@ def test_wait_for_rollout_uses_direct_revisions_while_resource_graph_stays_stale
         timeout_seconds=30,
         poll_seconds=5,
     )
-    assert result["properties"]["latestRevisionName"] == "fcag-dev-app--after"
+    assert result["properties"]["latestRevisionName"] == (
+        f"{helper.APP}--{helper.TARGET_REVISION_SUFFIX}"
+    )
     assert result["properties"]["template"] == ready_revision["properties"]["template"]
     assert result["properties"]["configuration"] == snapshot["properties"]["configuration"]
 
@@ -1046,6 +1133,7 @@ def test_success_requires_exact_image_health_and_preservation(
         "rest_patch",
         lambda token, payload: patches.append((token, payload)),
     )
+    monkeypatch.setattr(helper, "require_target_revision_absent", lambda _token: None)
     monkeypatch.setattr(helper, "wait_for_rollout", lambda _token, _before: after)
 
     assert (

@@ -23,6 +23,11 @@ LOGIN_SERVER = f"{REGISTRY}.azurecr.io"
 REPOSITORY = "fantasy-cards-generator/web-nat-dev"
 TARGET_DIGEST = "sha256:bb7c5c4e49b9f3860d0f5aca5ccf2ff66e43921f512726551de7fc8c60ee8a11"
 TARGET_IMAGE = f"{LOGIN_SERVER}/{REPOSITORY}@{TARGET_DIGEST}"
+APPROVED_RUN_ID = "c2f7448f-8a84-4e21-85a1-73946d9494e3"
+TARGET_REVISION_SUFFIX = f"pin-{TARGET_DIGEST.removeprefix('sha256:')[:8]}-{APPROVED_RUN_ID[:8]}"
+ORIGINAL_PRESERVATION_HASH = "3bedfba646bb05999d2b2c8000c74f6e16305b4935da4964afe780bef035898c"
+ORIGINAL_CONFIGURATION_HASH = "166b753f10588bf59a64f867df53a8c210cb9b4973c32547c0c0ab6475f991b2"
+ORIGINAL_REGISTRY_HASH = "dadbaab5fa61c0ba2e26ec91ae3a4b6cac811232bc06ed62e9c127da3e47b257"
 API_VERSION = "2025-01-01"
 RESOURCE_GRAPH_API_VERSION = "2022-10-01"
 ARM_RESOURCE = "https://management.azure.com/"
@@ -190,6 +195,7 @@ resources
     'identity', identity,
     'provisioningState', tostring(properties.provisioningState),
     'runningStatus', tostring(properties.runningStatus),
+    'deploymentErrors', tostring(properties.deploymentErrors),
     'latestRevisionName', tostring(properties.latestRevisionName),
     'latestReadyRevisionName', tostring(properties.latestReadyRevisionName),
     'latestRevisionFqdn', tostring(properties.latestRevisionFqdn),
@@ -286,6 +292,7 @@ class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 
 _OPENER = urllib.request.build_opener(NoRedirectHandler())
+_KEEP_REVISION_SUFFIX = object()
 
 
 def require(condition: bool, code: str) -> None:
@@ -776,6 +783,7 @@ def app_metadata_from_records(records: list[dict[str, object]]) -> dict[str, obj
         "identity",
         "provisioningState",
         "runningStatus",
+        "deploymentErrors",
         "latestRevisionName",
         "latestReadyRevisionName",
         "latestRevisionFqdn",
@@ -861,6 +869,7 @@ def app_metadata_from_records(records: list[dict[str, object]]) -> dict[str, obj
         for key in (
             "provisioningState",
             "runningStatus",
+            "deploymentErrors",
             "latestRevisionName",
             "latestReadyRevisionName",
             "latestRevisionFqdn",
@@ -1401,6 +1410,7 @@ def validate_snapshot(snapshot: dict[str, object], *, require_stable: bool) -> N
         == {
             "provisioningState",
             "runningStatus",
+            "deploymentErrors",
             "latestRevisionName",
             "latestReadyRevisionName",
             "latestRevisionFqdn",
@@ -1411,6 +1421,11 @@ def validate_snapshot(snapshot: dict[str, object], *, require_stable: bool) -> N
             "template",
             "revisionState",
         },
+        "app_metadata_invalid",
+    )
+    require(
+        isinstance(properties["deploymentErrors"], str)
+        and len(properties["deploymentErrors"]) <= 2000,
         "app_metadata_invalid",
     )
     configuration = validate_configuration(properties["configuration"])
@@ -1494,7 +1509,12 @@ def desired_containers(snapshot: dict[str, object]) -> list[object]:
 def patch_payload(snapshot: dict[str, object]) -> dict[str, object]:
     return {
         "location": snapshot["location"],
-        "properties": {"template": {"containers": desired_containers(snapshot)}},
+        "properties": {
+            "template": {
+                "revisionSuffix": TARGET_REVISION_SUFFIX,
+                "containers": desired_containers(snapshot),
+            }
+        },
     }
 
 
@@ -1521,11 +1541,24 @@ def normalized_template(template: dict[str, object]) -> dict[str, object]:
     return result
 
 
-def preserved_contract(snapshot: dict[str, object]) -> dict[str, object]:
+def rollout_template_hash(template: dict[str, object]) -> str:
+    normalized = normalized_template(template)
+    normalized["revisionSuffix"] = "<reviewed-revision-suffix>"
+    return canonical_hash(normalized)
+
+
+def preserved_contract(
+    snapshot: dict[str, object],
+    *,
+    revision_suffix_override: object = _KEEP_REVISION_SUFFIX,
+) -> dict[str, object]:
     properties = snapshot["properties"]
     require(isinstance(properties, dict), "app_metadata_invalid")
     template = properties["template"]
     require(isinstance(template, dict), "revision_template_invalid")
+    normalized = normalized_template(template)
+    if revision_suffix_override is not _KEEP_REVISION_SUFFIX:
+        normalized["revisionSuffix"] = revision_suffix_override
     return {
         "id": snapshot["id"],
         "name": snapshot["name"],
@@ -1539,9 +1572,105 @@ def preserved_contract(snapshot: dict[str, object]) -> dict[str, object]:
             "managedEnvironmentId": properties["managedEnvironmentId"],
             "workloadProfileName": properties["workloadProfileName"],
             "configuration": copy.deepcopy(properties["configuration"]),
-            "template": normalized_template(template),
+            "template": normalized,
         },
     }
+
+
+def template_revision_suffix(snapshot: dict[str, object]) -> object:
+    properties = snapshot["properties"]
+    require(isinstance(properties, dict), "app_metadata_invalid")
+    template = properties["template"]
+    require(isinstance(template, dict), "revision_template_invalid")
+    return template.get("revisionSuffix")
+
+
+def active_revision_suffix(snapshot: dict[str, object]) -> str:
+    properties = snapshot["properties"]
+    require(isinstance(properties, dict), "app_metadata_invalid")
+    revision_name = properties["latestRevisionName"]
+    prefix = f"{APP}--"
+    require(
+        isinstance(revision_name, str) and revision_name.startswith(prefix),
+        "revision_suffix_invalid",
+    )
+    suffix = revision_name.removeprefix(prefix)
+    require(
+        re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?", suffix) is not None,
+        "revision_suffix_invalid",
+    )
+    template_suffix = template_revision_suffix(snapshot)
+    require(
+        template_suffix is None or template_suffix == suffix,
+        "revision_suffix_invalid",
+    )
+    return suffix
+
+
+def known_collision_error(revision_suffix: object) -> str:
+    require(
+        isinstance(revision_suffix, str)
+        and re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?", revision_suffix) is not None,
+        "revision_suffix_invalid",
+    )
+    return (
+        "The following field(s) are either invalid or missing. Field "
+        f"'template.revisionsuffix' is invalid with details: 'Invalid value: "
+        f'"{revision_suffix}": revision with suffix {revision_suffix} already exists.\';.'
+    )
+
+
+def validate_deployable_state(
+    snapshot: dict[str, object], registry_resource: dict[str, object]
+) -> None:
+    properties = snapshot["properties"]
+    require(isinstance(properties, dict), "app_metadata_invalid")
+    revision_state = properties["revisionState"]
+    require(isinstance(revision_state, dict), "revision_metadata_invalid")
+    stable = (
+        properties["provisioningState"] == "Succeeded"
+        and properties["runningStatus"] in {"Running", "Ready"}
+        and properties["deploymentErrors"] == ""
+        and properties["latestRevisionName"] == properties["latestReadyRevisionName"]
+        and revision_state["active"] is True
+        and revision_state["healthState"] == "Healthy"
+        and revision_state["provisioningState"] == "Provisioned"
+        and isinstance(revision_state["replicas"], int)
+        and not isinstance(revision_state["replicas"], bool)
+        and revision_state["replicas"] >= 1
+        and revision_state["runningState"] == "Running"
+    )
+    if stable:
+        return
+    inherited_suffix = active_revision_suffix(snapshot)
+    require(
+        properties["provisioningState"] == "Failed"
+        and properties["runningStatus"] == "Running"
+        and properties["latestRevisionName"] == properties["latestReadyRevisionName"]
+        and revision_state["active"] is True
+        and revision_state["healthState"] == "Healthy"
+        and revision_state["provisioningState"] == "Provisioned"
+        and isinstance(revision_state["replicas"], int)
+        and not isinstance(revision_state["replicas"], bool)
+        and revision_state["replicas"] >= 1
+        and revision_state["runningState"] == "Running"
+        and properties["deploymentErrors"] == known_collision_error(inherited_suffix),
+        "app_failed_state_not_approved",
+    )
+    require(
+        canonical_hash(preserved_contract(snapshot)) == ORIGINAL_PRESERVATION_HASH
+        and canonical_hash(properties["configuration"]) == ORIGINAL_CONFIGURATION_HASH
+        and canonical_hash(registry_resource) == ORIGINAL_REGISTRY_HASH,
+        "recovery_preservation_drift",
+    )
+
+
+def require_target_revision_absent(token: str) -> None:
+    target_name = f"{APP}--{TARGET_REVISION_SUFFIX}"
+    require(
+        all(revision["name"] != target_name for revision in list_revisions(token)),
+        "target_revision_suffix_exists",
+    )
 
 
 def reviewed_fingerprint(snapshot: dict[str, object], registry_resource: dict[str, object]) -> str:
@@ -1570,8 +1699,13 @@ def report(snapshot: dict[str, object], registry_resource: dict[str, object]) ->
         "registry_metadata_hash": canonical_hash(registry_resource),
         "blast_radius": {
             "resource": APP_ID,
-            "operation": "2025-01-01 JSON Merge PATCH of location and template.containers",
-            "expected_change": "one web container image and one new application revision",
+            "operation": (
+                "2025-01-01 JSON Merge PATCH of location, template.containers, "
+                "and template.revisionSuffix"
+            ),
+            "expected_change": (
+                "one web container image and one explicit new application revision suffix"
+            ),
             "configuration_transmitted": False,
             "provision": False,
             "registry_write": False,
@@ -1657,6 +1791,7 @@ def wait_for_rollout(
     before_direct = read_revision(token, before_revision)
     before_created_time = revision_created_time(before_direct)
     expected_preservation = canonical_hash(preserved_contract(before))
+    inherited_revision_suffix = template_revision_suffix(before)
     expected_configuration = canonical_hash(before_properties["configuration"])
     before_template = before_properties["template"]
     require(isinstance(before_template, dict), "revision_template_invalid")
@@ -1665,7 +1800,7 @@ def wait_for_rollout(
         isinstance(before_containers, list) and isinstance(before_containers[0], dict),
         "web_container_invalid",
     )
-    expected_template = canonical_hash(normalized_template(before_template))
+    expected_template = rollout_template_hash(before_template)
     deadline = time.monotonic() + timeout_seconds
     candidate_revision: str | None = None
     while time.monotonic() < deadline:
@@ -1686,6 +1821,10 @@ def wait_for_rollout(
             time.sleep(poll_seconds)
             continue
         require(len(newer) == 1, "unexpected_revision_churn")
+        require(
+            newer[0]["name"] == f"{APP}--{TARGET_REVISION_SUFFIX}",
+            "unexpected_revision_churn",
+        )
         candidate = read_revision(token, newer[0]["name"])
         if candidate_revision is None:
             candidate_revision = candidate["name"]
@@ -1702,7 +1841,7 @@ def wait_for_rollout(
             "rollout_image_drift",
         )
         require(
-            canonical_hash(normalized_template(candidate_template)) == expected_template,
+            rollout_template_hash(candidate_template) == expected_template,
             "preservation_drift",
         )
         if rollout_revision_ready(candidate):
@@ -1725,7 +1864,13 @@ def wait_for_rollout(
             require(isinstance(after_properties, dict), "app_metadata_invalid")
             require(
                 after_properties["latestRevisionName"] == candidate_revision
-                and canonical_hash(preserved_contract(after)) == expected_preservation
+                and canonical_hash(
+                    preserved_contract(
+                        after,
+                        revision_suffix_override=inherited_revision_suffix,
+                    )
+                )
+                == expected_preservation
                 and canonical_hash(after_properties["configuration"]) == expected_configuration,
                 "preservation_drift",
             )
@@ -1741,8 +1886,10 @@ def preflight(
     manifest(TARGET_DIGEST)
     registry_resource = registry_metadata(token)
     snapshot = safe_snapshot(token)
-    validate_snapshot(snapshot, require_stable=True)
+    validate_snapshot(snapshot, require_stable=False)
     validate_registry_contract(snapshot, registry_resource)
+    validate_deployable_state(snapshot, registry_resource)
+    require_target_revision_absent(token)
     properties = snapshot["properties"]
     require(isinstance(properties, dict), "app_metadata_invalid")
     template = properties["template"]
@@ -1786,13 +1933,15 @@ def main(argv: list[str] | None = None) -> int:
         )
         immediately_before_registry = registry_metadata(token)
         immediately_before = safe_snapshot(token)
-        validate_snapshot(immediately_before, require_stable=True)
+        validate_snapshot(immediately_before, require_stable=False)
         validate_registry_contract(immediately_before, immediately_before_registry)
+        validate_deployable_state(immediately_before, immediately_before_registry)
         require(
             reviewed_fingerprint(immediately_before, immediately_before_registry)
             == evidence["baseline_fingerprint"],
             "concurrent_drift_before_patch",
         )
+        require_target_revision_absent(token)
         rest_patch(token, patch_payload(immediately_before))
         after = wait_for_rollout(token, immediately_before)
         after_registry = registry_metadata(token)
@@ -1812,7 +1961,12 @@ def main(argv: list[str] | None = None) -> int:
                     "revision": after_properties["latestRevisionName"],
                     "image": TARGET_IMAGE,
                     "healthz": 200,
-                    "preservation_hash": canonical_hash(preserved_contract(after)),
+                    "preservation_hash": canonical_hash(
+                        preserved_contract(
+                            after,
+                            revision_suffix_override=template_revision_suffix(immediately_before),
+                        )
+                    ),
                     "configuration_metadata_hash": canonical_hash(
                         after_properties["configuration"]
                     ),

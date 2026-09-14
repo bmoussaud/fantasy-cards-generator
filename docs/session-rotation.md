@@ -31,8 +31,9 @@ telemetry contract it reads.
   `python scripts/session_rotation/control.py session-*`. Its five temporary
   resources remain absent from `azure.yaml`, `deploy.sh`, and
   `infra/main.bicep`. The separately reviewed `web-pinned*` root deployment
-  path changes only the existing dev app's image reference before a fresh
-  baseline; it does not provision or run the drill.
+  path changes only the existing dev app's image reference and required new
+  revision identifier before a fresh baseline; it does not provision or run
+  the drill.
 - The actual rotation logic (`scripts/session_rotation/harness.py`) runs **only**
   inside a dedicated, single-purpose Container App Job execution, with its own
   identity that can read/write **only** the `app-session-secret-key` secret's
@@ -115,10 +116,13 @@ Content-Type: application/json
 ```
 
 The JSON Merge Patch body contains only the existing `location` (required by the
-API) and `properties.template.containers`. The complete current containers
-array is preserved at the JSON data-model level except for the single
-`web.image` value and omission of service-generated, read-only
-`resources.ephemeralStorage`. It does not transmit
+API), `properties.template.containers`, and the reviewed deterministic
+`properties.template.revisionSuffix`. The complete current containers array is
+preserved at the JSON data-model level except for the single `web.image` value
+and omission of service-generated, read-only `resources.ephemeralStorage`.
+The suffix is derived from the immutable digest and approved rollout run ID,
+and the helper proves that the corresponding revision name is absent by direct
+ARM revision inventory immediately before PATCH. It does not transmit
 `properties.configuration`, identities, tags, environment IDs, scale, Dapr,
 init containers, volumes, service binds, or any other template field. It never
 calls `listSecrets`, reads an azd environment file, writes a parameter file,
@@ -126,11 +130,17 @@ invokes an azd hook, builds or pushes an image, provisions a resource, changes
 RBAC, or changes networking. The PATCH response body is deliberately not read.
 
 Immediately before PATCH, the helper re-reads the allowlisted live snapshot and
-requires an exact match with the reviewed fingerprint. The Container Apps
+requires an exact match with the reviewed fingerprint. A narrowly bounded
+recovery preflight also accepts the known failed control-plane state caused by
+the inherited suffix collision, but only while the sole direct active revision
+remains healthy and the original reviewed preservation, configuration, and
+registry hashes match exactly. Any other failed state or drift remains blocked.
+The Container Apps
 2025-01-01 response does not expose a usable ETag, so this is an optimistic
 concurrency gate rather than an atomic lock; serialize the short operator
-window. Because the request is a partial JSON Merge Patch, a concurrent change
-outside `template.containers` is neither transmitted nor overwritten. After
+window. Because the request is a partial JSON Merge Patch, a concurrent change outside
+`template.containers` and `template.revisionSuffix` is neither transmitted nor
+overwritten. After
 PATCH, the helper polls documented transient app/revision provisioning and
 readiness states. It fails immediately on a terminal state, an unknown state,
 revision churn, wrong image, or preservation drift. Success is reported only

@@ -133,13 +133,18 @@ Both services can be deployed independently from the repository root:
 - `./deploy.sh web-pinned --environment dev --subscription <id> --reviewed
   --expect-fingerprint <hash> --approve-change` — applies a JSON Merge Patch
   containing only the required unchanged location and the existing containers
-  array with one image edit (service-generated read-only ephemeral storage is
-  omitted). Read-only preflight uses direct authenticated HTTPS: Azure Resource
+  array with one image edit plus a deterministic reviewed `revisionSuffix`
+  (service-generated read-only ephemeral storage is omitted). The suffix is
+  proven absent from the direct revision inventory before PATCH. Read-only
+  preflight uses direct authenticated HTTPS: Azure Resource
   Graph performs server-side projections of the complete 2025-01-01
   configuration metadata and a secret-free environment inventory, then the
   exact guarded revision supplies the versioned template. Unknown schema fields
   fail closed. The fixed ACR and pull-identity ARM IDs are validated
-  case-insensitively. It does not issue a Container App GET, transmit Container
+  case-insensitively. The one allowed failed-state recovery requires the exact
+  known inherited-suffix collision and the original preservation,
+  configuration, and registry hashes; unknown failures and drift fail closed.
+  It does not issue a Container App GET, transmit Container
   App configuration, read a PATCH response body, call `listSecrets`, build,
   push, provision, roll back, restart, or invoke shared hooks.
 - `azd deploy card-orchestrator` — builds, pushes, and registers the hosted
