@@ -49,7 +49,10 @@ IMAGE_REPOSITORY, IMAGE_DIGEST = IMAGE_REMAINDER.split("@", 1)
 ACR_NAME = IMAGE_REGISTRY.split(".", 1)[0]
 AZD_TAG = re.compile(r"azd-deploy-[1-9][0-9]*")
 ARM_NAMESPACE = UUID("11fb06fb-712d-4ddd-98c7-e71bbd588830")
-ROLE = (
+ROLE = f"/subscriptions/{SUBSCRIPTION}/providers/Microsoft.Authorization/roleDefinitions/" + str(
+    uuid5(ARM_NAMESPACE, RG_ID + "-private-session-rotation-v1")
+)
+ROLE_RESOURCE = (
     PREFIX
     + "Microsoft.Authorization/roleDefinitions/"
     + str(uuid5(ARM_NAMESPACE, RG_ID + "-private-session-rotation-v1"))
@@ -61,7 +64,12 @@ ACR_ROLE = (
 ASSIGNMENT = (
     SECRET_ID
     + "/providers/Microsoft.Authorization/roleAssignments/"
-    + str(uuid5(ARM_NAMESPACE, "-".join((VAULT, "app-session-secret-key", IDENTITY, ROLE))))
+    + str(
+        uuid5(
+            ARM_NAMESPACE,
+            "-".join((VAULT, "app-session-secret-key", IDENTITY, ROLE_RESOURCE)),
+        )
+    )
 )
 ACR_ASSIGNMENT = (
     REGISTRY
@@ -72,6 +80,7 @@ ACR_ASSIGNMENT = (
 # cleanup()'s per-resource revocation resumable after a partial/interrupted attempt.
 ASSIGNMENT_NOT_FOUND = "RoleAssignmentNotFound"
 ROLE_NOT_FOUND = "RoleDefinitionDoesNotExist"
+RESOURCE_NOT_FOUND = "ResourceNotFound"
 DATA_ACTIONS = [
     "Microsoft.KeyVault/vaults/secrets/getSecret/action",
     "Microsoft.KeyVault/vaults/secrets/setSecret/action",
@@ -193,7 +202,8 @@ def _parse_az_rest_not_found(stderr_text, not_found_code):
     if not isinstance(error, dict):
         return False
     code = error.get("code")
-    return isinstance(code, str) and code == not_found_code
+    expected = {not_found_code} if isinstance(not_found_code, str) else set(not_found_code)
+    return isinstance(code, str) and code in expected
 
 
 def rest(method, resource_id, api, body=None, not_found_code=None):
@@ -250,18 +260,23 @@ def load(run_id):
     state = json.loads(path.read_text())
     require(state.get("schema") == 1 and state.get("run_id") == run_id, "state_invalid")
     require(state.get("source_hash") == source_hash(), "reviewed_source_changed")
+    require(isinstance(state.get("provision_attempted"), bool), "state_invalid")
     return state
 
 
 def source_hash():
-    names = ("harness.py", "control.py", "process_inventory.py")
-    return hashlib.sha256(
-        b"".join((ROOT / "scripts/session_rotation" / name).read_bytes() for name in names)
-    ).hexdigest()
+    names = (
+        "scripts/session_rotation/harness.py",
+        "scripts/session_rotation/control.py",
+        "scripts/session_rotation/process_inventory.py",
+        "infra/session-rotation.bicep",
+        "infra/modules/session-rotation-runner.bicep",
+    )
+    return hashlib.sha256(b"".join((ROOT / name).read_bytes() for name in names)).hexdigest()
 
 
-def deployment(run_id, expected):
-    return [
+def deployment(run_id, expected, identity_principal=""):
+    args = [
         "--resource-group",
         GROUP,
         "--name",
@@ -276,18 +291,23 @@ def deployment(run_id, expected):
         "sessionRunId=" + run_id,
         "sessionExpectedHash=" + expected,
     ]
+    if identity_principal:
+        args.append("existingIdentityPrincipalId=" + identity_principal)
+    return args
 
 
-def preview(run_id, expected):
+def preview(run_id, expected, present=(), identity_principal=""):
     result = azure(
         [
             "deployment",
             "group",
             "what-if",
-            *deployment(run_id, expected),
+            *deployment(run_id, expected, identity_principal),
             "--no-pretty-print",
             "--result-format",
             "FullResourcePayloads",
+            "--exclude-change-types",
+            "Ignore",
         ]
     )
     require(
@@ -295,18 +315,27 @@ def preview(run_id, expected):
         "preview_failed_or_diagnostics",
     )
     expected_ids = {
-        item.casefold() for item in (JOB_ID, IDENTITY, ROLE, ASSIGNMENT, ACR_ASSIGNMENT)
+        item.casefold() for item in (JOB_ID, IDENTITY, ROLE_RESOURCE, ASSIGNMENT, ACR_ASSIGNMENT)
     }
-    actual = []
+    present_ids = {item.casefold() for item in present}
+    require(present_ids <= expected_ids, "preview_extra_scope")
+    actual = {}
     for change in result.get("changes", []):
-        if change.get("changeType") in ("Ignore", "NoChange"):
-            continue
-        require(change.get("changeType") == "Create", "preview_not_create_only")
         rid = change.get("resourceId", "").casefold()
         require(rid in expected_ids, "preview_extra_scope")
-        actual.append(rid)
-    require(len(actual) == 5 and set(actual) == expected_ids, "preview_not_exact_five")
-    return {"creates": 5, "modifies": 0, "deletes": 0, "diagnostics": 0}
+        require(rid not in actual, "preview_duplicate_resource")
+        change_type = change.get("changeType")
+        require(change_type in ("Create", "NoChange"), "preview_not_create_or_nochange")
+        actual[rid] = change_type
+    require(set(actual) == expected_ids, "preview_not_exact_five")
+    require(
+        all(
+            actual[rid] == ("NoChange" if rid in present_ids else "Create") for rid in expected_ids
+        ),
+        "preview_reconciliation_mismatch",
+    )
+    creates = sum(change == "Create" for change in actual.values())
+    return {"creates": creates, "modifies": 0, "deletes": 0, "diagnostics": 0}
 
 
 def app_image(image, revision_created):
@@ -801,10 +830,26 @@ def terminal_only(rows):
     require(all(row["status"] in TERMINAL for row in rows), "execution_active_or_unknown")
 
 
-def validate_role():
-    role = rest("get", ROLE, "2022-04-01")["properties"]
+def canonical_role_definition_id(value, expected):
+    require(isinstance(value, str), "role_definition_id_drift")
+    if same_id(expected, ROLE):
+        require(
+            same_id(value, ROLE) or same_id(value, ROLE_RESOURCE),
+            "role_definition_id_drift",
+        )
+        return ROLE
+    require(same_id(expected, ACR_ROLE) and same_id(value, ACR_ROLE), "role_definition_id_drift")
+    return ACR_ROLE
+
+
+def validate_role_item(item):
+    canonical_role_definition_id(item.get("id"), ROLE)
+    role = item["properties"]
     require(
         role["type"] == "CustomRole"
+        and role["roleName"] == f"{GROUP} temporary session rotation"
+        and role["description"]
+        == "Temporary session-only drill: get/set values and list version metadata."
         and len(role["assignableScopes"]) == 1
         and same_id(role["assignableScopes"][0], RG_ID)
         and role["permissions"]
@@ -820,21 +865,39 @@ def validate_role():
     )
 
 
-def validate_assignments(principal):
-    validate_role()
-    for rid, role, scope in ((ASSIGNMENT, ROLE, SECRET_ID), (ACR_ASSIGNMENT, ACR_ROLE, REGISTRY)):
-        item = rest("get", rid, "2022-04-01")
-        p = item["properties"]
-        require(
-            same_id(item["id"], rid)
-            and same_id(p["principalId"], principal)
-            and same_id(p["roleDefinitionId"], role)
-            and same_id(p["scope"], scope)
-            and not p.get("condition")
-            and p.get("principalType") == "ServicePrincipal",
-            "assignment_drift",
-        )
-    all_roles = azure(
+def validate_role():
+    validate_role_item(rest("get", ROLE, "2022-04-01"))
+
+
+def validate_identity_item(item):
+    require(
+        same_id(item.get("id"), IDENTITY)
+        and item.get("name") == JOB + "-id"
+        and same_id(item.get("type"), "Microsoft.ManagedIdentity/userAssignedIdentities")
+        and item.get("location", "").casefold() == "eastus2"
+        and not item.get("tags")
+        and isinstance(item.get("properties", {}).get("principalId"), str)
+        and isinstance(item["properties"].get("clientId"), str),
+        "identity_drift",
+    )
+    return item["properties"]
+
+
+def validate_assignment_item(item, rid, principal, role, scope):
+    p = item["properties"]
+    require(
+        same_id(item.get("id"), rid)
+        and same_id(p["principalId"], principal)
+        and canonical_role_definition_id(p["roleDefinitionId"], role) == role
+        and same_id(p["scope"], scope)
+        and not p.get("condition")
+        and p.get("principalType") == "ServicePrincipal",
+        "assignment_drift",
+    )
+
+
+def identity_assignment_ids(principal):
+    rows = azure(
         [
             "role",
             "assignment",
@@ -847,34 +910,32 @@ def validate_assignments(principal):
         ]
     )
     require(
-        {v.casefold() for v in all_roles} == {ASSIGNMENT.casefold(), ACR_ASSIGNMENT.casefold()},
+        isinstance(rows, list) and all(isinstance(value, str) for value in rows),
+        "identity_permissions_invalid",
+    )
+    return {value.casefold() for value in rows}
+
+
+def validate_assignments(principal):
+    validate_role()
+    for rid, role, scope in ((ASSIGNMENT, ROLE, SECRET_ID), (ACR_ASSIGNMENT, ACR_ROLE, REGISTRY)):
+        item = rest("get", rid, "2022-04-01")
+        validate_assignment_item(item, rid, principal, role, scope)
+    require(
+        identity_assignment_ids(principal) == {ASSIGNMENT.casefold(), ACR_ASSIGNMENT.casefold()},
         "identity_extra_permissions",
     )
 
 
-def validate_job_identity(state):
-    """Validate the retained job/identity resources only (never deleted by cleanup()).
-    Deliberately excludes validate_assignments(): callers that may run after a partial
-    role/assignment revocation (i.e. cleanup()'s resume path) must not be blocked by a
-    strict "all expected assignments still exist" check.
-    """
-    identity = azure(
-        [
-            "identity",
-            "show",
-            "-g",
-            GROUP,
-            "-n",
-            JOB + "-id",
-            "--query",
-            "{clientId:clientId,principalId:principalId,id:id}",
-        ]
-    )
-    require(same_id(identity["id"], IDENTITY), "identity_drift")
-    item = rest("get", JOB_ID, "2024-03-01")
+def validate_job_item(state, item, identity, allowed_provisioning_states=("Succeeded",)):
     assigned = item["identity"].get("userAssignedIdentities", {})
     require(
-        item["identity"]["type"] == "UserAssigned"
+        same_id(item.get("id"), JOB_ID)
+        and item.get("name") == JOB
+        and item.get("location", "").casefold() == "eastus2"
+        and same_id(item.get("type"), "Microsoft.App/jobs")
+        and not item.get("tags")
+        and item["identity"]["type"] == "UserAssigned"
         and len(assigned) == 1
         and same_id(next(iter(assigned)), IDENTITY),
         "job_identity_drift",
@@ -882,7 +943,8 @@ def validate_job_identity(state):
     p = item["properties"]
     c = p["configuration"]
     require(
-        same_id(p["environmentId"], PREFIX + "Microsoft.App/managedEnvironments/fcag-dev-cae")
+        p["provisioningState"] in allowed_provisioning_states
+        and same_id(p["environmentId"], PREFIX + "Microsoft.App/managedEnvironments/fcag-dev-cae")
         and p["workloadProfileName"] == "Consumption"
         and c["triggerType"] == "Manual"
         and c["replicaTimeout"] == 4500
@@ -935,6 +997,24 @@ def validate_job_identity(state):
     return identity["principalId"]
 
 
+def validate_job_identity(state):
+    """Validate the retained job/identity resources only (never deleted by cleanup())."""
+    identity = azure(
+        [
+            "identity",
+            "show",
+            "-g",
+            GROUP,
+            "-n",
+            JOB + "-id",
+            "--query",
+            "{clientId:clientId,principalId:principalId,id:id}",
+        ]
+    )
+    require(same_id(identity["id"], IDENTITY), "identity_drift")
+    return validate_job_item(state, rest("get", JOB_ID, "2024-03-01"), identity)
+
+
 def validate_job(state):
     """Full pre-execution validation (session-run/-observe/-recover): the retained job
     resources plus a strict check that exactly the expected role assignments exist and
@@ -943,6 +1023,158 @@ def validate_job(state):
     principal = validate_job_identity(state)
     validate_assignments(principal)
     return principal
+
+
+EXPECTED_RESOURCE_IDS = (JOB_ID, IDENTITY, ROLE_RESOURCE, ASSIGNMENT, ACR_ASSIGNMENT)
+
+
+def _probe(resource_id, api, not_found_code):
+    return rest("get", resource_id, api, not_found_code=not_found_code)
+
+
+def fresh_preview_context():
+    identity_item = _probe(IDENTITY, "2023-01-31", RESOURCE_NOT_FOUND)
+    require(_probe(ROLE, "2022-04-01", ROLE_NOT_FOUND) is None, "fresh_run_resources_exist")
+    require(
+        _probe(ASSIGNMENT, "2022-04-01", ASSIGNMENT_NOT_FOUND) is None,
+        "fresh_run_resources_exist",
+    )
+    require(
+        _probe(ACR_ASSIGNMENT, "2022-04-01", ASSIGNMENT_NOT_FOUND) is None,
+        "fresh_run_resources_exist",
+    )
+    require(_probe(JOB_ID, "2024-03-01", RESOURCE_NOT_FOUND) is None, "fresh_run_resources_exist")
+    if identity_item is None:
+        return set(), ""
+    identity = validate_identity_item(identity_item)
+    require(not identity_assignment_ids(identity["principalId"]), "identity_extra_permissions")
+    return {IDENTITY}, identity["principalId"]
+
+
+def validate_current_baseline(state):
+    config = app_config()
+    require(config == state["config"], "app_configuration_changed")
+    members = inventory(config)
+    evidence = baseline(members, observations(config["revision"]), config["revision"], now())
+    require(
+        evidence["session_hash"] == state["baseline"]["session_hash"]
+        and evidence["entra_hash"] == state["baseline"]["entra_hash"],
+        "baseline_changed",
+    )
+    return members, evidence
+
+
+def resource_snapshot(state, require_no_executions=False, allow_failed_job=False):
+    identity_item = _probe(IDENTITY, "2023-01-31", RESOURCE_NOT_FOUND)
+    role_item = _probe(ROLE, "2022-04-01", ROLE_NOT_FOUND)
+    assignment_items = {
+        ASSIGNMENT: _probe(ASSIGNMENT, "2022-04-01", ASSIGNMENT_NOT_FOUND),
+        ACR_ASSIGNMENT: _probe(ACR_ASSIGNMENT, "2022-04-01", ASSIGNMENT_NOT_FOUND),
+    }
+    job_item = _probe(JOB_ID, "2024-03-01", RESOURCE_NOT_FOUND)
+    present = set()
+    identity = None
+    if identity_item is not None:
+        properties = validate_identity_item(identity_item)
+        identity = {"id": identity_item["id"], **properties}
+        present.add(IDENTITY)
+    if role_item is not None:
+        validate_role_item(role_item)
+        present.add(ROLE_RESOURCE)
+    require(
+        identity is not None or (job_item is None and not any(assignment_items.values())),
+        "provision_partial_inconsistent",
+    )
+    if identity is not None:
+        expected_assignments = {ASSIGNMENT.casefold(), ACR_ASSIGNMENT.casefold()}
+        require(
+            identity_assignment_ids(identity["principalId"]) <= expected_assignments,
+            "identity_extra_permissions",
+        )
+    for rid, role, scope in (
+        (ASSIGNMENT, ROLE, SECRET_ID),
+        (ACR_ASSIGNMENT, ACR_ROLE, REGISTRY),
+    ):
+        item = assignment_items[rid]
+        if item is None:
+            continue
+        require(identity is not None, "provision_partial_inconsistent")
+        if rid == ASSIGNMENT:
+            require(role_item is not None, "provision_partial_inconsistent")
+        validate_assignment_item(item, rid, identity["principalId"], role, scope)
+        present.add(rid)
+    if job_item is not None:
+        require(identity is not None, "provision_partial_inconsistent")
+        allowed_states = ("Succeeded", "Failed") if allow_failed_job else ("Succeeded",)
+        validate_job_item(state, job_item, identity, allowed_states)
+        present.add(JOB_ID)
+        if require_no_executions:
+            require(not executions(), "preexisting_execution")
+    return {
+        "present": present,
+        "identity": identity,
+        "job": job_item,
+        "job_provisioning_state": (
+            job_item["properties"]["provisioningState"] if job_item is not None else None
+        ),
+    }
+
+
+def provision(state, resume):
+    validate_current_baseline(state)
+    attempted = state["provision_attempted"]
+    snapshot = resource_snapshot(
+        state,
+        require_no_executions=True,
+        allow_failed_job=attempted,
+    )
+    if not attempted and snapshot["present"]:
+        require(
+            snapshot["present"] == {IDENTITY}
+            and snapshot["job"] is None
+            and not identity_assignment_ids(snapshot["identity"]["principalId"]),
+            "fresh_run_resources_exist",
+        )
+    principal = snapshot["identity"]["principalId"] if snapshot["identity"] else ""
+    plan = preview(
+        state["run_id"],
+        state["baseline"]["session_hash"],
+        snapshot["present"],
+        principal,
+    )
+    deploy_required = bool(plan["creates"]) or snapshot["job_provisioning_state"] == "Failed"
+    if deploy_required:
+        if not attempted:
+            state["provision_attempted"] = True
+            save(state)
+        result = azure(
+            [
+                "deployment",
+                "group",
+                "create",
+                *deployment(state["run_id"], state["baseline"]["session_hash"], principal),
+                "--query",
+                "properties.provisioningState",
+            ]
+        )
+        require(result == "Succeeded", "provision_unconfirmed")
+    final = resource_snapshot(state, require_no_executions=True)
+    require(final["present"] == set(EXPECTED_RESOURCE_IDS), "provision_incomplete")
+    validate_current_baseline(state)
+    state["phase"] = "provisioned"
+    save(state)
+
+
+def cleanup_execution_guard(snapshot, require_empty=False):
+    if snapshot["job"] is None:
+        return
+    rows = executions()
+    if snapshot["job_provisioning_state"] == "Failed":
+        require(not rows, "failed_job_has_executions")
+    else:
+        terminal_only(rows)
+    if require_empty:
+        require(not rows, "unobserved_execution")
 
 
 def measure(state, rows, events, members, at):
@@ -1102,47 +1334,48 @@ def observe(state, approve):
 
 
 def cleanup(state):
-    # "rights_revoked" is accepted so a repeat call against an already-fully-cleaned
-    # run is a safe, idempotent no-op rather than an error.
     require(
-        state["phase"] in ("accepted_stopped", "recovered", "provisioned", "rights_revoked"),
+        state["phase"]
+        in (
+            "provision_intent",
+            "aborted",
+            "accepted_stopped",
+            "recovered",
+            "provisioned",
+            "rights_revoked",
+        ),
         "cleanup_requires_terminal_proof",
     )
-    # validate_job_identity(), not validate_job(): the job/identity themselves are
-    # never deleted by cleanup() and must still match, but a prior interrupted cleanup
-    # attempt may have already revoked one or more assignments/the role, so the strict
-    # "every expected assignment still exists" check (validate_assignments) must not
-    # gate resuming here.
-    principal = validate_job_identity(state)
-    terminal_only(executions())
-    if state["phase"] == "provisioned":
-        require(not executions(), "unobserved_execution")
-    # Each assignment is independently probed, revalidated, and deleted. A resource
-    # that is already gone (the exact, documented ARM not-found error only) is treated
-    # as already-clean and skipped, making this resumable after a partial prior
-    # attempt; any other failure (drift, auth, network, unexpected API shape) still
-    # raises and leaves the phase/state untouched so a retry starts from a known point.
+    if state["phase"] in ("provision_intent", "aborted"):
+        state["phase"] = "aborted"
+        save(state)
+    snapshot = resource_snapshot(state, allow_failed_job=True)
+    cleanup_execution_guard(snapshot, require_empty=state["phase"] == "provisioned")
     for rid, role, scope in ((ASSIGNMENT, ROLE, SECRET_ID), (ACR_ASSIGNMENT, ACR_ROLE, REGISTRY)):
-        terminal_only(executions())
+        snapshot = resource_snapshot(state, allow_failed_job=True)
+        cleanup_execution_guard(snapshot)
         item = rest("get", rid, "2022-04-01", not_found_code=ASSIGNMENT_NOT_FOUND)
         if item is None:
             continue
-        p = item["properties"]
-        require(
-            same_id(p["principalId"], principal)
-            and same_id(p["roleDefinitionId"], role)
-            and same_id(p["scope"], scope),
-            "assignment_drift",
-        )
+        require(snapshot["identity"] is not None, "provision_partial_inconsistent")
+        validate_assignment_item(item, rid, snapshot["identity"]["principalId"], role, scope)
         rest("delete", rid, "2022-04-01")
+    snapshot = resource_snapshot(state, allow_failed_job=True)
+    cleanup_execution_guard(snapshot)
     remaining = azure(
         ["role", "assignment", "list", "--all", "--query", "[?roleDefinitionId=='" + ROLE + "'].id"]
     )
     require(not remaining, "role_still_assigned")
     role_item = rest("get", ROLE, "2022-04-01", not_found_code=ROLE_NOT_FOUND)
     if role_item is not None:
-        validate_role()
+        validate_role_item(role_item)
         rest("delete", ROLE, "2022-04-01")
+    final = resource_snapshot(state, allow_failed_job=True)
+    cleanup_execution_guard(final)
+    require(
+        not ({ROLE_RESOURCE, ASSIGNMENT, ACR_ASSIGNMENT} & final["present"]),
+        "cleanup_unconfirmed",
+    )
     state["phase"] = "rights_revoked"
     save(state)
 
@@ -1166,42 +1399,40 @@ def main(argv=None):
         lock = os.fdopen(os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600), "w")
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         if args.action == "session-preview":
-            print(json.dumps(preview(args.run_id, "0" * 12), sort_keys=True))
+            present, principal = fresh_preview_context()
+            print(
+                json.dumps(
+                    preview(args.run_id, "0" * 12, present, principal),
+                    sort_keys=True,
+                )
+            )
             return 0
         if args.action == "session-provision":
-            require(not state_path(args.run_id).exists(), "run_already_exists")
-            config = app_config()
-            members = inventory(config)
-            evidence = baseline(
-                members,
-                observations(config["revision"]),
-                config["revision"],
-                now(),
-            )
-            preview(args.run_id, evidence["session_hash"])
-            state = {
-                "schema": 1,
-                "run_id": args.run_id,
-                "source_hash": source_hash(),
-                "phase": "provision_intent",
-                "config": config,
-                "members": members,
-                "baseline": evidence,
-            }
-            save(state)
-            result = azure(
-                [
-                    "deployment",
-                    "group",
-                    "create",
-                    *deployment(args.run_id, evidence["session_hash"]),
-                    "--query",
-                    "properties.provisioningState",
-                ]
-            )
-            require(result == "Succeeded", "provision_unconfirmed")
-            state["phase"] = "provisioned"
-            save(state)
+            resume = state_path(args.run_id).exists()
+            if resume:
+                state = load(args.run_id)
+                require(state["phase"] == "provision_intent", "provision_resume_phase_invalid")
+            else:
+                config = app_config()
+                members = inventory(config)
+                evidence = baseline(
+                    members,
+                    observations(config["revision"]),
+                    config["revision"],
+                    now(),
+                )
+                state = {
+                    "schema": 1,
+                    "run_id": args.run_id,
+                    "source_hash": source_hash(),
+                    "phase": "provision_intent",
+                    "provision_attempted": False,
+                    "config": config,
+                    "members": members,
+                    "baseline": evidence,
+                }
+                save(state)
+            provision(state, resume)
         else:
             state = load(args.run_id)
             if args.action == "session-run":

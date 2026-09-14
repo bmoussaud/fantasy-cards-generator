@@ -166,7 +166,10 @@ revision is healthy. Baseline proof before this redeployment is not reusable.
    on the session secret only) and two role assignments (that role + `AcrPull`),
    scoped to exactly one Key Vault secret and one ACR registry. Do not run
    `session-provision` without this approval recorded separately from this
-   runbook.
+   runbook. Azure may return the custom role resource under its historical
+   resource-group alias, but assignment properties and controller comparisons
+   use the exact subscription-scoped role-definition ID. Only those two exact
+   forms, for the fixed subscription and deterministic role GUID, are accepted.
 2. **Separately approved rotation scope + recovery plan.** The rotation itself
    (`session-run`) and any compensating recovery (`session-recover`) mutate a
    live secret version. Do not run `session-run` without this approval.
@@ -196,9 +199,11 @@ per drill attempt and reuse for every subsequent command in that attempt
 (`python -c "import uuid; print(uuid.uuid4())"`).
 
 ```sh
-# 1. Dry-run preview: confirms the deployment would create exactly the five
-#    expected resources (job, identity, role, and its two assignments) and
-#    nothing else. Never mutates anything; no approval flags needed.
+# 1. Dry-run preview: confirms the deployment would create the five expected
+#    resources (job, identity, role, and its two assignments) and nothing else.
+#    If the exact idle identity from an abandoned attempt remains with zero
+#    grants and no job, it must be the sole NoChange and the other four
+#    resources must be Create. Never mutates anything; no approval flags needed.
 python scripts/session_rotation/control.py session-preview \
   --subscription b8ff3e15-7e2d-4fac-a773-992fb59ccedd --run-id <run-id>
 
@@ -207,6 +212,24 @@ python scripts/session_rotation/control.py session-preview \
 #    five dev-only resources. Requires RBAC approval (see above).
 python scripts/session_rotation/control.py session-provision \
   --subscription b8ff3e15-7e2d-4fac-a773-992fb59ccedd --run-id <run-id> \
+  --approve-change --reviewed
+
+# If provisioning returns an error or is interrupted after Azure may have
+# accepted some resources, wait for Azure control-plane propagation and rerun
+# this exact command with the SAME run ID and unchanged reviewed source. The
+# controller reloads the saved provision_intent. A separate
+# provision_attempted flag becomes true only after fresh-resource, current-app,
+# baseline, ownership, and exact what-if validation all pass, immediately
+# before the first deployment create call. Until then, every retry remains a
+# fresh attempt and may see only no resources or the exact idle zero-grant
+# identity. Once attempted, the controller validates every existing resource,
+# requires Create only for missing resources and NoChange for exact matches,
+# and completes the same deployment. A contract-valid job left in
+# provisioningState Failed is not runnable: the same approved deployment is
+# retried and must return Succeeded before provisioning completes. It never
+# starts the job.
+python scripts/session_rotation/control.py session-provision \
+  --subscription b8ff3e15-7e2d-4fac-a773-992fb59ccedd --run-id <same-run-id> \
   --approve-change --reviewed
 
 # 3. Run: re-validates the job/app configuration and baseline are unchanged
@@ -237,20 +260,29 @@ python scripts/session_rotation/control.py session-recover \
   --subscription b8ff3e15-7e2d-4fac-a773-992fb59ccedd --run-id <run-id> \
   --approve-change --reviewed
 
-# 5. Cleanup: only reachable from a terminal, proven state
-#    (accepted_stopped / recovered / provisioned-with-no-execution /
-#    rights_revoked). Revokes both role assignments and deletes the custom
-#    role definition, each re-verified immediately before deletion. Always
-#    run this once you are done with a drill attempt, successful or not.
+# 5. Cleanup: reachable from a terminal, proven state or a saved partial
+#    provision_intent/aborted state. It revokes whichever exact assignments
+#    exist and deletes the exact custom role definition, with a fresh app,
+#    source, resource, and no-active-execution gate before each deletion.
+#    The dedicated identity and an exact, idle job (if creation reached it) are
+#    deliberately retained; an identity left with zero grants is safe. An exact
+#    same-run job whose provisioningState is Failed may be cleaned up only when
+#    it has no executions at every deletion boundary. Unknown, in-progress,
+#    drifted, or foreign-run jobs remain blocked.
 python scripts/session_rotation/control.py session-cleanup \
   --subscription b8ff3e15-7e2d-4fac-a773-992fb59ccedd --run-id <run-id> \
   --approve-change --reviewed
 
-# 5b. If step 5 is interrupted (Ctrl-C, network failure, a failed delete) partway
-#     through, retry with the exact SAME <run-id> and reviewed source (harness.py /
-#     control.py / process_inventory.py must be byte-identical to what was reviewed —
-#     otherwise the saved state's source hash will not match and the controller
-#     refuses to proceed with `reviewed_source_changed`). Re-running
+# 5b. If provisioning must be abandoned before all five resources exist, use
+#     the same cleanup command and same run ID. The state is first recorded as
+#     aborted, then advances to rights_revoked only after both assignments and
+#     the custom role are verified absent.
+#
+#     If cleanup is interrupted (Ctrl-C, network failure, a failed delete) partway
+#     through, retry with the exact SAME <run-id> and unchanged reviewed source
+#     (the three controller scripts and both session-rotation Bicep files must be
+#     byte-identical to what was reviewed — otherwise the saved state's source hash
+#     will not match and the controller refuses with `reviewed_source_changed`). Re-running
 #     `session-cleanup` is safe and resumable: it re-probes each role assignment and
 #     the role definition individually, skips whichever of them a prior attempt
 #     already confirmed deleted, and re-validates principal/role/scope on whatever
@@ -265,9 +297,27 @@ python scripts/session_rotation/control.py session-cleanup \
 Local per-run state lives at `<git-dir>/session-rotation-<run-id>.json` (mode
 `0600`, never a symlink) plus a `session-rotation.lock` file that prevents two
 controller invocations from running concurrently against the same checkout.
-Never edit either file by hand; a `reviewed_source_changed` block is intentional
-if `harness.py`/`control.py`/`process_inventory.py` change after a run's state
-was saved — start a fresh `<run-id>` instead.
+Never edit either file by hand, including its phase or hashes. The reviewed
+source hash covers `harness.py`, `control.py`, `process_inventory.py`,
+`infra/session-rotation.bicep`, and
+`infra/modules/session-rotation-runner.bicep`. A `reviewed_source_changed`
+block is intentional if any of them changes after a run's state was saved:
+start a fresh `<run-id>` instead. An older immutable forensic state must not be
+migrated or claimed as resumed after source changes.
+
+A schema-1 state also records the boolean `provision_attempted`.
+`provision_intent` with `provision_attempted: false` proves only that the local
+baseline was saved; it grants no ownership of Azure resources. The marker is
+persisted immediately before the first deployment create call, never after a
+failed validation or preview.
+
+A fresh run ID may reuse only the exact named managed identity left by an
+aborted attempt when the job is absent and the identity has zero role
+assignments. Any job, assignment, foreign permission, principal mismatch, or
+resource drift blocks reuse. Control-plane RBAC visibility does not prove Key
+Vault or ACR data-plane readiness; if creation succeeds but propagation is not
+ready, wait and rerun `session-provision` with the same run ID rather than
+adding permissions or editing state.
 
 ## What local preparation *has* proven
 

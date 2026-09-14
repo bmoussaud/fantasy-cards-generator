@@ -1343,7 +1343,8 @@ def test_pinned_web_deploy_is_fixed_digest_and_double_gated() -> None:
     assert f"@{digest}" in runner
     assert 'method="PATCH"' in script
     assert "url=APP_URL" in script
-    assert '"properties": {"template": {"containers": desired_containers(snapshot)}}' in script
+    assert '"containers": desired_containers(snapshot)' in script
+    assert '"revisionSuffix": TARGET_REVISION_SUFFIX' in script
     assert '"configuration_transmitted": False' in script
     assert '"maxInactiveRevisions"' in script
     assert "bag_keys(secret)" in script

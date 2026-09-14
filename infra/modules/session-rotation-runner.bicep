@@ -9,6 +9,8 @@ param sessionRunId string
 @maxLength(12)
 param sessionExpectedHash string
 
+param existingIdentityPrincipalId string = ''
+
 @minValue(1)
 #disable-next-line BCP329 // Fail closed outside the independently reviewed dev scope.
 param devScopeGuard int = resourceGroup().name == 'rg-fcag-dev' && subscription().subscriptionId == 'b8ff3e15-7e2d-4fac-a773-992fb59ccedd' ? 1 : 0
@@ -16,6 +18,8 @@ param devScopeGuard int = resourceGroup().name == 'rg-fcag-dev' && subscription(
 var jobName = 'fcag-${environmentName}-session-rotation'
 var image = 'fcagdevqhg3qc4rlbt4gacr.azurecr.io/fantasy-cards-generator/web-nat-dev@sha256:bb7c5c4e49b9f3860d0f5aca5ccf2ff66e43921f512726551de7fc8c60ee8a11'
 var acrPullRoleId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')
+var sessionRoleGuid = guid(resourceGroup().id, 'private-session-rotation-v${devScopeGuard}')
+var sessionRoleDefinitionId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', sessionRoleGuid)
 
 resource environment 'Microsoft.App/managedEnvironments@2024-03-01' existing = {
   name: 'fcag-dev-cae'
@@ -38,7 +42,7 @@ resource identity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' 
   location: 'eastus2'
 }
 resource sessionRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
-  name: guid(resourceGroup().id, 'private-session-rotation-v${devScopeGuard}')
+  name: sessionRoleGuid
   properties: {
     roleName: '${resourceGroup().name} temporary session rotation'
     description: 'Temporary session-only drill: get/set values and list version metadata.'
@@ -60,16 +64,16 @@ resource sessionAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' 
   name: guid(vault.id, 'app-session-secret-key', identity.id, sessionRole.id)
   scope: sessionSecret
   properties: {
-    principalId: identity.properties.principalId
+    principalId: empty(existingIdentityPrincipalId) ? identity.properties.principalId : existingIdentityPrincipalId
     principalType: 'ServicePrincipal'
-    roleDefinitionId: sessionRole.id
+    roleDefinitionId: sessionRoleDefinitionId
   }
 }
 resource registryPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   name: guid(registry.id, identity.id, acrPullRoleId)
   scope: registry
   properties: {
-    principalId: identity.properties.principalId
+    principalId: empty(existingIdentityPrincipalId) ? identity.properties.principalId : existingIdentityPrincipalId
     principalType: 'ServicePrincipal'
     roleDefinitionId: acrPullRoleId
   }

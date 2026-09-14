@@ -73,7 +73,7 @@ def _expected_ids(control):
     return [
         control.JOB_ID,
         control.IDENTITY,
-        control.ROLE,
+        control.ROLE_RESOURCE,
         control.ASSIGNMENT,
         control.ACR_ASSIGNMENT,
     ]
@@ -97,6 +97,7 @@ def test_preview_accepts_exactly_five_expected_creates(control, run_id, monkeypa
     assert result == {"creates": 5, "modifies": 0, "deletes": 0, "diagnostics": 0}
     assert len(calls) == 1
     assert "what-if" in calls[0]
+    assert calls[0][calls[0].index("--exclude-change-types") + 1] == "Ignore"
     assert "create" not in calls[0] and "delete" not in calls[0]
 
 
@@ -118,7 +119,18 @@ def test_preview_rejects_non_create_change_type(control, run_id, monkeypatch):
     monkeypatch.setattr(control, "azure", lambda args: _whatif(changes))
     with pytest.raises(control.ControlError) as excinfo:
         control.preview(run_id, "0" * 12)
-    assert excinfo.value.args[0] == "preview_not_create_only"
+    assert excinfo.value.args[0] == "preview_not_create_or_nochange"
+
+
+@pytest.mark.parametrize("change_type", ["Delete", "Ignore", "Modify"])
+def test_preview_rejects_every_unapproved_change_type(control, run_id, monkeypatch, change_type):
+    ids = _expected_ids(control)
+    changes = [_change(rid) for rid in ids]
+    changes[-1] = _change(ids[-1], change_type)
+    monkeypatch.setattr(control, "azure", lambda args: _whatif(changes))
+    with pytest.raises(control.ControlError) as excinfo:
+        control.preview(run_id, "0" * 12)
+    assert excinfo.value.args[0] == "preview_not_create_or_nochange"
 
 
 def test_preview_rejects_diagnostics(control, run_id, monkeypatch):
@@ -141,12 +153,38 @@ def test_preview_rejects_incomplete_resource_set(control, run_id, monkeypatch):
     assert excinfo.value.args[0] == "preview_not_exact_five"
 
 
-def test_preview_ignores_noop_changes(control, run_id, monkeypatch):
+def test_preview_rejects_unknown_nochange_resource(control, run_id, monkeypatch):
     ids = _expected_ids(control)
     changes = [_change(rid) for rid in ids] + [_change(control.RG_ID, change_type="NoChange")]
     monkeypatch.setattr(control, "azure", lambda args: _whatif(changes))
-    result = control.preview(run_id, "0" * 12)
-    assert result == {"creates": 5, "modifies": 0, "deletes": 0, "diagnostics": 0}
+    with pytest.raises(control.ControlError) as excinfo:
+        control.preview(run_id, "0" * 12)
+    assert excinfo.value.args[0] == "preview_extra_scope"
+
+
+def test_preview_accepts_reused_identity_as_only_nochange(control, run_id, monkeypatch):
+    changes = [
+        _change(rid, "NoChange" if rid == control.IDENTITY else "Create")
+        for rid in _expected_ids(control)
+    ]
+    monkeypatch.setattr(control, "azure", lambda args: _whatif(changes))
+    result = control.preview(
+        run_id,
+        "0" * 12,
+        present={control.IDENTITY},
+        identity_principal=str(uuid4()),
+    )
+    assert result == {"creates": 4, "modifies": 0, "deletes": 0, "diagnostics": 0}
+
+
+def test_preview_accepts_all_five_nochange_after_ambiguous_success(control, run_id, monkeypatch):
+    monkeypatch.setattr(
+        control,
+        "azure",
+        lambda args: _whatif([_change(rid, "NoChange") for rid in _expected_ids(control)]),
+    )
+    result = control.preview(run_id, "0" * 12, present=set(_expected_ids(control)))
+    assert result == {"creates": 0, "modifies": 0, "deletes": 0, "diagnostics": 0}
 
 
 # ---------------------------------------------------------------------------
@@ -187,6 +225,7 @@ def test_preview_action_never_requires_approval_and_only_previews(
     control, run_id, monkeypatch, capsys
 ):
     calls = []
+    monkeypatch.setattr(control, "fresh_preview_context", lambda: (set(), ""))
 
     def fake_azure(args):
         calls.append(args)
@@ -273,6 +312,7 @@ def test_unexpected_exception_is_redacted(control, run_id, monkeypatch, capsys):
 
 
 def test_control_error_reports_only_fixed_code(control, run_id, monkeypatch, capsys):
+    monkeypatch.setattr(control, "fresh_preview_context", lambda: (set(), ""))
     monkeypatch.setattr(control, "azure", lambda args: _whatif([]))
     code = control.main(
         ["--subscription", control.SUBSCRIPTION, "--run-id", run_id, "session-preview"]
@@ -301,10 +341,43 @@ def test_state_load_accepts_matching_source_hash(control, run_id):
         "run_id": run_id,
         "source_hash": control.source_hash(),
         "phase": "provisioned",
+        "provision_attempted": True,
     }
     control.save(state)
     loaded = control.load(run_id)
     assert loaded == state
+
+
+def test_state_load_rejects_missing_provision_attempt_marker(control, run_id):
+    state = {
+        "schema": 1,
+        "run_id": run_id,
+        "source_hash": control.source_hash(),
+        "phase": "provision_intent",
+    }
+    control.save(state)
+    with pytest.raises(control.ControlError) as excinfo:
+        control.load(run_id)
+    assert excinfo.value.args[0] == "state_invalid"
+
+
+def test_state_load_rejects_conflicting_run_id(control, run_id):
+    other_run_id = str(uuid4())
+    path = control.state_path(run_id)
+    path.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "run_id": other_run_id,
+                "source_hash": control.source_hash(),
+                "phase": "provision_intent",
+                "provision_attempted": False,
+            }
+        )
+    )
+    with pytest.raises(control.ControlError) as excinfo:
+        control.load(run_id)
+    assert excinfo.value.args[0] == "state_invalid"
 
 
 def test_state_load_rejects_symlinked_state_file(control, run_id, tmp_path):
@@ -316,6 +389,7 @@ def test_state_load_rejects_symlinked_state_file(control, run_id, tmp_path):
                 "run_id": run_id,
                 "source_hash": control.source_hash(),
                 "phase": "provisioned",
+                "provision_attempted": True,
             },
         )
     )
@@ -333,10 +407,29 @@ def test_state_save_is_private_and_not_world_readable(control, run_id):
         "run_id": run_id,
         "source_hash": control.source_hash(),
         "phase": "provisioned",
+        "provision_attempted": True,
     }
     control.save(state)
     mode = control.state_path(run_id).stat().st_mode & 0o777
     assert mode == 0o600
+
+
+def test_source_hash_covers_both_bicep_contract_files(control, tmp_path, monkeypatch):
+    files = (
+        "scripts/session_rotation/harness.py",
+        "scripts/session_rotation/control.py",
+        "scripts/session_rotation/process_inventory.py",
+        "infra/session-rotation.bicep",
+        "infra/modules/session-rotation-runner.bicep",
+    )
+    for relative in files:
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(relative)
+    monkeypatch.setattr(control, "ROOT", tmp_path)
+    before = control.source_hash()
+    (tmp_path / "infra/modules/session-rotation-runner.bicep").write_text("changed")
+    assert control.source_hash() != before
 
 
 # ---------------------------------------------------------------------------
@@ -526,6 +619,8 @@ def test_app_config_rejects_tag_locked_after_revision_creation(control, monkeypa
 def _role_properties(control):
     return {
         "type": "CustomRole",
+        "roleName": f"{control.GROUP} temporary session rotation",
+        "description": "Temporary session-only drill: get/set values and list version metadata.",
         "assignableScopes": [control.RG_ID],
         "permissions": [
             {
@@ -539,8 +634,62 @@ def _role_properties(control):
 
 
 def test_validate_role_accepts_expected_shape(control, monkeypatch):
-    monkeypatch.setattr(control, "rest", lambda *a, **k: {"properties": _role_properties(control)})
+    monkeypatch.setattr(
+        control,
+        "rest",
+        lambda *a, **k: {"id": control.ROLE, "properties": _role_properties(control)},
+    )
     control.validate_role()  # must not raise
+
+
+@pytest.mark.parametrize("value", ["canonical", "alias", "mixed-case-alias"])
+def test_custom_role_id_accepts_only_exact_canonical_or_rg_alias(control, value):
+    role_id = {
+        "canonical": control.ROLE,
+        "alias": control.ROLE_RESOURCE,
+        "mixed-case-alias": control.ROLE_RESOURCE.upper(),
+    }[value]
+    assert control.canonical_role_definition_id(role_id, control.ROLE) == control.ROLE
+
+
+@pytest.mark.parametrize(
+    "role_id",
+    [
+        "/subscriptions/00000000-0000-0000-0000-000000000000/providers/"
+        "Microsoft.Authorization/roleDefinitions/00000000-0000-0000-0000-000000000000",
+        "/subscriptions/b8ff3e15-7e2d-4fac-a773-992fb59ccedd/providers/"
+        "Microsoft.Authorization/roleDefinitions/00000000-0000-0000-0000-000000000000",
+        "/subscriptions/b8ff3e15-7e2d-4fac-a773-992fb59ccedd/resourceGroups/other/providers/"
+        "Microsoft.Authorization/roleDefinitions/00000000-0000-0000-0000-000000000000",
+        "roleDefinitions/" + "0" * 36,
+    ],
+)
+def test_custom_role_id_rejects_foreign_or_suffix_only_values(control, role_id):
+    with pytest.raises(control.ControlError) as excinfo:
+        control.canonical_role_definition_id(role_id, control.ROLE)
+    assert excinfo.value.args[0] == "role_definition_id_drift"
+
+
+def test_custom_role_id_rejects_known_guid_at_foreign_subscription_or_group(control):
+    role_guid = control.ROLE.rsplit("/", 1)[1]
+    invalid = (
+        f"/subscriptions/00000000-0000-0000-0000-000000000000/providers/"
+        f"Microsoft.Authorization/roleDefinitions/{role_guid}",
+        f"/subscriptions/{control.SUBSCRIPTION}/resourceGroups/other/providers/"
+        f"Microsoft.Authorization/roleDefinitions/{role_guid}",
+        f"Microsoft.Authorization/roleDefinitions/{role_guid}",
+    )
+    for role_id in invalid:
+        with pytest.raises(control.ControlError) as excinfo:
+            control.canonical_role_definition_id(role_id, control.ROLE)
+        assert excinfo.value.args[0] == "role_definition_id_drift"
+
+
+def test_deterministic_resource_and_assignment_guids_are_unchanged(control):
+    assert control.ROLE_RESOURCE.endswith("/c75c5223-8a74-566b-8ce8-3d1ff71baa59")
+    assert control.ROLE.endswith("/c75c5223-8a74-566b-8ce8-3d1ff71baa59")
+    assert control.ASSIGNMENT.endswith("/4b479add-c456-545f-b0cc-5f94841aae4b")
+    assert control.ACR_ASSIGNMENT.endswith("/2d923f2b-95a3-5f3d-b747-3e81a288390e")
 
 
 def test_validate_role_detects_extra_data_action_drift(control, monkeypatch):
@@ -549,7 +698,24 @@ def test_validate_role_detects_extra_data_action_drift(control, monkeypatch):
         *control.DATA_ACTIONS,
         "Microsoft.KeyVault/vaults/purge/action",
     ]
-    monkeypatch.setattr(control, "rest", lambda *a, **k: {"properties": props})
+    monkeypatch.setattr(
+        control,
+        "rest",
+        lambda *a, **k: {"id": control.ROLE, "properties": props},
+    )
+    with pytest.raises(control.ControlError) as excinfo:
+        control.validate_role()
+    assert excinfo.value.args[0] == "role_drift"
+
+
+def test_validate_role_detects_assignable_scope_drift(control, monkeypatch):
+    props = _role_properties(control)
+    props["assignableScopes"] = [f"/subscriptions/{control.SUBSCRIPTION}"]
+    monkeypatch.setattr(
+        control,
+        "rest",
+        lambda *a, **k: {"id": control.ROLE, "properties": props},
+    )
     with pytest.raises(control.ControlError) as excinfo:
         control.validate_role()
     assert excinfo.value.args[0] == "role_drift"
@@ -560,7 +726,7 @@ def test_validate_assignments_detects_identity_extra_permissions(control, monkey
 
     def fake_rest(method, resource_id, api, body=None):
         if resource_id == control.ROLE:
-            return {"properties": _role_properties(control)}
+            return {"id": control.ROLE, "properties": _role_properties(control)}
         return {
             "id": resource_id,
             "properties": {
@@ -595,7 +761,7 @@ def test_validate_assignments_accepts_exact_two(control, monkeypatch):
 
     def fake_rest(method, resource_id, api, body=None):
         if resource_id == control.ROLE:
-            return {"properties": _role_properties(control)}
+            return {"id": control.ROLE, "properties": _role_properties(control)}
         return {
             "id": resource_id,
             "properties": {
@@ -615,6 +781,602 @@ def test_validate_assignments_accepts_exact_two(control, monkeypatch):
     control.validate_assignments(principal)  # must not raise
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("principalId", "00000000-0000-0000-0000-000000000000"),
+        ("scope", "/subscriptions/b8ff3e15-7e2d-4fac-a773-992fb59ccedd"),
+        (
+            "roleDefinitionId",
+            "/subscriptions/00000000-0000-0000-0000-000000000000/providers/"
+            "Microsoft.Authorization/roleDefinitions/7f951dda-4ed3-4680-a7ca-43fe172d538d",
+        ),
+    ],
+)
+def test_assignment_validation_rejects_principal_scope_or_role_drift(control, field, value):
+    principal = str(uuid4())
+    item = {
+        "id": control.ACR_ASSIGNMENT,
+        "properties": {
+            "principalId": principal,
+            "roleDefinitionId": control.ACR_ROLE,
+            "scope": control.REGISTRY,
+            "principalType": "ServicePrincipal",
+        },
+    }
+    item["properties"][field] = value
+    with pytest.raises(control.ControlError):
+        control.validate_assignment_item(
+            item,
+            control.ACR_ASSIGNMENT,
+            principal,
+            control.ACR_ROLE,
+            control.REGISTRY,
+        )
+
+
+# ---------------------------------------------------------------------------
+# provision(): resumable intent and exact resource reconciliation
+# ---------------------------------------------------------------------------
+
+
+def _snapshot(control, present, job_provisioning_state="Succeeded"):
+    identity = None
+    if control.IDENTITY in present:
+        identity = {
+            "id": control.IDENTITY,
+            "clientId": str(uuid4()),
+            "principalId": str(uuid4()),
+        }
+    return {
+        "present": set(present),
+        "identity": identity,
+        "job": {} if control.JOB_ID in present else None,
+        "job_provisioning_state": (job_provisioning_state if control.JOB_ID in present else None),
+    }
+
+
+@pytest.mark.parametrize(
+    "present",
+    [
+        set(),
+        {"identity"},
+        {"identity", "role"},
+        {"identity", "role", "secret-assignment"},
+        {"identity", "role", "secret-assignment", "acr-assignment"},
+    ],
+)
+def test_provision_resume_creates_only_missing_expected_resources(
+    control, run_id, monkeypatch, present
+):
+    mapping = {
+        "identity": control.IDENTITY,
+        "role": control.ROLE_RESOURCE,
+        "secret-assignment": control.ASSIGNMENT,
+        "acr-assignment": control.ACR_ASSIGNMENT,
+    }
+    existing = {mapping[name] for name in present}
+    state = _prepared_state(control, run_id)
+    state["phase"] = "provision_intent"
+    state["provision_attempted"] = True
+    initial = _snapshot(control, existing)
+    final = _snapshot(control, set(_expected_ids(control)))
+    snapshots = iter((initial, final))
+    plans = []
+    deployments = []
+    monkeypatch.setattr(control, "validate_current_baseline", lambda state: ({}, {}))
+    monkeypatch.setattr(control, "resource_snapshot", lambda state, **kwargs: next(snapshots))
+
+    def fake_preview(run, expected, resources, principal):
+        plans.append((set(resources), principal))
+        return {"creates": 5 - len(resources), "modifies": 0, "deletes": 0, "diagnostics": 0}
+
+    monkeypatch.setattr(control, "preview", fake_preview)
+    monkeypatch.setattr(control, "azure", lambda args: deployments.append(args) or "Succeeded")
+    monkeypatch.setattr(control, "save", lambda state: None)
+    control.provision(state, resume=True)
+    assert plans[0][0] == existing
+    assert len(deployments) == 1
+    assert state["phase"] == "provisioned"
+
+
+def test_provision_all_resources_exist_reconciles_without_redeploy(control, run_id, monkeypatch):
+    state = _prepared_state(control, run_id)
+    state["phase"] = "provision_intent"
+    state["provision_attempted"] = True
+    complete = _snapshot(control, set(_expected_ids(control)))
+    monkeypatch.setattr(control, "validate_current_baseline", lambda state: ({}, {}))
+    monkeypatch.setattr(control, "resource_snapshot", lambda state, **kwargs: complete)
+    monkeypatch.setattr(
+        control,
+        "preview",
+        lambda *args: {"creates": 0, "modifies": 0, "deletes": 0, "diagnostics": 0},
+    )
+    monkeypatch.setattr(
+        control, "azure", lambda args: pytest.fail("deployment must not be repeated")
+    )
+    monkeypatch.setattr(control, "save", lambda state: None)
+    control.provision(state, resume=True)
+    assert state["phase"] == "provisioned"
+
+
+def test_provision_failed_deployment_keeps_intent_phase(control, run_id, monkeypatch):
+    state = _prepared_state(control, run_id)
+    state["phase"] = "provision_intent"
+    state["provision_attempted"] = True
+    monkeypatch.setattr(control, "validate_current_baseline", lambda state: ({}, {}))
+    monkeypatch.setattr(
+        control, "resource_snapshot", lambda state, **kwargs: _snapshot(control, set())
+    )
+    monkeypatch.setattr(
+        control,
+        "preview",
+        lambda *args: {"creates": 5, "modifies": 0, "deletes": 0, "diagnostics": 0},
+    )
+    monkeypatch.setattr(control, "azure", lambda args: "Failed")
+    with pytest.raises(control.ControlError) as excinfo:
+        control.provision(state, resume=True)
+    assert excinfo.value.args[0] == "provision_unconfirmed"
+    assert state["phase"] == "provision_intent"
+
+
+def test_provision_timeout_after_write_can_reconcile_same_run(control, run_id, monkeypatch):
+    state = _prepared_state(control, run_id)
+    state["phase"] = "provision_intent"
+    state["provision_attempted"] = True
+    empty = _snapshot(control, set())
+    complete = _snapshot(control, set(_expected_ids(control)))
+    monkeypatch.setattr(control, "validate_current_baseline", lambda state: ({}, {}))
+    monkeypatch.setattr(
+        control,
+        "preview",
+        lambda *args: {
+            "creates": 0 if args[2] else 5,
+            "modifies": 0,
+            "deletes": 0,
+            "diagnostics": 0,
+        },
+    )
+    monkeypatch.setattr(control, "save", lambda state: None)
+    monkeypatch.setattr(control, "resource_snapshot", lambda state, **kwargs: empty)
+    monkeypatch.setattr(
+        control,
+        "azure",
+        lambda args: (_ for _ in ()).throw(control.ControlError("azure_transport_failed")),
+    )
+    with pytest.raises(control.ControlError):
+        control.provision(state, resume=True)
+    assert state["phase"] == "provision_intent"
+
+    monkeypatch.setattr(control, "resource_snapshot", lambda state, **kwargs: complete)
+    monkeypatch.setattr(
+        control, "azure", lambda args: pytest.fail("reconciled success must not redeploy")
+    )
+    control.provision(state, resume=True)
+    assert state["phase"] == "provisioned"
+
+
+def test_fresh_provision_reuses_only_idle_identity_with_zero_grants(control, run_id, monkeypatch):
+    state = _prepared_state(control, run_id)
+    state["phase"] = "provision_intent"
+    state["provision_attempted"] = False
+    identity_only = _snapshot(control, {control.IDENTITY})
+    complete = _snapshot(control, set(_expected_ids(control)))
+    snapshots = iter((identity_only, complete))
+    captured = {}
+    monkeypatch.setattr(control, "validate_current_baseline", lambda state: ({}, {}))
+    monkeypatch.setattr(control, "resource_snapshot", lambda state, **kwargs: next(snapshots))
+    monkeypatch.setattr(control, "identity_assignment_ids", lambda principal: set())
+
+    def fake_preview(run, expected, present, principal):
+        captured["present"] = present
+        captured["principal"] = principal
+        return {"creates": 4, "modifies": 0, "deletes": 0, "diagnostics": 0}
+
+    monkeypatch.setattr(control, "preview", fake_preview)
+    monkeypatch.setattr(control, "azure", lambda args: "Succeeded")
+    monkeypatch.setattr(control, "save", lambda state: None)
+    control.provision(state, resume=False)
+    assert captured["present"] == {control.IDENTITY}
+    assert captured["principal"] == identity_only["identity"]["principalId"]
+
+
+def test_fresh_provision_rejects_retained_role_or_job(control, run_id, monkeypatch):
+    state = _prepared_state(control, run_id)
+    state["phase"] = "provision_intent"
+    state["provision_attempted"] = False
+    snapshot = _snapshot(control, {control.IDENTITY, control.ROLE_RESOURCE})
+    monkeypatch.setattr(control, "validate_current_baseline", lambda state: ({}, {}))
+    monkeypatch.setattr(control, "resource_snapshot", lambda state, **kwargs: snapshot)
+    monkeypatch.setattr(control, "identity_assignment_ids", lambda principal: set())
+    with pytest.raises(control.ControlError) as excinfo:
+        control.provision(state, resume=False)
+    assert excinfo.value.args[0] == "fresh_run_resources_exist"
+
+
+def test_provision_rejects_stopped_or_active_preexisting_execution(control, run_id, monkeypatch):
+    state = _prepared_state(control, run_id)
+    identity = {
+        "id": control.IDENTITY,
+        "name": control.JOB + "-id",
+        "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+        "location": "eastus2",
+        "tags": None,
+        "properties": {"clientId": str(uuid4()), "principalId": str(uuid4())},
+    }
+    resources = {
+        control.IDENTITY: identity,
+        control.ROLE: {"id": control.ROLE, "properties": _role_properties(control)},
+        control.ASSIGNMENT: None,
+        control.ACR_ASSIGNMENT: None,
+        control.JOB_ID: _job_resource(
+            control,
+            state,
+            {"id": control.IDENTITY, **identity["properties"]},
+        ),
+    }
+    monkeypatch.setattr(
+        control,
+        "_probe",
+        lambda resource_id, api, code: resources.get(resource_id),
+    )
+    monkeypatch.setattr(control, "identity_assignment_ids", lambda principal: set())
+    monkeypatch.setattr(
+        control,
+        "executions",
+        lambda: [{"name": "old-execution", "status": "Stopped"}],
+    )
+    with pytest.raises(control.ControlError) as excinfo:
+        control.resource_snapshot(state, require_no_executions=True)
+    assert excinfo.value.args[0] == "preexisting_execution"
+
+
+def test_job_validation_rejects_conflicting_run_id(control, run_id):
+    state = _prepared_state(control, run_id)
+    identity = {"id": control.IDENTITY, "clientId": str(uuid4()), "principalId": str(uuid4())}
+    item = _job_resource(control, state, identity)
+    item["properties"]["template"]["containers"][0]["env"][1]["value"] = str(uuid4())
+    with pytest.raises(control.ControlError) as excinfo:
+        control.validate_job_item(state, item, identity)
+    assert excinfo.value.args[0] == "job_template_drift"
+
+
+def test_job_validation_rejects_failed_server_provisioning(control, run_id):
+    state = _prepared_state(control, run_id)
+    identity = {"id": control.IDENTITY, "clientId": str(uuid4()), "principalId": str(uuid4())}
+    item = _job_resource(control, state, identity)
+    item["properties"]["provisioningState"] = "Failed"
+    with pytest.raises(control.ControlError) as excinfo:
+        control.validate_job_item(state, item, identity)
+    assert excinfo.value.args[0] == "job_configuration_drift"
+
+
+@pytest.mark.parametrize("provisioning_state", ["InProgress", "Updating", "Unknown"])
+def test_failed_job_snapshot_path_rejects_nonterminal_server_states(
+    control, run_id, monkeypatch, provisioning_state
+):
+    state = _prepared_state(control, run_id)
+    identity = {
+        "id": control.IDENTITY,
+        "name": control.JOB + "-id",
+        "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+        "location": "eastus2",
+        "tags": None,
+        "properties": {"clientId": str(uuid4()), "principalId": str(uuid4())},
+    }
+    job = _job_resource(
+        control,
+        state,
+        {"id": control.IDENTITY, **identity["properties"]},
+    )
+    job["properties"]["provisioningState"] = provisioning_state
+    resources = {
+        control.IDENTITY: identity,
+        control.ROLE: None,
+        control.ASSIGNMENT: None,
+        control.ACR_ASSIGNMENT: None,
+        control.JOB_ID: job,
+    }
+    monkeypatch.setattr(
+        control,
+        "_probe",
+        lambda resource_id, api, code: resources.get(resource_id),
+    )
+    monkeypatch.setattr(control, "identity_assignment_ids", lambda principal: set())
+
+    with pytest.raises(control.ControlError) as excinfo:
+        control.resource_snapshot(state, allow_failed_job=True)
+
+    assert excinfo.value.args[0] == "job_configuration_drift"
+
+
+def test_failed_job_snapshot_path_rejects_foreign_run(control, run_id, monkeypatch):
+    state = _prepared_state(control, run_id)
+    identity = {
+        "id": control.IDENTITY,
+        "name": control.JOB + "-id",
+        "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+        "location": "eastus2",
+        "tags": None,
+        "properties": {"clientId": str(uuid4()), "principalId": str(uuid4())},
+    }
+    job = _job_resource(
+        control,
+        state,
+        {"id": control.IDENTITY, **identity["properties"]},
+    )
+    job["properties"]["provisioningState"] = "Failed"
+    job["properties"]["template"]["containers"][0]["env"][1]["value"] = str(uuid4())
+    resources = {
+        control.IDENTITY: identity,
+        control.ROLE: None,
+        control.ASSIGNMENT: None,
+        control.ACR_ASSIGNMENT: None,
+        control.JOB_ID: job,
+    }
+    monkeypatch.setattr(
+        control,
+        "_probe",
+        lambda resource_id, api, code: resources.get(resource_id),
+    )
+    monkeypatch.setattr(control, "identity_assignment_ids", lambda principal: set())
+
+    with pytest.raises(control.ControlError) as excinfo:
+        control.resource_snapshot(state, allow_failed_job=True)
+
+    assert excinfo.value.args[0] == "job_template_drift"
+
+
+def test_provision_retries_contract_valid_failed_job_and_requires_server_success(
+    control, run_id, monkeypatch
+):
+    state = _prepared_state(control, run_id)
+    state["phase"] = "provision_intent"
+    state["provision_attempted"] = True
+    failed = _snapshot(control, set(_expected_ids(control)), "Failed")
+    succeeded = _snapshot(control, set(_expected_ids(control)))
+    snapshots = iter((failed, succeeded))
+    deployments = []
+    monkeypatch.setattr(control, "validate_current_baseline", lambda state: ({}, {}))
+    monkeypatch.setattr(control, "resource_snapshot", lambda state, **kwargs: next(snapshots))
+    monkeypatch.setattr(
+        control,
+        "preview",
+        lambda *args: {"creates": 0, "modifies": 0, "deletes": 0, "diagnostics": 0},
+    )
+    monkeypatch.setattr(control, "azure", lambda args: deployments.append(args) or "Succeeded")
+    monkeypatch.setattr(control, "save", lambda state: None)
+
+    control.provision(state, resume=True)
+
+    assert len(deployments) == 1
+    assert "create" in deployments[0]
+    assert state["phase"] == "provisioned"
+
+
+def test_provision_rejects_failed_job_still_failed_after_successful_deployment(
+    control, run_id, monkeypatch
+):
+    state = _prepared_state(control, run_id)
+    state["phase"] = "provision_intent"
+    state["provision_attempted"] = True
+    failed = _snapshot(control, set(_expected_ids(control)), "Failed")
+    monkeypatch.setattr(control, "validate_current_baseline", lambda state: ({}, {}))
+
+    def failed_snapshot(state, allow_failed_job=False, **kwargs):
+        if not allow_failed_job:
+            raise control.ControlError("job_configuration_drift")
+        return failed
+
+    monkeypatch.setattr(control, "resource_snapshot", failed_snapshot)
+    monkeypatch.setattr(
+        control,
+        "preview",
+        lambda *args: {"creates": 0, "modifies": 0, "deletes": 0, "diagnostics": 0},
+    )
+    monkeypatch.setattr(control, "azure", lambda args: "Succeeded")
+
+    with pytest.raises(control.ControlError) as excinfo:
+        control.provision(state, resume=True)
+
+    assert excinfo.value.args[0] == "job_configuration_drift"
+    assert state["phase"] == "provision_intent"
+
+
+def test_main_saves_intent_before_provision_and_reuses_same_state(
+    control, run_id, monkeypatch, capsys
+):
+    config = _prepared_state(control, run_id)["config"]
+    evidence = _prepared_state(control, run_id)["baseline"]
+    monkeypatch.setattr(control, "app_config", lambda: config)
+    monkeypatch.setattr(control, "inventory", lambda current: {})
+    monkeypatch.setattr(control, "observations", lambda revision: [])
+    monkeypatch.setattr(control, "baseline", lambda *args: evidence)
+    calls = []
+
+    def fake_provision(state, resume):
+        assert control.state_path(run_id).exists()
+        assert control.load(run_id)["phase"] == "provision_intent"
+        assert control.load(run_id)["provision_attempted"] is False
+        calls.append(resume)
+
+    monkeypatch.setattr(control, "provision", fake_provision)
+    args = [
+        "--subscription",
+        control.SUBSCRIPTION,
+        "--run-id",
+        run_id,
+        "session-provision",
+        "--approve-change",
+        "--reviewed",
+    ]
+    assert control.main(args) == 0
+    capsys.readouterr()
+    assert control.main(args) == 0
+    assert calls == [False, True]
+
+
+def test_main_unattempted_intent_rejects_stale_resources_on_every_retry(
+    control, run_id, monkeypatch, capsys
+):
+    prepared = _prepared_state(control, run_id)
+    monkeypatch.setattr(control, "app_config", lambda: prepared["config"])
+    monkeypatch.setattr(control, "inventory", lambda current: {})
+    monkeypatch.setattr(control, "observations", lambda revision: [])
+    monkeypatch.setattr(control, "baseline", lambda *args: prepared["baseline"])
+    monkeypatch.setattr(control, "validate_current_baseline", lambda state: ({}, {}))
+    stale = _snapshot(control, {control.IDENTITY, control.ROLE_RESOURCE})
+    monkeypatch.setattr(control, "resource_snapshot", lambda state, **kwargs: stale)
+    monkeypatch.setattr(control, "identity_assignment_ids", lambda principal: set())
+    monkeypatch.setattr(
+        control,
+        "azure",
+        lambda args: pytest.fail("stale resources must block before Azure deployment"),
+    )
+    args = [
+        "--subscription",
+        control.SUBSCRIPTION,
+        "--run-id",
+        run_id,
+        "session-provision",
+        "--approve-change",
+        "--reviewed",
+    ]
+
+    assert control.main(args) == 1
+    assert json.loads(capsys.readouterr().out)["status"] == "fresh_run_resources_exist"
+    assert control.load(run_id)["provision_attempted"] is False
+    assert control.main(args) == 1
+    assert json.loads(capsys.readouterr().out)["status"] == "fresh_run_resources_exist"
+    assert control.load(run_id)["provision_attempted"] is False
+
+
+def test_invalid_preview_cannot_turn_foreign_resources_into_owned_resume(
+    control, run_id, monkeypatch, capsys
+):
+    prepared = _prepared_state(control, run_id)
+    monkeypatch.setattr(control, "app_config", lambda: prepared["config"])
+    monkeypatch.setattr(control, "inventory", lambda current: {})
+    monkeypatch.setattr(control, "observations", lambda revision: [])
+    monkeypatch.setattr(control, "baseline", lambda *args: prepared["baseline"])
+    monkeypatch.setattr(control, "validate_current_baseline", lambda state: ({}, {}))
+    current = {"snapshot": _snapshot(control, set())}
+    monkeypatch.setattr(control, "resource_snapshot", lambda state, **kwargs: current["snapshot"])
+    monkeypatch.setattr(
+        control,
+        "preview",
+        lambda *args: (_ for _ in ()).throw(control.ControlError("preview_not_exact_five")),
+    )
+    monkeypatch.setattr(
+        control,
+        "azure",
+        lambda args: pytest.fail("invalid preview must never reach Azure deployment"),
+    )
+    args = [
+        "--subscription",
+        control.SUBSCRIPTION,
+        "--run-id",
+        run_id,
+        "session-provision",
+        "--approve-change",
+        "--reviewed",
+    ]
+
+    assert control.main(args) == 1
+    assert json.loads(capsys.readouterr().out)["status"] == "preview_not_exact_five"
+    assert control.load(run_id)["provision_attempted"] is False
+
+    current["snapshot"] = _snapshot(control, {control.IDENTITY, control.ROLE_RESOURCE})
+    assert control.main(args) == 1
+    assert json.loads(capsys.readouterr().out)["status"] == "fresh_run_resources_exist"
+    assert control.load(run_id)["provision_attempted"] is False
+
+
+def test_partial_deployment_failure_persists_attempt_and_resumes_owned_resources(
+    control, run_id, monkeypatch, capsys
+):
+    prepared = _prepared_state(control, run_id)
+    monkeypatch.setattr(control, "app_config", lambda: prepared["config"])
+    monkeypatch.setattr(control, "inventory", lambda current: {})
+    monkeypatch.setattr(control, "observations", lambda revision: [])
+    monkeypatch.setattr(control, "baseline", lambda *args: prepared["baseline"])
+    monkeypatch.setattr(control, "validate_current_baseline", lambda state: ({}, {}))
+    current = {"snapshot": _snapshot(control, set())}
+    monkeypatch.setattr(control, "resource_snapshot", lambda state, **kwargs: current["snapshot"])
+    monkeypatch.setattr(
+        control,
+        "preview",
+        lambda *args: {
+            "creates": 0 if args[2] else 5,
+            "modifies": 0,
+            "deletes": 0,
+            "diagnostics": 0,
+        },
+    )
+    deployment_calls = []
+
+    def fail_after_attempt(args):
+        deployment_calls.append(args)
+        raise control.ControlError("azure_transport_failed")
+
+    monkeypatch.setattr(control, "azure", fail_after_attempt)
+    args = [
+        "--subscription",
+        control.SUBSCRIPTION,
+        "--run-id",
+        run_id,
+        "session-provision",
+        "--approve-change",
+        "--reviewed",
+    ]
+
+    assert control.main(args) == 1
+    assert json.loads(capsys.readouterr().out)["status"] == "azure_transport_failed"
+    assert len(deployment_calls) == 1
+    assert control.load(run_id)["provision_attempted"] is True
+
+    current["snapshot"] = _snapshot(control, set(_expected_ids(control)))
+    monkeypatch.setattr(
+        control,
+        "azure",
+        lambda args: pytest.fail("complete owned resources must reconcile without redeploy"),
+    )
+    assert control.main(args) == 0
+    assert json.loads(capsys.readouterr().out)["phase"] == "provisioned"
+
+
+def test_main_source_hash_drift_blocks_before_any_azure_call(control, run_id, monkeypatch, capsys):
+    state = _prepared_state(control, run_id)
+    state["phase"] = "provision_intent"
+    state["source_hash"] = "0" * 64
+    control.save(state)
+    monkeypatch.setattr(
+        control,
+        "azure",
+        lambda args: pytest.fail("source drift must block before Azure calls"),
+    )
+    monkeypatch.setattr(
+        control,
+        "rest",
+        lambda *args, **kwargs: pytest.fail("source drift must block before Azure calls"),
+    )
+
+    code = control.main(
+        [
+            "--subscription",
+            control.SUBSCRIPTION,
+            "--run-id",
+            run_id,
+            "session-provision",
+            "--approve-change",
+            "--reviewed",
+        ]
+    )
+
+    assert code == 1
+    assert json.loads(capsys.readouterr().out)["status"] == "reviewed_source_changed"
+
+
 # ---------------------------------------------------------------------------
 # cleanup(): least-privilege teardown ordering and drift rejection
 # ---------------------------------------------------------------------------
@@ -623,8 +1385,14 @@ def test_validate_assignments_accepts_exact_two(control, monkeypatch):
 def _job_resource(control, state, identity):
     harness_text = (control.ROOT / "scripts/session_rotation/harness.py").read_text()
     return {
+        "id": control.JOB_ID,
+        "name": control.JOB,
+        "type": "Microsoft.App/jobs",
+        "location": "eastus2",
+        "tags": None,
         "identity": {"type": "UserAssigned", "userAssignedIdentities": {identity["id"]: {}}},
         "properties": {
+            "provisioningState": "Succeeded",
             "environmentId": control.PREFIX + "Microsoft.App/managedEnvironments/fcag-dev-cae",
             "workloadProfileName": "Consumption",
             "configuration": {
@@ -663,6 +1431,7 @@ def _prepared_state(control, run_id):
         "run_id": run_id,
         "source_hash": control.source_hash(),
         "phase": "provisioned",
+        "provision_attempted": True,
         "config": {
             "fingerprint": "f" * 64,
             "revision": "rev0",
@@ -675,7 +1444,14 @@ def _prepared_state(control, run_id):
 
 
 def _wire_validate_job(
-    control, monkeypatch, state, principal, identity, executions=None, already_deleted=()
+    control,
+    monkeypatch,
+    state,
+    principal,
+    identity,
+    executions=None,
+    already_deleted=(),
+    job_provisioning_state="Succeeded",
 ):
     """Wire fake azure()/rest() for cleanup()-focused tests.
 
@@ -685,34 +1461,46 @@ def _wire_validate_job(
     404 with the matching documented error code would after passing through rest()'s
     own not-found handling.
     """
-    remaining_role_holders = [
-        rid for rid in (control.ASSIGNMENT, control.ACR_ASSIGNMENT) if rid not in already_deleted
-    ]
+    deleted = set(already_deleted)
+    monkeypatch.setattr(control, "validate_current_baseline", lambda state: ({}, {}))
 
     def fake_azure(args):
-        if args[:2] == ["identity", "show"]:
-            return {
-                "clientId": identity["clientId"],
-                "principalId": principal,
-                "id": identity["id"],
-            }
         if args[:3] == ["containerapp", "job", "execution"]:
             return list(executions or [])
         if args[:3] == ["role", "assignment", "list"]:
             if "--assignee-object-id" in args:
-                # validate_assignments(): the identity's full assignment membership.
-                return remaining_role_holders
-            # cleanup()'s post-delete check for any remaining holder of the custom role.
-            return [] if control.ROLE not in already_deleted else []
+                return [
+                    rid
+                    for rid in (control.ASSIGNMENT, control.ACR_ASSIGNMENT)
+                    if rid not in deleted
+                ]
+            return []
         raise AssertionError(f"unexpected azure() call: {args}")
 
     def fake_rest(method, resource_id, api, body=None, not_found_code=None):
-        if not_found_code is not None and resource_id in already_deleted:
+        if method == "delete":
+            deleted.add(resource_id)
             return None
+        if not_found_code is not None and resource_id in deleted:
+            return None
+        if resource_id == control.IDENTITY:
+            return {
+                "id": identity["id"],
+                "name": control.JOB + "-id",
+                "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+                "location": "eastus2",
+                "tags": None,
+                "properties": {
+                    "clientId": identity["clientId"],
+                    "principalId": principal,
+                },
+            }
         if resource_id == control.JOB_ID:
-            return _job_resource(control, state, identity)
+            item = _job_resource(control, state, identity)
+            item["properties"]["provisioningState"] = job_provisioning_state
+            return item
         if resource_id == control.ROLE:
-            return {"properties": _role_properties(control)}
+            return {"id": control.ROLE, "properties": _role_properties(control)}
         if resource_id in (control.ASSIGNMENT, control.ACR_ASSIGNMENT):
             return {
                 "id": resource_id,
@@ -727,8 +1515,6 @@ def _wire_validate_job(
                     "principalType": "ServicePrincipal",
                 },
             }
-        if method == "delete":
-            return None
         raise AssertionError(f"unexpected rest() call: {method} {resource_id}")
 
     monkeypatch.setattr(control, "azure", fake_azure)
@@ -755,6 +1541,36 @@ def test_cleanup_happy_path_revokes_rights_in_order(control, run_id, monkeypatch
     assert deleted == [control.ASSIGNMENT, control.ACR_ASSIGNMENT, control.ROLE]
 
 
+def test_cleanup_partial_intent_without_job_marks_aborted_then_revokes(
+    control, run_id, monkeypatch
+):
+    identity = {"clientId": str(uuid4()), "principalId": str(uuid4()), "id": control.IDENTITY}
+    state = _prepared_state(control, run_id)
+    state["phase"] = "provision_intent"
+    phases = []
+    deleted = []
+    _wire_validate_job(
+        control,
+        monkeypatch,
+        state,
+        identity["principalId"],
+        identity,
+        already_deleted={control.JOB_ID, control.ASSIGNMENT},
+    )
+    monkeypatch.setattr(control, "save", lambda current: phases.append(current["phase"]))
+    original_rest = control.rest
+
+    def recording_rest(method, resource_id, api, body=None, not_found_code=None):
+        if method == "delete":
+            deleted.append(resource_id)
+        return original_rest(method, resource_id, api, body, not_found_code=not_found_code)
+
+    monkeypatch.setattr(control, "rest", recording_rest)
+    control.cleanup(state)
+    assert phases == ["aborted", "rights_revoked"]
+    assert deleted == [control.ACR_ASSIGNMENT, control.ROLE]
+
+
 def test_cleanup_blocked_while_execution_is_active(control, run_id, monkeypatch):
     identity = {"clientId": str(uuid4()), "principalId": str(uuid4()), "id": control.IDENTITY}
     state = _prepared_state(control, run_id)
@@ -771,6 +1587,75 @@ def test_cleanup_blocked_while_execution_is_active(control, run_id, monkeypatch)
     with pytest.raises(control.ControlError) as excinfo:
         control.cleanup(state)
     assert excinfo.value.args[0] == "execution_active_or_unknown"
+
+
+def test_cleanup_revokes_rights_for_contract_valid_failed_job(control, run_id, monkeypatch):
+    identity = {"clientId": str(uuid4()), "principalId": str(uuid4()), "id": control.IDENTITY}
+    state = _prepared_state(control, run_id)
+    state["phase"] = "provision_intent"
+    deleted = []
+    _wire_validate_job(
+        control,
+        monkeypatch,
+        state,
+        identity["principalId"],
+        identity,
+        job_provisioning_state="Failed",
+    )
+    original_rest = control.rest
+
+    def recording_rest(method, resource_id, api, body=None, not_found_code=None):
+        if method == "delete":
+            deleted.append(resource_id)
+        return original_rest(method, resource_id, api, body, not_found_code=not_found_code)
+
+    monkeypatch.setattr(control, "rest", recording_rest)
+    control.cleanup(state)
+
+    assert state["phase"] == "rights_revoked"
+    assert deleted == [control.ASSIGNMENT, control.ACR_ASSIGNMENT, control.ROLE]
+    snapshot = control.resource_snapshot(state, allow_failed_job=True)
+    assert snapshot["job_provisioning_state"] == "Failed"
+
+
+def test_cleanup_failed_job_stops_if_execution_appears_between_deletes(
+    control, run_id, monkeypatch
+):
+    identity = {"clientId": str(uuid4()), "principalId": str(uuid4()), "id": control.IDENTITY}
+    state = _prepared_state(control, run_id)
+    state["phase"] = "provision_intent"
+    deleted = []
+    _wire_validate_job(
+        control,
+        monkeypatch,
+        state,
+        identity["principalId"],
+        identity,
+        job_provisioning_state="Failed",
+    )
+    original_azure = control.azure
+    execution_checks = iter(([], [], [{"name": "unexpected", "status": "Running"}]))
+
+    def dynamic_azure(args):
+        if args[:3] == ["containerapp", "job", "execution"]:
+            return next(execution_checks)
+        return original_azure(args)
+
+    original_rest = control.rest
+
+    def recording_rest(method, resource_id, api, body=None, not_found_code=None):
+        if method == "delete":
+            deleted.append(resource_id)
+        return original_rest(method, resource_id, api, body, not_found_code=not_found_code)
+
+    monkeypatch.setattr(control, "azure", dynamic_azure)
+    monkeypatch.setattr(control, "rest", recording_rest)
+
+    with pytest.raises(control.ControlError) as excinfo:
+        control.cleanup(state)
+
+    assert excinfo.value.args[0] == "failed_job_has_executions"
+    assert deleted == [control.ASSIGNMENT]
 
 
 def test_cleanup_rejects_from_non_terminal_phase(control, run_id):
@@ -951,13 +1836,13 @@ def test_cleanup_rejects_role_scope_drift_before_role_delete(control, run_id, mo
     original_rest = control.rest
 
     def drifted_role_rest(method, resource_id, api, body=None, not_found_code=None):
-        if resource_id == control.ROLE and method == "get" and not_found_code is None:
+        if resource_id == control.ROLE and method == "get":
             props = _role_properties(control)
             props["permissions"][0]["dataActions"] = [
                 *control.DATA_ACTIONS,
                 "Microsoft.KeyVault/vaults/purge/action",
             ]
-            return {"properties": props}
+            return {"id": control.ROLE, "properties": props}
         return original_rest(method, resource_id, api, body, not_found_code=not_found_code)
 
     monkeypatch.setattr(control, "rest", drifted_role_rest)
@@ -1127,6 +2012,7 @@ def test_cleanup_end_to_end_resumes_partial_deletion_via_real_rest(control, run_
     state = _prepared_state(control, run_id)
 
     calls = {"deleted": []}
+    monkeypatch.setattr(control, "validate_current_baseline", lambda state: ({}, {}))
 
     def fake_run_az(args):
         # `azure()`-style calls (no --method/--url "rest" subcommand args distinguish
@@ -1146,12 +2032,36 @@ def test_cleanup_end_to_end_resumes_partial_deletion_via_real_rest(control, run_
             return _completed(0, stdout=json.dumps([]))
         if args[0] == "role" and args[1] == "assignment" and args[2] == "list":
             if "--assignee-object-id" in args:
-                return _completed(0, stdout=json.dumps([control.ACR_ASSIGNMENT]))
+                return _completed(
+                    0,
+                    stdout=json.dumps(
+                        []
+                        if control.ACR_ASSIGNMENT in calls["deleted"]
+                        else [control.ACR_ASSIGNMENT]
+                    ),
+                )
             return _completed(0, stdout=json.dumps([]))
         if args[0] == "rest":
             method = args[2]
             url = args[4]
             resource_id = url.split("?", 1)[0][len("https://management.azure.com") :]
+            if method == "get" and resource_id == control.IDENTITY:
+                return _completed(
+                    0,
+                    stdout=json.dumps(
+                        {
+                            "id": identity["id"],
+                            "name": control.JOB + "-id",
+                            "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+                            "location": "eastus2",
+                            "tags": None,
+                            "properties": {
+                                "clientId": identity["clientId"],
+                                "principalId": principal,
+                            },
+                        }
+                    ),
+                )
             if method == "get" and resource_id == control.JOB_ID:
                 return _completed(0, stdout=json.dumps(_job_resource(control, state, identity)))
             if method == "get" and resource_id == control.ASSIGNMENT:
@@ -1159,15 +2069,19 @@ def test_cleanup_end_to_end_resumes_partial_deletion_via_real_rest(control, run_
                 # exactly as az CLI 2.74.0 emits it.
                 return _completed(1, stderr=_arm_error_stderr("RoleAssignmentNotFound"))
             if method == "get" and resource_id == control.ACR_ASSIGNMENT:
+                if resource_id in calls["deleted"]:
+                    return _completed(1, stderr=_arm_error_stderr("RoleAssignmentNotFound"))
                 return _completed(
                     0,
                     stdout=json.dumps(
                         {
+                            "id": control.ACR_ASSIGNMENT,
                             "properties": {
                                 "principalId": principal,
                                 "roleDefinitionId": control.ACR_ROLE,
                                 "scope": control.REGISTRY,
-                            }
+                                "principalType": "ServicePrincipal",
+                            },
                         }
                     ),
                 )
@@ -1175,7 +2089,14 @@ def test_cleanup_end_to_end_resumes_partial_deletion_via_real_rest(control, run_
                 calls["deleted"].append(resource_id)
                 return _completed(0, stdout="")
             if method == "get" and resource_id == control.ROLE:
-                return _completed(0, stdout=json.dumps({"properties": _role_properties(control)}))
+                if resource_id in calls["deleted"]:
+                    return _completed(1, stderr=_arm_error_stderr("RoleDefinitionDoesNotExist"))
+                return _completed(
+                    0,
+                    stdout=json.dumps(
+                        {"id": control.ROLE, "properties": _role_properties(control)}
+                    ),
+                )
             raise AssertionError(f"unexpected rest() call: {method} {resource_id}")
         raise AssertionError(f"unexpected azure() call: {args}")
 
@@ -2179,6 +3100,18 @@ def test_default_deploy_flows_do_not_reference_session_rotation(relative):
 def test_session_rotation_bicep_is_gated_behind_disabled_by_default_flag():
     text = (ROOT / "infra/session-rotation.bicep").read_text()
     assert "param enableSessionRotation bool = false" in text
+
+
+def test_session_rotation_bicep_uses_canonical_role_id_without_changing_guids():
+    text = (ROOT / "infra/modules/session-rotation-runner.bicep").read_text()
+    assert (
+        "var sessionRoleDefinitionId = subscriptionResourceId("
+        "'Microsoft.Authorization/roleDefinitions', sessionRoleGuid)"
+    ) in text
+    assert "roleDefinitionId: sessionRoleDefinitionId" in text
+    assert ("name: guid(vault.id, 'app-session-secret-key', identity.id, sessionRole.id)") in text
+    assert "name: guid(registry.id, identity.id, acrPullRoleId)" in text
+    assert "assignableScopes: [resourceGroup().id]" in text
 
 
 # ---------------------------------------------------------------------------
