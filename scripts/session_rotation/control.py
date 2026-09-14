@@ -33,6 +33,7 @@ SUBSCRIPTION = "b8ff3e15-7e2d-4fac-a773-992fb59ccedd"
 GROUP = "rg-fcag-dev"
 APP = "fcag-dev-app"
 JOB = "fcag-dev-session-rotation"
+LOCATION = "eastus2"
 RG_ID = f"/subscriptions/{SUBSCRIPTION}/resourceGroups/{GROUP}"
 PREFIX = RG_ID + "/providers/"
 IDENTITY = PREFIX + f"Microsoft.ManagedIdentity/userAssignedIdentities/{JOB}-id"
@@ -105,6 +106,22 @@ def require(condition, code):
 
 def same_id(left, right):
     return isinstance(left, str) and isinstance(right, str) and left.casefold() == right.casefold()
+
+
+def same_location(value, expected):
+    """Compare an ARM `location` value against an expected compact region name.
+
+    ARM APIs are inconsistent about location representation: some return the
+    compact form (e.g. "eastus2"), others the display form (e.g. "East US 2").
+    Only whitespace and case differences are treated as equivalent; any other
+    difference (a different region, punctuation, or a non-string value) fails
+    closed. This intentionally does not perform any broader region name
+    normalization (no hyphen/underscore folding, no alias tables).
+    """
+    if not isinstance(value, str) or not isinstance(expected, str):
+        return False
+    normalized = "".join(value.split()).casefold()
+    return normalized == expected.casefold()
 
 
 def now():
@@ -874,7 +891,7 @@ def validate_identity_item(item):
         same_id(item.get("id"), IDENTITY)
         and item.get("name") == JOB + "-id"
         and same_id(item.get("type"), "Microsoft.ManagedIdentity/userAssignedIdentities")
-        and item.get("location", "").casefold() == "eastus2"
+        and same_location(item.get("location", ""), LOCATION)
         and not item.get("tags")
         and isinstance(item.get("properties", {}).get("principalId"), str)
         and isinstance(item["properties"].get("clientId"), str),
@@ -932,7 +949,7 @@ def validate_job_item(state, item, identity, allowed_provisioning_states=("Succe
     require(
         same_id(item.get("id"), JOB_ID)
         and item.get("name") == JOB
-        and item.get("location", "").casefold() == "eastus2"
+        and same_location(item.get("location", ""), LOCATION)
         and same_id(item.get("type"), "Microsoft.App/jobs")
         and not item.get("tags")
         and item["identity"]["type"] == "UserAssigned"

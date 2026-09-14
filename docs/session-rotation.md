@@ -294,6 +294,33 @@ python scripts/session_rotation/control.py session-cleanup \
 #     (phase already `rights_revoked`) is also a safe no-op.
 ```
 
+### Region/location representation and a pending-fix recovery gap
+
+ARM is inconsistent about how it renders a resource's `location`: some
+resource types/API versions return the compact form (e.g. `eastus2`), others
+the display form (e.g. `East US 2`). `validate_identity_item()` and
+`validate_job_item()` compare this field exactly, so a run whose job resource
+happens to come back in display form fails closed with `job_identity_drift`
+even though every other field matches. Because `session-cleanup` calls the
+same validators via `resource_snapshot()` before every deletion, this also
+blocks the reviewed, resumable revocation path for that run specifically.
+
+The fix is a narrow, whitespace/case-only equivalence (`same_location()`) —
+any other difference (wrong region, punctuation, non-string value) still
+fails closed exactly as before. Once that fix is merged and re-reviewed, the
+in-repo `session-cleanup --approve-change --reviewed` command above remains
+the primary, supported way to revoke a run's temporary rights, and no
+separate tooling is needed. If a specific already-approved run is blocked by
+this exact defect before the fix lands, a transient, non-repository reviewer
+artifact may be used instead: it loads the byte-for-byte original,
+commit-pinned `control.py`, applies only this same narrow location fold at
+the boundary before calling its unmodified validators, and re-runs the full
+guard (state/source-hash, role/identity/job contract, zero executions, and
+the grants still expected to remain) before every single delete rather than
+once up front. Such an artifact must never be committed to this repository
+and must never touch the managed identity or the container app job, which
+remain intentionally retained, reusable resources.
+
 Local per-run state lives at `<git-dir>/session-rotation-<run-id>.json` (mode
 `0600`, never a symlink) plus a `session-rotation.lock` file that prevents two
 controller invocations from running concurrently against the same checkout.

@@ -1051,6 +1051,86 @@ def test_job_validation_rejects_failed_server_provisioning(control, run_id):
     assert excinfo.value.args[0] == "job_configuration_drift"
 
 
+@pytest.mark.parametrize("value", ["eastus2", "EASTUS2", "East US 2", "east us 2", " eastus2 "])
+def test_same_location_accepts_compact_and_display_forms(control, value):
+    assert control.same_location(value, control.LOCATION) is True
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "eastus",  # different (shorter) region
+        "westus2",  # different region entirely
+        "East US",  # display form of a different region
+        "east-us-2",  # hyphenated, not a real ARM form
+        "eastus2x",  # trailing garbage
+        "",  # missing/empty
+        None,  # non-string
+        123,  # non-string
+    ],
+)
+def test_same_location_rejects_other_regions_and_malformed_values(control, value):
+    assert control.same_location(value, control.LOCATION) is False
+
+
+@pytest.mark.parametrize("location", ["eastus2", "East US 2"])
+def test_job_validation_accepts_compact_and_display_location(control, run_id, location):
+    state = _prepared_state(control, run_id)
+    identity = {"id": control.IDENTITY, "clientId": str(uuid4()), "principalId": str(uuid4())}
+    item = _job_resource(control, state, identity)
+    item["location"] = location
+    # Should not raise: both real ARM location representations are accepted.
+    control.validate_job_item(state, item, identity)
+
+
+def test_job_validation_rejects_other_region(control, run_id):
+    state = _prepared_state(control, run_id)
+    identity = {"id": control.IDENTITY, "clientId": str(uuid4()), "principalId": str(uuid4())}
+    item = _job_resource(control, state, identity)
+    item["location"] = "westus2"
+    with pytest.raises(control.ControlError) as excinfo:
+        control.validate_job_item(state, item, identity)
+    assert excinfo.value.args[0] == "job_identity_drift"
+
+
+def test_job_validation_rejects_malformed_location(control, run_id):
+    state = _prepared_state(control, run_id)
+    identity = {"id": control.IDENTITY, "clientId": str(uuid4()), "principalId": str(uuid4())}
+    item = _job_resource(control, state, identity)
+    item["location"] = "east-us-2"
+    with pytest.raises(control.ControlError) as excinfo:
+        control.validate_job_item(state, item, identity)
+    assert excinfo.value.args[0] == "job_identity_drift"
+
+
+@pytest.mark.parametrize("location", ["eastus2", "East US 2"])
+def test_identity_validation_accepts_compact_and_display_location(control, location):
+    item = {
+        "id": control.IDENTITY,
+        "name": control.JOB + "-id",
+        "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+        "location": location,
+        "tags": None,
+        "properties": {"clientId": str(uuid4()), "principalId": str(uuid4())},
+    }
+    # Should not raise: both real ARM location representations are accepted.
+    control.validate_identity_item(item)
+
+
+def test_identity_validation_rejects_other_region(control):
+    item = {
+        "id": control.IDENTITY,
+        "name": control.JOB + "-id",
+        "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+        "location": "West US 2",
+        "tags": None,
+        "properties": {"clientId": str(uuid4()), "principalId": str(uuid4())},
+    }
+    with pytest.raises(control.ControlError) as excinfo:
+        control.validate_identity_item(item)
+    assert excinfo.value.args[0] == "identity_drift"
+
+
 @pytest.mark.parametrize("provisioning_state", ["InProgress", "Updating", "Unknown"])
 def test_failed_job_snapshot_path_rejects_nonterminal_server_states(
     control, run_id, monkeypatch, provisioning_state
