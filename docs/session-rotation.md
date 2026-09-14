@@ -1,7 +1,8 @@
 # Session-rotation local preparation runbook
 
-> **Status: local preparation only. No live drill has been run.** This document
-> describes how to *prepare* the private, dev-only session-secret rotation drill
+> **Status: dev provisioning succeeded; live rotation acceptance remains unproven.**
+> The 2026-09-14 execution failed, and its temporary permissions were revoked.
+> This document describes the private, dev-only session-secret rotation drill
 > introduced for #89/#53 and exactly what has (and has not) been proven so far.
 > It does not authorize, and must not be read as authorizing, an actual rotation
 > against the live `fcag-dev-app`.
@@ -260,10 +261,13 @@ python scripts/session_rotation/control.py session-recover \
   --subscription b8ff3e15-7e2d-4fac-a773-992fb59ccedd --run-id <run-id> \
   --approve-change --reviewed
 
-# 5. Cleanup: reachable from a terminal, proven state or a saved partial
-#    provision_intent/aborted state. It revokes whichever exact assignments
-#    exist and deletes the exact custom role definition, with a fresh app,
-#    source, resource, and no-active-execution gate before each deletion.
+# 5. Cleanup: reachable from a terminal, proven state, a saved partial
+#    provision_intent/aborted state, or a still-"running" state whose one
+#    state-recorded execution is positively and exclusively terminal Failed.
+#    It revokes whichever exact assignments exist and deletes the exact custom
+#    role definition, with a fresh safe app-configuration/pinned-image check,
+#    source/resource validation, exact assignment-GET-to-identity-grant-list
+#    agreement, and a no-active-execution gate before each deletion.
 #    The dedicated identity and an exact, idle job (if creation reached it) are
 #    deliberately retained; an identity left with zero grants is safe. An exact
 #    same-run job whose provisioningState is Failed may be cleaned up only when
@@ -286,12 +290,25 @@ python scripts/session_rotation/control.py session-cleanup \
 #     `session-cleanup` is safe and resumable: it re-probes each role assignment and
 #     the role definition individually, skips whichever of them a prior attempt
 #     already confirmed deleted, and re-validates principal/role/scope on whatever
-#     is left before deleting it. A resource is only ever treated as "already
-#     deleted" via the exact, documented ARM not-found error for its type; any other
-#     failure (drift, authorization, network, an unexpected/malformed error body)
-#     still aborts the whole command rather than being silently accepted as clean.
+#     is left before deleting it. Before every delete it also re-runs the bounded
+#     app configuration and pinned-image guards used by provisioning/run; it does
+#     not inspect secret values or require process inventory to remain unchanged.
+#     The identity's live assignment list must exactly match the assignment
+#     resources returned by the bounded GET probes throughout partial cleanup and
+#     must be empty before rights_revoked is recorded. A resource is only ever
+#     treated as "already deleted" via the exact, documented ARM not-found error
+#     for its type; any other failure (drift, authorization, network, inconsistent
+#     assignment evidence, or an unexpected/malformed error body) still aborts the
+#     whole command rather than being silently accepted as clean.
 #     Calling `session-cleanup` again once everything is already revoked
 #     (phase already `rights_revoked`) is also a safe no-op.
+#
+#     For the narrowly accepted failed-execution case, cleanup does not claim
+#     that rotation or recovery was proved: `phase` remains `running` and the
+#     separate `permission_phase` becomes `rights_revoked`. A missing, active,
+#     additional, or foreign execution remains blocked. The successful CLI JSON
+#     includes both fields, making permission cleanup distinct from rotation or
+#     recovery acceptance.
 ```
 
 ### Region/location representation and a pending-fix recovery gap
@@ -428,7 +445,7 @@ client (no network), and fully controllable clocks — never a live call:
   drill's implementation; the harness only ever touches the session secret.
 - **Outage/failure-injection scenarios.** Not implemented, not tested here.
 - **Worker-turnover reconciliation logic is unit-tested against fakes, not
-  live Azure.** `control.py`'s `inventory()`/`baseline()`/`observe()`
+  successful live acceptance.** `control.py`'s `inventory()`/`baseline()`/`observe()`
   functions (which reconcile process identity via
   `(revision, replica, pid, incarnation)` against `az containerapp
   exec`/`replica list`/observation-log output) now have direct unit coverage
@@ -436,9 +453,9 @@ client (no network), and fully controllable clocks — never a live call:
   `process_inventory()`'s exec wrapper and an unmocked `measure()` call inside
   an `observe()` end-to-end turnover-rejection test. What remains unproven is
   the same as everywhere else in this document: these are fakes, not a real
-  `az containerapp exec`/Log Analytics ingestion/job-execution lifecycle. No
-  live drill has exercised this reconciliation against the real
-  `fcag-dev-app`.
+  `az containerapp exec`/Log Analytics ingestion/job-execution lifecycle. The
+  2026-09-14 live attempt stopped with `azure_transport_failed` and a failed
+  job execution; it did not establish adoption, overlap, or recovery acceptance.
 
 ## Private network constraints
 

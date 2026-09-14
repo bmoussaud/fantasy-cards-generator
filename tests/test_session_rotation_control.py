@@ -781,6 +781,19 @@ def test_validate_assignments_accepts_exact_two(control, monkeypatch):
     control.validate_assignments(principal)  # must not raise
 
 
+def test_identity_assignment_ids_rejects_ambiguous_duplicates(control, monkeypatch):
+    monkeypatch.setattr(
+        control,
+        "azure",
+        lambda args: [control.ASSIGNMENT, control.ASSIGNMENT.upper()],
+    )
+
+    with pytest.raises(control.ControlError) as excinfo:
+        control.identity_assignment_ids(str(uuid4()))
+
+    assert excinfo.value.args[0] == "identity_permissions_invalid"
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -1457,6 +1470,38 @@ def test_main_source_hash_drift_blocks_before_any_azure_call(control, run_id, mo
     assert json.loads(capsys.readouterr().out)["status"] == "reviewed_source_changed"
 
 
+def test_main_cleanup_reports_permission_outcome_without_changing_running_phase(
+    control, run_id, monkeypatch, capsys
+):
+    state = _prepared_state(control, run_id)
+    state["phase"] = "running"
+    control.save(state)
+
+    def fake_cleanup(current):
+        current["permission_phase"] = "rights_revoked"
+
+    monkeypatch.setattr(control, "cleanup", fake_cleanup)
+
+    code = control.main(
+        [
+            "--subscription",
+            control.SUBSCRIPTION,
+            "--run-id",
+            run_id,
+            "session-cleanup",
+            "--approve-change",
+            "--reviewed",
+        ]
+    )
+
+    assert code == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "schema": "session-controller/v1",
+        "phase": "running",
+        "permission_phase": "rights_revoked",
+    }
+
+
 # ---------------------------------------------------------------------------
 # cleanup(): least-privilege teardown ordering and drift rejection
 # ---------------------------------------------------------------------------
@@ -1543,6 +1588,7 @@ def _wire_validate_job(
     """
     deleted = set(already_deleted)
     monkeypatch.setattr(control, "validate_current_baseline", lambda state: ({}, {}))
+    monkeypatch.setattr(control, "app_config", lambda: state["config"])
 
     def fake_azure(args):
         if args[:3] == ["containerapp", "job", "execution"]:
@@ -1669,6 +1715,102 @@ def test_cleanup_blocked_while_execution_is_active(control, run_id, monkeypatch)
     assert excinfo.value.args[0] == "execution_active_or_unknown"
 
 
+def test_cleanup_running_failed_execution_revokes_without_claiming_recovery(
+    control, run_id, monkeypatch
+):
+    identity = {"clientId": str(uuid4()), "principalId": str(uuid4()), "id": control.IDENTITY}
+    state = _prepared_state(control, run_id)
+    state.update(phase="running", execution="fcag-dev-session-rotation-ownedfailed1")
+    deleted = []
+    _wire_validate_job(
+        control,
+        monkeypatch,
+        state,
+        identity["principalId"],
+        identity,
+        executions=[{"name": state["execution"], "status": "Failed"}],
+    )
+    original_rest = control.rest
+
+    def recording_rest(method, resource_id, api, body=None, not_found_code=None):
+        if method == "delete":
+            deleted.append(resource_id)
+        return original_rest(method, resource_id, api, body, not_found_code=not_found_code)
+
+    monkeypatch.setattr(control, "rest", recording_rest)
+    control.cleanup(state)
+
+    assert deleted == [control.ASSIGNMENT, control.ACR_ASSIGNMENT, control.ROLE]
+    assert state["phase"] == "running"
+    assert state["permission_phase"] == "rights_revoked"
+
+
+@pytest.mark.parametrize(
+    "executions",
+    [
+        [{"name": "foreign-execution", "status": "Failed"}],
+        [{"name": "fcag-dev-session-rotation-ownedfailed1", "status": "Running"}],
+        [
+            {"name": "fcag-dev-session-rotation-ownedfailed1", "status": "Failed"},
+            {"name": "foreign-execution", "status": "Failed"},
+        ],
+    ],
+)
+def test_cleanup_running_rejects_foreign_or_nonterminal_execution(
+    control, run_id, monkeypatch, executions
+):
+    identity = {"clientId": str(uuid4()), "principalId": str(uuid4()), "id": control.IDENTITY}
+    state = _prepared_state(control, run_id)
+    state.update(phase="running", execution="fcag-dev-session-rotation-ownedfailed1")
+    deleted = []
+    _wire_validate_job(
+        control,
+        monkeypatch,
+        state,
+        identity["principalId"],
+        identity,
+        executions=executions,
+    )
+    original_rest = control.rest
+
+    def recording_rest(method, resource_id, api, body=None, not_found_code=None):
+        if method == "delete":
+            deleted.append(resource_id)
+        return original_rest(method, resource_id, api, body, not_found_code=not_found_code)
+
+    monkeypatch.setattr(control, "rest", recording_rest)
+
+    with pytest.raises(control.ControlError) as excinfo:
+        control.cleanup(state)
+
+    assert excinfo.value.args[0] == "owned_failed_execution_not_terminal"
+    assert deleted == []
+    assert state["phase"] == "running"
+    assert "permission_phase" not in state
+
+
+def test_cleanup_running_rejects_absent_job(control, run_id, monkeypatch):
+    identity = {"clientId": str(uuid4()), "principalId": str(uuid4()), "id": control.IDENTITY}
+    state = _prepared_state(control, run_id)
+    state.update(phase="running", execution="fcag-dev-session-rotation-ownedfailed1")
+    _wire_validate_job(
+        control,
+        monkeypatch,
+        state,
+        identity["principalId"],
+        identity,
+        executions=[{"name": state["execution"], "status": "Failed"}],
+        already_deleted={control.JOB_ID},
+    )
+
+    with pytest.raises(control.ControlError) as excinfo:
+        control.cleanup(state)
+
+    assert excinfo.value.args[0] == "owned_failed_job_absent"
+    assert state["phase"] == "running"
+    assert "permission_phase" not in state
+
+
 def test_cleanup_revokes_rights_for_contract_valid_failed_job(control, run_id, monkeypatch):
     identity = {"clientId": str(uuid4()), "principalId": str(uuid4()), "id": control.IDENTITY}
     state = _prepared_state(control, run_id)
@@ -1738,9 +1880,90 @@ def test_cleanup_failed_job_stops_if_execution_appears_between_deletes(
     assert deleted == [control.ASSIGNMENT]
 
 
+def test_cleanup_app_configuration_drift_blocks_before_next_delete(control, run_id, monkeypatch):
+    identity = {"clientId": str(uuid4()), "principalId": str(uuid4()), "id": control.IDENTITY}
+    state = _prepared_state(control, run_id)
+    deleted = []
+    _wire_validate_job(control, monkeypatch, state, identity["principalId"], identity)
+    configs = iter((state["config"], {**state["config"], "fingerprint": "drift"}))
+    monkeypatch.setattr(control, "app_config", lambda: next(configs))
+    original_rest = control.rest
+
+    def recording_rest(method, resource_id, api, body=None, not_found_code=None):
+        if method == "delete":
+            deleted.append(resource_id)
+        return original_rest(method, resource_id, api, body, not_found_code=not_found_code)
+
+    monkeypatch.setattr(control, "rest", recording_rest)
+
+    with pytest.raises(control.ControlError) as excinfo:
+        control.cleanup(state)
+
+    assert excinfo.value.args[0] == "app_configuration_changed"
+    assert deleted == [control.ASSIGNMENT]
+    assert state["phase"] == "provisioned"
+
+
+def test_cleanup_stale_identity_grant_blocks_rights_revoked_state(control, run_id, monkeypatch):
+    identity = {"clientId": str(uuid4()), "principalId": str(uuid4()), "id": control.IDENTITY}
+    state = _prepared_state(control, run_id)
+    deleted = []
+    _wire_validate_job(control, monkeypatch, state, identity["principalId"], identity)
+    original_rest = control.rest
+    original_identity_assignment_ids = control.identity_assignment_ids
+
+    def recording_rest(method, resource_id, api, body=None, not_found_code=None):
+        if method == "delete":
+            deleted.append(resource_id)
+        return original_rest(method, resource_id, api, body, not_found_code=not_found_code)
+
+    def stale_after_deletes(principal):
+        if control.ROLE in deleted:
+            return {control.ASSIGNMENT.casefold()}
+        return original_identity_assignment_ids(principal)
+
+    monkeypatch.setattr(control, "rest", recording_rest)
+    monkeypatch.setattr(control, "identity_assignment_ids", stale_after_deletes)
+
+    with pytest.raises(control.ControlError) as excinfo:
+        control.cleanup(state)
+
+    assert excinfo.value.args[0] == "identity_assignment_consistency_invalid"
+    assert deleted == [control.ASSIGNMENT, control.ACR_ASSIGNMENT, control.ROLE]
+    assert state["phase"] == "provisioned"
+    assert "permission_phase" not in state
+
+
+def test_cleanup_missing_identity_grant_blocks_before_mutation(control, run_id, monkeypatch):
+    identity = {"clientId": str(uuid4()), "principalId": str(uuid4()), "id": control.IDENTITY}
+    state = _prepared_state(control, run_id)
+    deleted = []
+    _wire_validate_job(control, monkeypatch, state, identity["principalId"], identity)
+    monkeypatch.setattr(
+        control,
+        "identity_assignment_ids",
+        lambda principal: {control.ASSIGNMENT.casefold()},
+    )
+    original_rest = control.rest
+
+    def recording_rest(method, resource_id, api, body=None, not_found_code=None):
+        if method == "delete":
+            deleted.append(resource_id)
+        return original_rest(method, resource_id, api, body, not_found_code=not_found_code)
+
+    monkeypatch.setattr(control, "rest", recording_rest)
+
+    with pytest.raises(control.ControlError) as excinfo:
+        control.cleanup(state)
+
+    assert excinfo.value.args[0] == "identity_assignment_consistency_invalid"
+    assert deleted == []
+    assert state["phase"] == "provisioned"
+
+
 def test_cleanup_rejects_from_non_terminal_phase(control, run_id):
     state = _prepared_state(control, run_id)
-    state["phase"] = "running"
+    state["phase"] = "start_intent"
     with pytest.raises(control.ControlError) as excinfo:
         control.cleanup(state)
     assert excinfo.value.args[0] == "cleanup_requires_terminal_proof"
@@ -2093,6 +2316,7 @@ def test_cleanup_end_to_end_resumes_partial_deletion_via_real_rest(control, run_
 
     calls = {"deleted": []}
     monkeypatch.setattr(control, "validate_current_baseline", lambda state: ({}, {}))
+    monkeypatch.setattr(control, "app_config", lambda: state["config"])
 
     def fake_run_az(args):
         # `azure()`-style calls (no --method/--url "rest" subcommand args distinguish

@@ -930,7 +930,9 @@ def identity_assignment_ids(principal):
         isinstance(rows, list) and all(isinstance(value, str) for value in rows),
         "identity_permissions_invalid",
     )
-    return {value.casefold() for value in rows}
+    normalized = [value.casefold() for value in rows]
+    require(len(normalized) == len(set(normalized)), "identity_permissions_invalid")
+    return set(normalized)
 
 
 def validate_assignments(principal):
@@ -1102,12 +1104,6 @@ def resource_snapshot(state, require_no_executions=False, allow_failed_job=False
         identity is not None or (job_item is None and not any(assignment_items.values())),
         "provision_partial_inconsistent",
     )
-    if identity is not None:
-        expected_assignments = {ASSIGNMENT.casefold(), ACR_ASSIGNMENT.casefold()}
-        require(
-            identity_assignment_ids(identity["principalId"]) <= expected_assignments,
-            "identity_extra_permissions",
-        )
     for rid, role, scope in (
         (ASSIGNMENT, ROLE, SECRET_ID),
         (ACR_ASSIGNMENT, ACR_ROLE, REGISTRY),
@@ -1120,6 +1116,16 @@ def resource_snapshot(state, require_no_executions=False, allow_failed_job=False
             require(role_item is not None, "provision_partial_inconsistent")
         validate_assignment_item(item, rid, identity["principalId"], role, scope)
         present.add(rid)
+    assignment_ids = {rid.casefold() for rid in (ASSIGNMENT, ACR_ASSIGNMENT) if rid in present}
+    identity_assignments = set()
+    if identity is not None:
+        expected_assignments = {ASSIGNMENT.casefold(), ACR_ASSIGNMENT.casefold()}
+        identity_assignments = identity_assignment_ids(identity["principalId"])
+        require(identity_assignments <= expected_assignments, "identity_extra_permissions")
+        require(
+            identity_assignments == assignment_ids,
+            "identity_assignment_consistency_invalid",
+        )
     if job_item is not None:
         require(identity is not None, "provision_partial_inconsistent")
         allowed_states = ("Succeeded", "Failed") if allow_failed_job else ("Succeeded",)
@@ -1134,6 +1140,7 @@ def resource_snapshot(state, require_no_executions=False, allow_failed_job=False
         "job_provisioning_state": (
             job_item["properties"]["provisioningState"] if job_item is not None else None
         ),
+        "identity_assignment_ids": identity_assignments,
     }
 
 
@@ -1182,7 +1189,18 @@ def provision(state, resume):
     save(state)
 
 
-def cleanup_execution_guard(snapshot, require_empty=False):
+def cleanup_execution_guard(snapshot, state, require_empty=False):
+    if state["phase"] == "running":
+        require(snapshot["job"] is not None, "owned_failed_job_absent")
+        rows = executions()
+        execution = state.get("execution")
+        require(
+            isinstance(execution, str)
+            and ID_PATTERN.fullmatch(execution)
+            and rows == [{"name": execution, "status": "Failed"}],
+            "owned_failed_execution_not_terminal",
+        )
+        return
     if snapshot["job"] is None:
         return
     rows = executions()
@@ -1192,6 +1210,10 @@ def cleanup_execution_guard(snapshot, require_empty=False):
         terminal_only(rows)
     if require_empty:
         require(not rows, "unobserved_execution")
+
+
+def cleanup_app_configuration_guard(state):
+    require(app_config() == state["config"], "app_configuration_changed")
 
 
 def measure(state, rows, events, members, at):
@@ -1360,6 +1382,7 @@ def cleanup(state):
             "recovered",
             "provisioned",
             "rights_revoked",
+            "running",
         ),
         "cleanup_requires_terminal_proof",
     )
@@ -1367,18 +1390,19 @@ def cleanup(state):
         state["phase"] = "aborted"
         save(state)
     snapshot = resource_snapshot(state, allow_failed_job=True)
-    cleanup_execution_guard(snapshot, require_empty=state["phase"] == "provisioned")
+    cleanup_execution_guard(snapshot, state, require_empty=state["phase"] == "provisioned")
     for rid, role, scope in ((ASSIGNMENT, ROLE, SECRET_ID), (ACR_ASSIGNMENT, ACR_ROLE, REGISTRY)):
         snapshot = resource_snapshot(state, allow_failed_job=True)
-        cleanup_execution_guard(snapshot)
+        cleanup_execution_guard(snapshot, state)
         item = rest("get", rid, "2022-04-01", not_found_code=ASSIGNMENT_NOT_FOUND)
         if item is None:
             continue
         require(snapshot["identity"] is not None, "provision_partial_inconsistent")
         validate_assignment_item(item, rid, snapshot["identity"]["principalId"], role, scope)
+        cleanup_app_configuration_guard(state)
         rest("delete", rid, "2022-04-01")
     snapshot = resource_snapshot(state, allow_failed_job=True)
-    cleanup_execution_guard(snapshot)
+    cleanup_execution_guard(snapshot, state)
     remaining = azure(
         ["role", "assignment", "list", "--all", "--query", "[?roleDefinitionId=='" + ROLE + "'].id"]
     )
@@ -1386,14 +1410,19 @@ def cleanup(state):
     role_item = rest("get", ROLE, "2022-04-01", not_found_code=ROLE_NOT_FOUND)
     if role_item is not None:
         validate_role_item(role_item)
+        cleanup_app_configuration_guard(state)
         rest("delete", ROLE, "2022-04-01")
     final = resource_snapshot(state, allow_failed_job=True)
-    cleanup_execution_guard(final)
+    cleanup_execution_guard(final, state)
     require(
         not ({ROLE_RESOURCE, ASSIGNMENT, ACR_ASSIGNMENT} & final["present"]),
         "cleanup_unconfirmed",
     )
-    state["phase"] = "rights_revoked"
+    require(not final["identity_assignment_ids"], "cleanup_permissions_unconfirmed")
+    if state["phase"] == "running":
+        state["permission_phase"] = "rights_revoked"
+    else:
+        state["phase"] = "rights_revoked"
     save(state)
 
 
@@ -1503,7 +1532,10 @@ def main(argv=None):
                 save(state)
             elif args.action == "session-cleanup":
                 cleanup(state)
-        print(json.dumps({"schema": "session-controller/v1", "phase": state["phase"]}))
+        payload = {"schema": "session-controller/v1", "phase": state["phase"]}
+        if "permission_phase" in state:
+            payload["permission_phase"] = state["permission_phase"]
+        print(json.dumps(payload))
         return 0
     except Exception as error:
         # Sole terminal privacy boundary: never print arbitrary exception contents.
