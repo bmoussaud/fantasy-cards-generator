@@ -1,5 +1,10 @@
 # Secret adoption observations
 
+> For the local-preparation runbook that drives an actual (private, dev-only)
+> rotation drill and consumes these events as evidence, see
+> [`session-rotation.md`](session-rotation.md). That drill has not been run
+> live; only its harness/controller/inventory logic has been locally tested.
+
 `secret.rotation_observation` is a content-free log event, not an authentication
 probe or a public diagnostic endpoint. Each successful Azure provider refresh
 emits an observation, including unchanged versions. Initial lifespan preload and
