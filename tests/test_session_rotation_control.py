@@ -295,19 +295,24 @@ def test_concurrent_invocation_blocks_second_controller(
 
 def test_unexpected_exception_is_redacted(control, run_id, monkeypatch, capsys):
     secret_value = "super-secret-key-value-should-never-print"  # pragma: allowlist secret
+    calls = []
 
-    def leaky_azure(_args):
+    def leaky_azure(args):
+        calls.append(args)
         raise RuntimeError(f"boom, leaked value: {secret_value}")
 
+    monkeypatch.setattr(control, "fresh_preview_context", lambda: (set(), ""))
     monkeypatch.setattr(control, "azure", leaky_azure)
     code = control.main(
         ["--subscription", control.SUBSCRIPTION, "--run-id", run_id, "session-preview"]
     )
-    out = capsys.readouterr().out
+    captured = capsys.readouterr()
 
     assert code == 1
-    assert secret_value not in out
-    payload = json.loads(out)
+    assert len(calls) == 1
+    assert "what-if" in calls[0]
+    assert secret_value not in captured.out + captured.err
+    payload = json.loads(captured.out)
     assert payload["status"] == "controller_failed"
 
 
