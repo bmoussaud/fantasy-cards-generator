@@ -1,6 +1,7 @@
 """Dev-only external controller. Azure mutation and value access are separate boundaries."""
 
 import argparse
+import base64
 import fcntl
 import hashlib
 import importlib.util
@@ -10,7 +11,6 @@ import os
 import pty
 import re
 import select
-import shlex
 import subprocess
 import sys
 import time
@@ -42,8 +42,12 @@ VAULT = PREFIX + "Microsoft.KeyVault/vaults/kvfcagdevqhg3qc4rlbt4g"
 SECRET_ID = VAULT + "/secrets/app-session-secret-key"
 IMAGE = (
     "fcagdevqhg3qc4rlbt4gacr.azurecr.io/fantasy-cards-generator/web-nat-dev"
-    "@sha256:53c95a2d0457516d715df8e2e78d996afde9124016d2f5b6381bbf0f07f7dfeb"
+    "@sha256:bb7c5c4e49b9f3860d0f5aca5ccf2ff66e43921f512726551de7fc8c60ee8a11"
 )
+IMAGE_REGISTRY, IMAGE_REMAINDER = IMAGE.split("/", 1)
+IMAGE_REPOSITORY, IMAGE_DIGEST = IMAGE_REMAINDER.split("@", 1)
+ACR_NAME = IMAGE_REGISTRY.split(".", 1)[0]
+AZD_TAG = re.compile(r"azd-deploy-[1-9][0-9]*")
 ARM_NAMESPACE = UUID("11fb06fb-712d-4ddd-98c7-e71bbd588830")
 ROLE = (
     PREFIX
@@ -305,6 +309,63 @@ def preview(run_id, expected):
     return {"creates": 5, "modifies": 0, "deletes": 0, "diagnostics": 0}
 
 
+def app_image(image, revision_created):
+    if image == IMAGE:
+        return {"reference": image, "digest": IMAGE_DIGEST, "kind": "digest"}
+    require(isinstance(image, str), "worker_image_or_command_drift")
+    match = re.fullmatch(r"([^/]+)/([^@:]+(?:/[^@:]+)*):([^/:@]+)", image)
+    require(bool(match), "worker_image_or_command_drift")
+    registry, repository, tag = match.groups()
+    require(
+        registry == IMAGE_REGISTRY
+        and repository == IMAGE_REPOSITORY
+        and bool(AZD_TAG.fullmatch(tag)),
+        "worker_image_or_command_drift",
+    )
+    result = azure(
+        [
+            "acr",
+            "repository",
+            "show-tags",
+            "--name",
+            ACR_NAME,
+            "--repository",
+            IMAGE_REPOSITORY,
+            "--detail",
+            "--query",
+            (
+                f"[?name=='{tag}'].{{name:name,digest:digest,createdTime:createdTime,"
+                "lastUpdateTime:lastUpdateTime,changeableAttributes:changeableAttributes}"
+            ),
+        ]
+    )
+    require(isinstance(result, list) and len(result) == 1, "worker_image_metadata_invalid")
+    item = result[0]
+    require(
+        isinstance(item, dict)
+        and item.get("name") == tag
+        and item.get("digest") == IMAGE_DIGEST
+        and item.get("changeableAttributes")
+        == {
+            "deleteEnabled": False,
+            "listEnabled": True,
+            "readEnabled": True,
+            "writeEnabled": False,
+        },
+        "worker_image_or_command_drift",
+    )
+    created = date(item.get("createdTime"))
+    updated = date(item.get("lastUpdateTime"))
+    require(created <= updated <= revision_created, "worker_image_or_command_drift")
+    return {
+        "reference": image,
+        "digest": item["digest"],
+        "kind": "locked_azd_tag",
+        "tag_created": harness.stamp(created),
+        "tag_locked": harness.stamp(updated),
+    }
+
+
 def app_config():
     # Project env names + secret references, not general values or secret configuration.
     result = azure(
@@ -323,15 +384,16 @@ def app_config():
             "containers:properties.template.containers[].{name:name,image:image,command:command,args:args,"
             "env:env[].{name:name,secretRef:secretRef},"
             "settings:env[?name=='SESSION_SIGNING_KEY_OVERLAP_SECONDS' || "
-            "name=='KEY_VAULT_PROVIDER_BACKEND' || name=='AGENT_GENERATION_ENABLED' || "
+            "name=='SECRET_PROVIDER_BACKEND' || name=='AGENT_GENERATION_ENABLED' || "
             "name=='WEB_CONCURRENCY'].{name:name,value:value}},scale:properties.template.scale}",
         ]
     )
     require(
-        result["provision"] == "Succeeded"
-        and result["running"] == "Running"
-        and result["revision"] == result["latest"]
-        and result["mode"] == "Single",
+        isinstance(result, dict)
+        and result.get("provision") == "Succeeded"
+        and result.get("running") == "Running"
+        and result.get("revision") == result.get("latest")
+        and result.get("mode") == "Single",
         "app_not_stable",
     )
     safe_id(result["revision"])
@@ -343,24 +405,68 @@ def app_config():
     require(len(containers) == 1, "container_count_unknown")
     container = containers[0]
     safe_id(container["name"])
+    revision = azure(
+        [
+            "containerapp",
+            "revision",
+            "show",
+            "-g",
+            GROUP,
+            "-n",
+            APP,
+            "--revision",
+            result["revision"],
+            "--query",
+            "{name:name,created:properties.createdTime,active:properties.active,"
+            "health:properties.healthState,provision:properties.provisioningState,"
+            "containers:properties.template.containers[]."
+            "{name:name,image:image,command:command,args:args}}",
+        ]
+    )
     require(
-        container["image"] == IMAGE and not container["command"] and not container["args"],
+        isinstance(revision, dict)
+        and revision.get("name") == result["revision"]
+        and revision.get("active") is True
+        and revision.get("health") == "Healthy"
+        and revision.get("provision") == "Provisioned"
+        and revision.get("containers")
+        == [
+            {
+                "name": container["name"],
+                "image": container["image"],
+                "command": container["command"],
+                "args": container["args"],
+            }
+        ],
+        "revision_configuration_drift",
+    )
+    revision_created = date(revision.get("created"))
+    require(
+        not container["command"] and not container["args"],
         "worker_image_or_command_drift",
     )
+    image = app_image(container["image"], revision_created)
     settings = {v["name"]: v["value"] for v in container["settings"]}
-    require(settings.get("KEY_VAULT_PROVIDER_BACKEND") == "azure", "provider_not_azure")
+    require(settings.get("SECRET_PROVIDER_BACKEND") == "azure", "provider_not_azure")
     require(
         settings.get("SESSION_SIGNING_KEY_OVERLAP_SECONDS", "3600") == "3600", "overlap_not_3600"
     )
     require("WEB_CONCURRENCY" not in settings, "worker_count_unknown")
-    require(settings.get("AGENT_GENERATION_ENABLED") in ("true", "false"), "agent_flag_unknown")
+    agent_flag = settings.get("AGENT_GENERATION_ENABLED")
+    require(
+        isinstance(agent_flag, str) and agent_flag.casefold() in ("true", "false"),
+        "agent_flag_unknown",
+    )
     # Persist only a fingerprint of configuration, plus needed safe identifiers.
-    fingerprint = hashlib.sha256(json.dumps(result, sort_keys=True).encode()).hexdigest()
+    fingerprint = hashlib.sha256(
+        json.dumps({"app": result, "revision": revision, "image": image}, sort_keys=True).encode()
+    ).hexdigest()
     return {
         "fingerprint": fingerprint,
         "revision": result["revision"],
         "container": container["name"],
         "host": result["fqdn"],
+        "image": image,
     }
 
 
@@ -368,7 +474,13 @@ def process_inventory(revision, replica, container):
     for value in (revision, replica, container):
         safe_id(value)
     source = (ROOT / "scripts/session_rotation/process_inventory.py").read_text()
-    command = "/app/.venv/bin/python -I -c " + shlex.quote(source)
+    encoded = base64.b64encode(source.encode("utf-8")).decode("ascii")
+    command = (
+        "/app/.venv/bin/python -I -c "
+        + "\"import base64;exec(base64.b64decode('"
+        + encoded
+        + "'))\""
+    )
     args = [
         "az",
         "containerapp",
@@ -392,7 +504,11 @@ def process_inventory(revision, replica, container):
     master, slave = pty.openpty()
     process = None
     data = bytearray()
-    started = now()
+    connected_at = None
+    connected_line = (
+        f"INFO: Successfully connected to container: '{container}'. "
+        f"[ Revision: '{revision}', Replica: '{replica}']."
+    ).encode()
     deadline = time.monotonic() + 20
     try:
         process = subprocess.Popen(args, stdin=slave, stdout=slave, stderr=slave)
@@ -401,6 +517,7 @@ def process_inventory(revision, replica, container):
         while time.monotonic() < deadline:
             ready, _, _ = select.select([master], [], [], 0.25)
             if ready:
+                received_at = now()
                 try:
                     chunk = os.read(master, 4096)
                 except OSError:
@@ -409,6 +526,8 @@ def process_inventory(revision, replica, container):
                     break
                 data.extend(chunk)
                 require(len(data) <= 65536, "process_inventory_output_limit")
+                if connected_at is None and connected_line in data.replace(b"\r", b""):
+                    connected_at = received_at
             if process.poll() is not None and not ready:
                 break
         require(process.poll() == 0, "process_inventory_failed")
@@ -441,10 +560,13 @@ def process_inventory(revision, replica, container):
         "process_inventory_invalid",
     )
     measured = date(result["at"])
-    # Request brackets prove a conservative bound; a slow exec is not clock evidence.
+    # Only remote-command exchange, not websocket setup, consumes the clock margin.
     ended = now()
     require(
-        (ended - started).total_seconds() <= MARGIN and started <= measured <= ended,
+        connected_at is not None
+        and (ended - connected_at).total_seconds() <= MARGIN
+        and connected_at - timedelta(seconds=MARGIN) <= measured
+        and measured <= ended + timedelta(seconds=MARGIN),
         "worker_clock_bound_unproved",
     )
     return worker
@@ -574,6 +696,12 @@ def observations(revision):
     )
     valid = []
     for row in rows:
+        observed_at = row.get("observed_at")
+        if isinstance(observed_at, str) and re.fullmatch(
+            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}0Z",
+            observed_at,
+        ):
+            row = {**row, "observed_at": observed_at[:-2] + "Z"}
         item = validate_envelope(row)
         require(item is not None, "observation_invalid")
         require(

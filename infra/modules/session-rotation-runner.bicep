@@ -14,7 +14,7 @@ param sessionExpectedHash string
 param devScopeGuard int = resourceGroup().name == 'rg-fcag-dev' && subscription().subscriptionId == 'b8ff3e15-7e2d-4fac-a773-992fb59ccedd' ? 1 : 0
 
 var jobName = 'fcag-${environmentName}-session-rotation'
-var image = 'fcagdevqhg3qc4rlbt4gacr.azurecr.io/fantasy-cards-generator/web-nat-dev@sha256:53c95a2d0457516d715df8e2e78d996afde9124016d2f5b6381bbf0f07f7dfeb'
+var image = 'fcagdevqhg3qc4rlbt4gacr.azurecr.io/fantasy-cards-generator/web-nat-dev@sha256:bb7c5c4e49b9f3860d0f5aca5ccf2ff66e43921f512726551de7fc8c60ee8a11'
 var acrPullRoleId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')
 
 resource environment 'Microsoft.App/managedEnvironments@2024-03-01' existing = {

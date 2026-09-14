@@ -1322,6 +1322,55 @@ def test_deploy_script_plan_only_by_default(action: str) -> None:
     assert "PLAN ONLY" in result.stdout
 
 
+def test_pinned_web_deploy_requires_explicit_dev_subscription() -> None:
+    result = subprocess.run(
+        ["bash", str(REPO_ROOT / "deploy.sh"), "web-pinned"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 2
+    assert "explicit --environment dev and --subscription" in result.stderr
+
+
+def test_pinned_web_deploy_is_fixed_digest_and_double_gated() -> None:
+    script = (REPO_ROOT / "scripts/pinned_web_image.py").read_text()
+    control = (REPO_ROOT / "scripts/session_rotation/control.py").read_text()
+    runner = (REPO_ROOT / "infra/modules/session-rotation-runner.bicep").read_text()
+    digest = "sha256:bb7c5c4e49b9f3860d0f5aca5ccf2ff66e43921f512726551de7fc8c60ee8a11"
+
+    assert f'TARGET_DIGEST = "{digest}"' in script
+    assert f"@{digest}" in control
+    assert f"@{digest}" in runner
+    assert 'method="PATCH"' in script
+    assert "url=APP_URL" in script
+    assert '"properties": {"template": {"containers": desired_containers(snapshot)}}' in script
+    assert '"configuration_transmitted": False' in script
+    assert '"maxInactiveRevisions"' in script
+    assert "bag_keys(secret)" in script
+    assert "bag_keys(environment)" in script
+    assert "ACR_PULL_ID = (" in script
+    assert "read_response=False" in script
+    assert "listSecrets" not in script
+    assert '"az",\n            "rest"' not in script
+    assert "--from-package" not in script
+    assert '["azd"' not in script
+    assert '"azd",' not in script
+    assert "args.approve_change and args.reviewed" in script
+    assert "azd-service-name" in script
+    assert "reviewed_fingerprint_required" in script
+    assert "concurrent_drift_before_patch" in script
+    assert "provision" not in script.split("def main", 1)[1].casefold()
+
+
+def test_pinned_web_deploy_rejects_wrong_or_rollback_digest_contract() -> None:
+    script = (REPO_ROOT / "scripts/pinned_web_image.py").read_text()
+    wrong = "sha256:" + "0" * 64
+
+    assert f'TARGET_DIGEST = "{wrong}"' not in script
+    assert "ROLLBACK_DIGEST" not in script
+    assert "rollback_candidate" not in script
+
+
 def test_deploy_script_rejects_prod_without_approve_prod() -> None:
     """Production deployments require --approve-prod after separate review."""
     result = subprocess.run(

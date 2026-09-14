@@ -128,12 +128,27 @@ Or via the root orchestrator with approval gates:
 Both services can be deployed independently from the repository root:
 
 - `azd deploy web-nat` — redeploys the web Container App only.
+- `./deploy.sh web-pinned-preview --environment dev --subscription <id>` —
+  read-only validation for the reviewed dev image digest.
+- `./deploy.sh web-pinned --environment dev --subscription <id> --reviewed
+  --expect-fingerprint <hash> --approve-change` — applies a JSON Merge Patch
+  containing only the required unchanged location and the existing containers
+  array with one image edit (service-generated read-only ephemeral storage is
+  omitted). Read-only preflight uses direct authenticated HTTPS: Azure Resource
+  Graph performs server-side projections of the complete 2025-01-01
+  configuration metadata and a secret-free environment inventory, then the
+  exact guarded revision supplies the versioned template. Unknown schema fields
+  fail closed. The fixed ACR and pull-identity ARM IDs are validated
+  case-insensitively. It does not issue a Container App GET, transmit Container
+  App configuration, read a PATCH response body, call `listSecrets`, build,
+  push, provision, roll back, restart, or invoke shared hooks.
 - `azd deploy card-orchestrator` — builds, pushes, and registers the hosted
   agent only after `CARD_ORCHESTRATOR_ENABLE_PREREQUISITES=true`; otherwise the
   service lifecycle hooks fail closed before package/publish/deploy.
 
 Do not use bare `azd deploy` with this manifest. Supported entrypoints are
-`./deploy.sh {web|agent|full|provision|preview}` and fully targeted
+`./deploy.sh {web|web-pinned-preview|web-pinned|agent|full|provision|preview}`
+and fully targeted
 `azd deploy <service-name>` commands.
 
 ### Agent opt-in variables

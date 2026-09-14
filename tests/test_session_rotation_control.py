@@ -340,6 +340,185 @@ def test_state_save_is_private_and_not_world_readable(control, run_id):
 
 
 # ---------------------------------------------------------------------------
+# app_config(): exact deployed revision and image-identity validation
+# ---------------------------------------------------------------------------
+
+
+def _app_show(control, image=None, agent_flag="True"):
+    return {
+        "revision": "rev0",
+        "latest": "rev0",
+        "mode": "Single",
+        "fqdn": "fcag-dev-app.example.azurecontainerapps.io",
+        "traffic": [{"latestRevision": True, "weight": 100}],
+        "provision": "Succeeded",
+        "running": "Running",
+        "containers": [
+            {
+                "name": "web",
+                "image": image or control.IMAGE,
+                "command": None,
+                "args": None,
+                "env": [],
+                "settings": [
+                    {"name": "SECRET_PROVIDER_BACKEND", "value": "azure"},
+                    {"name": "AGENT_GENERATION_ENABLED", "value": agent_flag},
+                ],
+            }
+        ],
+        "scale": {"minReplicas": 1, "maxReplicas": 2},
+    }
+
+
+def _revision_show(control, image=None):
+    return {
+        "name": "rev0",
+        "created": "2026-09-11T12:41:36Z",
+        "active": True,
+        "health": "Healthy",
+        "provision": "Provisioned",
+        "containers": [
+            {
+                "name": "web",
+                "image": image or control.IMAGE,
+                "command": None,
+                "args": None,
+            }
+        ],
+    }
+
+
+def _locked_tag(control, tag="azd-deploy-1789130475", **overrides):
+    item = {
+        "name": tag,
+        "digest": control.IMAGE_DIGEST,
+        "createdTime": "2026-09-11T12:40:00Z",
+        "lastUpdateTime": "2026-09-11T12:40:30Z",
+        "changeableAttributes": {
+            "deleteEnabled": False,
+            "listEnabled": True,
+            "readEnabled": True,
+            "writeEnabled": False,
+        },
+    }
+    item.update(overrides)
+    return [item]
+
+
+def _wire_app_config(control, monkeypatch, image, metadata=None):
+    app = _app_show(control, image)
+    revision = _revision_show(control, image)
+    calls = []
+
+    def fake_azure(args):
+        calls.append(args)
+        if args[:2] == ["containerapp", "show"]:
+            return app
+        if args[:3] == ["containerapp", "revision", "show"]:
+            return revision
+        if args[:3] == ["acr", "repository", "show-tags"]:
+            return metadata
+        raise AssertionError(args)
+
+    monkeypatch.setattr(control, "azure", fake_azure)
+    return calls
+
+
+def test_app_config_accepts_exact_digest_and_azure_boolean_casing(control, monkeypatch):
+    calls = _wire_app_config(control, monkeypatch, control.IMAGE)
+    config = control.app_config()
+    assert config["revision"] == "rev0"
+    assert config["container"] == "web"
+    assert config["image"] == {
+        "reference": control.IMAGE,
+        "digest": control.IMAGE_DIGEST,
+        "kind": "digest",
+    }
+    assert not any(args[:3] == ["acr", "repository", "show-tags"] for args in calls)
+
+
+def test_app_config_accepts_locked_azd_tag_backed_by_expected_digest(control, monkeypatch):
+    image = control.IMAGE_REGISTRY + "/" + control.IMAGE_REPOSITORY + ":azd-deploy-1789130475"
+    calls = _wire_app_config(control, monkeypatch, image, _locked_tag(control))
+    config = control.app_config()
+    assert config["image"]["kind"] == "locked_azd_tag"
+    assert config["image"]["digest"] == control.IMAGE_DIGEST
+    acr_call = next(args for args in calls if args[:3] == ["acr", "repository", "show-tags"])
+    query = acr_call[acr_call.index("--query") + 1]
+    assert query.endswith("changeableAttributes:changeableAttributes}")
+
+
+@pytest.mark.parametrize(
+    "image",
+    [
+        "other.azurecr.io/fantasy-cards-generator/web-nat-dev:azd-deploy-1789130475",
+        "fcagdevqhg3qc4rlbt4gacr.azurecr.io/other/web:azd-deploy-1789130475",
+        "fcagdevqhg3qc4rlbt4gacr.azurecr.io/fantasy-cards-generator/web-nat-dev:latest",
+    ],
+)
+def test_app_config_rejects_wrong_registry_repository_or_tag(control, monkeypatch, image):
+    calls = _wire_app_config(control, monkeypatch, image)
+    with pytest.raises(control.ControlError) as excinfo:
+        control.app_config()
+    assert excinfo.value.args[0] == "worker_image_or_command_drift"
+    assert not any(args[:3] == ["acr", "repository", "show-tags"] for args in calls)
+
+
+@pytest.mark.parametrize(
+    "digest",
+    [
+        "sha256:" + "0" * 64,
+        "sha256:53c95a2d0457516d715df8e2e78d996afde9124016d2f5b6381bbf0f07f7dfeb",
+    ],
+)
+def test_app_config_rejects_azd_tag_with_wrong_digest(control, monkeypatch, digest):
+    image = control.IMAGE_REGISTRY + "/" + control.IMAGE_REPOSITORY + ":azd-deploy-1789130475"
+    metadata = _locked_tag(control, digest=digest)
+    _wire_app_config(control, monkeypatch, image, metadata)
+    with pytest.raises(control.ControlError) as excinfo:
+        control.app_config()
+    assert excinfo.value.args[0] == "worker_image_or_command_drift"
+
+
+@pytest.mark.parametrize("metadata", [None, {}, [], [{}, {}], [{"name": "wrong"}]])
+def test_app_config_rejects_malformed_acr_tag_response(control, monkeypatch, metadata):
+    image = control.IMAGE_REGISTRY + "/" + control.IMAGE_REPOSITORY + ":azd-deploy-1789130475"
+    _wire_app_config(control, monkeypatch, image, metadata)
+    with pytest.raises(control.ControlError) as excinfo:
+        control.app_config()
+    assert excinfo.value.args[0] in {
+        "worker_image_metadata_invalid",
+        "worker_image_or_command_drift",
+    }
+
+
+def test_app_config_rejects_mutable_tag_even_with_expected_digest(control, monkeypatch):
+    image = control.IMAGE_REGISTRY + "/" + control.IMAGE_REPOSITORY + ":azd-deploy-1789130475"
+    metadata = _locked_tag(
+        control,
+        changeableAttributes={
+            "deleteEnabled": True,
+            "listEnabled": True,
+            "readEnabled": True,
+            "writeEnabled": True,
+        },
+    )
+    _wire_app_config(control, monkeypatch, image, metadata)
+    with pytest.raises(control.ControlError) as excinfo:
+        control.app_config()
+    assert excinfo.value.args[0] == "worker_image_or_command_drift"
+
+
+def test_app_config_rejects_tag_locked_after_revision_creation(control, monkeypatch):
+    image = control.IMAGE_REGISTRY + "/" + control.IMAGE_REPOSITORY + ":azd-deploy-1789130475"
+    metadata = _locked_tag(control, lastUpdateTime="2026-09-11T12:42:00Z")
+    _wire_app_config(control, monkeypatch, image, metadata)
+    with pytest.raises(control.ControlError) as excinfo:
+        control.app_config()
+    assert excinfo.value.args[0] == "worker_image_or_command_drift"
+
+
+# ---------------------------------------------------------------------------
 # validate_role / validate_assignments: drift and unknown-permission detection
 # ---------------------------------------------------------------------------
 
@@ -1418,18 +1597,29 @@ class _FakeProcess:
         pass
 
 
-def _fake_popen(output: bytes | None = None, returncode: int = 0, payload_factory=None):
+def _fake_popen(
+    output: bytes | None = None, returncode: int = 0, payload_factory=None, args_sink=None
+):
     """`payload_factory`, when given, is called at Popen-invocation time (i.e. after
     process_inventory()'s own `started = now()`) so the emitted `at` timestamp is
     always genuinely inside the real started..ended bracket -- not stamped before
     the call even begins."""
 
     def _popen(args, stdin=None, stdout=None, stderr=None):
+        if args_sink is not None:
+            args_sink.append(args)
         body = output
         if payload_factory is not None:
             payload = payload_factory()
             body = b"SESSION_PROCESS_INVENTORY=" + json.dumps(payload).encode() + b"\n"
-        os.write(stdout, body)
+        revision = args[args.index("--revision") + 1]
+        replica = args[args.index("--replica") + 1]
+        container = args[args.index("--container") + 1]
+        connected = (
+            f"INFO: Successfully connected to container: '{container}'. "
+            f"[ Revision: '{revision}', Replica: '{replica}'].\r\n"
+        ).encode()
+        os.write(stdout, connected + body)
         return _FakeProcess(returncode)
 
     return _popen
@@ -1521,13 +1711,70 @@ def test_process_inventory_rejects_clock_bound_violation(control, monkeypatch):
 
 
 def test_process_inventory_accepts_healthy_worker(control, monkeypatch):
+    calls = []
     monkeypatch.setattr(
         control.subprocess,
         "Popen",
-        _fake_popen(payload_factory=lambda: _inventory_payload(control)),
+        _fake_popen(payload_factory=lambda: _inventory_payload(control), args_sink=calls),
     )
     worker = control.process_inventory("rev0", "replica-0", "web-nat-dev")
     assert worker == {"pid": 4242, "start_ticks": 100}
+    command = calls[0][calls[0].index("--command") + 1]
+    assert command.startswith('/app/.venv/bin/python -I -c "import base64;exec(')
+    assert "SESSION_PROCESS_INVENTORY" not in command
+
+
+# ---------------------------------------------------------------------------
+# observations(): Kusto timestamp rendering and envelope validation
+# ---------------------------------------------------------------------------
+
+
+def _observation_row(**overrides):
+    row = {
+        "event": "secret.rotation_observation",
+        "schema_version": 1,
+        "observed_at": "2026-09-14T07:33:07.884383Z",
+        "sequence": 1,
+        "pid": 10,
+        "incarnation": "d63edabb1e1944e4bb0419000819011f",
+        "revision": "rev0",
+        "replica": "replica-0",
+        "logical_secret": "session",
+        "source": "azure",
+        "stage": "provider",
+        "result": "unchanged",
+        "version_hash": "1" * 12,
+        "error_category": "none",
+    }
+    row.update(overrides)
+    return row
+
+
+def test_observations_accepts_kusto_seven_digit_timestamp(control, monkeypatch):
+    monkeypatch.setattr(
+        control,
+        "query_logs",
+        lambda query: [_observation_row(observed_at="2026-09-14T07:33:07.8843830Z")],
+    )
+    rows = control.observations("rev0")
+    assert rows[0]["observed_at"] == "2026-09-14T07:33:07.884383Z"
+
+
+@pytest.mark.parametrize(
+    "observed_at",
+    [
+        "2026-09-14T07:33:07.8843831Z",
+        "2026-09-14T07:33:07.88438Z",
+        "2026-09-14T07:33:07Z",
+    ],
+)
+def test_observations_rejects_other_timestamp_shapes(control, monkeypatch, observed_at):
+    monkeypatch.setattr(
+        control, "query_logs", lambda query: [_observation_row(observed_at=observed_at)]
+    )
+    with pytest.raises(control.ControlError) as excinfo:
+        control.observations("rev0")
+    assert excinfo.value.args[0] == "observation_invalid"
 
 
 # ---------------------------------------------------------------------------

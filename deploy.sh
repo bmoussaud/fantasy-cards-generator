@@ -15,6 +15,8 @@
 #   ./deploy.sh full --approve-change                          # Execute full deploy (dev)
 #   ./deploy.sh provision --approve-change                     # Execute provision (dev)
 #   ./deploy.sh preview                                        # Provision preview (always safe)
+#   ./deploy.sh web-pinned-preview --environment dev --subscription ID
+#   ./deploy.sh web-pinned --environment dev --subscription ID --expect-fingerprint HASH --approve-change --reviewed
 #   ./deploy.sh web --environment prod --approve-change --approve-prod
 set -euo pipefail
 
@@ -26,8 +28,10 @@ shift || true
 ENVIRONMENT="dev"
 APPROVE_CHANGE=false
 APPROVE_PROD=false
+REVIEWED=false
 ENVIRONMENT_EXPLICIT=false
 SUBSCRIPTION=""
+EXPECT_FINGERPRINT=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -48,6 +52,14 @@ while [[ $# -gt 0 ]]; do
             APPROVE_PROD=true
             shift
             ;;
+        --reviewed)
+            REVIEWED=true
+            shift
+            ;;
+        --expect-fingerprint)
+            EXPECT_FINGERPRINT="${2:-}"
+            shift 2
+            ;;
         *)
             echo "ERROR: Unknown option: $1" >&2
             exit 2
@@ -56,7 +68,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$ACTION" in
-    web|agent|full|provision|preview|runner-preview|runner-provision|runner-start) ;;
+    web|agent|full|provision|preview|runner-preview|runner-provision|runner-start|web-pinned-preview|web-pinned) ;;
     *)
         echo "Usage: $0 {web|agent|full|provision|preview} [OPTIONS]" >&2
         echo "" >&2
@@ -67,15 +79,40 @@ case "$ACTION" in
         echo "  provision  Provision shared infrastructure" >&2
         echo "  preview    Provision preview (safe, no mutations)" >&2
         echo "  runner-preview|runner-provision|runner-start  Isolated dev metadata runner" >&2
+        echo "  web-pinned-preview|web-pinned  Reviewed immutable dev web image" >&2
         echo "" >&2
         echo "Options:" >&2
         echo "  --environment dev|prod  Target environment (default: dev)" >&2
         echo "  --approve-change        Required for all mutations" >&2
         echo "  --approve-prod          Required for prod (after separate review)" >&2
-        echo "  --subscription ID       Required for runner commands only" >&2
+        echo "  --subscription ID       Required for runner and pinned web commands" >&2
+        echo "  --reviewed              Required with --approve-change for web-pinned" >&2
+        echo "  --expect-fingerprint H  Required reviewed baseline for web-pinned mutation" >&2
         exit 2
         ;;
 esac
+
+# This deployment-only path never provisions, builds, pushes, or invokes shared hooks.
+if [[ "$ACTION" == web-pinned* ]]; then
+    if [[ "$ENVIRONMENT_EXPLICIT" != true || "$ENVIRONMENT" != dev || -z "$SUBSCRIPTION" ]]; then
+        echo "ERROR: Pinned web deployment requires explicit --environment dev and --subscription ID." >&2
+        exit 2
+    fi
+    PINNED_ARGS=("preview" "--subscription" "$SUBSCRIPTION")
+    if [[ "$ACTION" == "web-pinned" ]]; then
+        PINNED_ARGS[0]="deploy"
+    fi
+    if [[ "$APPROVE_CHANGE" == true ]]; then
+        PINNED_ARGS+=("--approve-change")
+    fi
+    if [[ "$REVIEWED" == true ]]; then
+        PINNED_ARGS+=("--reviewed")
+    fi
+    if [[ -n "$EXPECT_FINGERPRINT" ]]; then
+        PINNED_ARGS+=("--expect-fingerprint" "$EXPECT_FINGERPRINT")
+    fi
+    exec python3 "$ROOT/scripts/pinned_web_image.py" "${PINNED_ARGS[@]}"
+fi
 
 # This additive path must never enter azd's shared credential-minting hooks.
 if [[ "$ACTION" == runner-* ]]; then
@@ -91,7 +128,17 @@ if [[ "$ACTION" == runner-* ]]; then
 fi
 
 if [[ -n "$SUBSCRIPTION" ]]; then
-    echo "ERROR: --subscription is supported only by runner commands." >&2
+    echo "ERROR: --subscription is supported only by runner and pinned web commands." >&2
+    exit 2
+fi
+
+if [[ "$REVIEWED" == true ]]; then
+    echo "ERROR: --reviewed is supported only by pinned web commands." >&2
+    exit 2
+fi
+
+if [[ -n "$EXPECT_FINGERPRINT" ]]; then
+    echo "ERROR: --expect-fingerprint is supported only by pinned web commands." >&2
     exit 2
 fi
 

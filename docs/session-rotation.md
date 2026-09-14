@@ -27,9 +27,12 @@ telemetry contract it reads.
   authenticated session specifically. It never touches `ENTRA_CLIENT_SECRET`
   and never implements or tests an outage scenario. Those are separately
   authorized, unimplemented scopes.
-- It is invoked **directly**: `python scripts/session_rotation/control.py session-*`.
-  There is no `azd`/`azure.yaml`/`deploy.sh`/`infra/main.bicep` wiring, and none
-  should be added without a separate decision — see "Non-wiring guarantee" below.
+- The drill is invoked **directly**:
+  `python scripts/session_rotation/control.py session-*`. Its five temporary
+  resources remain absent from `azure.yaml`, `deploy.sh`, and
+  `infra/main.bicep`. The separately reviewed `web-pinned*` root deployment
+  path changes only the existing dev app's image reference before a fresh
+  baseline; it does not provision or run the drill.
 - The actual rotation logic (`scripts/session_rotation/harness.py`) runs **only**
   inside a dedicated, single-purpose Container App Job execution, with its own
   identity that can read/write **only** the `app-session-secret-key` secret's
@@ -43,6 +46,108 @@ is passed explicitly (default `false`), and it is never referenced from
 `azure.yaml`, `deploy.sh`, or `infra/main.bicep`. This is enforced by
 `tests/test_session_rotation_control.py::test_default_deploy_flows_do_not_reference_session_rotation`
 and `::test_session_rotation_bicep_is_gated_behind_disabled_by_default_flag`.
+
+## Immutable dev app image preparation
+
+The reviewed app and runner image is:
+
+`fcagdevqhg3qc4rlbt4gacr.azurecr.io/fantasy-cards-generator/web-nat-dev@sha256:bb7c5c4e49b9f3860d0f5aca5ccf2ff66e43921f512726551de7fc8c60ee8a11`
+
+Read-only inspection proved that digest exists as a Linux/amd64 OCI image,
+contains the same tracked `app/` bytes, `pyproject.toml`, and `uv.lock` as the
+current checkout, and imports the exact harness dependencies from
+`/app/.venv`: Azure Identity, Key Vault Secrets, Azure Core requests transport,
+HTTPX, and itsdangerous. The helper validates only this approved target
+manifest. It has no rollback, restart, build, push, or mutable-tag path.
+
+Run the fail-closed read-only preflight before deployment:
+
+```sh
+./deploy.sh web-pinned-preview --environment dev \
+  --subscription b8ff3e15-7e2d-4fac-a773-992fb59ccedd
+```
+
+It validates the fixed subscription, resource group, app and ACR resource IDs,
+`azd-service-name=web-nat` tag, current revision, target manifest, expected ACR
+login server, and the fixed case-insensitive ACR-pull identity resource ID.
+It never performs a Container App GET. Instead, authenticated HTTPS requests to
+Azure Resource Graph use server-side Kusto projections, so the HTTP response
+contains only the selected metadata:
+
+- all nine mutable 2025-01-01 configuration fields, including
+  `maxInactiveRevisions`;
+- secret field names plus only `name`, `identity`, and `keyVaultUrl` metadata,
+  never `value`;
+- container/environment field names, environment-variable names, and
+  `secretRef`, never environment values.
+
+Every configuration object is checked against the published 2025-01-01 schema;
+an unknown top-level or nested field fails closed. Direct-value environment
+variables must be in the Bicep-derived non-secret allowlist, the Application
+Insights connection string must use its exact secret reference, and
+`APP_SESSION_SECRET_KEY` or `ENTRA_CLIENT_SECRET` is forbidden in the template.
+
+Only after that server-side guard is bound to the exact immutable revision name
+does the helper fetch the revision. The official
+[`ContainerAppsRevisions.json`](https://github.com/Azure/azure-rest-api-specs/blob/main/specification/app/resource-manager/Microsoft.App/ContainerApps/stable/2025-01-01/ContainerAppsRevisions.json)
+response schema contains the versioned `Template` but no non-versioned
+`Configuration` or configuration secret values. The returned environment
+metadata must exactly match the preceding projection. Tokens remain only in
+process memory; snapshots and token values are never printed or stored. Record
+the emitted `baseline_fingerprint` for the independently reviewed apply
+command.
+
+The reviewed deployment command is plan-only without both gates:
+
+```sh
+./deploy.sh web-pinned --environment dev \
+  --subscription b8ff3e15-7e2d-4fac-a773-992fb59ccedd \
+  --expect-fingerprint <baseline_fingerprint> --reviewed
+```
+
+After review, execute the same command with `--approve-change`. Its only
+mutating control-plane request is an authenticated HTTPS request whose token is
+captured in memory and never logged:
+
+```text
+PATCH https://management.azure.com/subscriptions/b8ff3e15-7e2d-4fac-a773-992fb59ccedd/resourceGroups/rg-fcag-dev/providers/Microsoft.App/containerApps/fcag-dev-app?api-version=2025-01-01
+Content-Type: application/json
+```
+
+The JSON Merge Patch body contains only the existing `location` (required by the
+API) and `properties.template.containers`. The complete current containers
+array is preserved at the JSON data-model level except for the single
+`web.image` value and omission of service-generated, read-only
+`resources.ephemeralStorage`. It does not transmit
+`properties.configuration`, identities, tags, environment IDs, scale, Dapr,
+init containers, volumes, service binds, or any other template field. It never
+calls `listSecrets`, reads an azd environment file, writes a parameter file,
+invokes an azd hook, builds or pushes an image, provisions a resource, changes
+RBAC, or changes networking. The PATCH response body is deliberately not read.
+
+Immediately before PATCH, the helper re-reads the allowlisted live snapshot and
+requires an exact match with the reviewed fingerprint. The Container Apps
+2025-01-01 response does not expose a usable ETag, so this is an optimistic
+concurrency gate rather than an atomic lock; serialize the short operator
+window. Because the request is a partial JSON Merge Patch, a concurrent change
+outside `template.containers` is neither transmitted nor overwritten. After
+PATCH, the helper polls documented transient app/revision provisioning and
+readiness states. It fails immediately on a terminal state, an unknown state,
+revision churn, wrong image, or preservation drift. Success is reported only
+when Azure exposes a different active, provisioned, running, healthy revision
+with at least one replica, the exact immutable image, `/healthz` returns 200,
+and the full preservation, configuration-metadata, and ACR metadata hashes
+still match. A failed or unproven rollout remains failed; no rollback, restart,
+secret replay, or recovery mutation is attempted.
+
+The expected blast radius is one new application revision of
+`fcag-dev-app`. Bicep remains the infrastructure source of truth. If
+post-deployment health or preservation proof fails, stop before the fresh
+baseline and separately review any recovery action; do not restart during the
+drill and do not fall back to a mutable tag.
+
+A **fresh** `session-provision` baseline must be taken only after the digest
+revision is healthy. Baseline proof before this redeployment is not reusable.
 
 ## Prerequisites and approvals
 
@@ -62,6 +167,17 @@ and `::test_session_rotation_bicep_is_gated_behind_disabled_by_default_flag`.
 4. Every mutating action requires **both** `--approve-change` and `--reviewed` on
    the command line; without both, the controller prints `PLAN ONLY: ...` and
    exits `0` without calling Azure. `session-preview` never requires either flag.
+
+The live app revision must also prove the same reviewed image identity as the
+digest-pinned rotation runner. An app revision that directly references the
+pinned digest is accepted. An `azd-deploy-*` tag is accepted only when ACR
+metadata resolves that exact registry/repository/tag to the pinned digest, the
+tag has read/list enabled and write/delete disabled, and the tag's last update
+(including its lock) predates the Container App revision creation time. Wrong
+registries, repositories, tags, digests, mutable tags, late locks, and malformed
+ACR responses all fail closed as `worker_image_or_command_drift` or
+`worker_image_metadata_invalid`; the current tag-to-digest mapping alone is
+never treated as proof of what a running replica pulled.
 
 ## Exact command sequence
 
