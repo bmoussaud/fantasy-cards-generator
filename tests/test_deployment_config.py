@@ -70,6 +70,46 @@ def test_azd_service_wires_container_app_and_acr() -> None:
     assert "port: 8000" in azure_yaml
 
 
+def test_entra_user_provisioning_uses_postprovision_hook_and_is_secret_safe() -> None:
+    main_bicep = (REPO_ROOT / "infra" / "main.bicep").read_text()
+    template = (REPO_ROOT / "hooks" / "create_entra_users.sh").read_text()
+    docs = (REPO_ROOT / "docs" / "entra-user-provisioning.md").read_text()
+
+    assert (REPO_ROOT / "pics" / "paul_smith.png").is_file()
+    assert (REPO_ROOT / "pics" / "paul_smith.jpg").is_file()
+    assert (REPO_ROOT / "pics" / "jane_smith.png").is_file()
+    assert (REPO_ROOT / "pics" / "jane_smith.jpg").is_file()
+    assert "run: ./hooks/create_entra_users.sh" not in (REPO_ROOT / "azure.yaml").read_text()
+    assert 'azd env get-value AZURE_ENV_NAME' in template
+    assert "azd env get-value ENTRA_USER_INITIAL_PASSWORD" in template
+    assert "isDefault && isVerified" in template
+    assert "Paul Smith" in template
+    assert "Jane Smith" in template
+    assert "force-change-password-next-sign-in true" in template
+    assert "mktemp" in template
+    assert "sed" in template
+    assert '2>/tmp/create-entra-users.err' not in template
+    assert '2>"$error_file"' in template
+    assert "Content-Type: image/jpeg" in template
+    assert "az account get-access-token" in template
+    assert "curl --silent --show-error" in template
+    assert "--data-binary" in template
+    assert "pics/paul_smith.jpg" in template
+    assert "pics/jane_smith.jpg" in template
+    assert 'upload_photo "$paul_id" "Paul Smith" "pics/paul_smith.jpg"' in template
+    assert 'upload_photo "$jane_id" "Jane Smith" "pics/jane_smith.jpg"' in template
+    assert "module entraUser" not in main_bicep
+    assert "Microsoft.Resources/deploymentScripts" not in main_bicep
+    assert "ENTRA_USER_INITIAL_PASSWORD" in docs
+    assert "User.ReadWrite.All" in docs
+    assert "paul_smith.jpg" in docs
+    assert "jane_smith.jpg" in docs
+    assert "azd env set AZURE_ENV_NAME dev" in docs
+    assert "./hooks/create_entra_users.sh" in docs
+    assert "AZURE_ENV_NAME=dev ./hooks/create_entra_users.sh" not in docs
+    assert 'echo "$password"' not in template
+
+
 def test_bicep_exposes_azd_container_outputs_without_helloworld_image() -> None:
     main_bicep = (REPO_ROOT / "infra" / "main.bicep").read_text()
     container_apps_bicep = (REPO_ROOT / "infra" / "modules" / "container-apps.bicep").read_text()

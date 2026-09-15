@@ -6,7 +6,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.46.1.21595",
-      "templateHash": "16675126905808378303"
+      "templateHash": "7593874166618454161"
     }
   },
   "parameters": {
@@ -9198,14 +9198,6 @@
     "containerAppUrl": {
       "type": "string",
       "value": "[reference('containerApps').outputs.containerAppUrl.value]"
-    },
-    "containerAppsEnvironmentName": {
-      "type": "string",
-      "value": "[reference('containerAppsEnvironment').outputs.containerAppsEnvironmentName.value]"
-    },
-    "containerAppsEnvironmentResourceId": {
-      "type": "string",
-      "value": "[reference('containerAppsEnvironment').outputs.containerAppsEnvironmentResourceId.value]"
     },
     "cosmosAccountEndpoint": {
       "type": "string",

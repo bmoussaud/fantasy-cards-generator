@@ -95,6 +95,12 @@ See `infra/README.md` for infrastructure configuration, historical NAT cutover n
 the manual Entra redirect verification required when the replacement Container
 Apps domain changes.
 
+For the one-time dev-only Paul Smith and Jane Smith Entra user provisioning
+setup, including Graph administrator consent, PIM activation, secure password
+configuration, and the manual script flow, see
+[`docs/entra-user-provisioning.md`](docs/entra-user-provisioning.md). Do not
+commit passwords or place them in `.env` files tracked by source control.
+
 Application telemetry is disabled locally by default and enabled in Azure through
 the existing Application Insights connection-string secret. Monitoring resources,
 safe defaults, alert routing, privacy exclusions, KQL, cost controls, and rollback
