@@ -67,13 +67,13 @@
         <mxCell id="delivery" value="AZURE / DELIVERY" style="rounded=0;dashed=1;fillColor=#F0F5FA;strokeColor=#61758A;fontColor=#263B50;align=left;verticalAlign=bottom;spacing=16;fontSize=20;fontStyle=1;container=1;collapsible=0;" vertex="1" parent="1">
           <mxGeometry x="40" y="1130" width="260" height="280" as="geometry"/>
         </mxCell>
-        <mxCell id="acr" value="Container Registry&#10;azd builds / pushes web&#10;AcrPull via dedicated&#10;user-assigned identity" style="shape=label;rounded=0;fillColor=#DCE8F3;strokeColor=#61758A;fontColor=#172B4D;fontSize=17;align=center;verticalAlign=top;spacingTop=52;imageAlign=center;imageVerticalAlign=top;imageWidth=34;imageHeight=34;image=https://tomkiljo.github.io/ms-icons/icons/Azure_Public_Service_Icons/Icons/containers/10105-icon-service-Container-Registries.svg;" vertex="1" parent="delivery">
+        <mxCell id="acr" value="azd / Bicep + Registry&#10;Builds / pushes web image&#10;Copies secrets to KV + ACA&#10;AcrPull: user-assigned identity" style="shape=label;rounded=0;fillColor=#DCE8F3;strokeColor=#61758A;fontColor=#172B4D;fontSize=17;align=center;verticalAlign=top;spacingTop=52;imageAlign=center;imageVerticalAlign=top;imageWidth=34;imageHeight=34;image=https://tomkiljo.github.io/ms-icons/icons/Azure_Public_Service_Icons/Icons/containers/10105-icon-service-Container-Registries.svg;" vertex="1" parent="delivery">
           <mxGeometry x="20" y="70" width="220" height="150" as="geometry"/>
         </mxCell>
         <mxCell id="data" value="AZURE / PRIVATE SERVICES | public network access disabled" style="rounded=0;dashed=1;fillColor=#EFF8F0;strokeColor=#4C8A59;fontColor=#2C6337;align=left;verticalAlign=bottom;spacing=16;fontSize=20;fontStyle=1;container=1;collapsible=0;" vertex="1" parent="1">
           <mxGeometry x="400" y="1130" width="760" height="280" as="geometry"/>
         </mxCell>
-        <mxCell id="vault" value="Key Vault&#10;Session + OIDC secrets&#10;Secrets User (runtime)" style="shape=label;rounded=0;fillColor=#DBEEDC;strokeColor=#4C8A59;fontColor=#213E27;fontSize=17;align=center;verticalAlign=top;spacingTop=52;imageAlign=center;imageVerticalAlign=top;imageWidth=34;imageHeight=34;image=https://tomkiljo.github.io/ms-icons/icons/Azure_Public_Service_Icons/Icons/security/10245-icon-service-Key-Vaults.svg;" vertex="1" parent="data">
+        <mxCell id="vault" value="Key Vault&#10;Durable secret storage&#10;Deploy-time copy to ACA&#10;Static env via secretRefs" style="shape=label;rounded=0;fillColor=#DBEEDC;strokeColor=#4C8A59;fontColor=#213E27;fontSize=17;align=center;verticalAlign=top;spacingTop=52;imageAlign=center;imageVerticalAlign=top;imageWidth=34;imageHeight=34;image=https://tomkiljo.github.io/ms-icons/icons/Azure_Public_Service_Icons/Icons/security/10245-icon-service-Key-Vaults.svg;" vertex="1" parent="data">
           <mxGeometry x="20" y="70" width="210" height="140" as="geometry"/>
         </mxCell>
         <mxCell id="cosmos" value="Cosmos DB (NoSQL)&#10;Cards / photos / audits&#10;Owner-partitioned data&#10;TTL deletion audits" style="shape=label;rounded=0;fillColor=#CDE8D2;strokeColor=#4C8A59;fontColor=#213E27;fontSize=17;align=center;verticalAlign=top;spacingTop=52;imageAlign=center;imageVerticalAlign=top;imageWidth=34;imageHeight=34;image=https://tomkiljo.github.io/ms-icons/icons/Azure_Public_Service_Icons/Icons/databases/10121-icon-service-Azure-Cosmos-DB.svg;" vertex="1" parent="data">
@@ -91,7 +91,7 @@
         <mxCell id="logs" value="Log Analytics workspace&#10;ACA environment logs&#10;Workbooks / availability&#10;Alerts off by default" style="shape=label;rounded=0;fillColor=#FBECD0;strokeColor=#B38736;fontColor=#59421C;fontSize=17;align=center;verticalAlign=top;spacingTop=52;imageAlign=center;imageVerticalAlign=top;imageWidth=34;imageHeight=34;image=https://tomkiljo.github.io/ms-icons/icons/Azure_Public_Service_Icons/Icons/analytics/00009-icon-service-Log-Analytics-Workspaces.svg;" vertex="1" parent="monitoring">
           <mxGeometry x="430" y="70" width="300" height="140" as="geometry"/>
         </mxCell>
-        <mxCell id="legend" value="Solid: runtime / data access    Purple dashed: opt-in agent    Grey dashed: identity, delivery or telemetry    Arrows show calls/dependencies; responses omitted." style="text;html=0;align=left;fontSize=18;fontColor=#42526E;" vertex="1" parent="1">
+        <mxCell id="legend" value="Solid: runtime / data access    Purple dashed: opt-in agent    Grey dashed: identity, deployment or telemetry    Grey dotted (no arrow): network association. Responses omitted." style="text;html=0;align=left;fontSize=18;fontColor=#42526E;" vertex="1" parent="1">
           <mxGeometry x="40" y="1435" width="2000" height="36" as="geometry"/>
         </mxCell>
         <mxCell id="footer" value="Generation safety and persistence stay in FastAPI. Retryable agent errors / routing_defer can fall back once to direct text; auth, policy and schema failures do not." style="text;html=0;align=left;fontSize=18;fontColor=#42526E;" vertex="1" parent="1">
@@ -133,8 +133,8 @@
         <mxCell id="e-nat" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#377CB6;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="web" target="nat">
           <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="575" y="815"/></Array></mxGeometry>
         </mxCell>
-        <mxCell id="e-vault" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#4C8A59;strokeWidth=2;exitX=0.15;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="pe" target="vault">
-          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="882" y="1030"/><mxPoint x="525" y="1030"/></Array></mxGeometry>
+        <mxCell id="e-vault" value="Private endpoint (réseau)" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=none;strokeColor=#7A869A;strokeWidth=2;dashed=1;dashPattern=1 4;exitX=0.15;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;fontSize=14;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="pe" target="vault">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="882" y="1030"/><mxPoint x="525" y="1030"/></Array><mxPoint x="-25" y="-12" as="offset"/></mxGeometry>
         </mxCell>
         <mxCell id="e-cosmos" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#4C8A59;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="pe" target="cosmos">
           <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="980" y="1060"/><mxPoint x="785" y="1060"/></Array></mxGeometry>
@@ -142,8 +142,11 @@
         <mxCell id="e-blob" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#4C8A59;strokeWidth=2;exitX=0.85;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="pe" target="blob">
           <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="1078" y="1090"/><mxPoint x="1040" y="1090"/></Array></mxGeometry>
         </mxCell>
-        <mxCell id="e-pull" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#61758A;strokeWidth=2;dashed=1;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0;entryY=0.9;entryDx=0;entryDy=0;" edge="1" parent="1" source="acr" target="web">
-          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="170" y="1060"/><mxPoint x="320" y="1060"/><mxPoint x="320" y="670"/></Array></mxGeometry>
+        <mxCell id="e-pull" value="Deploy-time image + ACA native secretRefs" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#61758A;strokeWidth=2;dashed=1;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0;entryY=0.9;entryDx=0;entryDy=0;fontSize=14;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="acr" target="web">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="170" y="1060"/><mxPoint x="320" y="1060"/><mxPoint x="320" y="670"/></Array><mxPoint x="30" y="-12" as="offset"/></mxGeometry>
+        </mxCell>
+        <mxCell id="e-secret-vault" value="Bicep: deploy-time durable copy" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#61758A;strokeWidth=2;dashed=1;exitX=1;exitY=0.2;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;fontSize=14;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="acr" target="vault">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="340" y="1230"/><mxPoint x="340" y="1160"/><mxPoint x="525" y="1160"/></Array><mxPoint x="30" y="-12" as="offset"/></mxGeometry>
         </mxCell>
         <mxCell id="e-web-telemetry" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#61758A;strokeWidth=2;dashed=1;exitX=0;exitY=0.8;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="web" target="insights">
           <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="360" y="650"/><mxPoint x="360" y="1100"/><mxPoint x="1470" y="1100"/></Array></mxGeometry>

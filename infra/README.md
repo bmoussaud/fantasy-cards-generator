@@ -277,10 +277,11 @@ Provisioning grants the deployment caller only:
 These read-only deployer grants are intentionally separate from the existing
 Container App managed identity grants: Cosmos DB Built-in **Data Contributor**,
 container-scoped **Storage Blob Data Contributor** on both `card-assets` and
-`profile-photos`, account-scoped **Cognitive Services User**, and
-vault-scoped **Key Vault Secrets User** for runtime secret-value reads. The
-deployer cannot create, replace, upload, overwrite, or delete Cosmos items or
-blobs through the reader roles.
+`profile-photos`, and account-scoped **Cognitive Services User**. Authentication
+secrets are supplied through ACA-native secrets and `secretRef` environment
+variables; the runtime identity does not read secret values from Key Vault.
+The deployer cannot create, replace, upload, overwrite, or delete Cosmos items
+or blobs through the reader roles.
 
 When `ENABLE_FOUNDRY_AGENT_ACCESS=true`, provisioning also grants only the
 additional hosted-agent permissions needed for future invoke-only access:
@@ -386,14 +387,10 @@ After a live deploy, verify:
     plane allows listing secrets, keys, and certificates plus reading only their
     metadata. Also confirm representative forbidden operations stay denied:
     reading a secret value, exporting certificate private key material, key
-    crypto operations, and any create/update/delete/recover/purge action.
-    Note: the runtime Container App identity holds **Key Vault Secrets User**
-    (role ID `4633458b-17de-408a-b874-0445c86b69e6`), which grants
-    `getSecret/action` (read current secret value) **and**
-    `readMetadata/action` (list secret versions, read metadata) — no additional
-    role is needed for version enumeration. All Key Vault data-plane access
-    requires the `privatelink.vaultcore.azure.net` private endpoint path;
-    requests from outside the VNet are rejected with HTTP 403.
+    crypto operations, and any create/update/delete/recover/purge action. All
+    Key Vault data-plane access requires the
+    `privatelink.vaultcore.azure.net` private endpoint path; requests from
+    outside the VNet are rejected with HTTP 403.
 
 The key live-network assertion — ACA outbound traffic actually using the NAT
 public IP — requires an Azure deployment and cannot be proven from source alone.

@@ -8,16 +8,6 @@ param location string = resourceGroup().location
 ])
 param environmentName string
 
-@description('Opt-in dev-only metadata runner. Prefer the root runner commands for an additive deployment without shared credential hooks.')
-param enablePrivateMetadataRunner bool = false
-
-module privateMetadataRunner './modules/private-metadata-runner.bicep' = if (enablePrivateMetadataRunner && environmentName == 'dev') {
-  name: 'private-metadata-runner'
-  params: {
-    environmentName: 'dev'
-  }
-}
-
 @description('Optional tags shared by all deployed resources.')
 param tags object = {}
 
@@ -65,29 +55,6 @@ param appSessionSecretKeyValue string = ''
 @secure()
 @description('Microsoft Entra ID client secret stored in Key Vault as ENTRA_CLIENT_SECRET. Populated automatically by hooks/gen_client_secret.sh when deployEntraAppRegistration=true.')
 param entraClientSecretValue string = ''
-
-@allowed([
-  'auto'
-  'azure'
-  'env'
-])
-@description('Secret provider backend injected into the Container App runtime.')
-param keyVaultProviderBackend string = 'azure'
-
-@description('Secret-provider cache TTL in seconds injected into the Container App runtime.')
-param keyVaultCacheTtlSeconds string = '60'
-
-@description('Secret-provider request timeout in seconds injected into the Container App runtime.')
-param keyVaultRequestTimeoutSeconds string = '2'
-
-@description('Secret-provider max retries injected into the Container App runtime.')
-param keyVaultMaxRetries int = 2
-
-@description('Secret-provider retry backoff in seconds injected into the Container App runtime.')
-param keyVaultRetryBackoffSeconds string = '0.25'
-
-@description('Secret-provider max stale window in seconds injected into the Container App runtime.')
-param keyVaultMaxStaleSeconds string = '300'
 
 @description('Cosmos DB SQL database name for application data.')
 param cosmosDatabaseName string = 'appdb'
@@ -423,12 +390,6 @@ module security './modules/security.bicep' = {
   }
 }
 
-var keyVaultSecretsUserRoleDefinitionId = '4633458b-17de-408a-b874-0445c86b69e6'
-
-resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' existing = {
-  name: keyVaultName
-}
-
 module network './modules/network.bicep' = {
   name: 'network'
   params: {
@@ -492,6 +453,7 @@ module containerApps './modules/container-apps.bicep' = {
     acrPullIdentityResourceId: registry.outputs.acrPullIdentityResourceId
     aiMode: aiMode
     appInsightsConnectionString: monitoring.outputs.appInsightsConnectionString
+    appSessionSecretKeyValue: appSessionSecretKeyValue
     auditRetentionDays: auditRetentionDays
     blobContainerName: cardAssetsContainerName
     blobEndpoint: 'https://${storageAccountName}.blob.${environment().suffixes.storage}/'
@@ -506,6 +468,7 @@ module containerApps './modules/container-apps.bicep' = {
     cosmosEndpoint: 'https://${cosmosAccountName}.documents.azure.com:443/'
     deploymentEnvironment: environmentName
     entraClientId: entraClientId
+    entraClientSecretValue: entraClientSecretValue
     entraPostLogoutRedirectUri: empty(entraClientId) ? '' : deployedPostLogoutRedirectUri
     entraRedirectUri: empty(entraClientId) ? '' : deployedAuthRedirectUri
     contentSafetyApiVersion: contentSafetyApiVersion
@@ -542,12 +505,6 @@ module containerApps './modules/container-apps.bicep' = {
     savedPhotoMaxBytes: string(savedPhotoMaxBytes)
     savedPhotoMaxCount: savedPhotoMaxCount
     savedPhotoThumbnailSize: savedPhotoThumbnailSize
-    keyVaultProviderBackend: keyVaultProviderBackend
-    keyVaultCacheTtlSeconds: keyVaultCacheTtlSeconds
-    keyVaultRequestTimeoutSeconds: keyVaultRequestTimeoutSeconds
-    keyVaultMaxRetries: keyVaultMaxRetries
-    keyVaultRetryBackoffSeconds: keyVaultRetryBackoffSeconds
-    keyVaultMaxStaleSeconds: keyVaultMaxStaleSeconds
     serviceName: serviceName
     tags: tags
     telemetryEnvironmentName: telemetryEnvironmentName
@@ -557,16 +514,6 @@ module containerApps './modules/container-apps.bicep' = {
     upstreamBaseBackoffSeconds: upstreamBaseBackoffSeconds
     upstreamMaxRetries: upstreamMaxRetries
     textTimeoutSeconds: textTimeoutSeconds
-  }
-}
-
-resource containerAppKeyVaultSecretsUserRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(keyVault.id, containerAppName, keyVaultSecretsUserRoleDefinitionId)
-  scope: keyVault
-  properties: {
-    principalId: containerApps.outputs.containerAppPrincipalId
-    principalType: 'ServicePrincipal'
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', keyVaultSecretsUserRoleDefinitionId)
   }
 }
 

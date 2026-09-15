@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import secrets
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -18,13 +17,13 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
 from starlette.datastructures import UploadFile
+from starlette.middleware.sessions import SessionMiddleware
 
 from app.auth import (
     AUTH_NONCE_SESSION_KEY,
     AUTH_SESSION_KEY,
     AuthenticatedUser,
-    EntraOAuthClientManager,
-    build_auth_secret_error_response,
+    build_claims_options,
     build_logout_redirect_target,
     create_oauth_client,
     ensure_auth_configured,
@@ -50,18 +49,6 @@ from app.health import NotApplicableHealthProbe, build_healthz_payload, run_depe
 from app.library import CardLibraryService
 from app.photos import SavedPhotoListResponseModel, SavedPhotoResponseModel, SavedPhotoService
 from app.problems import ProblemDetails
-from app.secrets import (
-    AzureSecretProvider,
-    SecretProvider,
-    SecretProviderError,
-    build_secret_provider_from_environment,
-    run_secret_refresh_worker,
-)
-from app.session_middleware import (
-    RotatingSessionMiddleware,
-    load_session_cookie_settings,
-    load_session_signing_keys,
-)
 from app.settings import SettingsError, load_app_settings
 from app.telemetry import (
     enrich_request_span,
@@ -89,14 +76,8 @@ class ParsedCardGenerateRequest:
     photo_label: str | None = None
 
 
-def create_app(
-    services: AppServices | None = None,
-    *,
-    secret_provider: SecretProvider | None = None,
-) -> FastAPI:
+def create_app(services: AppServices | None = None) -> FastAPI:
     auth_settings = load_auth_settings()
-    session_cookie_settings = load_session_cookie_settings()
-    runtime_secret_provider = secret_provider or build_secret_provider_from_environment()
     app_settings = load_app_settings()
     app_services = services or create_services(app_settings)
     card_service = CardGenerationService(app_services)
@@ -120,68 +101,28 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        app.state.secret_provider = runtime_secret_provider
+        del app
         try:
-            session_keys = await load_session_signing_keys(
-                runtime_secret_provider,
-                overlap_window=session_cookie_settings.signing_key_overlap,
-            )
-            entra_configured = not auth_settings.missing_required(include_client_secret=False)
-            if session_keys.current.source == "azure" and entra_configured:
-                await app.state.entra_oauth_client_manager.get_client()
-            async with asyncio.TaskGroup() as workers:
-                tasks = []
-                if isinstance(runtime_secret_provider, AzureSecretProvider):
-                    tasks.append(
-                        workers.create_task(
-                            run_secret_refresh_worker(
-                                runtime_secret_provider, "APP_SESSION_SECRET_KEY"
-                            )
-                        )
-                    )
-                    if entra_configured:
-                        tasks.append(
-                            workers.create_task(
-                                run_secret_refresh_worker(
-                                    runtime_secret_provider,
-                                    "ENTRA_CLIENT_SECRET",
-                                    on_refresh=app.state.entra_oauth_client_manager.get_client,
-                                )
-                            )
-                        )
-                try:
-                    yield
-                finally:
-                    for task in tasks:
-                        task.cancel()
+            yield
         finally:
-            try:
-                await runtime_secret_provider.aclose()
-            finally:
-                if app_services.agent_client is not None and hasattr(
-                    app_services.agent_client, "aclose"
-                ):
-                    await app_services.agent_client.aclose()
+            if app_services.agent_client is not None and hasattr(
+                app_services.agent_client, "aclose"
+            ):
+                await app_services.agent_client.aclose()
 
     app = FastAPI(title="Fantasy Cards Generator", lifespan=lifespan)
     app.state.services = app_services
-    app.state.secret_provider = runtime_secret_provider
-    app.state.entra_oauth_client_manager = EntraOAuthClientManager(
-        settings=auth_settings,
-        secret_provider=runtime_secret_provider,
-        client_factory=lambda settings: create_oauth_client(settings),
-    )
     app.mount(
         "/static",
         StaticFiles(directory=str(Path(__file__).parent / "static")),
         name="static",
     )
     app.add_middleware(
-        RotatingSessionMiddleware,
+        SessionMiddleware,
+        secret_key=auth_settings.session_secret_key,
         session_cookie="fantasy_cards_session",
         same_site="lax",
         https_only=True,
-        signing_key_overlap=session_cookie_settings.signing_key_overlap,
     )
 
     @app.middleware("http")
@@ -238,7 +179,7 @@ def create_app(
         return {
             "request": request,
             "user": get_session_user(request),
-            "auth_configured": not auth_settings.missing_required(include_client_secret=False),
+            "auth_configured": auth_settings.is_configured,
             "csrf_token": csrf_token,
             "generate_idempotency_key": uuid4().hex,
             **context,
@@ -652,12 +593,8 @@ def create_app(
         if get_session_user(request) is not None:
             return RedirectResponse(url="/app", status_code=status.HTTP_303_SEE_OTHER)
 
-        ensure_auth_configured(auth_settings, include_client_secret=False)
-        oauth_client_manager: EntraOAuthClientManager = request.app.state.entra_oauth_client_manager
-        try:
-            oauth_client = await oauth_client_manager.get_client()
-        except SecretProviderError as exc:
-            raise build_auth_secret_error_response(exc) from exc
+        ensure_auth_configured(auth_settings)
+        oauth_client = create_oauth_client(auth_settings)
         nonce = secrets.token_urlsafe(32)
         request.session[AUTH_NONCE_SESSION_KEY] = nonce
 
@@ -669,7 +606,7 @@ def create_app(
 
     @app.get("/auth/callback")
     async def auth_callback(request: Request) -> RedirectResponse:
-        ensure_auth_configured(auth_settings, include_client_secret=False)
+        ensure_auth_configured(auth_settings)
         nonce = request.session.pop(AUTH_NONCE_SESSION_KEY, None)
         if not nonce:
             raise HTTPException(
@@ -677,10 +614,15 @@ def create_app(
                 detail="Missing login state. Start the sign-in flow again.",
             )
 
-        oauth_client_manager: EntraOAuthClientManager = request.app.state.entra_oauth_client_manager
+        oauth_client = create_oauth_client(auth_settings)
 
         try:
-            token = await oauth_client_manager.authorize_access_token(request)
+            server_metadata = await oauth_client.load_server_metadata()
+            claims_options = build_claims_options(server_metadata.get("issuer"))
+            token = await oauth_client.authorize_access_token(
+                request,
+                claims_options=claims_options,
+            )
             claims = token.get("userinfo")
             if claims is None:
                 raise RuntimeError("Authentication response did not include validated userinfo.")
@@ -690,9 +632,6 @@ def create_app(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Authentication failed: {exc.error}",
             ) from exc
-        except SecretProviderError as exc:
-            request.session.pop(AUTH_SESSION_KEY, None)
-            raise build_auth_secret_error_response(exc) from exc
         except Exception as exc:
             request.session.pop(AUTH_SESSION_KEY, None)
             safe_log(

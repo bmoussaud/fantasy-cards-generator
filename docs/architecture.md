@@ -62,10 +62,10 @@ public access path.
 
 The Container App's system-assigned identity gets Cosmos data-contributor
 access scoped to the shared container, Blob data-contributor access scoped to
-each asset container, Key Vault Secrets User at vault scope, and Cognitive
-Services User on the Foundry account. A separate user-assigned identity has
-`AcrPull`. Key Vault supplies the session-signing and Entra client secrets at
-runtime, rather than mirrored ACA-native copies.
+each asset container, and Cognitive Services User on the Foundry account. A
+separate user-assigned identity has `AcrPull`. Session-signing and Entra client
+secrets are stored as ACA-native secrets and exposed to the application through
+`secretRef` environment variables.
 
 Foundry's AI Services account and project use public endpoints and Entra tokens
 with local key authentication disabled. `enableFoundryAgentAccess` independently
@@ -85,13 +85,13 @@ The drawing omits individual RBAC resources and alert objects for readability.
 
 | Diagram surface | Authoritative repository inputs |
 | --- | --- |
-| Web, UI, auth, image proxy | `azure.yaml`, `Dockerfile`, `app/main.py`, `app/auth.py`, `app/session_middleware.py`, `app/library.py` |
+| Web, UI, auth, image proxy | `azure.yaml`, `Dockerfile`, `app/main.py`, `app/auth.py`, `app/library.py` |
 | Generation, fallback, models | `app/generation.py`, `app/foundry_agent_client.py`, `app/settings.py` |
 | Hosted Responses boundary and specialists | `hosted_agents/card_orchestrator/server.py`, `orchestrator.py`, `specialists.py`, `settings.py` in that same directory |
 | Saved photos and deletion | `app/photos.py`, `app/deletion.py` |
 | VNet, NAT, ACA environment | `infra/modules/network.bicep`, `container-apps-environment.bicep`, `container-apps.bicep` |
 | Private services and DNS | `infra/modules/cosmos-db.bicep`, `cosmos-private-endpoint.bicep`, `storage.bicep`, `security.bicep`, `keyvault-private-endpoint.bicep` |
-| Identity, Foundry account/project/model deployments | `infra/main.bicep`, `infra/modules/ai-foundry.bicep`, `container-registry.bicep`, `app/secrets.py` |
+| Identity, Foundry account/project/model deployments | `infra/main.bicep`, `infra/modules/ai-foundry.bicep`, `container-registry.bicep`, `security.bicep`, `container-apps.bicep` |
 | Observability | `app/telemetry.py`, `app/health.py`, `infra/modules/monitoring.bicep`, `operational-monitoring.bicep` |
 
 ## Maintaining the assets

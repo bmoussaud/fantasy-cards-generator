@@ -67,8 +67,8 @@ The main generation path is:
 
 Today, the backend already has strong boundaries worth preserving:
 
-- **HTTP/session/auth boundary:** `app/main.py`, `app/auth.py`, `app/session_middleware.py`
-- **runtime configuration boundary:** `app/settings.py`, `app/secrets.py`
+- **HTTP/session/auth boundary:** `app/main.py`, `app/auth.py`
+- **runtime configuration boundary:** `app/settings.py`
 - **generation orchestration boundary:** `app/generation.py`
 - **operability boundary:** `app/telemetry.py`, `app/health.py`
 - **state boundary:** Cosmos for metadata/audits and Blob for images/photos

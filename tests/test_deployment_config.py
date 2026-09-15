@@ -514,9 +514,6 @@ def test_deployer_gets_key_vault_reader_at_vault_scope() -> None:
     deployer_assignment = _bicep_block(
         security_bicep, "resource deployerKeyVaultReaderRoleAssignment"
     )
-    runtime_assignment = _bicep_block(
-        main_bicep, "resource containerAppKeyVaultSecretsUserRoleAssignment"
-    )
 
     assert main_bicep.count("deployer().objectId") == 1
     assert "param deployerPrincipalId" not in main_bicep
@@ -547,19 +544,12 @@ def test_deployer_gets_key_vault_reader_at_vault_scope() -> None:
         "keyVaultReaderRoleDefinitionId)" in deployer_assignment
     )
 
-    # Runtime secret-value access remains a separate assignment for the
-    # Container App identity.
-    assert "scope: keyVault" in runtime_assignment
-    assert "principalId: containerApps.outputs.containerAppPrincipalId" in runtime_assignment
-    assert "principalType: 'ServicePrincipal'" in runtime_assignment
-    assert "keyVaultSecretsUserRoleDefinitionId" in runtime_assignment
+    # Runtime auth values are delivered through ACA-native secrets, so the
+    # Container App identity has no Key Vault secret-value role assignment.
+    assert "containerAppKeyVaultSecretsUserRoleAssignment" not in main_bicep
+    assert "keyVaultSecretsUserRoleDefinitionId" not in main_bicep
     assert "keyVaultAccessPrincipalId" not in security_bicep
     assert "keyVaultAccessPrincipalId" not in security_module
-    assert "name: keyVaultName" in main_bicep
-    assert (
-        "guid(keyVault.id, containerAppName, keyVaultSecretsUserRoleDefinitionId)"
-        in runtime_assignment
-    )
 
 
 def test_healthz_dependency_probe_rbac_and_timeouts_are_iac_managed() -> None:
@@ -634,29 +624,23 @@ def test_container_apps_wire_key_vault_backed_auth_env_vars() -> None:
     main_bicep = (REPO_ROOT / "infra" / "main.bicep").read_text()
     main_parameters = (REPO_ROOT / "infra" / "main.parameters.json").read_text()
 
-    # APP_SESSION_SECRET_KEY and ENTRA_CLIENT_SECRET remain in Key Vault only;
-    # the Container App gets non-secret provider config instead of copied values.
-    assert "name: 'APP_SESSION_SECRET_KEY'" not in container_apps_bicep
-    assert "secretRef: 'app-session-secret-key'" not in container_apps_bicep
-    assert "name: 'ENTRA_CLIENT_SECRET'" not in container_apps_bicep
-    assert "secretRef: 'entra-client-secret'" not in container_apps_bicep
-    assert "name: 'app-session-secret-key'" not in container_apps_bicep
-    assert "name: 'entra-client-secret'" not in container_apps_bicep
-    assert "param appSessionSecretKeyValue" not in container_apps_bicep
-    assert "param entraClientSecretValue" not in container_apps_bicep
+    # Secure root parameters are mirrored into ACA-native secrets and exposed
+    # to the process only through secretRef environment variables.
+    assert "name: 'APP_SESSION_SECRET_KEY'" in container_apps_bicep
+    assert "secretRef: 'app-session-secret-key'" in container_apps_bicep
+    assert "name: 'ENTRA_CLIENT_SECRET'" in container_apps_bicep
+    assert "secretRef: 'entra-client-secret'" in container_apps_bicep
+    assert "name: 'app-session-secret-key'" in container_apps_bicep
+    assert "name: 'entra-client-secret'" in container_apps_bicep
+    assert "param appSessionSecretKeyValue" in container_apps_bicep
+    assert "param entraClientSecretValue" in container_apps_bicep
     assert "keyVaultUrl:" not in container_apps_bicep
     assert "appSessionSecretKeySecretUri" not in container_apps_bicep
     assert "entraClientSecretSecretUri" not in container_apps_bicep
 
-    assert "name: 'SECRET_PROVIDER_BACKEND'" in container_apps_bicep
-    assert "value: keyVaultProviderBackend" in container_apps_bicep
+    assert "SECRET_PROVIDER_" not in container_apps_bicep
     assert "name: 'KEY_VAULT_URI'" in container_apps_bicep
     assert "value: keyVaultUri" in container_apps_bicep
-    assert "name: 'SECRET_PROVIDER_CACHE_TTL_SECONDS'" in container_apps_bicep
-    assert "name: 'SECRET_PROVIDER_REQUEST_TIMEOUT_SECONDS'" in container_apps_bicep
-    assert "name: 'SECRET_PROVIDER_MAX_RETRIES'" in container_apps_bicep
-    assert "name: 'SECRET_PROVIDER_RETRY_BACKOFF_SECONDS'" in container_apps_bicep
-    assert "name: 'SECRET_PROVIDER_MAX_STALE_SECONDS'" in container_apps_bicep
 
     # ENTRA_CLIENT_ID is a plain env var, not a secretRef.
     assert "name: 'ENTRA_CLIENT_ID'" in container_apps_bicep
@@ -678,8 +662,7 @@ def test_container_apps_wire_key_vault_backed_auth_env_vars() -> None:
     assert "param entraClientSecretValue string = ''" in main_bicep
     assert '"value": "${APP_SESSION_SECRET_KEY=}"' in main_parameters
     assert '"value": "${ENTRA_CLIENT_SECRET=}"' in main_parameters
-    assert '"value": "${SECRET_PROVIDER_BACKEND=azure}"' in main_parameters
-    assert '"value": "${SECRET_PROVIDER_MAX_STALE_SECONDS=300}"' in main_parameters
+    assert "SECRET_PROVIDER_" not in main_parameters
 
     # Key Vault still stores the provisioned secrets.
     assert "Microsoft.KeyVault/vaults/secrets" in security_bicep
@@ -875,7 +858,7 @@ def test_blob_storage_uses_private_endpoint_for_container_app_access() -> None:
     assert "virtualNetworkResourceId: network.outputs.virtualNetworkResourceId" in main_bicep
 
 
-def test_key_vault_private_endpoint_enables_container_app_vault_access() -> None:
+def test_key_vault_private_endpoint_preserves_private_deployment_access() -> None:
     kv_pe_bicep = (REPO_ROOT / "infra" / "modules" / "keyvault-private-endpoint.bicep").read_text()
     main_bicep = (REPO_ROOT / "infra" / "main.bicep").read_text()
     security_bicep = (REPO_ROOT / "infra" / "modules" / "security.bicep").read_text()
@@ -909,8 +892,8 @@ def test_key_vault_private_endpoint_enables_container_app_vault_access() -> None
     assert "output keyVaultResourceId string" in security_bicep
     assert "publicNetworkAccess: 'Disabled'" in security_bicep
     assert "containerApps" not in root_module
-    assert "keyVaultSecretsUserRoleDefinitionId" in main_bicep
-    assert "'4633458b-17de-408a-b874-0445c86b69e6'" in main_bicep
+    assert "keyVaultSecretsUserRoleDefinitionId" not in main_bicep
+    assert "'4633458b-17de-408a-b874-0445c86b69e6'" not in main_bicep
 
 
 def test_telemetry_reuses_single_workspace_app_insights_and_secret_wiring() -> None:
@@ -1086,19 +1069,16 @@ def test_azd_yaml_wires_preprovision_session_secret_hook() -> None:
     assert "ensure_session_secret.sh" in azure_yaml
 
 
-def test_session_secret_flows_only_into_key_vault_not_container_app() -> None:
-    """Verify APP_SESSION_SECRET_KEY is provisioned only into Key Vault.
-
-    Runtime retrieval now happens through the app's managed identity, so the
-    Container App template must not keep a mirrored ACA-native secret copy.
-    """
+def test_session_secret_flows_into_key_vault_and_container_app_secret() -> None:
+    """Verify APP_SESSION_SECRET_KEY is persisted and wired through ACA secretRef."""
     container_apps_bicep = (REPO_ROOT / "infra" / "modules" / "container-apps.bicep").read_text()
     security_bicep = (REPO_ROOT / "infra" / "modules" / "security.bicep").read_text()
     main_parameters = (REPO_ROOT / "infra" / "main.parameters.json").read_text()
 
-    assert "name: 'app-session-secret-key'" not in container_apps_bicep
-    assert "name: 'APP_SESSION_SECRET_KEY'" not in container_apps_bicep
-    assert "secretRef: 'app-session-secret-key'" not in container_apps_bicep
+    assert "name: 'app-session-secret-key'" in container_apps_bicep
+    assert "value: appSessionSecretKeyValue" in container_apps_bicep
+    assert "name: 'APP_SESSION_SECRET_KEY'" in container_apps_bicep
+    assert "secretRef: 'app-session-secret-key'" in container_apps_bicep
     assert "name: 'app-session-secret-key'" in security_bicep
     assert "value: appSessionSecretKeyValue" in security_bicep
 

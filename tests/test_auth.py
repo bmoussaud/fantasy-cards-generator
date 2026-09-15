@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import json
 import time
-from base64 import b64decode
-from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from base64 import b64decode, b64encode
 from typing import Any
 from uuid import uuid4
 
@@ -20,15 +18,12 @@ from joserfc.jwk import OctKey
 from app import main as main_module
 from app.auth import (
     DEFAULT_ENTRA_AUTHORITY,
-    AuthSettings,
-    EntraOAuthClientManager,
     build_claims_options,
     build_logout_redirect_target,
     extract_user_claims,
     load_auth_settings,
 )
 from app.main import create_app
-from app.secrets import SecretValue
 from tests.conftest import TEST_OBJECT_ID, TEST_OWNER_ID, TEST_TENANT_ID, FakeOAuthClient
 
 
@@ -46,103 +41,10 @@ class FakeAsyncOpenIDClient(AsyncOpenIDMixin):
         return self._jwks
 
 
-class FakeClock:
-    def __init__(self, start: datetime | None = None) -> None:
-        self._now = start or datetime(2026, 1, 1, tzinfo=UTC)
-
-    def now(self) -> datetime:
-        return self._now
-
-    def advance(self, delta: timedelta) -> None:
-        self._now += delta
-
-
-class FakeRuntimeSecretProvider:
-    def __init__(self, secret: SecretValue) -> None:
-        self.secret = secret
-        self.calls: list[str] = []
-
-    def set_secret(self, secret: SecretValue) -> None:
-        self.secret = secret
-
-    async def get_secret(self, name: str) -> SecretValue:
-        self.calls.append(name)
-        return self.secret
-
-    async def aclose(self) -> None:
-        return None
-
-
-class RecordingOAuthClient:
-    def __init__(
-        self,
-        client_secret: str | None,
-        *,
-        authorize_results: list[dict[str, Any] | OAuthError] | None = None,
-    ) -> None:
-        self.client_secret = client_secret
-        self.authorize_calls = 0
-        self._authorize_results = list(authorize_results or [default_token_payload()])
-
-    async def load_server_metadata(self) -> dict[str, str]:
-        return {"issuer": "https://login.microsoftonline.com/{tenantid}/v2.0"}
-
-    async def authorize_access_token(self, request, **_: object) -> dict[str, Any]:
-        self.authorize_calls += 1
-        result = self._authorize_results.pop(0)
-        if isinstance(result, OAuthError):
-            raise result
-        return result
-
-
-@dataclass
-class RecordingOAuthClientFactory:
-    def __init__(self) -> None:
-        self.created_secrets: list[str | None] = []
-        self.configured_clients: dict[str | None, list[RecordingOAuthClient]] = {}
-
-    def queue_client(self, client_secret: str | None, client: RecordingOAuthClient) -> None:
-        self.configured_clients.setdefault(client_secret, []).append(client)
-
-    def __call__(self, settings: AuthSettings) -> RecordingOAuthClient:
-        self.created_secrets.append(settings.client_secret)
-        queued = self.configured_clients.get(settings.client_secret, [])
-        if queued:
-            return queued.pop(0)
-        return RecordingOAuthClient(settings.client_secret)
-
-
 def decode_session_cookie(cookie_value: str, secret_key: str) -> dict[str, object]:
     signer = TimestampSigner(secret_key)
     unsigned = signer.unsign(cookie_value.encode("utf-8"))
     return json.loads(b64decode(unsigned))
-
-
-def make_runtime_secret(
-    clock: FakeClock,
-    *,
-    value: str,
-    version: str | None,
-) -> SecretValue:
-    return SecretValue(
-        name="ENTRA_CLIENT_SECRET",
-        value=value,
-        version=version,
-        fetched_at=clock.now(),
-        source="azure",
-    )
-
-
-def default_token_payload() -> dict[str, Any]:
-    return {
-        "userinfo": {
-            "sub": "user-123",
-            "name": "Aragorn",
-            "email": "aragorn@example.com",
-            "tid": TEST_TENANT_ID,
-            "oid": TEST_OBJECT_ID,
-        }
-    }
 
 
 def test_load_auth_settings_defaults_to_organizations_authority(
@@ -186,54 +88,6 @@ def test_load_auth_settings_accepts_legacy_external_id_env_names(
     assert settings.post_logout_redirect_uri == "https://legacy.example/"
 
 
-def test_login_reloads_entra_secret_after_rotation_without_restarting_app(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    clock = FakeClock()
-    provider = FakeRuntimeSecretProvider(
-        make_runtime_secret(clock, value="old-secret", version="v1")
-    )
-    seen_client_secrets: list[str | None] = []
-
-    def fake_create_oauth_client(settings: AuthSettings) -> FakeOAuthClient:
-        seen_client_secrets.append(settings.client_secret)
-        return FakeOAuthClient()
-
-    monkeypatch.setattr(main_module, "create_oauth_client", fake_create_oauth_client)
-
-    with TestClient(create_app(secret_provider=provider), base_url="https://testserver") as client:
-        first_response = client.get("/auth/login", follow_redirects=False)
-        provider.set_secret(make_runtime_secret(clock, value="new-secret", version="v2"))
-        second_response = client.get("/auth/login", follow_redirects=False)
-
-    assert first_response.status_code == 307
-    assert second_response.status_code == 307
-    assert seen_client_secrets == ["old-secret", "new-secret"]
-
-
-def test_entra_oauth_client_manager_rebuilds_client_when_secret_version_changes() -> None:
-    clock = FakeClock()
-    provider = FakeRuntimeSecretProvider(
-        make_runtime_secret(clock, value="old-secret", version="v1")
-    )
-    factory = RecordingOAuthClientFactory()
-    manager = EntraOAuthClientManager(
-        settings=load_auth_settings(),
-        secret_provider=provider,
-        client_factory=factory,
-        clock=clock.now,
-    )
-
-    first_client = asyncio_run(manager.get_client())
-    second_client = asyncio_run(manager.get_client())
-    provider.set_secret(make_runtime_secret(clock, value="new-secret", version="v2"))
-    rotated_client = asyncio_run(manager.get_client())
-
-    assert first_client is second_client
-    assert rotated_client is not first_client
-    assert factory.created_secrets == ["old-secret", "new-secret"]
-
-
 def test_protected_shell_redirects_anonymous_users_to_login() -> None:
     client = TestClient(create_app(), base_url="https://testserver")
 
@@ -255,18 +109,6 @@ def test_create_app_fails_closed_when_session_secret_is_missing(
         create_app()
 
 
-def test_load_auth_settings_allows_key_vault_backed_session_secret(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("APP_SESSION_SECRET_KEY", raising=False)
-    monkeypatch.setenv("SECRET_PROVIDER_BACKEND", "azure")
-    monkeypatch.setenv("KEY_VAULT_URI", "https://vault.example")
-
-    settings = load_auth_settings()
-
-    assert settings.session_secret_key is None
-
-
 def test_login_redirects_to_entra_and_sets_secure_session_cookie(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -286,6 +128,29 @@ def test_login_redirects_to_entra_and_sets_secure_session_cookie(
     assert "httponly" in set_cookie
     assert "samesite=lax" in set_cookie
     assert "secure" in set_cookie
+
+
+def test_standard_session_middleware_accepts_current_key_cookie() -> None:
+    session = {
+        "user": {
+            "sub": "user-123",
+            "name": "Aragorn",
+            "email": "aragorn@example.com",
+            "tenant_id": TEST_TENANT_ID,
+            "object_id": TEST_OBJECT_ID,
+            "owner_id": TEST_OWNER_ID,
+        }
+    }
+    encoded = b64encode(json.dumps(session).encode("utf-8"))
+    cookie = TimestampSigner("test-session-secret").sign(encoded).decode("utf-8")
+    client = TestClient(create_app(), base_url="https://testserver")
+    client.cookies.set("fantasy_cards_session", cookie)
+
+    response = client.get("/app")
+
+    assert response.status_code == 200
+    assert "Aragorn" in response.text
+    assert "aragorn@example.com" in response.text
 
 
 def test_callback_persists_owner_claims_in_session(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -323,6 +188,37 @@ def test_callback_persists_owner_claims_in_session(monkeypatch: pytest.MonkeyPat
     assert "roles" not in app_shell_response.text
     assert "Aragorn" in app_shell_response.text
     assert "aragorn@example.com" in app_shell_response.text
+
+
+def test_static_oauth_callback_preserves_authorization_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, str] = {}
+
+    class QueryCapturingOAuthClient(FakeOAuthClient):
+        async def authorize_access_token(self, request, **kwargs: object) -> dict[str, Any]:
+            captured.update(request.query_params)
+            return await super().authorize_access_token(request, **kwargs)
+
+    monkeypatch.setattr(
+        main_module,
+        "create_oauth_client",
+        lambda settings: QueryCapturingOAuthClient(),
+    )
+    client = TestClient(create_app(), base_url="https://testserver")
+    client.get("/auth/login", follow_redirects=False)
+
+    response = client.get(
+        "/auth/callback?code=valid-code&state=opaque&session_state=tenant-state",
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert captured == {
+        "code": "valid-code",
+        "state": "opaque",
+        "session_state": "tenant-state",
+    }
 
 
 def test_callback_rejects_missing_nonce_session(monkeypatch: pytest.MonkeyPatch) -> None:
