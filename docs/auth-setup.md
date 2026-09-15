@@ -38,7 +38,7 @@ ENTRA_SCOPES=openid profile email
   `https://localhost:8000/...`. Plain HTTP is fine only for anonymous pages
   that do not exercise sign-in.
 
-## Deployed environments: Key Vault runtime retrieval via managed identity
+## Deployed environments: Azure Container Apps secrets
 
 `.env` is intentionally **not** shipped in the container image (it stays
 gitignored and is for local development only). Deployed Container Apps get
@@ -47,12 +47,11 @@ their runtime configuration entirely from `infra/main.bicep` /
 
 | Variable | Source in deployed environments |
 |---|---|
-| `APP_SESSION_SECRET_KEY` | Stored in Key Vault as `app-session-secret-key`; fetched at runtime from Key Vault using the Container App managed identity |
-| `ENTRA_CLIENT_SECRET` | Stored in Key Vault as `entra-client-secret`; fetched at runtime from Key Vault using the Container App managed identity |
+| `APP_SESSION_SECRET_KEY` | ACA secret reference `app-session-secret-key` |
+| `ENTRA_CLIENT_SECRET` | ACA secret reference `entra-client-secret` |
 | `ENTRA_CLIENT_ID` | Plain env var, sourced from the Entra app-registration Bicep module output |
 | `ENTRA_REDIRECT_URI` | Plain env var, auto-derived from the deployed Container Apps hostname (`deployedAuthRedirectUri` output) — never set manually |
 | `ENTRA_POST_LOGOUT_REDIRECT_URI` | Plain env var, auto-derived the same way |
-| `SECRET_PROVIDER_BACKEND`, `KEY_VAULT_URI`, `SECRET_PROVIDER_*` | Plain non-secret env vars injected by Bicep to point the runtime secret provider at Key Vault and control cache/retry/stale behavior |
 | `ENTRA_AUTHORITY`, `ENTRA_SCOPES` | Not injected; the app's code defaults are used in every environment |
 
 To populate the two deployment-time secret values before `azd provision`:
@@ -62,26 +61,22 @@ azd env set APP_SESSION_SECRET_KEY "$(openssl rand -base64 48)"
 # ENTRA_CLIENT_SECRET is normally set automatically by the postprovision hook
 # (hooks/gen_client_secret.sh) after the first `azd provision` run when
 # deployEntraAppRegistration=true. Re-run `azd provision` afterwards so the
-# secret is written into Key Vault for the Container App's runtime lookup.
+# secret is written to Key Vault and the Container App secret store.
 ```
 
 Both values flow into Bicep via `infra/main.parameters.json`
 (`appSessionSecretKeyValue` / `entraClientSecretValue`) as `@secure()`
-parameters. The deployment writes them to Key Vault only. The Container App
-receives the Key Vault URI plus non-secret secret-provider settings, and its
-runtime managed identity is granted **Key Vault Secrets User** at vault scope
-so the app can read secret values directly.
-
-At runtime, the app resolves `ENTRA_CLIENT_SECRET` via the secret-provider
-abstraction from `app/secrets.py`. In Azure that lets the auth flow adopt a
-new Key Vault secret version without restarting the application; in local
-development the same code path falls back to environment variables.
+parameters. The deployment writes them to Key Vault for durable storage and
+also configures ACA-native secrets consumed through `secretRef` environment
+variables. The application reads both values once from its process environment
+at startup and uses standard Starlette session middleware plus a static Authlib
+client for the lifetime of that revision.
 
 If `APP_SESSION_SECRET_KEY` or `ENTRA_CLIENT_SECRET` are unset when
 `azd provision` runs, the corresponding Key Vault secret is simply not
-created. The app then fails closed at startup when its managed-identity
-Key Vault lookup cannot load the required value, exactly as incomplete local
-`.env` config fails closed.
+created and the corresponding ACA secret reference is omitted. The app fails
+closed at startup when `APP_SESSION_SECRET_KEY` is missing, exactly as
+incomplete local `.env` configuration does.
 
 ## Register the application in Microsoft Entra ID
 
@@ -225,11 +220,12 @@ the registered URI before running this redeploy.
 
 Run the following as a pre-flight check before any direct false-mode redeploy.
 First prepare an ignored, resolved ARM parameter file containing the existing
-deployment's non-secret settings, including its container image, resource naming,
-network, model, and feature settings. Do not rely on template defaults to preserve
-those settings. Use the previous deployment's **parameters**, not its outputs,
-as the reference, and omit the two secret-value parameters to avoid rotating them.
-Do not copy secret values into this file or print them to the terminal.
+deployment settings, including its container image, resource naming, network,
+model, and feature settings. Do not rely on template defaults to preserve those
+settings. Use the previous deployment's **parameters**, not its outputs, as the
+reference. Supply the two secure values through an approved secret-safe
+mechanism, such as ARM Key Vault parameter references or protected pipeline
+inputs; do not copy secret values into this file or print them to the terminal.
 
 The commands below use `resolved.parameters.json` for that operator-prepared file.
 Do **not** pass `infra/main.parameters.json` directly to Azure CLI: its `${...}`
@@ -270,12 +266,14 @@ az deployment group create \
     entraClientIdOverride="$ENTRA_CLIENT_ID"
 ```
 
-**Do not** pass `appSessionSecretKeyValue` or `entraClientSecretValue` on the
-command line or in the resolved file. Their empty Bicep defaults leave the
-corresponding existing Key Vault secrets unchanged. This is a full infrastructure
-redeploy, not a partial patch: the client ID override does not preserve unrelated
-settings automatically. Stop if the preview changes the image, network posture,
-authentication metadata, or any other setting unexpectedly.
+This is a full infrastructure redeploy, not a partial patch: the client ID
+override does not preserve unrelated settings automatically. The resolved
+parameter source must provide `appSessionSecretKeyValue` and
+`entraClientSecretValue` through an approved secret-safe mechanism so the
+ACA-native secret values and references remain configured. Do not put either
+value on the command line or print it to the terminal. Stop if the preview
+changes the image, network posture, authentication metadata, or any other
+setting unexpectedly.
 
 **If `entraClientIdOverride` is omitted, blank, or whitespace-only**, the guard's
 minimum-length constraint is intended to reject the deployment with an error
@@ -329,134 +327,6 @@ The `ENTRA_REDIRECT_URI` env var in the Container App is auto-derived from the
 Container Apps environment default domain — it will be correct for the new
 hostname as soon as the deployment completes. The Entra portal registration is
 the external artifact that must match.
-## Rotating the Entra client secret
-
-This app can adopt a newer Key Vault version at runtime, but it does **not**
-create, register, or delete Microsoft Entra application credentials for you.
-Rotation therefore requires explicit operator steps:
-
-1. Create a **new client secret credential in Microsoft Entra ID** for the
-   existing app registration.
-2. Store that new secret value as a **new version** of the Key Vault secret
-   `entra-client-secret`.
-3. Keep the **previous Entra credential active** until every running app
-   replica has time to observe and use the new Key Vault version and the
-   overlap window has elapsed.
-4. Only then retire/delete the previous credential in Microsoft Entra ID.
-
-Changing Key Vault alone does **not** mint a new Entra credential. If the new
-Key Vault value is not already registered on the Entra app registration,
-authentication will fail.
-
-The Azure provider retains only the current secret and its direct predecessor.
-The Entra overlap lasts 15 minutes from the current Key Vault version's creation
-time, not from a replica's first login or a metadata edit. New logins use the
-current binding. On a normalized `invalid_client` response, the callback retries
-the token exchange once with an eligible predecessor, rechecking overlap,
-validity and observed revocation immediately before retry. It reuses the code,
-redirect URI and PKCE verifier without mutating shared client credentials.
-Authlib's inherited callback runs once: state is consumed once and the ID token
-still undergoes nonce, signature and issuer validation. Network errors, other
-OAuth errors and token-validation errors do not trigger fallback. Unknown
-predecessor evidence disables fallback; do not retire credentials prematurely.
-
-### Runtime rotation limits and acceptance gates (#53 / #89)
-
-Each Azure-backed replica preloads its required secrets, then owns independent
-session and (when configured) Entra refresh workers, including on idle replicas.
-Workers target a **20-second start-to-start polling interval**; time spent
-refreshing is deducted from the next sleep, and cycles never overlap for the
-same secret. A **25-second whole-refresh timeout** includes paginated metadata,
-current/predecessor value reads, per-operation retries and backoff. The Entra
-worker also updates the OAuth binding without requiring an authentication request.
-Shutdown cancels and awaits workers and shared in-flight refreshes before closing
-the Azure SDK client and credential. The environment backend has no workers.
-
-The 20/25-second budgets leave headroom toward the 60-second propagation target
-under healthy scheduling and vault responses; they are **not a deterministic
-real-time guarantee or live acceptance evidence**. Event-loop stalls, SDK
-cancellation latency, throttling, outages, version-list/read races and platform
-scheduling can exceed it. A refresh interrupted after its current read can also
-defer discovery to the next cycle. The per-replica target still requires #89.
-
-Supported non-secret environment settings retain their existing defaults:
-
-| Setting | Default |
-|---|---|
-| `SECRET_PROVIDER_BACKEND` | `auto` (`azure` when `KEY_VAULT_URI` is set, otherwise `env`) |
-| `KEY_VAULT_URI` | Unset; required for the `azure` backend |
-| `SECRET_PROVIDER_CACHE_TTL_SECONDS` | 60 |
-| `SECRET_PROVIDER_REQUEST_TIMEOUT_SECONDS` | 2 per SDK operation |
-| `SECRET_PROVIDER_MAX_RETRIES` | 2 retries after the first attempt |
-| `SECRET_PROVIDER_RETRY_BACKOFF_SECONDS` | 0.25, multiplied by the retry number |
-| `SECRET_PROVIDER_MAX_STALE_SECONDS` | 300 additional seconds |
-| `SESSION_SIGNING_KEY_OVERLAP_SECONDS` | 3600 |
-
-The 20-second polling interval, 25-second whole-refresh budget and 5-second
-failure cooldown are internal defaults, not additional environment settings.
-Changing per-operation retry settings cannot extend the whole-refresh budget.
-
-Session cookies retain the `fantasy_cards_session` name, `HttpOnly`, `Secure`,
-`SameSite=Lax`, `/` path and 14-day maximum age. New cookies use the current
-key. The immediate predecessor is allowed only during
-`SESSION_SIGNING_KEY_OVERLAP_SECONDS` (default 3600 seconds) measured from the
-current version's creation time. Editing metadata does not restart overlap or
-reorder history. A missing creation time or version identifier anywhere in the
-enumerated history disables overlap, even on a disabled or expired version:
-that version's position cannot be proven. Equal timestamps involving the current
-version or predecessor also disable overlap. In these cases the validated
-current version remains usable, but no historical key is substituted. The predecessor
-must be enabled, at or after `not_before`, and strictly before `expires_on`.
-Older versions are not substituted when that direct predecessor is invalid.
-Expired current values are rejected even within the cache TTL or stale grace.
-A current version observed as disabled is evicted instead of served stale.
-Remote changes can only be acted on once fetched; this is not instant revocation.
-
-Session reads, explicit version reads, metadata helpers and background refresh
-share one flight per logical secret and one immutable snapshot. Requests within
-TTL do not independently enumerate or fetch predecessor values. At most two
-values (current/direct predecessor) are cached per secret, with at most 32
-logical-secret snapshots, including failed entries. A failed refresh imposes a
-5-second retry cooldown; reads still check deadlines during cooldown. Missing
-predecessor evidence produces a sanitized current-only degradation rather than
-searching further back in history. An observed invalid latest version fails
-closed rather than promoting an older version to signing current.
-
-Partial refreshes apply observed invalidation and disable uncertain overlap
-immediately, even if a later page or value read fails. Eligible known-good values
-can survive transient failures,
-but each value retains its own successful-fetch timestamp. Successful metadata
-reads do not reset value age; successful current reads do not reset predecessor
-age. Metadata and value validity/freshness are intersected on every read, and
-overlap/expiry/stale cutoffs are exclusive. Remote revocation is bounded by
-observation, not instantaneous. A metadata outage at cold startup fails closed;
-with a cached snapshot it preserves only still-eligible known-good material.
-
-Azure startup requires both current authentication secrets when Entra client
-metadata is configured. Intentional no-auth bootstrap deployments still start
-without an Entra secret; authenticated endpoints remain unavailable. Local
-development keeps the existing session-secret startup requirement and login-time
-Entra configuration checks. During a transient read failure, a valid known-good
-current value may be served for at most the cache TTL plus
-`SECRET_PROVIDER_MAX_STALE_SECONDS` (default 300 seconds of additional grace)
-from its successful fetch. An expired or observed-disabled key is not eligible.
-Cold startup without the required values and exhaustion of that grace fail
-closed. Provider diagnostics use normalized categories and hashed versions;
-unit-test samples do not establish absence of disclosure across all live logs,
-traces, outputs or repository history.
-
-The three runtime code gaps now have local regression coverage, including
-independently cached idle replicas and real Authlib callbacks against mocked
-HTTP endpoints with signed synthetic ID tokens. Before closing #53, obtain
-coordinator review and complete #89: measure every active replica
-without restart/deployment, exercise session overlap and rejection, validate
-Entra credential registration/overlap/retirement, perform an explicitly approved
-bounded-stale/fail-closed drill, and collect sanitized evidence. The September 4
-propagation failure is historical; the later startup/private-endpoint fixes
-(#107, #114) and network-posture fix (#106) do not constitute a successful
-post-fix rotation drill. Do not broaden vault networking or use provisioning
-hooks that create credentials merely to collect evidence.
-
 No External ID tenant, CIAM user flow, or tenant allow-list is required for the
 current MVP. Any partner organization's Entra work account can sign in as long
 as the ID token passes standard OIDC validation.

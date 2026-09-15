@@ -88,6 +88,6 @@ def test_azd_exposes_explicit_auth_intent_and_client_override() -> None:
 
 def test_direct_deployment_docs_do_not_pass_azd_placeholders_to_azure_cli() -> None:
     docs = (REPO_ROOT / "docs/auth-setup.md").read_text()
-    section = docs.split("## Direct redeploy", 1)[1].split("## Rotating", 1)[0]
+    section = docs.split("## Direct redeploy", 1)[1].split("## Authority", 1)[0]
     assert "--parameters infra/main.parameters.json" not in section
     assert "--parameters @resolved.parameters.json" in section

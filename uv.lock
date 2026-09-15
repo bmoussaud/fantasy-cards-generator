@@ -354,20 +354,6 @@ wheels = [
 ]
 
 [[package]]
-name = "azure-keyvault-secrets"
-version = "4.11.2"
-source = { registry = "https://packagefeedproxy.microsoft.io/pypi/simple/" }
-dependencies = [
-    { name = "azure-core" },
-    { name = "isodate" },
-    { name = "typing-extensions" },
-]
-sdist = { url = "https://ms-feed-25.pkgs.visualstudio.com/6f084628-a36d-42cb-934d-057357e379dc/_packaging/49d7402f-07bb-4b18-a9ce-086e6e98a554/pypi/download/azure-keyvault-secrets/4.11.2/azure_keyvault_secrets-4.11.2.tar.gz", hash = "sha256:c0d86db01a8ae34d1db92ec6b9ef92d9a2aef7fbb1a67c0956513d46b85d7adb" }
-wheels = [
-    { url = "https://ms-feed-25.pkgs.visualstudio.com/6f084628-a36d-42cb-934d-057357e379dc/_packaging/49d7402f-07bb-4b18-a9ce-086e6e98a554/pypi/download/azure-keyvault-secrets/4.11.2/azure_keyvault_secrets-4.11.2-py3-none-any.whl", hash = "sha256:7abdd4a830bd8f4998bea0edbe69b8a772d672c17eabfdf3f77d8e4ef29442e9" },
-]
-
-[[package]]
 name = "azure-monitor-opentelemetry"
 version = "1.8.9"
 source = { registry = "https://packagefeedproxy.microsoft.io/pypi/simple/" }
@@ -769,7 +755,6 @@ dependencies = [
     { name = "authlib" },
     { name = "azure-cosmos" },
     { name = "azure-identity" },
-    { name = "azure-keyvault-secrets" },
     { name = "azure-monitor-opentelemetry" },
     { name = "azure-storage-blob" },
     { name = "fastapi" },
@@ -806,7 +791,6 @@ requires-dist = [
     { name = "azure-ai-agentserver-responses", marker = "extra == 'hosted-agent'", specifier = "==2.1.0", index = "https://pypi.org/simple" },
     { name = "azure-cosmos", specifier = ">=4.9.0" },
     { name = "azure-identity", specifier = ">=1.23.0" },
-    { name = "azure-keyvault-secrets", specifier = ">=4.11.2" },
     { name = "azure-monitor-opentelemetry", specifier = ">=1.8.9" },
     { name = "azure-storage-blob", specifier = ">=12.26.0" },
     { name = "fastapi", specifier = ">=0.116.0" },

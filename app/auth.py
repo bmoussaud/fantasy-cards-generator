@@ -1,36 +1,19 @@
 from __future__ import annotations
 
-import asyncio
 import os
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
-from datetime import datetime, timedelta
+from dataclasses import dataclass
 from typing import Any, TypedDict
 from urllib.parse import urlencode, urlsplit, urlunsplit
 from uuid import UUID
 
-from authlib.integrations.base_client.errors import OAuthError
 from authlib.integrations.starlette_client import OAuth, StarletteOAuth2App
 from fastapi import HTTPException, Request, status
 
 from app.generation import AuthenticatedOwner
-from app.rotation_observability import emit_observation
-from app.secrets import (
-    AzureSecretProvider,
-    SecretNotFoundError,
-    SecretProvider,
-    SecretProviderError,
-    SecretValue,
-    SecretVersionUnavailableError,
-    classify_secret_error,
-    load_secret_provider_config,
-    utc_now,
-)
 
 AUTH_SESSION_KEY = "user"
 AUTH_NONCE_SESSION_KEY = "auth_nonce"
 DEFAULT_ENTRA_AUTHORITY = "https://login.microsoftonline.com/organizations/v2.0"
-DEFAULT_ENTRA_CLIENT_SECRET_OVERLAP = timedelta(minutes=15)
 ENTRA_TENANT_ID_PLACEHOLDER = "{tenantid}"
 
 
@@ -50,7 +33,7 @@ class AuthSettings:
     authority: str | None
     redirect_uri: str | None
     post_logout_redirect_uri: str | None
-    session_secret_key: str | None
+    session_secret_key: str
     scopes: tuple[str, ...]
 
     @property
@@ -85,34 +68,21 @@ class AuthSettings:
     def is_configured(self) -> bool:
         return not self.missing_required()
 
-    def missing_required(self, *, include_client_secret: bool = True) -> tuple[str, ...]:
+    def missing_required(self) -> tuple[str, ...]:
         missing: list[str] = []
         if not self.client_id:
             missing.append("ENTRA_CLIENT_ID")
-        if include_client_secret and not self.client_secret:
+        if not self.client_secret:
             missing.append("ENTRA_CLIENT_SECRET")
         if not self.redirect_uri:
             missing.append("ENTRA_REDIRECT_URI")
         return tuple(missing)
 
-    def with_client_secret(self, client_secret: str | None) -> AuthSettings:
-        return replace(self, client_secret=client_secret)
-
-
-@dataclass(frozen=True)
-class _OAuthClientBinding:
-    secret: SecretValue
-    client: StarletteOAuth2App
-
-
-@dataclass(frozen=True)
-class _RetainedOAuthClientBinding:
-    binding: _OAuthClientBinding
-    expires_at: datetime
-
 
 def load_auth_settings() -> AuthSettings:
-    session_secret_key = _load_required_session_secret_key()
+    session_secret_key = os.getenv("APP_SESSION_SECRET_KEY")
+    if not session_secret_key:
+        raise RuntimeError("APP_SESSION_SECRET_KEY must be set before starting the application.")
 
     configured_scopes = _first_env(
         "ENTRA_SCOPES", "ENTRA_EXTERNAL_ID_SCOPES", default="openid profile email"
@@ -140,22 +110,8 @@ def load_auth_settings() -> AuthSettings:
     )
 
 
-def _load_required_session_secret_key() -> str | None:
-    secret_provider_config = load_secret_provider_config()
-    if secret_provider_config.backend == "azure" or (
-        secret_provider_config.backend == "auto"
-        and secret_provider_config.key_vault_uri is not None
-    ):
-        return None
-
-    session_secret_key = os.getenv("APP_SESSION_SECRET_KEY")
-    if not session_secret_key:
-        raise RuntimeError("APP_SESSION_SECRET_KEY must be set before starting the application.")
-    return session_secret_key
-
-
-def ensure_auth_configured(settings: AuthSettings, *, include_client_secret: bool = True) -> None:
-    missing = settings.missing_required(include_client_secret=include_client_secret)
+def ensure_auth_configured(settings: AuthSettings) -> None:
+    missing = settings.missing_required()
     if missing:
         missing_text = ", ".join(missing)
         raise HTTPException(
@@ -168,7 +124,6 @@ def create_oauth_client(settings: AuthSettings) -> StarletteOAuth2App:
     oauth = OAuth()
     oauth.register(
         name="entra_id",
-        client_cls=RotatingStarletteOAuth2App,
         client_id=settings.client_id,
         client_secret=settings.client_secret,
         server_metadata_url=settings.metadata_url,
@@ -182,213 +137,6 @@ def create_oauth_client(settings: AuthSettings) -> StarletteOAuth2App:
     if client is None:
         raise RuntimeError("Failed to create the Entra ID OAuth client.")
     return client
-
-
-class RotatingStarletteOAuth2App(StarletteOAuth2App):
-    async def fetch_access_token(self, redirect_uri=None, **kwargs):
-        previous_client: Callable[[], Awaitable[StarletteOAuth2App | None]] | None = kwargs.pop(
-            "_previous_client", None
-        )
-        try:
-            return await super().fetch_access_token(redirect_uri=redirect_uri, **kwargs)
-        except OAuthError as exc:
-            if not _should_retry_with_previous_secret(exc) or previous_client is None:
-                raise
-            previous = await previous_client()
-            if previous is None:
-                raise
-            await previous.load_server_metadata()
-            if await previous_client() is not previous:
-                raise
-            # Retry only the exchange. The inherited callback consumes state and validates
-            # the ID token exactly once, with its original nonce and PKCE parameters.
-            return await previous.fetch_access_token(redirect_uri=redirect_uri, **kwargs)
-
-
-class EntraOAuthClientManager:
-    def __init__(
-        self,
-        *,
-        settings: AuthSettings,
-        secret_provider: SecretProvider,
-        client_factory: Callable[[AuthSettings], StarletteOAuth2App] = create_oauth_client,
-        previous_secret_overlap: timedelta = DEFAULT_ENTRA_CLIENT_SECRET_OVERLAP,
-        clock: Callable[[], datetime] = utc_now,
-    ) -> None:
-        if previous_secret_overlap < timedelta(0):
-            raise ValueError("previous_secret_overlap must be >= 0.")
-        self._settings = settings
-        self._secret_provider = secret_provider
-        self._client_factory = client_factory
-        self._previous_secret_overlap = previous_secret_overlap
-        self._clock = clock
-        self._lock = asyncio.Lock()
-        self._current_binding: _OAuthClientBinding | None = None
-        self._previous_binding: _RetainedOAuthClientBinding | None = None
-
-    async def get_client(self) -> StarletteOAuth2App:
-        binding = await self._refresh_current_binding()
-        return binding.client
-
-    async def authorize_access_token(self, request: Request) -> dict[str, Any]:
-        current_binding = await self._refresh_current_binding()
-        server_metadata = await current_binding.client.load_server_metadata()
-        claims_options = build_claims_options(server_metadata.get("issuer"))
-
-        async def previous_client() -> StarletteOAuth2App | None:
-            return await self._eligible_previous_client(current_binding)
-
-        return await current_binding.client.authorize_access_token(
-            request, claims_options=claims_options, _previous_client=previous_client
-        )
-
-    async def _eligible_previous_client(
-        self, current: _OAuthClientBinding
-    ) -> StarletteOAuth2App | None:
-        async with self._lock:
-            previous = self._previous_binding
-            if (
-                previous is None
-                or previous.expires_at <= self._clock()
-                or not previous.binding.secret.is_valid_at(self._clock())
-            ):
-                self._previous_binding = None
-                return None
-            if self._current_binding is None or (
-                _secret_cache_key(self._current_binding.secret) != _secret_cache_key(current.secret)
-            ):
-                return None
-            if isinstance(self._secret_provider, AzureSecretProvider):
-                try:
-                    snapshot = self._secret_provider.snapshot_for_read("ENTRA_CLIENT_SECRET")
-                except SecretProviderError:
-                    return None
-                if (
-                    snapshot.current is None
-                    or snapshot.previous is None
-                    or _secret_cache_key(snapshot.current) != _secret_cache_key(current.secret)
-                    or _secret_cache_key(snapshot.previous)
-                    != _secret_cache_key(previous.binding.secret)
-                ):
-                    return None
-            return previous.binding.client
-
-    async def _refresh_current_binding(self) -> _OAuthClientBinding:
-        completed = False
-        error_category = "binding_error"
-        try:
-            binding = await self._build_current_binding()
-            completed = True
-            return binding
-        except SecretProviderError as exc:
-            error_category = classify_secret_error(exc)
-            raise
-        except asyncio.CancelledError:
-            completed = True
-            raise
-        finally:
-            if not completed:
-                current = self._current_binding
-                emit_observation(
-                    name="ENTRA_CLIENT_SECRET",
-                    source=current.secret.source if current else "unknown",
-                    stage="entra_binding",
-                    result="failed",
-                    version=current.secret.version if current else None,
-                    error_category=error_category,
-                )
-
-    async def _build_current_binding(self) -> _OAuthClientBinding:
-        snapshot = None
-        if isinstance(self._secret_provider, AzureSecretProvider):
-            snapshot = await self._secret_provider.get_snapshot("ENTRA_CLIENT_SECRET")
-            assert snapshot.current is not None
-            secret = snapshot.current
-        else:
-            secret = await self._secret_provider.get_secret("ENTRA_CLIENT_SECRET")
-        secret_key = _secret_cache_key(secret)
-
-        async with self._lock:
-            current = self._current_binding
-            new_binding = _OAuthClientBinding(
-                secret=secret,
-                client=(
-                    current.client
-                    if current is not None and _secret_cache_key(current.secret) == secret_key
-                    else self._client_factory(self._settings.with_client_secret(secret.value))
-                ),
-            )
-            if snapshot is not None:
-                prior = snapshot.previous
-                activated = snapshot.versions[0].activated_on if snapshot.versions else None
-                deadline = activated + self._previous_secret_overlap if activated else None
-                if prior is None or deadline is None or self._clock() >= deadline:
-                    self._previous_binding = None
-                else:
-                    retained = self._previous_binding
-                    candidates = (current, retained.binding if retained is not None else None)
-                    existing = next(
-                        (
-                            b
-                            for b in candidates
-                            if b is not None
-                            and _secret_cache_key(b.secret) == _secret_cache_key(prior)
-                        ),
-                        None,
-                    )
-                    self._previous_binding = _RetainedOAuthClientBinding(
-                        binding=_OAuthClientBinding(
-                            secret=prior,
-                            client=(
-                                existing.client
-                                if existing
-                                else self._client_factory(
-                                    self._settings.with_client_secret(prior.value)
-                                )
-                            ),
-                        ),
-                        expires_at=deadline,
-                    )
-            elif current is not None and _secret_cache_key(current.secret) != secret_key:
-                self._previous_binding = _RetainedOAuthClientBinding(
-                    binding=current,
-                    expires_at=self._clock() + self._previous_secret_overlap,
-                )
-            if self._previous_binding is not None and (
-                self._clock() >= self._previous_binding.expires_at
-                or not self._previous_binding.binding.secret.is_valid_at(self._clock())
-            ):
-                self._previous_binding = None
-            self._current_binding = new_binding
-            emit_observation(
-                name="ENTRA_CLIENT_SECRET",
-                source=new_binding.secret.source,
-                stage="entra_binding",
-                result=(
-                    "stale"
-                    if snapshot is not None and snapshot.error_category
-                    else (
-                        "unchanged"
-                        if current is not None and _secret_cache_key(current.secret) == secret_key
-                        else "adopted"
-                    )
-                ),
-                version=new_binding.secret.version,
-                error_category=(snapshot.error_category or "none") if snapshot else "none",
-            )
-            return new_binding
-
-
-def build_auth_secret_error_response(exc: SecretProviderError) -> HTTPException:
-    if isinstance(exc, (SecretNotFoundError, SecretVersionUnavailableError)):
-        return HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Authentication is not configured. Missing: ENTRA_CLIENT_SECRET",
-        )
-    return HTTPException(
-        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        detail="Authentication is temporarily unavailable while loading the Entra client secret.",
-    )
 
 
 def build_claims_options(server_metadata_issuer: str | None) -> dict[str, dict[str, Any]] | None:
@@ -556,11 +304,3 @@ def _first_env(*names: str, default: str | None = None) -> str | None:
         if value:
             return value
     return default
-
-
-def _secret_cache_key(secret: SecretValue) -> tuple[str | None, str]:
-    return (secret.version, secret.value)
-
-
-def _should_retry_with_previous_secret(error: OAuthError) -> bool:
-    return _optional_string(getattr(error, "error", None)) == "invalid_client"
