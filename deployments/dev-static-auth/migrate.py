@@ -1050,9 +1050,12 @@ def resolve_published_digest(tagged_image):
         ]
     )
     digest = metadata.get("digest", "")
+    tags = metadata.get("tags")
     require(
         re.fullmatch(r"sha256:[0-9a-f]{64}", digest)
-        and tagged_image.removeprefix(prefix) in (metadata.get("tags") or []),
+        and (
+            tags is None or (isinstance(tags, list) and tagged_image.removeprefix(prefix) in tags)
+        ),
         "Published azd artifact metadata is not exact",
     )
     return digest
@@ -1067,6 +1070,81 @@ def deploy_stage_state(receipt, raw_app, raw_vault, source_hash, tags):
         "sourceFingerprint": source_hash,
         "publishedTags": fingerprint(tags),
     }
+
+
+def wait_for_owned_azd_revision(before, timeout=300, interval=5):
+    baseline = app_snapshot(before)
+    baseline_revision = before["properties"]["latestRevisionName"]
+    baseline_image = web_image(before)
+    expected_revision = None
+    expected_tag = None
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        raw = get_app()
+        try:
+            snapshot = ENDPOINT_GUARD.snapshot(raw)
+        except ENDPOINT_GUARD.GateError as error:
+            raise GateError(str(error)) from None
+        require_static_configuration(raw)
+        properties = raw["properties"]
+        provisioning = properties.get("provisioningState")
+        running = properties.get("runningStatus")
+        require(
+            provisioning != "Failed" and running != "Failed",
+            "Published azd revision failed",
+        )
+        require(
+            provisioning in {"InProgress", "Succeeded"} and running in {"Progressing", "Running"},
+            "Published azd revision entered an unexpected state",
+        )
+        revision = properties.get("latestRevisionName")
+        ready_revision = properties.get("latestReadyRevisionName")
+        image = web_image(raw)
+        if revision == baseline_revision:
+            require(
+                snapshot == baseline and image == baseline_image,
+                "App configuration drifted while awaiting azd revision",
+            )
+        else:
+            require(
+                re.fullmatch(rf"{re.escape(APP_NAME)}--azd-[0-9]+", revision or ""),
+                "Owned azd deploy published an unexpected revision",
+            )
+            prefix = f"{REGISTRY_SERVER}/{IMAGE_REPOSITORY}:"
+            require(
+                image.startswith(prefix)
+                and re.fullmatch(r"azd-deploy-[0-9]+", image.removeprefix(prefix)),
+                "Owned azd deploy published an unexpected image",
+            )
+            if expected_revision is None:
+                expected_revision = revision
+                expected_tag = image
+            require(
+                revision == expected_revision and image == expected_tag,
+                "Published azd revision changed while awaiting readiness",
+            )
+            normalized = copy.deepcopy(snapshot)
+            normalized["properties"]["template"]["revisionSuffix"] = baseline["properties"][
+                "template"
+            ]["revisionSuffix"]
+            next(
+                item
+                for item in normalized["properties"]["template"]["containers"]
+                if item["name"] == "web"
+            )["image"] = baseline_image
+            require(
+                normalized == baseline,
+                "App configuration drifted while awaiting azd revision",
+            )
+            if (
+                provisioning == "Succeeded"
+                and running == "Running"
+                and ready_revision == revision
+                and healthz(raw)
+            ):
+                return raw
+        time.sleep(interval)
+    raise GateError("Published azd revision readiness timed out")
 
 
 def require_artifact(receipt, source, image):
@@ -1177,10 +1255,13 @@ def run_deploy_artifact(args):
         validate_source(args.rollback_source) == source_hash,
         "Reviewed source changed during deploy",
     )
-    after = get_app()
+    after = wait_for_owned_azd_revision(fresh_app)
+    require(
+        validate_source(args.rollback_source) == source_hash,
+        "Reviewed source changed while awaiting deploy readiness",
+    )
     app_snapshot(after)
     require_static_configuration(after)
-    require(healthz(after), "Published azd revision health check failed")
     published_tag = web_image(after)
     prefix = f"{REGISTRY_SERVER}/{IMAGE_REPOSITORY}:"
     require(

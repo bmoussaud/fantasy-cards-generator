@@ -52,6 +52,26 @@ def test_published_tags_uses_repository_command_registry_name(monkeypatch):
     }
 
 
+def test_resolve_published_digest_accepts_exact_tag_query_with_null_tags(monkeypatch):
+    digest = "sha256:" + "a" * 64
+    monkeypatch.setattr(
+        static_auth,
+        "command",
+        lambda values: {"digest": digest, "tags": None},
+    )
+    assert static_auth.resolve_published_digest(TAGGED_IMAGE) == digest
+
+
+def test_resolve_published_digest_rejects_conflicting_non_null_tags(monkeypatch):
+    monkeypatch.setattr(
+        static_auth,
+        "command",
+        lambda values: {"digest": "sha256:" + "a" * 64, "tags": ["another-tag"]},
+    )
+    with pytest.raises(static_auth.GateError, match="metadata is not exact"):
+        static_auth.resolve_published_digest(TAGGED_IMAGE)
+
+
 @pytest.fixture
 def raw_app():
     environment = static_auth.GROUP + "/providers/Microsoft.App/managedEnvironments/fcag-dev-cae"
@@ -285,8 +305,8 @@ def deploy_fixture(raw_app, raw_vault):
     }
     after = copy.deepcopy(raw_app)
     after["properties"]["template"]["containers"][0]["image"] = TAGGED_IMAGE
-    after["properties"]["latestRevisionName"] = "fcag-dev-app--azd-published"
-    after["properties"]["latestReadyRevisionName"] = "fcag-dev-app--azd-published"
+    after["properties"]["latestRevisionName"] = "fcag-dev-app--azd-123456"
+    after["properties"]["latestReadyRevisionName"] = "fcag-dev-app--azd-123456"
     after_tags = {
         **before_tags,
         "azd-deploy-123456": {
@@ -367,7 +387,135 @@ def test_owned_deploy_records_fresh_build_revision_and_digest(raw_app, raw_vault
     assert "artifact" not in saved[0]
     assert saved[-1]["buildAttempt"]["status"] == "succeeded"
     assert saved[-1]["artifact"]["image"] == IMAGE
-    assert saved[-1]["artifact"]["publishedRevision"] == "fcag-dev-app--azd-published"
+    assert saved[-1]["artifact"]["publishedRevision"] == "fcag-dev-app--azd-123456"
+
+
+def test_owned_deploy_waits_for_delayed_ready_revision(raw_app, raw_vault, monkeypatch):
+    receipt, vault, before_tags, after, after_tags = deploy_fixture(raw_app, raw_vault)
+    transient = copy.deepcopy(after)
+    transient["properties"]["runningStatus"] = "Progressing"
+    transient["properties"]["latestReadyRevisionName"] = raw_app["properties"][
+        "latestReadyRevisionName"
+    ]
+    saved, _, baseline = prepare_deploy(
+        monkeypatch, raw_app, receipt, vault, before_tags, after, after_tags
+    )
+    apps = iter([raw_app, raw_app, transient, after])
+    sleeps = []
+    monkeypatch.setattr(static_auth, "get_app", lambda: next(apps))
+    monkeypatch.setattr(static_auth.time, "sleep", lambda seconds: sleeps.append(seconds))
+    static_auth.run_deploy_artifact(
+        args(
+            "deploy",
+            apply=True,
+            approve_change=True,
+            reviewed=True,
+            expect_fingerprint=baseline,
+        )
+    )
+    assert sleeps == [5]
+    assert saved[-1]["artifact"]["publishedRevision"] == "fcag-dev-app--azd-123456"
+
+
+def test_owned_deploy_terminal_revision_failure_is_immediate(raw_app, raw_vault, monkeypatch):
+    receipt, vault, before_tags, after, after_tags = deploy_fixture(raw_app, raw_vault)
+    after["properties"]["runningStatus"] = "Failed"
+    after["properties"]["latestReadyRevisionName"] = raw_app["properties"][
+        "latestReadyRevisionName"
+    ]
+    saved, _, baseline = prepare_deploy(
+        monkeypatch, raw_app, receipt, vault, before_tags, after, after_tags
+    )
+    apps = iter([raw_app, raw_app, after])
+    monkeypatch.setattr(static_auth, "get_app", lambda: next(apps))
+    monkeypatch.setattr(
+        static_auth.time,
+        "sleep",
+        lambda seconds: pytest.fail("terminal failure must not be retried"),
+    )
+    with pytest.raises(static_auth.GateError, match="revision failed"):
+        static_auth.run_deploy_artifact(
+            args(
+                "deploy",
+                apply=True,
+                approve_change=True,
+                reviewed=True,
+                expect_fingerprint=baseline,
+            )
+        )
+    assert saved[-1]["buildAttempt"]["status"] == "started"
+    assert "artifact" not in saved[-1]
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (
+            lambda app: app["properties"].update({"latestRevisionName": "fcag-dev-app--foreign"}),
+            "unexpected revision",
+        ),
+        (
+            lambda app: app["properties"]["template"]["containers"][0].update(
+                {"image": "registry.invalid/foreign:azd-deploy-123456"}
+            ),
+            "unexpected image",
+        ),
+        (
+            lambda app: app["properties"]["configuration"].update(
+                {"activeRevisionsMode": "Multiple"}
+            ),
+            "Single revision mode",
+        ),
+    ],
+)
+def test_owned_deploy_rejects_revision_image_or_config_drift(
+    raw_app, raw_vault, monkeypatch, mutate, message
+):
+    receipt, vault, before_tags, after, after_tags = deploy_fixture(raw_app, raw_vault)
+    mutate(after)
+    saved, _, baseline = prepare_deploy(
+        monkeypatch, raw_app, receipt, vault, before_tags, after, after_tags
+    )
+    with pytest.raises(static_auth.GateError, match=message):
+        static_auth.run_deploy_artifact(
+            args(
+                "deploy",
+                apply=True,
+                approve_change=True,
+                reviewed=True,
+                expect_fingerprint=baseline,
+            )
+        )
+    assert saved[-1]["buildAttempt"]["status"] == "started"
+    assert "artifact" not in saved[-1]
+
+
+def test_owned_deploy_readiness_timeout_cannot_create_artifact(raw_app, raw_vault, monkeypatch):
+    receipt, vault, before_tags, after, after_tags = deploy_fixture(raw_app, raw_vault)
+    after["properties"]["runningStatus"] = "Progressing"
+    after["properties"]["latestReadyRevisionName"] = raw_app["properties"][
+        "latestReadyRevisionName"
+    ]
+    saved, _, baseline = prepare_deploy(
+        monkeypatch, raw_app, receipt, vault, before_tags, after, after_tags
+    )
+    apps = iter([raw_app, raw_app, after])
+    monotonic = iter([0, 0, 301])
+    monkeypatch.setattr(static_auth, "get_app", lambda: next(apps))
+    monkeypatch.setattr(static_auth.time, "monotonic", lambda: next(monotonic))
+    monkeypatch.setattr(static_auth.time, "sleep", lambda seconds: None)
+    with pytest.raises(static_auth.GateError, match="readiness timed out"):
+        static_auth.run_deploy_artifact(
+            args(
+                "deploy",
+                apply=True,
+                approve_change=True,
+                reviewed=True,
+                expect_fingerprint=baseline,
+            )
+        )
+    assert saved[-1]["buildAttempt"]["status"] == "started"
+    assert "artifact" not in saved[-1]
 
 
 def test_owned_deploy_rejects_existing_azd_tag(raw_app, raw_vault, monkeypatch):
@@ -395,7 +543,7 @@ def test_owned_deploy_rejects_same_old_revision(raw_app, raw_vault, monkeypatch)
     _, _, baseline = prepare_deploy(
         monkeypatch, raw_app, receipt, vault, before_tags, after, after_tags
     )
-    with pytest.raises(static_auth.GateError, match="fresh healthy revision"):
+    with pytest.raises(static_auth.GateError, match="drifted while awaiting"):
         static_auth.run_deploy_artifact(
             args(
                 "deploy",
