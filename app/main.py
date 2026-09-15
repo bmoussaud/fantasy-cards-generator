@@ -21,6 +21,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from app.auth import (
     AUTH_NONCE_SESSION_KEY,
+    AUTH_PROFILE_IMPORT_SESSION_KEY,
     AUTH_SESSION_KEY,
     AuthenticatedUser,
     build_claims_options,
@@ -35,9 +36,11 @@ from app.auth import (
     require_authenticated_user,
 )
 from app.deletion import DeletionService
+from app.entra_profile import GRAPH_PROFILE_PHOTO_SCOPE, fetch_profile_photo
 from app.generation import (
     AppServices,
     ArtworkRetryBody,
+    AuthenticatedOwner,
     CardGenerateBody,
     CardGenerationService,
     CardResponseModel,
@@ -47,7 +50,14 @@ from app.generation import (
 )
 from app.health import NotApplicableHealthProbe, build_healthz_payload, run_dependency_probes
 from app.library import CardLibraryService
-from app.photos import SavedPhotoListResponseModel, SavedPhotoResponseModel, SavedPhotoService
+from app.photos import (
+    PROFILE_PHOTO_IMPORT_SOURCE,
+    ProfilePhotoImportOAuthState,
+    ProfilePhotoImportState,
+    SavedPhotoListResponseModel,
+    SavedPhotoResponseModel,
+    SavedPhotoService,
+)
 from app.problems import ProblemDetails
 from app.settings import SettingsError, load_app_settings
 from app.telemetry import (
@@ -89,6 +99,7 @@ def create_app(services: AppServices | None = None) -> FastAPI:
         deletion_audit_repository=app_services.deletion_audit_repository,
         asset_store=app_services.asset_store,
         saved_photo_repository=app_services.saved_photo_repository,
+        profile_photo_import_state_repository=app_services.profile_photo_import_state_repository,
         photo_asset_store=app_services.photo_asset_store,
     )
     photo_service = SavedPhotoService(
@@ -97,7 +108,12 @@ def create_app(services: AppServices | None = None) -> FastAPI:
         asset_store=app_services.photo_asset_store,
         moderation_service=app_services.photo_moderation_service,
     )
+    profile_import_repository = app_services.profile_photo_import_state_repository
+    profile_import_oauth_state_repository = app_services.profile_photo_import_oauth_state_repository
     templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+
+    async def save_profile_import_state(state: ProfilePhotoImportState) -> None:
+        await profile_import_repository.save(state)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -271,10 +287,43 @@ def create_app(services: AppServices | None = None) -> FastAPI:
         request: Request,
         user: AuthenticatedUser = Depends(require_authenticated_user),
     ) -> HTMLResponse:
+        try:
+            import_state = await profile_import_repository.get(user["owner_id"])
+        except Exception as exc:
+            safe_log(
+                "auth.profile_photo_import_state_unavailable",
+                request_id=request.state.request_id,
+                attributes={
+                    "fcg.error_code": normalize_error_code(type(exc).__name__),
+                    "fcg.outcome": "failed",
+                },
+            )
+            import_state = ProfilePhotoImportState(owner_id=user["owner_id"], status="unavailable")
+        if import_state is None or import_state.status == "not_offered":
+            try:
+                await profile_import_repository.save(
+                    ProfilePhotoImportState(owner_id=user["owner_id"], status="offered")
+                )
+                import_state = await profile_import_repository.get(user["owner_id"])
+            except Exception as exc:
+                safe_log(
+                    "auth.profile_photo_import_offer_state_failed",
+                    request_id=request.state.request_id,
+                    attributes={
+                        "fcg.error_code": normalize_error_code(type(exc).__name__),
+                        "fcg.outcome": "failed",
+                    },
+                )
         return templates.TemplateResponse(
             request,
             "app_shell.html",
-            template_context(request, page_title="Generate a card", user=user),
+            template_context(
+                request,
+                page_title="Generate a card",
+                user=user,
+                show_profile_photo_import_offer=import_state is None
+                or import_state.status in {"not_offered", "offered", "failed_retryable"},
+            ),
         )
 
     @app.get("/my/cards", response_class=HTMLResponse)
@@ -485,7 +534,11 @@ def create_app(services: AppServices | None = None) -> FastAPI:
                 error_code="unauthorized",
                 headers={"WWW-Authenticate": "Session"},
             )
-        await photo_service.delete_photo(owner, photo_id)
+        await photo_service.delete_photo(
+            owner,
+            photo_id,
+            import_state_repository=profile_import_repository,
+        )
         return Response(status_code=204)
 
     @app.post("/my/cards/{card_id}/delete", status_code=303)
@@ -607,6 +660,7 @@ def create_app(services: AppServices | None = None) -> FastAPI:
     @app.get("/auth/callback")
     async def auth_callback(request: Request) -> RedirectResponse:
         ensure_auth_configured(auth_settings)
+        import_context = request.session.pop(AUTH_PROFILE_IMPORT_SESSION_KEY, None)
         nonce = request.session.pop(AUTH_NONCE_SESSION_KEY, None)
         if not nonce:
             raise HTTPException(
@@ -614,7 +668,46 @@ def create_app(services: AppServices | None = None) -> FastAPI:
                 detail="Missing login state. Start the sign-in flow again.",
             )
 
-        oauth_client = create_oauth_client(auth_settings)
+        import_flow = isinstance(import_context, dict)
+        import_oauth_state = None
+        if import_flow:
+            state_value = import_context.get("state")
+            if not isinstance(state_value, str):
+                return RedirectResponse(url="/app", status_code=status.HTTP_303_SEE_OTHER)
+            try:
+                import_oauth_state = await profile_import_oauth_state_repository.consume(
+                    state_value
+                )
+            except Exception as exc:
+                safe_log(
+                    "auth.profile_photo_import_state_unavailable",
+                    request_id=request.state.request_id,
+                    attributes={
+                        "fcg.error_code": normalize_error_code(type(exc).__name__),
+                        "fcg.outcome": "failed",
+                    },
+                )
+                return RedirectResponse(url="/app", status_code=status.HTTP_303_SEE_OTHER)
+            if (
+                import_oauth_state is None
+                or request.query_params.get("state") != import_oauth_state.state
+                or nonce != import_oauth_state.nonce
+                or import_oauth_state.operation != "profile_photo_import"
+            ):
+                safe_log(
+                    "auth.profile_photo_import_failed",
+                    request_id=request.state.request_id,
+                    attributes={"fcg.error_code": "invalid_oauth_state", "fcg.outcome": "failed"},
+                )
+                return RedirectResponse(url="/app", status_code=status.HTTP_303_SEE_OTHER)
+            import_context = {"owner_id": import_oauth_state.owner_id}
+        if import_flow:
+            oauth_client = create_oauth_client(
+                auth_settings,
+                scopes=(*auth_settings.scopes, GRAPH_PROFILE_PHOTO_SCOPE),
+            )
+        else:
+            oauth_client = create_oauth_client(auth_settings)
 
         try:
             server_metadata = await oauth_client.load_server_metadata()
@@ -627,12 +720,64 @@ def create_app(services: AppServices | None = None) -> FastAPI:
             if claims is None:
                 raise RuntimeError("Authentication response did not include validated userinfo.")
         except OAuthError as exc:
+            if isinstance(import_context, dict) and isinstance(import_context.get("owner_id"), str):
+                try:
+                    await save_profile_import_state(
+                        ProfilePhotoImportState(
+                            owner_id=import_context["owner_id"],
+                            status="failed_retryable",
+                        )
+                    )
+                except Exception as state_exc:
+                    safe_log(
+                        "auth.profile_photo_import_state_save_failed",
+                        request_id=request.state.request_id,
+                        attributes={
+                            "fcg.error_code": normalize_error_code(type(state_exc).__name__),
+                            "fcg.outcome": "failed",
+                        },
+                    )
+                safe_log(
+                    "auth.profile_photo_import_failed",
+                    request_id=request.state.request_id,
+                    attributes={
+                        "fcg.error_code": "oauth_error",
+                        "fcg.outcome": "failed",
+                    },
+                )
+                return RedirectResponse(url="/app", status_code=status.HTTP_303_SEE_OTHER)
             request.session.pop(AUTH_SESSION_KEY, None)
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Authentication failed: {exc.error}",
             ) from exc
         except Exception as exc:
+            if isinstance(import_context, dict) and isinstance(import_context.get("owner_id"), str):
+                try:
+                    await save_profile_import_state(
+                        ProfilePhotoImportState(
+                            owner_id=import_context["owner_id"],
+                            status="failed_retryable",
+                        )
+                    )
+                except Exception as state_exc:
+                    safe_log(
+                        "auth.profile_photo_import_state_save_failed",
+                        request_id=request.state.request_id,
+                        attributes={
+                            "fcg.error_code": normalize_error_code(type(state_exc).__name__),
+                            "fcg.outcome": "failed",
+                        },
+                    )
+                safe_log(
+                    "auth.profile_photo_import_failed",
+                    request_id=request.state.request_id,
+                    attributes={
+                        "fcg.error_code": normalize_error_code(type(exc).__name__),
+                        "fcg.outcome": "failed",
+                    },
+                )
+                return RedirectResponse(url="/app", status_code=status.HTTP_303_SEE_OTHER)
             request.session.pop(AUTH_SESSION_KEY, None)
             safe_log(
                 "auth.callback_failed",
@@ -647,7 +792,98 @@ def create_app(services: AppServices | None = None) -> FastAPI:
                 detail="Authentication failed while validating the Entra callback.",
             ) from exc
 
-        request.session[AUTH_SESSION_KEY] = extract_user_claims(claims)
+        authenticated_user = extract_user_claims(claims)
+        if import_flow:
+            owner_id = import_context.get("owner_id")
+            if owner_id != authenticated_user["owner_id"]:
+                safe_log(
+                    "auth.profile_photo_import_failed",
+                    request_id=request.state.request_id,
+                    attributes={"fcg.error_code": "owner_mismatch", "fcg.outcome": "failed"},
+                )
+                return RedirectResponse(url="/app", status_code=status.HTTP_303_SEE_OTHER)
+            try:
+                if not await profile_import_repository.claim(owner_id):
+                    request.session[AUTH_SESSION_KEY] = authenticated_user
+                    return RedirectResponse(url="/app", status_code=status.HTTP_303_SEE_OTHER)
+                access_token = token.get("access_token")
+                photo = await fetch_profile_photo(
+                    str(access_token) if isinstance(access_token, str) else ""
+                )
+                if photo is None:
+                    if not await profile_import_repository.complete_no_photo(owner_id):
+                        raise RuntimeError("Profile photo import state changed during import.")
+                else:
+                    stored = await photo_service.save_photo(
+                        owner=AuthenticatedOwner(
+                            owner_id=owner_id,
+                            tenant_id=authenticated_user["tenant_id"],
+                            object_id=authenticated_user["object_id"],
+                            subject=authenticated_user["sub"],
+                            display_name=authenticated_user["name"],
+                            email=authenticated_user["email"],
+                        ),
+                        photo=photo,
+                        label="Microsoft profile photo",
+                        source=PROFILE_PHOTO_IMPORT_SOURCE,
+                        source_key="me/photo",
+                    )
+                    completed = await profile_import_repository.complete_import(
+                        owner_id,
+                        stored.photoId,
+                    )
+                    if not completed:
+                        await photo_service.delete_photo(
+                            AuthenticatedOwner(
+                                owner_id=owner_id,
+                                tenant_id=authenticated_user["tenant_id"],
+                                object_id=authenticated_user["object_id"],
+                                subject=authenticated_user["sub"],
+                                display_name=authenticated_user["name"],
+                                email=authenticated_user["email"],
+                            ),
+                            stored.photoId,
+                        )
+            except Exception as exc:
+                try:
+                    await profile_import_repository.reset_claim(owner_id)
+                except Exception as reset_exc:
+                    safe_log(
+                        "auth.profile_photo_import_reset_failed",
+                        request_id=request.state.request_id,
+                        attributes={
+                            "fcg.error_code": normalize_error_code(type(reset_exc).__name__),
+                            "fcg.outcome": "failed",
+                        },
+                    )
+                safe_log(
+                    "auth.profile_photo_import_failed",
+                    request_id=request.state.request_id,
+                    attributes={
+                        "fcg.error_code": normalize_error_code(type(exc).__name__),
+                        "fcg.outcome": "failed",
+                    },
+                )
+        request.session[AUTH_SESSION_KEY] = authenticated_user
+        if not import_flow:
+            try:
+                existing_state = await profile_import_repository.get(authenticated_user["owner_id"])
+                if existing_state is None:
+                    await profile_import_repository.save(
+                        ProfilePhotoImportState(
+                            owner_id=authenticated_user["owner_id"],
+                            status="not_offered",
+                        )
+                    )
+            except Exception as exc:
+                safe_log(
+                    "auth.profile_photo_import_offer_state_failed",
+                    request_id=request.state.request_id,
+                    attributes={
+                        "fcg.error_code": normalize_error_code(type(exc).__name__),
+                        "fcg.outcome": "failed",
+                    },
+                )
         return RedirectResponse(url="/app", status_code=status.HTTP_303_SEE_OTHER)
 
     @app.get("/auth/logout")
@@ -657,6 +893,61 @@ def create_app(services: AppServices | None = None) -> FastAPI:
             url=build_logout_redirect_target(auth_settings),
             status_code=status.HTTP_303_SEE_OTHER,
         )
+
+    @app.post("/auth/profile-photo/import")
+    async def begin_profile_photo_import(
+        request: Request,
+        _: AuthenticatedUser = Depends(require_api_user),
+    ) -> RedirectResponse:
+        app_services.csrf_protector.validate(
+            request,
+            (await request.form()).get("csrf_token"),
+        )
+        owner = get_authenticated_owner(request)
+        if owner is None:
+            raise HTTPException(status_code=401, detail="Authentication required.")
+        state = await profile_import_repository.get(owner.owner_id)
+        if state is not None and state.status not in {"offered", "failed_retryable"}:
+            return RedirectResponse(url="/app", status_code=status.HTTP_303_SEE_OTHER)
+        nonce = secrets.token_urlsafe(32)
+        state_value = secrets.token_urlsafe(32)
+        await profile_import_oauth_state_repository.create(
+            ProfilePhotoImportOAuthState(
+                state=state_value,
+                nonce=nonce,
+                owner_id=owner.owner_id,
+            )
+        )
+        request.session[AUTH_NONCE_SESSION_KEY] = nonce
+        request.session[AUTH_PROFILE_IMPORT_SESSION_KEY] = {
+            "state": state_value,
+        }
+        scopes = tuple(dict.fromkeys((*auth_settings.scopes, GRAPH_PROFILE_PHOTO_SCOPE)))
+        oauth_client = create_oauth_client(auth_settings, scopes=scopes)
+        return await oauth_client.authorize_redirect(
+            request,
+            auth_settings.redirect_uri,
+            nonce=nonce,
+            state=state_value,
+        )
+
+    @app.post("/auth/profile-photo/decline")
+    async def decline_profile_photo_import(
+        request: Request,
+        _: AuthenticatedUser = Depends(require_api_user),
+    ) -> RedirectResponse:
+        app_services.csrf_protector.validate(
+            request,
+            (await request.form()).get("csrf_token"),
+        )
+        owner = get_authenticated_owner(request)
+        if owner is not None:
+            state = await profile_import_repository.get(owner.owner_id)
+            if state is None or state.status in {"not_offered", "offered"}:
+                await profile_import_repository.save(
+                    ProfilePhotoImportState(owner_id=owner.owner_id, status="declined")
+                )
+        return RedirectResponse(url="/app", status_code=status.HTTP_303_SEE_OTHER)
 
     @app.get("/healthz")
     async def healthz(request: Request) -> JSONResponse:

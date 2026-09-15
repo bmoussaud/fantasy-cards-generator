@@ -13,6 +13,7 @@ from app.generation import AuthenticatedOwner
 
 AUTH_SESSION_KEY = "user"
 AUTH_NONCE_SESSION_KEY = "auth_nonce"
+AUTH_PROFILE_IMPORT_SESSION_KEY = "profile_photo_import"
 DEFAULT_ENTRA_AUTHORITY = "https://login.microsoftonline.com/organizations/v2.0"
 ENTRA_TENANT_ID_PLACEHOLDER = "{tenantid}"
 
@@ -120,7 +121,11 @@ def ensure_auth_configured(settings: AuthSettings) -> None:
         )
 
 
-def create_oauth_client(settings: AuthSettings) -> StarletteOAuth2App:
+def create_oauth_client(
+    settings: AuthSettings,
+    *,
+    scopes: tuple[str, ...] | None = None,
+) -> StarletteOAuth2App:
     oauth = OAuth()
     oauth.register(
         name="entra_id",
@@ -128,7 +133,7 @@ def create_oauth_client(settings: AuthSettings) -> StarletteOAuth2App:
         client_secret=settings.client_secret,
         server_metadata_url=settings.metadata_url,
         client_kwargs={
-            "scope": settings.scope,
+            "scope": " ".join(scopes or settings.scopes),
             "code_challenge_method": "S256",
         },
     )

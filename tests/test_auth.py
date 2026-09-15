@@ -4,6 +4,7 @@ import json
 import time
 from base64 import b64decode, b64encode
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
 
 import pytest
@@ -15,6 +16,7 @@ from joserfc import jwt
 from joserfc.errors import InvalidClaimError
 from joserfc.jwk import OctKey
 
+from app import entra_profile
 from app import main as main_module
 from app.auth import (
     DEFAULT_ENTRA_AUTHORITY,
@@ -23,6 +25,7 @@ from app.auth import (
     extract_user_claims,
     load_auth_settings,
 )
+from app.generation import ReferenceImageUpload
 from app.main import create_app
 from tests.conftest import TEST_OBJECT_ID, TEST_OWNER_ID, TEST_TENANT_ID, FakeOAuthClient
 
@@ -45,6 +48,10 @@ def decode_session_cookie(cookie_value: str, secret_key: str) -> dict[str, objec
     signer = TimestampSigner(secret_key)
     unsigned = signer.unsign(cookie_value.encode("utf-8"))
     return json.loads(b64decode(unsigned))
+
+
+def callback_state(response) -> str:
+    return parse_qs(urlsplit(response.headers["location"]).query)["state"][0]
 
 
 def test_load_auth_settings_defaults_to_organizations_authority(
@@ -188,6 +195,176 @@ def test_callback_persists_owner_claims_in_session(monkeypatch: pytest.MonkeyPat
     assert "roles" not in app_shell_response.text
     assert "Aragorn" in app_shell_response.text
     assert "aragorn@example.com" in app_shell_response.text
+
+
+def test_profile_photo_import_is_explicit_and_uses_transient_graph_flow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_scopes: list[tuple[str, ...] | None] = []
+
+    def oauth_client(settings, *, scopes=None):
+        captured_scopes.append(scopes)
+        return FakeOAuthClient()
+
+    async def fake_fetch(_: str) -> ReferenceImageUpload:
+        return ReferenceImageUpload(
+            content=b"not-an-image",
+            content_type="image/png",
+            filename="entra-profile-photo",
+        )
+
+    monkeypatch.setattr(main_module, "create_oauth_client", oauth_client)
+    monkeypatch.setattr(main_module, "fetch_profile_photo", fake_fetch)
+    client = TestClient(create_app(), base_url="https://testserver")
+
+    client.get("/auth/login", follow_redirects=False)
+    callback = client.get("/auth/callback?code=valid-code&state=opaque", follow_redirects=False)
+    assert callback.status_code == 303
+    shell = client.get("/app")
+    assert "Import profile photo" in shell.text
+
+    marker = 'name="csrf_token" value="'
+    csrf_start = shell.text.index(marker) + len(marker)
+    csrf_token = shell.text[csrf_start : shell.text.index('"', csrf_start)]
+    declined = client.post(
+        "/auth/profile-photo/decline",
+        data={"csrf_token": csrf_token},
+        follow_redirects=False,
+    )
+    assert declined.status_code == 303
+    assert "Import profile photo" not in client.get("/app").text
+
+    # A second user session can still exercise the opt-in route independently.
+    client = TestClient(create_app(), base_url="https://testserver")
+    client.get("/auth/login", follow_redirects=False)
+    client.get("/auth/callback?code=valid-code&state=opaque", follow_redirects=False)
+    shell = client.get("/app")
+    csrf_start = shell.text.index(marker) + len(marker)
+    csrf_token = shell.text[csrf_start : shell.text.index('"', csrf_start)]
+    start = client.post(
+        "/auth/profile-photo/import",
+        data={"csrf_token": csrf_token},
+        follow_redirects=False,
+    )
+    assert start.status_code == 307
+    assert captured_scopes[-1] is not None
+    assert "User.Read" in captured_scopes[-1]
+    assert callback_state(start)
+
+
+def test_profile_photo_import_consent_failure_does_not_fail_existing_login(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ImportConsentDeniedClient(FakeOAuthClient):
+        async def authorize_access_token(self, request, **_: object) -> dict[str, Any]:
+            if request.session.get("profile_photo_import"):
+                raise OAuthError(error="access_denied")
+            return await super().authorize_access_token(request)
+
+    monkeypatch.setattr(
+        main_module,
+        "create_oauth_client",
+        lambda settings, **_: ImportConsentDeniedClient(),
+    )
+    client = TestClient(create_app(), base_url="https://testserver")
+    client.get("/auth/login", follow_redirects=False)
+    client.get("/auth/callback?code=valid-code&state=opaque", follow_redirects=False)
+    shell = client.get("/app")
+    marker = 'name="csrf_token" value="'
+    csrf_start = shell.text.index(marker) + len(marker)
+    csrf_token = shell.text[csrf_start : shell.text.index('"', csrf_start)]
+
+    start = client.post(
+        "/auth/profile-photo/import",
+        data={"csrf_token": csrf_token},
+        follow_redirects=False,
+    )
+    assert start.status_code == 307
+    callback = client.get(
+        f"/auth/callback?error=access_denied&state={callback_state(start)}",
+        follow_redirects=False,
+    )
+
+    assert callback.status_code == 303
+    assert callback.headers["location"] == "/app"
+    assert client.get("/app").status_code == 200
+
+
+def test_graph_profile_photo_request_uses_delegated_bearer_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        status_code = 200
+        headers = {"content-type": "image/jpeg"}
+        content = b"jpeg"
+
+    class FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return None
+
+        async def get(self, url, *, headers, timeout):
+            captured.update({"url": url, "headers": headers, "timeout": timeout})
+            return FakeResponse()
+
+    monkeypatch.setattr(entra_profile.httpx, "AsyncClient", FakeAsyncClient)
+
+    result = asyncio_run(entra_profile.fetch_profile_photo("delegated-token"))
+
+    assert result is not None
+    assert captured["url"] == entra_profile.GRAPH_PROFILE_PHOTO_URL
+    assert captured["headers"] == {"Authorization": "Bearer delegated-token"}
+
+
+def test_profile_photo_import_state_write_failure_keeps_auth_and_resets_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    services = create_app().state.services
+    client = TestClient(create_app(services=services), base_url="https://testserver")
+
+    async def no_photo(_):
+        return None
+
+    async def failing_complete_no_photo(_):
+        raise RuntimeError("state persistence failed")
+
+    monkeypatch.setattr(
+        services.profile_photo_import_state_repository,
+        "complete_no_photo",
+        failing_complete_no_photo,
+    )
+    monkeypatch.setattr(main_module, "fetch_profile_photo", no_photo)
+    monkeypatch.setattr(
+        main_module,
+        "create_oauth_client",
+        lambda settings, **_: FakeOAuthClient(),
+    )
+
+    client.get("/auth/login", follow_redirects=False)
+    client.get("/auth/callback?code=valid-code&state=opaque", follow_redirects=False)
+    shell = client.get("/app")
+    marker = 'name="csrf_token" value="'
+    csrf_start = shell.text.index(marker) + len(marker)
+    csrf_token = shell.text[csrf_start : shell.text.index('"', csrf_start)]
+    start = client.post(
+        "/auth/profile-photo/import",
+        data={"csrf_token": csrf_token},
+        follow_redirects=False,
+    )
+    callback = client.get(
+        f"/auth/callback?code=valid-code&state={callback_state(start)}",
+        follow_redirects=False,
+    )
+
+    assert callback.status_code == 303
+    assert client.get("/app").status_code == 200
+    state = asyncio_run(services.profile_photo_import_state_repository.get(TEST_OWNER_ID))
+    assert state is not None
+    assert state.status == "failed_retryable"
 
 
 def test_static_oauth_callback_preserves_authorization_query(

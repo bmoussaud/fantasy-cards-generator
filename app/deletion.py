@@ -14,7 +14,11 @@ from app.generation import (
     _default_azure_credential,
     now_iso,
 )
-from app.photos import AbstractSavedPhotoRepository, StoredSavedPhoto
+from app.photos import (
+    AbstractProfilePhotoImportStateRepository,
+    AbstractSavedPhotoRepository,
+    StoredSavedPhoto,
+)
 from app.problems import ProblemDetails
 from app.settings import AppSettings
 from app.telemetry import normalize_error_code, record_persistence, safe_log, telemetry_span
@@ -221,6 +225,7 @@ class DeletionService:
         deletion_audit_repository: AbstractDeletionAuditRepository,
         asset_store: AbstractAssetStore,
         saved_photo_repository: AbstractSavedPhotoRepository,
+        profile_photo_import_state_repository: AbstractProfilePhotoImportStateRepository,
         photo_asset_store: AbstractAssetStore,
     ) -> None:
         self._settings = settings
@@ -229,6 +234,7 @@ class DeletionService:
         self._deletion_audit_repository = deletion_audit_repository
         self._asset_store = asset_store
         self._saved_photo_repository = saved_photo_repository
+        self._profile_photo_import_state_repository = profile_photo_import_state_repository
         self._photo_asset_store = photo_asset_store
         self._audit_ttl_seconds = settings.audit_retention_days * 24 * 60 * 60
 
@@ -325,6 +331,7 @@ class DeletionService:
         request_id: str,
         schedule_cleanup,
     ) -> None:
+        await self._profile_photo_import_state_repository.mark_deleted_suppressed(owner.owner_id)
         cards = await self._card_repository.list_by_owner(owner.owner_id)
         saved_photos = await self._saved_photo_repository.list_by_owner(owner.owner_id)
         generation_audits = await self._audit_repository.list_audits_by_owner(owner.owner_id)

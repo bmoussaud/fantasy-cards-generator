@@ -80,7 +80,7 @@ def test_entra_user_provisioning_uses_postprovision_hook_and_is_secret_safe() ->
     assert (REPO_ROOT / "pics" / "jane_smith.png").is_file()
     assert (REPO_ROOT / "pics" / "jane_smith.jpg").is_file()
     assert "run: ./hooks/create_entra_users.sh" not in (REPO_ROOT / "azure.yaml").read_text()
-    assert 'azd env get-value AZURE_ENV_NAME' in template
+    assert "azd env get-value AZURE_ENV_NAME" in template
     assert "azd env get-value ENTRA_USER_INITIAL_PASSWORD" in template
     assert "isDefault && isVerified" in template
     assert "Paul Smith" in template
@@ -88,7 +88,7 @@ def test_entra_user_provisioning_uses_postprovision_hook_and_is_secret_safe() ->
     assert "force-change-password-next-sign-in true" in template
     assert "mktemp" in template
     assert "sed" in template
-    assert '2>/tmp/create-entra-users.err' not in template
+    assert "2>/tmp/create-entra-users.err" not in template
     assert '2>"$error_file"' in template
     assert "Content-Type: image/jpeg" in template
     assert "az account get-access-token" in template
