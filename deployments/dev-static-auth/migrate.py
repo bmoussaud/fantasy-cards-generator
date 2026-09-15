@@ -991,7 +991,7 @@ def published_tags():
             "acr",
             "repository",
             "show-tags",
-            "--registry",
+            "--name",
             REGISTRY_NAME,
             "--repository",
             IMAGE_REPOSITORY,
