@@ -188,13 +188,22 @@ snapshot and passes readiness, health, and auth checks, followed by a fresh
 receipt check. The original build source, tag, and published revision remain
 unchanged.
 
-`cleanup-vault` restores the receipt's exact original writable snapshot. It
-does not synthesize a `Deny` object when the original `networkAcls` was missing
-or `null`, and it preserves existing rule arrays and flags byte-for-byte in the
-projected JSON representation.
+`cleanup-vault` preserves the receipt's immutable original writable snapshot as
+forensic evidence, but targets a canonical restrictive representation because
+Key Vault PUT retains existing values when writable properties are omitted or
+sent as missing. Cleanup therefore explicitly sets
+`enabledForTemplateDeployment: false`. When the original `networkAcls` was
+missing or `null`, it explicitly sends `bypass: None`, `defaultAction: Deny`,
+and empty IP and virtual-network rule lists while `publicNetworkAccess` remains
+`Disabled`. If the original ACL object contained approved restrictive fields
+or rules, their full values and lists are preserved and only missing disabled
+defaults are materialized. Azure cannot represent restoration to property
+absence through this PUT contract, so post-checks require this canonical
+restrictive state rather than falsely claiming byte-exact missing metadata.
 
 `cleanup-role` proceeds only after the digest-pinned app is healthy,
-application cleanup is complete, and the vault exactly matches the receipt.
+application cleanup is complete, and the vault exactly matches that computed
+canonical restrictive restoration.
 It requires the principal/scope/role-definition inventory to contain exactly
 the one reviewed Key Vault Secrets User assignment, rechecks that complete
 state immediately before deletion, and confirms explicit post-delete absence.
@@ -204,11 +213,13 @@ proof of absence.
 ## Interrupted cleanup
 
 All cleanup phases are deterministic and independently retryable. If
-`cleanup-app` succeeded, `cleanup-vault` restored the original state, and role
-deletion failed, rerun only `cleanup-role` plan and apply with a fresh
-fingerprint. Completed app or vault phases report `alreadyApplied`; they do not
-require the vault to remain transfer-enabled, overwrite the approved image, or
-repeat secret transfer.
+`cleanup-app` succeeded, `cleanup-vault` reached the canonical restrictive
+state, and role deletion failed, rerun only `cleanup-role` plan and apply with
+a fresh fingerprint. Completed app or vault phases report `alreadyApplied`;
+they do not require the vault to remain transfer-enabled, overwrite the
+approved image, or repeat secret transfer. A vault that still exactly matches
+the immutable pre-access receipt baseline is also treated as already restored
+without a needless metadata-normalization write.
 
 If deployment completed but the local cleanup pointer write was interrupted,
 rerun `cleanup-app` first. Its plan reports `reconciliationPending` only when
