@@ -36,6 +36,11 @@ ENTRA_SCOPES=openid profile email
 - Profile-photo import requests delegated Microsoft Graph `User.Read` only after
   the signed-in user explicitly accepts the post-login import notice. The Graph
   access token is transient and is never stored in the browser session or database.
+- The import authorization `state` and nonce are also stored server-side in a
+  short-lived Cosmos record bound to the owner and `profile_photo_import`
+  operation. Callback consumption is one-time and expiry-checked; the browser
+  session stores only a pointer needed to correlate Authlib's callback. No
+  access token is stored in this record.
 - Authentication testing on localhost requires HTTPS because the session cookie
   is marked `Secure`, and the default Entra redirect URIs use
   `https://localhost:8000/...`. Plain HTTP is fine only for anonymous pages

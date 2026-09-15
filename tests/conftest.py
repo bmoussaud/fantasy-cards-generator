@@ -4,6 +4,7 @@ import os
 import re
 from collections.abc import Generator
 from typing import Any
+from urllib.parse import urlencode
 from uuid import uuid4
 
 import pytest
@@ -72,8 +73,14 @@ class FakeOAuthClient:
     ) -> RedirectResponse:
         assert redirect_uri == "https://testserver/auth/callback"
         assert nonce
+        query = {"code_challenge": "test"}
+        if "state" in _:
+            query["state"] = str(_["state"])
         return RedirectResponse(
-            url="https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize?code_challenge=test",
+            url=(
+                "https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize?"
+                + urlencode(query)
+            ),
             status_code=307,
         )
 

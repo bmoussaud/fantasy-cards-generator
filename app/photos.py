@@ -29,8 +29,19 @@ SAVED_PHOTO_DOCUMENT_ID_PREFIX = "photo:"
 PROFILE_PHOTO_IMPORT_DOCUMENT_ID_PREFIX = "profile-photo-import:"
 PROFILE_PHOTO_IMPORT_SOURCE = "entra-profile-photo"
 PROFILE_PHOTO_IMPORT_LEASE_SECONDS = 600
+PROFILE_PHOTO_IMPORT_OAUTH_STATE_TTL_SECONDS = 600
 MAX_IMPORTED_PROFILE_PHOTO_BYTES = 4 * 1024 * 1024
-# "failed" is the canonical retryable terminal state; the offer is shown for it.
+PROFILE_PHOTO_IMPORT_STATUSES = {
+    "not_offered",
+    "offered",
+    "declined",
+    "accepted",
+    "imported",
+    "no_photo",
+    "failed_retryable",
+    "deleted_suppressed",
+}
+PROFILE_PHOTO_IMPORT_OAUTH_STATE_DOCUMENT_ID_PREFIX = "profile-photo-oauth-state:"
 CONTENT_SAFETY_CATEGORIES = ("Hate", "SelfHarm", "Sexual", "Violence")
 THUMBNAIL_BLOB_CONTENT_TYPE = "image/png"
 logger = logging.getLogger(__name__)
@@ -295,6 +306,68 @@ class AbstractProfilePhotoImportStateRepository:
         raise NotImplementedError
 
 
+@dataclass(slots=True)
+class ProfilePhotoImportOAuthState:
+    state: str
+    nonce: str
+    owner_id: str
+    operation: str = "profile_photo_import"
+    expires_at: str = field(
+        default_factory=lambda: (
+            datetime.now(UTC) + timedelta(seconds=PROFILE_PHOTO_IMPORT_OAUTH_STATE_TTL_SECONDS)
+        ).isoformat()
+    )
+    consumed_at: str | None = None
+
+    @property
+    def document_id(self) -> str:
+        return f"{PROFILE_PHOTO_IMPORT_OAUTH_STATE_DOCUMENT_ID_PREFIX}{self.state}"
+
+    def to_document(self) -> dict[str, Any]:
+        return {
+            "id": self.document_id,
+            "documentType": "profile-photo-oauth-state",
+            "state": self.state,
+            "nonce": self.nonce,
+            "userId": self.owner_id,
+            "owner": {"ownerId": self.owner_id},
+            "operation": self.operation,
+            "expiresAt": self.expires_at,
+            "consumedAt": self.consumed_at,
+            "ttl": PROFILE_PHOTO_IMPORT_OAUTH_STATE_TTL_SECONDS,
+        }
+
+    @classmethod
+    def from_document(cls, document: dict[str, Any]) -> "ProfilePhotoImportOAuthState | None":
+        if str(document.get("documentType")) != "profile-photo-oauth-state":
+            return None
+        values = {
+            "state": document.get("state"),
+            "nonce": document.get("nonce"),
+            "owner_id": document.get("userId"),
+            "operation": document.get("operation"),
+            "expires_at": document.get("expiresAt"),
+        }
+        if not all(isinstance(value, str) and value for value in values.values()):
+            return None
+        return cls(
+            state=values["state"],
+            nonce=values["nonce"],
+            owner_id=values["owner_id"],
+            operation=values["operation"],
+            expires_at=values["expires_at"],
+            consumed_at=document.get("consumedAt"),
+        )
+
+
+class AbstractProfilePhotoImportOAuthStateRepository:
+    async def create(self, state: ProfilePhotoImportOAuthState) -> None:
+        raise NotImplementedError
+
+    async def consume(self, state: str) -> ProfilePhotoImportOAuthState | None:
+        raise NotImplementedError
+
+
 class InMemoryProfilePhotoImportStateRepository(AbstractProfilePhotoImportStateRepository):
     def __init__(self) -> None:
         self._records: dict[str, ProfilePhotoImportState] = {}
@@ -318,20 +391,23 @@ class InMemoryProfilePhotoImportStateRepository(AbstractProfilePhotoImportStateR
         async with self._lock:
             existing = self._records.get(owner_id)
             if existing is not None:
-                if existing.status not in {"failed", "importing"}:
+                if existing.status not in {"offered", "failed_retryable", "accepted"}:
                     return False
-                if existing.status == "importing" and not _profile_import_claim_expired(
+                if existing.status == "accepted" and not _profile_import_claim_expired(
                     existing.updated_at
                 ):
                     return False
-            self._records[owner_id] = ProfilePhotoImportState(owner_id=owner_id, status="importing")
+            self._records[owner_id] = ProfilePhotoImportState(owner_id=owner_id, status="accepted")
             return True
 
     async def reset_claim(self, owner_id: str) -> None:
         async with self._lock:
             existing = self._records.get(owner_id)
-            if existing is not None and existing.status == "importing":
-                self._records.pop(owner_id, None)
+            if existing is not None and existing.status == "accepted":
+                self._records[owner_id] = ProfilePhotoImportState(
+                    owner_id=owner_id,
+                    status="failed_retryable",
+                )
 
     async def mark_deleted_suppressed(self, owner_id: str) -> ProfilePhotoImportState:
         async with self._lock:
@@ -342,7 +418,7 @@ class InMemoryProfilePhotoImportStateRepository(AbstractProfilePhotoImportStateR
     async def complete_import(self, owner_id: str, photo_id: str) -> bool:
         async with self._lock:
             existing = self._records.get(owner_id)
-            if existing is None or existing.status != "importing":
+            if existing is None or existing.status != "accepted":
                 return False
             self._records[owner_id] = ProfilePhotoImportState(
                 owner_id=owner_id,
@@ -354,13 +430,37 @@ class InMemoryProfilePhotoImportStateRepository(AbstractProfilePhotoImportStateR
     async def complete_no_photo(self, owner_id: str) -> bool:
         async with self._lock:
             existing = self._records.get(owner_id)
-            if existing is None or existing.status != "importing":
+            if existing is None or existing.status != "accepted":
                 return False
             self._records[owner_id] = ProfilePhotoImportState(
                 owner_id=owner_id,
                 status="no_photo",
             )
             return True
+
+
+class InMemoryProfilePhotoImportOAuthStateRepository(
+    AbstractProfilePhotoImportOAuthStateRepository
+):
+    def __init__(self) -> None:
+        self._records: dict[str, ProfilePhotoImportOAuthState] = {}
+        self._lock = asyncio.Lock()
+
+    async def create(self, state: ProfilePhotoImportOAuthState) -> None:
+        async with self._lock:
+            if state.state in self._records:
+                raise ValueError("OAuth state already exists.")
+            self._records[state.state] = state
+
+    async def consume(self, state: str) -> ProfilePhotoImportOAuthState | None:
+        async with self._lock:
+            record = self._records.pop(state, None)
+            if record is None or record.consumed_at is not None:
+                return None
+            if _profile_import_state_expired(record.expires_at):
+                return None
+            record.consumed_at = now_iso()
+            return record
 
 
 class InMemorySavedPhotoRepository(AbstractSavedPhotoRepository):
@@ -545,26 +645,41 @@ class AzureCosmosProfilePhotoImportStateRepository(AbstractProfilePhotoImportSta
         container = await self._get_container()
         existing = await self.get(owner_id)
         if existing is not None:
-            if existing.status not in {"failed", "importing"}:
+            if existing.status not in {"offered", "failed_retryable", "accepted"}:
                 return False
-            if existing.status == "importing" and not _profile_import_claim_expired(
+            if existing.status == "accepted" and not _profile_import_claim_expired(
                 existing.updated_at
             ):
                 return False
-            await self.delete(owner_id)
-        state = ProfilePhotoImportState(owner_id=owner_id, status="importing")
+        if existing is None:
+            return False
+        now = now_iso()
+        lease_cutoff = (
+            datetime.now(UTC) - timedelta(seconds=PROFILE_PHOTO_IMPORT_LEASE_SECONDS)
+        ).isoformat()
         try:
-            await container.create_item(state.to_document())
+            await container.patch_item(
+                existing.document_id,
+                partition_key=owner_id,
+                patch_operations=[
+                    {"op": "replace", "path": "/status", "value": "accepted"},
+                    {"op": "replace", "path": "/updatedAt", "value": now},
+                ],
+                filter_predicate=(
+                    "FROM c WHERE c.status IN ('offered', 'failed_retryable') "
+                    f"OR (c.status = 'accepted' AND c.updatedAt <= '{lease_cutoff}')"
+                ),
+            )
         except CosmosHttpResponseError as exc:
-            if getattr(exc, "status_code", None) == 409:
+            if getattr(exc, "status_code", None) in {404, 412}:
                 return False
             raise
         return True
 
     async def reset_claim(self, owner_id: str) -> None:
         state = await self.get(owner_id)
-        if state is not None and state.status == "importing":
-            await self.delete(owner_id)
+        if state is not None and state.status == "accepted":
+            await self.save(ProfilePhotoImportState(owner_id=owner_id, status="failed_retryable"))
 
     async def mark_deleted_suppressed(self, owner_id: str) -> ProfilePhotoImportState:
         state = ProfilePhotoImportState(owner_id=owner_id, status="deleted_suppressed")
@@ -572,7 +687,7 @@ class AzureCosmosProfilePhotoImportStateRepository(AbstractProfilePhotoImportSta
 
     async def complete_import(self, owner_id: str, photo_id: str) -> bool:
         state = await self.get(owner_id)
-        if state is None or state.status != "importing":
+        if state is None or state.status != "accepted":
             return False
         await self.save(
             ProfilePhotoImportState(
@@ -585,10 +700,71 @@ class AzureCosmosProfilePhotoImportStateRepository(AbstractProfilePhotoImportSta
 
     async def complete_no_photo(self, owner_id: str) -> bool:
         state = await self.get(owner_id)
-        if state is None or state.status != "importing":
+        if state is None or state.status != "accepted":
             return False
         await self.save(ProfilePhotoImportState(owner_id=owner_id, status="no_photo"))
         return True
+
+
+class AzureCosmosProfilePhotoImportOAuthStateRepository(
+    AbstractProfilePhotoImportOAuthStateRepository
+):
+    def __init__(self, settings: AppSettings) -> None:
+        from azure.cosmos.aio import CosmosClient
+
+        self._client = CosmosClient(
+            settings.cosmos_endpoint,
+            credential=_default_azure_credential(),
+        )
+        self._database_name = settings.cosmos_database_name or "appdb"
+        self._container_name = settings.cosmos_container_name or "cards"
+        self._container = None
+
+    async def _get_container(self):
+        if self._container is None:
+            database = self._client.get_database_client(self._database_name)
+            self._container = database.get_container_client(self._container_name)
+        return self._container
+
+    async def create(self, state: ProfilePhotoImportOAuthState) -> None:
+        container = await self._get_container()
+        await container.create_item(state.to_document())
+
+    async def consume(self, state: str) -> ProfilePhotoImportOAuthState | None:
+        from azure.cosmos.exceptions import CosmosHttpResponseError
+
+        container = await self._get_container()
+        document_id = f"{PROFILE_PHOTO_IMPORT_OAUTH_STATE_DOCUMENT_ID_PREFIX}{state}"
+        try:
+            iterator = container.query_items(
+                query=(
+                    "SELECT * FROM c WHERE c.id = @id "
+                    "AND c.documentType = 'profile-photo-oauth-state'"
+                ),
+                parameters=[{"name": "@id", "value": document_id}],
+                enable_cross_partition_query=True,
+            )
+            document = None
+            async for candidate in iterator:
+                document = candidate
+                break
+            if document is None:
+                return None
+            now = now_iso()
+            response = await container.patch_item(
+                document_id,
+                partition_key=document["userId"],
+                patch_operations=[{"op": "add", "path": "/consumedAt", "value": now_iso()}],
+                filter_predicate=(
+                    "FROM c WHERE c.documentType = 'profile-photo-oauth-state' "
+                    f"AND c.consumedAt = null AND c.expiresAt > '{now}'"
+                ),
+            )
+        except CosmosHttpResponseError as exc:
+            if getattr(exc, "status_code", None) in {404, 412}:
+                return None
+            raise
+        return ProfilePhotoImportOAuthState.from_document(response)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1065,6 +1241,16 @@ def _profile_import_claim_expired(updated_at: str) -> bool:
     if timestamp.tzinfo is None:
         timestamp = timestamp.replace(tzinfo=UTC)
     return datetime.now(UTC) - timestamp >= timedelta(seconds=PROFILE_PHOTO_IMPORT_LEASE_SECONDS)
+
+
+def _profile_import_state_expired(expires_at: str) -> bool:
+    try:
+        timestamp = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=UTC)
+    return datetime.now(UTC) >= timestamp
 
 
 def _optional_label(value: object) -> str | None:

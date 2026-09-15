@@ -4,6 +4,7 @@ import json
 import time
 from base64 import b64decode, b64encode
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
 
 import pytest
@@ -47,6 +48,10 @@ def decode_session_cookie(cookie_value: str, secret_key: str) -> dict[str, objec
     signer = TimestampSigner(secret_key)
     unsigned = signer.unsign(cookie_value.encode("utf-8"))
     return json.loads(b64decode(unsigned))
+
+
+def callback_state(response) -> str:
+    return parse_qs(urlsplit(response.headers["location"]).query)["state"][0]
 
 
 def test_load_auth_settings_defaults_to_organizations_authority(
@@ -244,6 +249,7 @@ def test_profile_photo_import_is_explicit_and_uses_transient_graph_flow(
     assert start.status_code == 307
     assert captured_scopes[-1] is not None
     assert "User.Read" in captured_scopes[-1]
+    assert callback_state(start)
 
 
 def test_profile_photo_import_consent_failure_does_not_fail_existing_login(
@@ -274,7 +280,10 @@ def test_profile_photo_import_consent_failure_does_not_fail_existing_login(
         follow_redirects=False,
     )
     assert start.status_code == 307
-    callback = client.get("/auth/callback?error=access_denied&state=opaque", follow_redirects=False)
+    callback = client.get(
+        f"/auth/callback?error=access_denied&state={callback_state(start)}",
+        follow_redirects=False,
+    )
 
     assert callback.status_code == 303
     assert callback.headers["location"] == "/app"
@@ -341,16 +350,21 @@ def test_profile_photo_import_state_write_failure_keeps_auth_and_resets_claim(
     marker = 'name="csrf_token" value="'
     csrf_start = shell.text.index(marker) + len(marker)
     csrf_token = shell.text[csrf_start : shell.text.index('"', csrf_start)]
-    client.post(
+    start = client.post(
         "/auth/profile-photo/import",
         data={"csrf_token": csrf_token},
         follow_redirects=False,
     )
-    callback = client.get("/auth/callback?code=valid-code&state=opaque", follow_redirects=False)
+    callback = client.get(
+        f"/auth/callback?code=valid-code&state={callback_state(start)}",
+        follow_redirects=False,
+    )
 
     assert callback.status_code == 303
     assert client.get("/app").status_code == 200
-    assert asyncio_run(services.profile_photo_import_state_repository.get(TEST_OWNER_ID)) is None
+    state = asyncio_run(services.profile_photo_import_state_repository.get(TEST_OWNER_ID))
+    assert state is not None
+    assert state.status == "failed_retryable"
 
 
 def test_static_oauth_callback_preserves_authorization_query(

@@ -1661,6 +1661,7 @@ class AppServices:
     blob_health_probe: HealthDependencyProbe | None = None
     saved_photo_repository: Any | None = None
     profile_photo_import_state_repository: Any | None = None
+    profile_photo_import_oauth_state_repository: Any | None = None
     photo_asset_store: AbstractAssetStore | None = None
     photo_moderation_service: Any | None = None
     deletion_audit_repository: Any | None = None
@@ -3022,9 +3023,11 @@ class CardGenerationService:
 def create_services(settings: AppSettings) -> AppServices:
     from app.deletion import AzureCosmosDeletionAuditRepository, InMemoryDeletionAuditRepository
     from app.photos import (
+        AzureCosmosProfilePhotoImportOAuthStateRepository,
         AzureCosmosProfilePhotoImportStateRepository,
         AzureCosmosSavedPhotoRepository,
         ContentSafetyPhotoModerationService,
+        InMemoryProfilePhotoImportOAuthStateRepository,
         InMemoryProfilePhotoImportStateRepository,
         InMemorySavedPhotoRepository,
     )
@@ -3036,6 +3039,9 @@ def create_services(settings: AppSettings) -> AppServices:
         saved_photo_repository = AzureCosmosSavedPhotoRepository(settings)
         profile_photo_import_state_repository = AzureCosmosProfilePhotoImportStateRepository(
             settings
+        )
+        profile_photo_import_oauth_state_repository = (
+            AzureCosmosProfilePhotoImportOAuthStateRepository(settings)
         )
         photo_asset_store = AzureBlobAssetStore(
             settings,
@@ -3061,6 +3067,9 @@ def create_services(settings: AppSettings) -> AppServices:
         asset_store = InMemoryAssetStore()
         saved_photo_repository = InMemorySavedPhotoRepository()
         profile_photo_import_state_repository = InMemoryProfilePhotoImportStateRepository()
+        profile_photo_import_oauth_state_repository = (
+            InMemoryProfilePhotoImportOAuthStateRepository()
+        )
         photo_asset_store = InMemoryAssetStore()
         deletion_audit_repository = InMemoryDeletionAuditRepository()
         cosmos_health_probe = NotApplicableHealthProbe("cosmos")
@@ -3087,6 +3096,7 @@ def create_services(settings: AppSettings) -> AppServices:
         blob_health_probe=blob_health_probe,
         saved_photo_repository=saved_photo_repository,
         profile_photo_import_state_repository=profile_photo_import_state_repository,
+        profile_photo_import_oauth_state_repository=profile_photo_import_oauth_state_repository,
         photo_asset_store=photo_asset_store,
         photo_moderation_service=ContentSafetyPhotoModerationService(settings),
         deletion_audit_repository=deletion_audit_repository,

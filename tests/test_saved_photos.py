@@ -24,6 +24,8 @@ from app.generation import (
 from app.main import create_app
 from app.photos import (
     PROFILE_PHOTO_IMPORT_SOURCE,
+    ProfilePhotoImportOAuthState,
+    ProfilePhotoImportState,
     SavedPhotoResponseModel,
     normalize_imported_profile_photo,
 )
@@ -421,6 +423,51 @@ def test_import_claim_can_be_reset_and_retried(monkeypatch: pytest.MonkeyPatch) 
     assert not asyncio.run(repository.claim(TEST_OWNER_ID))
     asyncio.run(repository.reset_claim(TEST_OWNER_ID))
     assert asyncio.run(repository.claim(TEST_OWNER_ID))
+
+
+def test_import_claim_allows_only_one_concurrent_accept(monkeypatch: pytest.MonkeyPatch) -> None:
+    services = build_services(monkeypatch)
+    repository = services.profile_photo_import_state_repository
+    asyncio.run(repository.save(ProfilePhotoImportState(owner_id=TEST_OWNER_ID, status="offered")))
+
+    async def claim() -> bool:
+        return await repository.claim(TEST_OWNER_ID)
+
+    async def run_claims() -> list[bool]:
+        return await asyncio.gather(*(claim() for _ in range(8)))
+
+    results = asyncio.run(run_claims())
+
+    assert results.count(True) == 1
+    state = asyncio.run(repository.get(TEST_OWNER_ID))
+    assert state is not None
+    assert state.status == "accepted"
+
+
+def test_import_oauth_state_is_one_time_expiring_and_contains_no_token() -> None:
+    repository = photos_module.InMemoryProfilePhotoImportOAuthStateRepository()
+    state = ProfilePhotoImportOAuthState(
+        state="oauth-state",
+        nonce="oauth-nonce",
+        owner_id=TEST_OWNER_ID,
+    )
+    asyncio.run(repository.create(state))
+
+    consumed = asyncio.run(repository.consume("oauth-state"))
+
+    assert consumed is not None
+    assert consumed.owner_id == TEST_OWNER_ID
+    assert consumed.nonce == "oauth-nonce"
+    assert "access_token" not in state.to_document()
+    assert asyncio.run(repository.consume("oauth-state")) is None
+
+    expired = replace(
+        state,
+        state="expired-state",
+        expires_at="2000-01-01T00:00:00+00:00",
+    )
+    asyncio.run(repository.create(expired))
+    assert asyncio.run(repository.consume("expired-state")) is None
 
 
 def test_imported_original_is_reencoded_with_bounded_dimensions_and_no_metadata() -> None:

@@ -163,8 +163,12 @@ After sign-in, users may explicitly opt in to copying their Microsoft Entra prof
 photo into this library. The import is a one-time snapshot, labeled
 `Microsoft profile photo`, and does not synchronize later profile-photo changes.
 Deleting that imported item permanently suppresses automatic re-import for the
-account. Graph, moderation, validation, capacity, and storage failures never
-block authentication.
+account. Import state is durable and uses these lifecycle values:
+`not_offered`, `offered`, `declined`, `accepted`, `imported`, `no_photo`,
+`failed_retryable`, and `deleted_suppressed`. `accepted` is the short-lived
+claim held while an import runs; failures transition to `failed_retryable` so
+the offer remains actionable. Graph, moderation, validation, capacity, and
+storage failures never block authentication.
 
 ## Error contract
 
