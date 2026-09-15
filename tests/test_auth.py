@@ -311,6 +311,48 @@ def test_graph_profile_photo_request_uses_delegated_bearer_token(
     assert captured["headers"] == {"Authorization": "Bearer delegated-token"}
 
 
+def test_profile_photo_import_state_write_failure_keeps_auth_and_resets_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    services = create_app().state.services
+    client = TestClient(create_app(services=services), base_url="https://testserver")
+
+    async def no_photo(_):
+        return None
+
+    async def failing_complete_no_photo(_):
+        raise RuntimeError("state persistence failed")
+
+    monkeypatch.setattr(
+        services.profile_photo_import_state_repository,
+        "complete_no_photo",
+        failing_complete_no_photo,
+    )
+    monkeypatch.setattr(main_module, "fetch_profile_photo", no_photo)
+    monkeypatch.setattr(
+        main_module,
+        "create_oauth_client",
+        lambda settings, **_: FakeOAuthClient(),
+    )
+
+    client.get("/auth/login", follow_redirects=False)
+    client.get("/auth/callback?code=valid-code&state=opaque", follow_redirects=False)
+    shell = client.get("/app")
+    marker = 'name="csrf_token" value="'
+    csrf_start = shell.text.index(marker) + len(marker)
+    csrf_token = shell.text[csrf_start : shell.text.index('"', csrf_start)]
+    client.post(
+        "/auth/profile-photo/import",
+        data={"csrf_token": csrf_token},
+        follow_redirects=False,
+    )
+    callback = client.get("/auth/callback?code=valid-code&state=opaque", follow_redirects=False)
+
+    assert callback.status_code == 303
+    assert client.get("/app").status_code == 200
+    assert asyncio_run(services.profile_photo_import_state_repository.get(TEST_OWNER_ID)) is None
+
+
 def test_static_oauth_callback_preserves_authorization_query(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

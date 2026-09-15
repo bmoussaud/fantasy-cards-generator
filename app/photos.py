@@ -30,6 +30,7 @@ PROFILE_PHOTO_IMPORT_DOCUMENT_ID_PREFIX = "profile-photo-import:"
 PROFILE_PHOTO_IMPORT_SOURCE = "entra-profile-photo"
 PROFILE_PHOTO_IMPORT_LEASE_SECONDS = 600
 MAX_IMPORTED_PROFILE_PHOTO_BYTES = 4 * 1024 * 1024
+# "failed" is the canonical retryable terminal state; the offer is shown for it.
 CONTENT_SAFETY_CATEGORIES = ("Hate", "SelfHarm", "Sexual", "Violence")
 THUMBNAIL_BLOB_CONTENT_TYPE = "image/png"
 logger = logging.getLogger(__name__)

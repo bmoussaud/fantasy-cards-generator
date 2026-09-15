@@ -111,17 +111,7 @@ def create_app(services: AppServices | None = None) -> FastAPI:
     templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
     async def save_profile_import_state(state: ProfilePhotoImportState) -> None:
-        try:
-            await profile_import_repository.save(state)
-        except Exception as exc:
-            safe_log(
-                "auth.profile_photo_import_state_save_failed",
-                request_id=None,
-                attributes={
-                    "fcg.error_code": normalize_error_code(type(exc).__name__),
-                    "fcg.outcome": "failed",
-                },
-            )
+        await profile_import_repository.save(state)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -682,12 +672,22 @@ def create_app(services: AppServices | None = None) -> FastAPI:
                 raise RuntimeError("Authentication response did not include validated userinfo.")
         except OAuthError as exc:
             if isinstance(import_context, dict) and isinstance(import_context.get("owner_id"), str):
-                await save_profile_import_state(
-                    ProfilePhotoImportState(
-                        owner_id=import_context["owner_id"],
-                        status="failed",
+                try:
+                    await save_profile_import_state(
+                        ProfilePhotoImportState(
+                            owner_id=import_context["owner_id"],
+                            status="failed",
+                        )
                     )
-                )
+                except Exception as state_exc:
+                    safe_log(
+                        "auth.profile_photo_import_state_save_failed",
+                        request_id=request.state.request_id,
+                        attributes={
+                            "fcg.error_code": normalize_error_code(type(state_exc).__name__),
+                            "fcg.outcome": "failed",
+                        },
+                    )
                 safe_log(
                     "auth.profile_photo_import_failed",
                     request_id=request.state.request_id,
@@ -704,12 +704,22 @@ def create_app(services: AppServices | None = None) -> FastAPI:
             ) from exc
         except Exception as exc:
             if isinstance(import_context, dict) and isinstance(import_context.get("owner_id"), str):
-                await save_profile_import_state(
-                    ProfilePhotoImportState(
-                        owner_id=import_context["owner_id"],
-                        status="failed",
+                try:
+                    await save_profile_import_state(
+                        ProfilePhotoImportState(
+                            owner_id=import_context["owner_id"],
+                            status="failed",
+                        )
                     )
-                )
+                except Exception as state_exc:
+                    safe_log(
+                        "auth.profile_photo_import_state_save_failed",
+                        request_id=request.state.request_id,
+                        attributes={
+                            "fcg.error_code": normalize_error_code(type(state_exc).__name__),
+                            "fcg.outcome": "failed",
+                        },
+                    )
                 safe_log(
                     "auth.profile_photo_import_failed",
                     request_id=request.state.request_id,
