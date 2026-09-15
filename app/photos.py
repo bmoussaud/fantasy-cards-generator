@@ -4,6 +4,7 @@ import asyncio
 import base64
 import logging
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from typing import Any, Literal
 from uuid import uuid4
@@ -27,6 +28,8 @@ from app.settings import AppSettings
 SAVED_PHOTO_DOCUMENT_ID_PREFIX = "photo:"
 PROFILE_PHOTO_IMPORT_DOCUMENT_ID_PREFIX = "profile-photo-import:"
 PROFILE_PHOTO_IMPORT_SOURCE = "entra-profile-photo"
+PROFILE_PHOTO_IMPORT_LEASE_SECONDS = 600
+MAX_IMPORTED_PROFILE_PHOTO_BYTES = 4 * 1024 * 1024
 CONTENT_SAFETY_CATEGORIES = ("Hate", "SelfHarm", "Sexual", "Violence")
 THUMBNAIL_BLOB_CONTENT_TYPE = "image/png"
 logger = logging.getLogger(__name__)
@@ -274,6 +277,22 @@ class AbstractProfilePhotoImportStateRepository:
     async def claim(self, owner_id: str) -> bool:
         raise NotImplementedError
 
+    async def reset_claim(self, owner_id: str) -> None:
+        raise NotImplementedError
+
+    async def mark_deleted_suppressed(self, owner_id: str) -> ProfilePhotoImportState:
+        raise NotImplementedError
+
+    async def complete_import(
+        self,
+        owner_id: str,
+        photo_id: str,
+    ) -> bool:
+        raise NotImplementedError
+
+    async def complete_no_photo(self, owner_id: str) -> bool:
+        raise NotImplementedError
+
 
 class InMemoryProfilePhotoImportStateRepository(AbstractProfilePhotoImportStateRepository):
     def __init__(self) -> None:
@@ -296,9 +315,50 @@ class InMemoryProfilePhotoImportStateRepository(AbstractProfilePhotoImportStateR
 
     async def claim(self, owner_id: str) -> bool:
         async with self._lock:
-            if owner_id in self._records:
-                return False
+            existing = self._records.get(owner_id)
+            if existing is not None:
+                if existing.status not in {"failed", "importing"}:
+                    return False
+                if existing.status == "importing" and not _profile_import_claim_expired(
+                    existing.updated_at
+                ):
+                    return False
             self._records[owner_id] = ProfilePhotoImportState(owner_id=owner_id, status="importing")
+            return True
+
+    async def reset_claim(self, owner_id: str) -> None:
+        async with self._lock:
+            existing = self._records.get(owner_id)
+            if existing is not None and existing.status == "importing":
+                self._records.pop(owner_id, None)
+
+    async def mark_deleted_suppressed(self, owner_id: str) -> ProfilePhotoImportState:
+        async with self._lock:
+            state = ProfilePhotoImportState(owner_id=owner_id, status="deleted_suppressed")
+            self._records[owner_id] = state
+            return state
+
+    async def complete_import(self, owner_id: str, photo_id: str) -> bool:
+        async with self._lock:
+            existing = self._records.get(owner_id)
+            if existing is None or existing.status != "importing":
+                return False
+            self._records[owner_id] = ProfilePhotoImportState(
+                owner_id=owner_id,
+                status="imported",
+                photo_id=photo_id,
+            )
+            return True
+
+    async def complete_no_photo(self, owner_id: str) -> bool:
+        async with self._lock:
+            existing = self._records.get(owner_id)
+            if existing is None or existing.status != "importing":
+                return False
+            self._records[owner_id] = ProfilePhotoImportState(
+                owner_id=owner_id,
+                status="no_photo",
+            )
             return True
 
 
@@ -482,6 +542,15 @@ class AzureCosmosProfilePhotoImportStateRepository(AbstractProfilePhotoImportSta
         from azure.cosmos.exceptions import CosmosHttpResponseError
 
         container = await self._get_container()
+        existing = await self.get(owner_id)
+        if existing is not None:
+            if existing.status not in {"failed", "importing"}:
+                return False
+            if existing.status == "importing" and not _profile_import_claim_expired(
+                existing.updated_at
+            ):
+                return False
+            await self.delete(owner_id)
         state = ProfilePhotoImportState(owner_id=owner_id, status="importing")
         try:
             await container.create_item(state.to_document())
@@ -489,6 +558,35 @@ class AzureCosmosProfilePhotoImportStateRepository(AbstractProfilePhotoImportSta
             if getattr(exc, "status_code", None) == 409:
                 return False
             raise
+        return True
+
+    async def reset_claim(self, owner_id: str) -> None:
+        state = await self.get(owner_id)
+        if state is not None and state.status == "importing":
+            await self.delete(owner_id)
+
+    async def mark_deleted_suppressed(self, owner_id: str) -> ProfilePhotoImportState:
+        state = ProfilePhotoImportState(owner_id=owner_id, status="deleted_suppressed")
+        return await self.save(state)
+
+    async def complete_import(self, owner_id: str, photo_id: str) -> bool:
+        state = await self.get(owner_id)
+        if state is None or state.status != "importing":
+            return False
+        await self.save(
+            ProfilePhotoImportState(
+                owner_id=owner_id,
+                status="imported",
+                photo_id=photo_id,
+            )
+        )
+        return True
+
+    async def complete_no_photo(self, owner_id: str) -> bool:
+        state = await self.get(owner_id)
+        if state is None or state.status != "importing":
+            return False
+        await self.save(ProfilePhotoImportState(owner_id=owner_id, status="no_photo"))
         return True
 
 
@@ -641,6 +739,17 @@ class SavedPhotoService:
         source: str | None = None,
         source_key: str | None = None,
     ) -> SavedPhotoResponseModel:
+        if source == PROFILE_PHOTO_IMPORT_SOURCE:
+            try:
+                photo = normalize_imported_profile_photo(photo)
+            except InvalidSavedPhotoError as exc:
+                raise ProblemDetails(
+                    status_code=422,
+                    title="Invalid Photo Upload",
+                    detail=str(exc),
+                    type="/problems/invalid-photo-upload",
+                    error_code="invalid_photo_upload",
+                ) from exc
         normalized_label = normalize_photo_label(label)
         if len(photo.content) > self._settings.saved_photo_max_bytes:
             raise ProblemDetails(
@@ -782,6 +891,8 @@ class SavedPhotoService:
         import_state_repository: AbstractProfilePhotoImportStateRepository | None = None,
     ) -> None:
         record = await self._require_photo(owner.owner_id, photo_id)
+        if record.source == PROFILE_PHOTO_IMPORT_SOURCE and import_state_repository is not None:
+            await import_state_repository.mark_deleted_suppressed(owner.owner_id)
         await self._delete_blob(
             record.blob_name,
             owner_id=owner.owner_id,
@@ -795,14 +906,6 @@ class SavedPhotoService:
             stage="thumbnail delete",
         )
         await self._repository.delete(owner.owner_id, photo_id)
-        if record.source == PROFILE_PHOTO_IMPORT_SOURCE and import_state_repository is not None:
-            await import_state_repository.save(
-                ProfilePhotoImportState(
-                    owner_id=owner.owner_id,
-                    status="deleted",
-                    photo_id=photo_id,
-                )
-            )
 
     async def _require_photo(self, owner_id: str, photo_id: str) -> StoredSavedPhoto:
         record = await self._repository.get(owner_id, photo_id)
@@ -930,6 +1033,37 @@ def build_thumbnail(payload: bytes, *, size: int) -> bytes:
         ) from exc
     except OSError as exc:
         raise InvalidSavedPhotoError("The uploaded photo could not be processed safely.") from exc
+
+
+def normalize_imported_profile_photo(photo: ReferenceImageUpload) -> ReferenceImageUpload:
+    try:
+        with Image.open(BytesIO(photo.content)) as image:
+            working = ImageOps.exif_transpose(image).convert("RGB")
+            working.thumbnail((2048, 2048), getattr(Image, "Resampling", Image).LANCZOS)
+            output = BytesIO()
+            working.save(output, format="JPEG", quality=90, optimize=True)
+    except (UnidentifiedImageError, OSError) as exc:
+        raise InvalidSavedPhotoError(
+            "The imported profile photo could not be processed safely."
+        ) from exc
+    normalized = output.getvalue()
+    if len(normalized) > MAX_IMPORTED_PROFILE_PHOTO_BYTES:
+        raise InvalidSavedPhotoError("The imported profile photo is too large after processing.")
+    return ReferenceImageUpload(
+        content=normalized,
+        content_type="image/jpeg",
+        filename="entra-profile-photo.jpg",
+    )
+
+
+def _profile_import_claim_expired(updated_at: str) -> bool:
+    try:
+        timestamp = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=UTC)
+    return datetime.now(UTC) - timestamp >= timedelta(seconds=PROFILE_PHOTO_IMPORT_LEASE_SECONDS)
 
 
 def _optional_label(value: object) -> str | None:

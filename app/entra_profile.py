@@ -22,7 +22,7 @@ async def fetch_profile_photo(access_token: str) -> ReferenceImageUpload | None:
         async with httpx.AsyncClient() as client:
             response = await client.get(
                 GRAPH_PROFILE_PHOTO_URL,
-                headers={"Authorization": f"Bearer {access_token}"},
+                headers={"Authorization": "Bearer " + access_token},
                 timeout=10.0,
             )
     except httpx.HTTPError as exc:

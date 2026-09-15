@@ -22,7 +22,11 @@ from app.generation import (
     create_services,
 )
 from app.main import create_app
-from app.photos import PROFILE_PHOTO_IMPORT_SOURCE, SavedPhotoResponseModel
+from app.photos import (
+    PROFILE_PHOTO_IMPORT_SOURCE,
+    SavedPhotoResponseModel,
+    normalize_imported_profile_photo,
+)
 from app.settings import load_app_settings
 
 TEST_TENANT_ID = "11111111-1111-1111-1111-111111111111"
@@ -406,7 +410,36 @@ def test_imported_photo_deletion_persists_do_not_reimport_state(
     assert response.status_code == 204
     state = asyncio.run(services.profile_photo_import_state_repository.get(TEST_OWNER_ID))
     assert state is not None
-    assert state.status == "deleted"
+    assert state.status == "deleted_suppressed"
+
+
+def test_import_claim_can_be_reset_and_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    services = build_services(monkeypatch)
+    repository = services.profile_photo_import_state_repository
+
+    assert asyncio.run(repository.claim(TEST_OWNER_ID))
+    assert not asyncio.run(repository.claim(TEST_OWNER_ID))
+    asyncio.run(repository.reset_claim(TEST_OWNER_ID))
+    assert asyncio.run(repository.claim(TEST_OWNER_ID))
+
+
+def test_imported_original_is_reencoded_with_bounded_dimensions_and_no_metadata() -> None:
+    image = Image.new("RGB", (3000, 1000), color="purple")
+    payload = BytesIO()
+    image.save(payload, format="PNG", pnginfo=None)
+
+    normalized = normalize_imported_profile_photo(
+        ReferenceImageUpload(
+            content=payload.getvalue(),
+            content_type="image/png",
+            filename="entra-profile-photo",
+        )
+    )
+
+    assert normalized.content_type == "image/jpeg"
+    with Image.open(BytesIO(normalized.content)) as decoded:
+        assert max(decoded.size) <= 2048
+        assert decoded.getexif() == {}
 
 
 def test_delete_photo_removes_metadata_and_blobs(monkeypatch: pytest.MonkeyPatch) -> None:

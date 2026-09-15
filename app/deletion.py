@@ -331,6 +331,7 @@ class DeletionService:
         request_id: str,
         schedule_cleanup,
     ) -> None:
+        await self._profile_photo_import_state_repository.mark_deleted_suppressed(owner.owner_id)
         cards = await self._card_repository.list_by_owner(owner.owner_id)
         saved_photos = await self._saved_photo_repository.list_by_owner(owner.owner_id)
         generation_audits = await self._audit_repository.list_audits_by_owner(owner.owner_id)
@@ -352,7 +353,6 @@ class DeletionService:
             await self._audit_repository.delete_audit(owner.owner_id, generation_audit.id)
         for photo in saved_photos:
             await self._saved_photo_repository.delete(owner.owner_id, photo.photo_id)
-        await self._profile_photo_import_state_repository.delete(owner.owner_id)
 
         audit.timestamps.deleted_at = now_iso()
         blob_targets = self._card_blob_targets(cards) + self._photo_blob_targets(saved_photos)

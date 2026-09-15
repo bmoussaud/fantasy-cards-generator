@@ -752,9 +752,8 @@ def create_app(services: AppServices | None = None) -> FastAPI:
                     str(access_token) if isinstance(access_token, str) else ""
                 )
                 if photo is None:
-                    await save_profile_import_state(
-                        ProfilePhotoImportState(owner_id=owner_id, status="no_photo")
-                    )
+                    if not await profile_import_repository.complete_no_photo(owner_id):
+                        raise RuntimeError("Profile photo import state changed during import.")
                 else:
                     stored = await photo_service.save_photo(
                         owner=AuthenticatedOwner(
@@ -770,17 +769,34 @@ def create_app(services: AppServices | None = None) -> FastAPI:
                         source=PROFILE_PHOTO_IMPORT_SOURCE,
                         source_key="me/photo",
                     )
-                    await save_profile_import_state(
-                        ProfilePhotoImportState(
-                            owner_id=owner_id,
-                            status="imported",
-                            photo_id=stored.photoId,
-                        )
+                    completed = await profile_import_repository.complete_import(
+                        owner_id,
+                        stored.photoId,
                     )
+                    if not completed:
+                        await photo_service.delete_photo(
+                            AuthenticatedOwner(
+                                owner_id=owner_id,
+                                tenant_id=authenticated_user["tenant_id"],
+                                object_id=authenticated_user["object_id"],
+                                subject=authenticated_user["sub"],
+                                display_name=authenticated_user["name"],
+                                email=authenticated_user["email"],
+                            ),
+                            stored.photoId,
+                        )
             except Exception as exc:
-                await save_profile_import_state(
-                    ProfilePhotoImportState(owner_id=owner_id, status="failed")
-                )
+                try:
+                    await profile_import_repository.reset_claim(owner_id)
+                except Exception as reset_exc:
+                    safe_log(
+                        "auth.profile_photo_import_reset_failed",
+                        request_id=request.state.request_id,
+                        attributes={
+                            "fcg.error_code": normalize_error_code(type(reset_exc).__name__),
+                            "fcg.outcome": "failed",
+                        },
+                    )
                 safe_log(
                     "auth.profile_photo_import_failed",
                     request_id=request.state.request_id,
@@ -813,7 +829,7 @@ def create_app(services: AppServices | None = None) -> FastAPI:
         if owner is None:
             raise HTTPException(status_code=401, detail="Authentication required.")
         state = await profile_import_repository.get(owner.owner_id)
-        if state is not None:
+        if state is not None and state.status != "failed":
             return RedirectResponse(url="/app", status_code=status.HTTP_303_SEE_OTHER)
         nonce = secrets.token_urlsafe(32)
         request.session[AUTH_NONCE_SESSION_KEY] = nonce

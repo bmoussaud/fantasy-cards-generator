@@ -15,6 +15,7 @@ from joserfc import jwt
 from joserfc.errors import InvalidClaimError
 from joserfc.jwk import OctKey
 
+from app import entra_profile
 from app import main as main_module
 from app.auth import (
     DEFAULT_ENTRA_AUTHORITY,
@@ -278,6 +279,36 @@ def test_profile_photo_import_consent_failure_does_not_fail_existing_login(
     assert callback.status_code == 303
     assert callback.headers["location"] == "/app"
     assert client.get("/app").status_code == 200
+
+
+def test_graph_profile_photo_request_uses_delegated_bearer_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        status_code = 200
+        headers = {"content-type": "image/jpeg"}
+        content = b"jpeg"
+
+    class FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return None
+
+        async def get(self, url, *, headers, timeout):
+            captured.update({"url": url, "headers": headers, "timeout": timeout})
+            return FakeResponse()
+
+    monkeypatch.setattr(entra_profile.httpx, "AsyncClient", FakeAsyncClient)
+
+    result = asyncio_run(entra_profile.fetch_profile_photo("delegated-token"))
+
+    assert result is not None
+    assert captured["url"] == entra_profile.GRAPH_PROFILE_PHOTO_URL
+    assert captured["headers"] == {"Authorization": "Bearer delegated-token"}
 
 
 def test_static_oauth_callback_preserves_authorization_query(

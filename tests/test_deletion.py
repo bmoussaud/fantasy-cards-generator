@@ -416,6 +416,11 @@ def test_delete_account_removes_owned_data_clears_session_and_preserves_minimal_
     assert audit.cost_estimate is None
     assert audit.timestamps.deleted_at
     assert audit.timestamps.asset_cleanup_completed_at
+    import_state = asyncio.run(
+        client.app.state.services.profile_photo_import_state_repository.get(TEST_OWNER_ID)
+    )
+    assert import_state is not None
+    assert import_state.status == "deleted_suppressed"
 
     follow_up = client.get("/my/cards")
     assert follow_up.status_code == 401
