@@ -749,6 +749,163 @@ def test_cleanup_app_does_not_require_vault_access_or_secret_reads(raw_app, raw_
     static_auth.run_cleanup_app(args("cleanup-app"))
 
 
+def cleaned_app(raw_app, revision="fcag-dev-app--static-cleanup-12345678"):
+    result = copy.deepcopy(raw_app)
+    result["properties"]["latestRevisionName"] = revision
+    result["properties"]["latestReadyRevisionName"] = revision
+    result["properties"]["template"]["revisionSuffix"] = revision.rsplit("--", 1)[1]
+    result["properties"]["template"]["containers"][0]["env"] = [
+        item
+        for item in result["properties"]["template"]["containers"][0]["env"]
+        if item["name"] not in static_auth.ROTATION_ONLY_ENV
+    ]
+    return result
+
+
+def prepare_cleanup_apply(raw_app, raw_vault, monkeypatch, *, after=None):
+    patch_source(monkeypatch)
+    receipt = make_receipt(raw_vault)
+    baseline = static_auth.fingerprint(raw_app)
+    after = after or cleaned_app(raw_app, f"fcag-dev-app--static-cleanup-{baseline[:8]}")
+    saved = []
+    apps = iter([raw_app, raw_app, after, after, after])
+    monkeypatch.setattr(
+        static_auth,
+        "load_receipt",
+        lambda: copy.deepcopy(saved[-1] if saved else receipt),
+    )
+    monkeypatch.setattr(
+        static_auth,
+        "save_receipt",
+        lambda value: saved.append(copy.deepcopy(value)),
+    )
+    monkeypatch.setattr(static_auth, "get_app", lambda: copy.deepcopy(next(apps)))
+    monkeypatch.setattr(static_auth, "healthz", lambda raw: True)
+    monkeypatch.setattr(static_auth, "verify_auth_surface", lambda raw: None)
+    monkeypatch.setattr(static_auth, "build", lambda name: {"parameters": {}})
+    monkeypatch.setattr(static_auth, "preview", lambda *values: {"changes": [static_auth.APP]})
+    monkeypatch.setattr(static_auth, "deploy", lambda *values: None)
+    monkeypatch.setattr(static_auth, "verify_app_after", lambda expected, suffix: None)
+    monkeypatch.setattr(
+        static_auth,
+        "utc_now",
+        lambda: datetime.datetime(2026, 9, 15, 8, tzinfo=datetime.timezone.utc),
+    )
+    return receipt, after, saved
+
+
+def test_cleanup_app_promotes_verified_revision_and_unblocks_downstream(
+    raw_app, raw_vault, monkeypatch
+):
+    receipt, after, saved = prepare_cleanup_apply(raw_app, raw_vault, monkeypatch)
+    baseline = static_auth.fingerprint(raw_app)
+    static_auth.run_cleanup_app(
+        args(
+            "cleanup-app",
+            apply=True,
+            approve_change=True,
+            reviewed=True,
+            expect_fingerprint=baseline,
+        )
+    )
+    assert saved[0]["artifact"]["pinnedRevision"] == receipt["artifact"]["pinnedRevision"]
+    assert (
+        saved[0]["artifact"]["cleanupAppIntent"]["expectedRevision"]
+        == after["properties"]["latestRevisionName"]
+    )
+    assert saved[-1]["artifact"]["pinnedRevision"] == after["properties"]["latestRevisionName"]
+    assert saved[-1]["artifact"]["publishedRevision"] == receipt["artifact"]["publishedRevision"]
+    assert "cleanupAppIntent" not in saved[-1]["artifact"]
+
+    final_receipt = saved[-1]
+    monkeypatch.setattr(static_auth, "load_receipt", lambda: final_receipt)
+    monkeypatch.setattr(static_auth, "get_app", lambda: after)
+    monkeypatch.setattr(static_auth, "get_vault", lambda: raw_vault)
+    monkeypatch.setattr(static_auth, "role_assignments", lambda: [])
+    static_auth.run_cleanup_vault(args("cleanup-vault"))
+    static_auth.run_cleanup_role(args("cleanup-role"))
+
+
+def test_cleanup_app_digest_drift_cannot_promote_receipt(raw_app, raw_vault, monkeypatch):
+    baseline = static_auth.fingerprint(raw_app)
+    drifted = cleaned_app(raw_app, f"fcag-dev-app--static-cleanup-{baseline[:8]}")
+    drifted["properties"]["template"]["containers"][0]["image"] = IMAGE.replace("a" * 64, "b" * 64)
+    _, _, saved = prepare_cleanup_apply(raw_app, raw_vault, monkeypatch, after=drifted)
+    with pytest.raises(static_auth.GateError, match="exact recorded cleanup intent"):
+        static_auth.run_cleanup_app(
+            args(
+                "cleanup-app",
+                apply=True,
+                approve_change=True,
+                reviewed=True,
+                expect_fingerprint=static_auth.fingerprint(raw_app),
+            )
+        )
+    assert len(saved) == 1
+    assert saved[0]["artifact"]["pinnedRevision"] == raw_app["properties"]["latestRevisionName"]
+
+
+def test_cleanup_app_failed_status_cannot_promote_receipt(raw_app, raw_vault, monkeypatch):
+    baseline = static_auth.fingerprint(raw_app)
+    failed = cleaned_app(raw_app, f"fcag-dev-app--static-cleanup-{baseline[:8]}")
+    failed["properties"]["runningStatus"] = "Failed"
+    _, _, saved = prepare_cleanup_apply(raw_app, raw_vault, monkeypatch, after=failed)
+    with pytest.raises(static_auth.GateError, match="not healthy"):
+        static_auth.run_cleanup_app(
+            args(
+                "cleanup-app",
+                apply=True,
+                approve_change=True,
+                reviewed=True,
+                expect_fingerprint=static_auth.fingerprint(raw_app),
+            )
+        )
+    assert len(saved) == 1
+    assert saved[0]["artifact"]["cleanupAppIntent"]["status"] == "started"
+    assert saved[0]["artifact"]["pinnedRevision"] == raw_app["properties"]["latestRevisionName"]
+
+
+def test_cleanup_app_retry_reconciles_only_exact_recorded_intent(raw_app, raw_vault, monkeypatch):
+    patch_source(monkeypatch)
+    receipt = make_receipt(raw_vault)
+    after = cleaned_app(raw_app)
+    expected = static_auth.app_snapshot(after)
+    intent = static_auth.cleanup_app_intent(
+        receipt,
+        raw_app,
+        expected,
+        after["properties"]["template"]["revisionSuffix"],
+        IMAGE,
+        SOURCE,
+    )
+    receipt["artifact"]["cleanupAppIntent"] = intent
+    saved = []
+    monkeypatch.setattr(static_auth, "load_receipt", lambda: copy.deepcopy(receipt))
+    monkeypatch.setattr(static_auth, "get_app", lambda: copy.deepcopy(after))
+    monkeypatch.setattr(static_auth, "healthz", lambda raw: True)
+    monkeypatch.setattr(static_auth, "verify_auth_surface", lambda raw: None)
+    monkeypatch.setattr(static_auth, "save_receipt", lambda value: saved.append(value))
+    static_auth.run_cleanup_app(
+        args(
+            "cleanup-app",
+            apply=True,
+            approve_change=True,
+            reviewed=True,
+            expect_fingerprint=static_auth.fingerprint(after),
+        )
+    )
+    assert saved[0]["artifact"]["pinnedRevision"] == intent["expectedRevision"]
+
+    arbitrary = copy.deepcopy(after)
+    arbitrary["properties"]["latestRevisionName"] = "fcag-dev-app--static-cleanup-deadbeef"
+    arbitrary["properties"]["latestReadyRevisionName"] = arbitrary["properties"][
+        "latestRevisionName"
+    ]
+    monkeypatch.setattr(static_auth, "get_app", lambda: arbitrary)
+    with pytest.raises(static_auth.GateError, match="exact recorded cleanup intent"):
+        static_auth.run_cleanup_app(args("cleanup-app"))
+
+
 def test_stale_cleanup_vault_fingerprint_refuses_before_apply(raw_app, raw_vault, monkeypatch):
     patch_source(monkeypatch)
     receipt = make_receipt(raw_vault)
