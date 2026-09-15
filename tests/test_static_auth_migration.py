@@ -21,6 +21,37 @@ IMAGE = f"{static_auth.REGISTRY_SERVER}/{static_auth.IMAGE_REPOSITORY}" f"@sha25
 TAGGED_IMAGE = f"{static_auth.REGISTRY_SERVER}/{static_auth.IMAGE_REPOSITORY}:azd-deploy-123456"
 
 
+def test_published_tags_uses_repository_command_registry_name(monkeypatch):
+    tag = {
+        "name": "azd-deploy-123456",
+        "digest": "sha256:" + "a" * 64,
+        "createdTime": "2026-09-15T05:18:37Z",
+        "lastUpdateTime": "2026-09-15T05:18:37Z",
+    }
+
+    def inventory(args):
+        assert args == [
+            "az",
+            "acr",
+            "repository",
+            "show-tags",
+            "--name",
+            static_auth.REGISTRY_NAME,
+            "--repository",
+            static_auth.IMAGE_REPOSITORY,
+            "--detail",
+            "--output",
+            "json",
+        ]
+        return [tag, {"name": "unrelated"}]
+
+    monkeypatch.setattr(static_auth, "command", inventory)
+
+    assert static_auth.published_tags() == {
+        tag["name"]: {key: tag[key] for key in ("digest", "createdTime", "lastUpdateTime")}
+    }
+
+
 @pytest.fixture
 def raw_app():
     environment = static_auth.GROUP + "/providers/Microsoft.App/managedEnvironments/fcag-dev-cae"
