@@ -25,6 +25,8 @@ from app.problems import ProblemDetails
 from app.settings import AppSettings
 
 SAVED_PHOTO_DOCUMENT_ID_PREFIX = "photo:"
+PROFILE_PHOTO_IMPORT_DOCUMENT_ID_PREFIX = "profile-photo-import:"
+PROFILE_PHOTO_IMPORT_SOURCE = "entra-profile-photo"
 CONTENT_SAFETY_CATEGORIES = ("Hate", "SelfHarm", "Sexual", "Violence")
 THUMBNAIL_BLOB_CONTENT_TYPE = "image/png"
 logger = logging.getLogger(__name__)
@@ -91,6 +93,7 @@ class SavedPhotoResponseModel(BaseModel):
     schemaVersion: Literal[1] = 1
     photoId: str
     label: str | None = None
+    source: str | None = None
     createdAt: str
     updatedAt: str
     image: SavedPhotoImageModel
@@ -116,6 +119,8 @@ class StoredSavedPhoto:
     image_url_path: str
     thumbnail_blob_name: str
     thumbnail_image_url_path: str
+    source: str | None = None
+    source_key: str | None = None
     created_at: str = field(default_factory=now_iso)
     updated_at: str = field(default_factory=now_iso)
 
@@ -132,6 +137,8 @@ class StoredSavedPhoto:
             "schemaVersion": 1,
             "owner": {"ownerId": self.owner_id},
             "label": self.label,
+            "source": self.source,
+            "sourceKey": self.source_key,
             "blob": {
                 "name": self.blob_name,
                 "contentType": self.blob_content_type,
@@ -165,6 +172,8 @@ class StoredSavedPhoto:
             photo_id=photo_id,
             owner_id=str(document["userId"]),
             label=_optional_label(document.get("label")),
+            source=_optional_label(document.get("source")),
+            source_key=_optional_label(document.get("sourceKey")),
             blob_name=blob_name,
             blob_content_type=str(blob.get("contentType") or "image/png"),
             blob_sha256=str(blob.get("sha256") or ""),
@@ -182,6 +191,7 @@ class StoredSavedPhoto:
         return SavedPhotoResponseModel(
             photoId=self.photo_id,
             label=self.label,
+            source=self.source,
             createdAt=self.created_at,
             updatedAt=self.updated_at,
             image=SavedPhotoImageModel(
@@ -211,6 +221,85 @@ class AbstractSavedPhotoRepository:
 
     async def count_by_owner(self, owner_id: str) -> int:
         raise NotImplementedError
+
+
+@dataclass(slots=True)
+class ProfilePhotoImportState:
+    owner_id: str
+    status: str
+    photo_id: str | None = None
+    updated_at: str = field(default_factory=now_iso)
+
+    @property
+    def document_id(self) -> str:
+        return f"{PROFILE_PHOTO_IMPORT_DOCUMENT_ID_PREFIX}{self.owner_id}"
+
+    def to_document(self) -> dict[str, Any]:
+        return {
+            "id": self.document_id,
+            "documentType": "profile-photo-import",
+            "userId": self.owner_id,
+            "owner": {"ownerId": self.owner_id},
+            "status": self.status,
+            "photoId": self.photo_id,
+            "updatedAt": self.updated_at,
+        }
+
+    @classmethod
+    def from_document(cls, document: dict[str, Any]) -> "ProfilePhotoImportState | None":
+        if str(document.get("documentType")) != "profile-photo-import":
+            return None
+        owner_id = document.get("userId")
+        status = document.get("status")
+        if not isinstance(owner_id, str) or not owner_id or not isinstance(status, str):
+            return None
+        return cls(
+            owner_id=owner_id,
+            status=status,
+            photo_id=_optional_label(document.get("photoId")),
+            updated_at=str(document.get("updatedAt") or now_iso()),
+        )
+
+
+class AbstractProfilePhotoImportStateRepository:
+    async def get(self, owner_id: str) -> ProfilePhotoImportState | None:
+        raise NotImplementedError
+
+    async def save(self, state: ProfilePhotoImportState) -> ProfilePhotoImportState:
+        raise NotImplementedError
+
+    async def delete(self, owner_id: str) -> None:
+        raise NotImplementedError
+
+    async def claim(self, owner_id: str) -> bool:
+        raise NotImplementedError
+
+
+class InMemoryProfilePhotoImportStateRepository(AbstractProfilePhotoImportStateRepository):
+    def __init__(self) -> None:
+        self._records: dict[str, ProfilePhotoImportState] = {}
+        self._lock = asyncio.Lock()
+
+    async def get(self, owner_id: str) -> ProfilePhotoImportState | None:
+        async with self._lock:
+            return self._records.get(owner_id)
+
+    async def save(self, state: ProfilePhotoImportState) -> ProfilePhotoImportState:
+        async with self._lock:
+            state.updated_at = now_iso()
+            self._records[state.owner_id] = state
+            return state
+
+    async def delete(self, owner_id: str) -> None:
+        async with self._lock:
+            self._records.pop(owner_id, None)
+
+    async def claim(self, owner_id: str) -> bool:
+        async with self._lock:
+            if owner_id in self._records:
+                return False
+            self._records[owner_id] = ProfilePhotoImportState(owner_id=owner_id, status="importing")
+            return True
 
 
 class InMemorySavedPhotoRepository(AbstractSavedPhotoRepository):
@@ -338,6 +427,69 @@ class AzureCosmosSavedPhotoRepository(AbstractSavedPhotoRepository):
         async for value in iterator:
             return int(value)
         return 0
+
+
+class AzureCosmosProfilePhotoImportStateRepository(AbstractProfilePhotoImportStateRepository):
+    def __init__(self, settings: AppSettings) -> None:
+        from azure.cosmos.aio import CosmosClient
+
+        self._client = CosmosClient(
+            settings.cosmos_endpoint,
+            credential=_default_azure_credential(),
+        )
+        self._database_name = settings.cosmos_database_name or "appdb"
+        self._container_name = settings.cosmos_container_name or "cards"
+        self._container = None
+
+    async def _get_container(self):
+        if self._container is None:
+            database = self._client.get_database_client(self._database_name)
+            self._container = database.get_container_client(self._container_name)
+        return self._container
+
+    async def get(self, owner_id: str) -> ProfilePhotoImportState | None:
+        from azure.cosmos.exceptions import CosmosResourceNotFoundError
+
+        container = await self._get_container()
+        try:
+            document = await container.read_item(
+                f"{PROFILE_PHOTO_IMPORT_DOCUMENT_ID_PREFIX}{owner_id}",
+                partition_key=owner_id,
+            )
+        except CosmosResourceNotFoundError:
+            return None
+        return ProfilePhotoImportState.from_document(document)
+
+    async def save(self, state: ProfilePhotoImportState) -> ProfilePhotoImportState:
+        container = await self._get_container()
+        state.updated_at = now_iso()
+        await container.upsert_item(state.to_document())
+        return state
+
+    async def delete(self, owner_id: str) -> None:
+        from azure.cosmos.exceptions import CosmosResourceNotFoundError
+
+        container = await self._get_container()
+        try:
+            await container.delete_item(
+                f"{PROFILE_PHOTO_IMPORT_DOCUMENT_ID_PREFIX}{owner_id}",
+                partition_key=owner_id,
+            )
+        except CosmosResourceNotFoundError:
+            return
+
+    async def claim(self, owner_id: str) -> bool:
+        from azure.cosmos.exceptions import CosmosHttpResponseError
+
+        container = await self._get_container()
+        state = ProfilePhotoImportState(owner_id=owner_id, status="importing")
+        try:
+            await container.create_item(state.to_document())
+        except CosmosHttpResponseError as exc:
+            if getattr(exc, "status_code", None) == 409:
+                return False
+            raise
+        return True
 
 
 @dataclass(frozen=True, slots=True)
@@ -486,6 +638,8 @@ class SavedPhotoService:
         owner: AuthenticatedOwner,
         photo: ReferenceImageUpload,
         label: str | None,
+        source: str | None = None,
+        source_key: str | None = None,
     ) -> SavedPhotoResponseModel:
         normalized_label = normalize_photo_label(label)
         if len(photo.content) > self._settings.saved_photo_max_bytes:
@@ -557,6 +711,8 @@ class SavedPhotoService:
                     image_url_path=f"/my/photos/{photo_id}/image",
                     thumbnail_blob_name=thumbnail_blob_name,
                     thumbnail_image_url_path=f"/my/photos/{photo_id}/thumbnail",
+                    source=source,
+                    source_key=source_key,
                 )
             )
         except Exception as exc:
@@ -618,7 +774,13 @@ class SavedPhotoService:
             filename=record.blob_name.rsplit("/", 1)[-1],
         )
 
-    async def delete_photo(self, owner: AuthenticatedOwner, photo_id: str) -> None:
+    async def delete_photo(
+        self,
+        owner: AuthenticatedOwner,
+        photo_id: str,
+        *,
+        import_state_repository: AbstractProfilePhotoImportStateRepository | None = None,
+    ) -> None:
         record = await self._require_photo(owner.owner_id, photo_id)
         await self._delete_blob(
             record.blob_name,
@@ -633,6 +795,14 @@ class SavedPhotoService:
             stage="thumbnail delete",
         )
         await self._repository.delete(owner.owner_id, photo_id)
+        if record.source == PROFILE_PHOTO_IMPORT_SOURCE and import_state_repository is not None:
+            await import_state_repository.save(
+                ProfilePhotoImportState(
+                    owner_id=owner.owner_id,
+                    status="deleted",
+                    photo_id=photo_id,
+                )
+            )
 
     async def _require_photo(self, owner_id: str, photo_id: str) -> StoredSavedPhoto:
         record = await self._repository.get(owner_id, photo_id)

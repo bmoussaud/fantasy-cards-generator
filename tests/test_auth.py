@@ -23,6 +23,7 @@ from app.auth import (
     extract_user_claims,
     load_auth_settings,
 )
+from app.generation import ReferenceImageUpload
 from app.main import create_app
 from tests.conftest import TEST_OBJECT_ID, TEST_OWNER_ID, TEST_TENANT_ID, FakeOAuthClient
 
@@ -188,6 +189,95 @@ def test_callback_persists_owner_claims_in_session(monkeypatch: pytest.MonkeyPat
     assert "roles" not in app_shell_response.text
     assert "Aragorn" in app_shell_response.text
     assert "aragorn@example.com" in app_shell_response.text
+
+
+def test_profile_photo_import_is_explicit_and_uses_transient_graph_flow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_scopes: list[tuple[str, ...] | None] = []
+
+    def oauth_client(settings, *, scopes=None):
+        captured_scopes.append(scopes)
+        return FakeOAuthClient()
+
+    async def fake_fetch(_: str) -> ReferenceImageUpload:
+        return ReferenceImageUpload(
+            content=b"not-an-image",
+            content_type="image/png",
+            filename="entra-profile-photo",
+        )
+
+    monkeypatch.setattr(main_module, "create_oauth_client", oauth_client)
+    monkeypatch.setattr(main_module, "fetch_profile_photo", fake_fetch)
+    client = TestClient(create_app(), base_url="https://testserver")
+
+    client.get("/auth/login", follow_redirects=False)
+    callback = client.get("/auth/callback?code=valid-code&state=opaque", follow_redirects=False)
+    assert callback.status_code == 303
+    shell = client.get("/app")
+    assert "Import profile photo" in shell.text
+
+    marker = 'name="csrf_token" value="'
+    csrf_start = shell.text.index(marker) + len(marker)
+    csrf_token = shell.text[csrf_start : shell.text.index('"', csrf_start)]
+    declined = client.post(
+        "/auth/profile-photo/decline",
+        data={"csrf_token": csrf_token},
+        follow_redirects=False,
+    )
+    assert declined.status_code == 303
+    assert "Import profile photo" not in client.get("/app").text
+
+    # A second user session can still exercise the opt-in route independently.
+    client = TestClient(create_app(), base_url="https://testserver")
+    client.get("/auth/login", follow_redirects=False)
+    client.get("/auth/callback?code=valid-code&state=opaque", follow_redirects=False)
+    shell = client.get("/app")
+    csrf_start = shell.text.index(marker) + len(marker)
+    csrf_token = shell.text[csrf_start : shell.text.index('"', csrf_start)]
+    start = client.post(
+        "/auth/profile-photo/import",
+        data={"csrf_token": csrf_token},
+        follow_redirects=False,
+    )
+    assert start.status_code == 307
+    assert captured_scopes[-1] is not None
+    assert "User.Read" in captured_scopes[-1]
+
+
+def test_profile_photo_import_consent_failure_does_not_fail_existing_login(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ImportConsentDeniedClient(FakeOAuthClient):
+        async def authorize_access_token(self, request, **_: object) -> dict[str, Any]:
+            if request.session.get("profile_photo_import"):
+                raise OAuthError(error="access_denied")
+            return await super().authorize_access_token(request)
+
+    monkeypatch.setattr(
+        main_module,
+        "create_oauth_client",
+        lambda settings, **_: ImportConsentDeniedClient(),
+    )
+    client = TestClient(create_app(), base_url="https://testserver")
+    client.get("/auth/login", follow_redirects=False)
+    client.get("/auth/callback?code=valid-code&state=opaque", follow_redirects=False)
+    shell = client.get("/app")
+    marker = 'name="csrf_token" value="'
+    csrf_start = shell.text.index(marker) + len(marker)
+    csrf_token = shell.text[csrf_start : shell.text.index('"', csrf_start)]
+
+    start = client.post(
+        "/auth/profile-photo/import",
+        data={"csrf_token": csrf_token},
+        follow_redirects=False,
+    )
+    assert start.status_code == 307
+    callback = client.get("/auth/callback?error=access_denied&state=opaque", follow_redirects=False)
+
+    assert callback.status_code == 303
+    assert callback.headers["location"] == "/app"
+    assert client.get("/app").status_code == 200
 
 
 def test_static_oauth_callback_preserves_authorization_query(

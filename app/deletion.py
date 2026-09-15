@@ -14,7 +14,11 @@ from app.generation import (
     _default_azure_credential,
     now_iso,
 )
-from app.photos import AbstractSavedPhotoRepository, StoredSavedPhoto
+from app.photos import (
+    AbstractProfilePhotoImportStateRepository,
+    AbstractSavedPhotoRepository,
+    StoredSavedPhoto,
+)
 from app.problems import ProblemDetails
 from app.settings import AppSettings
 from app.telemetry import normalize_error_code, record_persistence, safe_log, telemetry_span
@@ -221,6 +225,7 @@ class DeletionService:
         deletion_audit_repository: AbstractDeletionAuditRepository,
         asset_store: AbstractAssetStore,
         saved_photo_repository: AbstractSavedPhotoRepository,
+        profile_photo_import_state_repository: AbstractProfilePhotoImportStateRepository,
         photo_asset_store: AbstractAssetStore,
     ) -> None:
         self._settings = settings
@@ -229,6 +234,7 @@ class DeletionService:
         self._deletion_audit_repository = deletion_audit_repository
         self._asset_store = asset_store
         self._saved_photo_repository = saved_photo_repository
+        self._profile_photo_import_state_repository = profile_photo_import_state_repository
         self._photo_asset_store = photo_asset_store
         self._audit_ttl_seconds = settings.audit_retention_days * 24 * 60 * 60
 
@@ -346,6 +352,7 @@ class DeletionService:
             await self._audit_repository.delete_audit(owner.owner_id, generation_audit.id)
         for photo in saved_photos:
             await self._saved_photo_repository.delete(owner.owner_id, photo.photo_id)
+        await self._profile_photo_import_state_repository.delete(owner.owner_id)
 
         audit.timestamps.deleted_at = now_iso()
         blob_targets = self._card_blob_targets(cards) + self._photo_blob_targets(saved_photos)

@@ -1660,6 +1660,7 @@ class AppServices:
     cosmos_health_probe: HealthDependencyProbe | None = None
     blob_health_probe: HealthDependencyProbe | None = None
     saved_photo_repository: Any | None = None
+    profile_photo_import_state_repository: Any | None = None
     photo_asset_store: AbstractAssetStore | None = None
     photo_moderation_service: Any | None = None
     deletion_audit_repository: Any | None = None
@@ -3021,8 +3022,10 @@ class CardGenerationService:
 def create_services(settings: AppSettings) -> AppServices:
     from app.deletion import AzureCosmosDeletionAuditRepository, InMemoryDeletionAuditRepository
     from app.photos import (
+        AzureCosmosProfilePhotoImportStateRepository,
         AzureCosmosSavedPhotoRepository,
         ContentSafetyPhotoModerationService,
+        InMemoryProfilePhotoImportStateRepository,
         InMemorySavedPhotoRepository,
     )
 
@@ -3031,6 +3034,9 @@ def create_services(settings: AppSettings) -> AppServices:
         audit_repository = card_repository
         asset_store = AzureBlobAssetStore(settings)
         saved_photo_repository = AzureCosmosSavedPhotoRepository(settings)
+        profile_photo_import_state_repository = AzureCosmosProfilePhotoImportStateRepository(
+            settings
+        )
         photo_asset_store = AzureBlobAssetStore(
             settings,
             container_name=settings.profile_photos_container_name,
@@ -3054,6 +3060,7 @@ def create_services(settings: AppSettings) -> AppServices:
         )
         asset_store = InMemoryAssetStore()
         saved_photo_repository = InMemorySavedPhotoRepository()
+        profile_photo_import_state_repository = InMemoryProfilePhotoImportStateRepository()
         photo_asset_store = InMemoryAssetStore()
         deletion_audit_repository = InMemoryDeletionAuditRepository()
         cosmos_health_probe = NotApplicableHealthProbe("cosmos")
@@ -3079,6 +3086,7 @@ def create_services(settings: AppSettings) -> AppServices:
         cosmos_health_probe=cosmos_health_probe,
         blob_health_probe=blob_health_probe,
         saved_photo_repository=saved_photo_repository,
+        profile_photo_import_state_repository=profile_photo_import_state_repository,
         photo_asset_store=photo_asset_store,
         photo_moderation_service=ContentSafetyPhotoModerationService(settings),
         deletion_audit_repository=deletion_audit_repository,

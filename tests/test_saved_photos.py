@@ -16,12 +16,13 @@ from app import main as main_module
 from app import photos as photos_module
 from app.generation import (
     AppServices,
+    AuthenticatedOwner,
     MockAIClient,
     ReferenceImageUpload,
     create_services,
 )
 from app.main import create_app
-from app.photos import SavedPhotoResponseModel
+from app.photos import PROFILE_PHOTO_IMPORT_SOURCE, SavedPhotoResponseModel
 from app.settings import load_app_settings
 
 TEST_TENANT_ID = "11111111-1111-1111-1111-111111111111"
@@ -363,6 +364,49 @@ def test_saved_photos_are_owner_scoped_for_listing_image_and_delete(
     assert image.json()["errorCode"] == "saved_photo_not_found"
     assert delete.status_code == 404
     assert delete.json()["errorCode"] == "saved_photo_not_found"
+
+
+def test_imported_photo_deletion_persists_do_not_reimport_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    services = build_services(monkeypatch)
+    client = make_authenticated_client(monkeypatch, services=services)
+    owner = AuthenticatedOwner(
+        owner_id=TEST_OWNER_ID,
+        tenant_id=TEST_TENANT_ID,
+        object_id=TEST_OBJECT_ID,
+        subject="user-test",
+        display_name="Aragorn",
+        email="aragorn@example.com",
+    )
+    saved = asyncio.run(
+        main_module.SavedPhotoService(
+            settings=services.settings,
+            repository=services.saved_photo_repository,
+            asset_store=services.photo_asset_store,
+            moderation_service=services.photo_moderation_service,
+        ).save_photo(
+            owner=owner,
+            photo=ReferenceImageUpload(
+                content=make_png_bytes(),
+                content_type="image/png",
+                filename="entra-profile-photo",
+            ),
+            label="Microsoft profile photo",
+            source=PROFILE_PHOTO_IMPORT_SOURCE,
+            source_key="me/photo",
+        )
+    )
+    token = csrf_token(client)
+    response = client.delete(
+        f"/my/photos/{saved.photoId}",
+        headers={"x-csrf-token": token},
+    )
+
+    assert response.status_code == 204
+    state = asyncio.run(services.profile_photo_import_state_repository.get(TEST_OWNER_ID))
+    assert state is not None
+    assert state.status == "deleted"
 
 
 def test_delete_photo_removes_metadata_and_blobs(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -33,6 +33,9 @@ ENTRA_SCOPES=openid profile email
   `https://login.microsoftonline.com/organizations/v2.0`.
 - `ENTRA_REDIRECT_URI` must exactly match the app registration.
 - `ENTRA_SCOPES` defaults to `openid profile email`.
+- Profile-photo import requests delegated Microsoft Graph `User.Read` only after
+  the signed-in user explicitly accepts the post-login import notice. The Graph
+  access token is transient and is never stored in the browser session or database.
 - Authentication testing on localhost requires HTTPS because the session cookie
   is marked `Secure`, and the default Entra redirect URIs use
   `https://localhost:8000/...`. Plain HTTP is fine only for anonymous pages
