@@ -519,6 +519,76 @@ def require_approved_rollback(raw, receipt, image, source):
     )
 
 
+def cleanup_app_intent(receipt, raw, expected, suffix, image, source):
+    artifact = require_artifact(receipt, source, image)
+    revision = f"{APP_NAME}--{suffix}"
+    require(
+        artifact.get("pinnedRevision") == raw["properties"]["latestRevisionName"],
+        "Cleanup intent does not start from the approved pinned revision",
+    )
+    return {
+        "status": "started",
+        "source": source,
+        "sourceFingerprint": artifact["sourceFingerprint"],
+        "image": image,
+        "priorPinnedRevision": artifact["pinnedRevision"],
+        "baselineAppFingerprint": fingerprint(raw),
+        "expectedSnapshotFingerprint": fingerprint(expected),
+        "expectedRevision": revision,
+    }
+
+
+def require_cleanup_app_intent(receipt, raw, image, source):
+    artifact = require_artifact(receipt, source, image)
+    intent = artifact.get("cleanupAppIntent")
+    require(
+        isinstance(intent, dict)
+        and intent.get("status") == "started"
+        and intent.get("source") == source
+        and intent.get("sourceFingerprint") == artifact.get("sourceFingerprint")
+        and intent.get("image") == image
+        and intent.get("priorPinnedRevision") == artifact.get("pinnedRevision")
+        and re.fullmatch(
+            rf"{re.escape(APP_NAME)}--static-cleanup-[0-9a-f]{{8}}",
+            intent.get("expectedRevision", ""),
+        )
+        and re.fullmatch(r"[0-9a-f]{64}", intent.get("baselineAppFingerprint", ""))
+        and re.fullmatch(r"[0-9a-f]{64}", intent.get("expectedSnapshotFingerprint", "")),
+        "Cleanup receipt intent is missing or invalid",
+    )
+    require(
+        raw["properties"]["latestRevisionName"] == intent["expectedRevision"]
+        and raw["properties"]["latestReadyRevisionName"] == intent["expectedRevision"]
+        and web_image(raw) == image
+        and fingerprint(app_snapshot(raw)) == intent["expectedSnapshotFingerprint"]
+        and not rotation_environment_present(raw),
+        "Current app does not match the exact recorded cleanup intent",
+    )
+    return intent
+
+
+def promote_cleanup_revision(receipt, raw, image, source):
+    intent = require_cleanup_app_intent(receipt, raw, image, source)
+    require(healthz(raw), "Cleanup revision health check failed")
+    verify_auth_surface(raw)
+    fresh = get_app()
+    require(
+        fingerprint(fresh) == fingerprint(raw),
+        "Cleanup app changed during final verification",
+    )
+    require_cleanup_app_intent(receipt, fresh, image, source)
+    artifact = copy.deepcopy(receipt["artifact"])
+    completed = copy.deepcopy(intent)
+    completed["status"] = "succeeded"
+    completed["completedAt"] = utc_now().isoformat()
+    artifact["pinnedRevision"] = intent["expectedRevision"]
+    artifact["cleanupApp"] = completed
+    artifact.pop("cleanupAppIntent")
+    updated = copy.deepcopy(receipt)
+    updated["artifact"] = artifact
+    return updated
+
+
 def rotation_environment_present(raw):
     web = next(
         item for item in raw["properties"]["template"]["containers"] if item["name"] == "web"
@@ -1418,9 +1488,48 @@ def run_cleanup_app(args):
     baseline = fingerprint(raw)
     if args.expect_fingerprint:
         require(args.expect_fingerprint == baseline, "Reviewed app fingerprint drifted")
-    require_approved_rollback(raw, receipt, args.rollback_image, args.rollback_source)
-    require(healthz(raw), "Approved rollback revision health check failed")
     if not rotation_environment_present(raw):
+        artifact = require_artifact(receipt, args.rollback_source, args.rollback_image)
+        if artifact.get("pinnedRevision") != raw["properties"]["latestRevisionName"]:
+            require_cleanup_app_intent(
+                receipt,
+                raw,
+                args.rollback_image,
+                args.rollback_source,
+            )
+            print(
+                json.dumps(
+                    {
+                        "phase": "cleanup-app",
+                        "fingerprint": baseline,
+                        "receiptFingerprint": receipt_digest(receipt),
+                        "applied": False,
+                        "reconciliationPending": True,
+                        "changes": [str(receipt_path())],
+                    }
+                )
+            )
+            if not args.apply:
+                return
+            require_apply_gates(args)
+            require(
+                receipt_digest(load_receipt()) == receipt_digest(receipt),
+                "Migration receipt changed immediately before reconciliation",
+            )
+            updated = promote_cleanup_revision(
+                receipt,
+                raw,
+                args.rollback_image,
+                args.rollback_source,
+            )
+            require(
+                receipt_digest(load_receipt()) == receipt_digest(receipt),
+                "Migration receipt changed immediately before pointer promotion",
+            )
+            save_receipt(updated)
+            return
+        require_approved_rollback(raw, receipt, args.rollback_image, args.rollback_source)
+        require(healthz(raw), "Approved rollback revision health check failed")
         print(
             json.dumps(
                 {
@@ -1433,6 +1542,8 @@ def run_cleanup_app(args):
             )
         )
         return
+    require_approved_rollback(raw, receipt, args.rollback_image, args.rollback_source)
+    require(healthz(raw), "Approved rollback revision health check failed")
     snapshot = app_snapshot(raw)
     suffix = f"static-cleanup-{baseline[:8]}"
     snapshot["properties"]["template"]["revisionSuffix"] = suffix
@@ -1470,12 +1581,35 @@ def run_cleanup_app(args):
         receipt_digest(load_receipt()) == receipt_digest(receipt),
         "Migration receipt changed immediately before apply",
     )
+    intent_receipt = copy.deepcopy(receipt)
+    intent_artifact = copy.deepcopy(intent_receipt["artifact"])
+    intent_artifact["cleanupAppIntent"] = cleanup_app_intent(
+        receipt,
+        fresh,
+        expected,
+        suffix,
+        args.rollback_image,
+        args.rollback_source,
+    )
+    intent_receipt["artifact"] = intent_artifact
+    save_receipt(intent_receipt)
     deploy(
         f"dev-static-auth-cleanup-app-{baseline[:12]}",
         deployment_body(template, parameters),
     )
     verify_app_after(expected, suffix)
-    verify_auth_surface(get_app())
+    after = get_app()
+    updated = promote_cleanup_revision(
+        intent_receipt,
+        after,
+        args.rollback_image,
+        args.rollback_source,
+    )
+    require(
+        receipt_digest(load_receipt()) == receipt_digest(intent_receipt),
+        "Migration receipt changed immediately before pointer promotion",
+    )
+    save_receipt(updated)
 
 
 def run_cleanup_vault(args):

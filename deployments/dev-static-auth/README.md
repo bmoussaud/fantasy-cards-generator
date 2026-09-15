@@ -80,8 +80,11 @@ inventory before running any build. Apply rechecks that state, persists a
 started attempt, runs `azd package web-nat --no-prompt`, then runs `azd deploy
 web-nat --no-prompt --timeout 1200`. It accepts only a new healthy revision
 running a new `azd-deploy-*` tag whose registry timestamp is at or after the
-owned attempt start. Source cleanliness and fingerprint are rechecked after
-both commands.
+owned attempt start. Because `azd deploy` can return before the latest revision
+is ready, the helper polls that revision for at most five minutes; terminal
+failure, ownership/image/configuration drift, or timeout fails closed without
+recording an artifact. Source cleanliness and fingerprint are rechecked after
+both commands and again after readiness.
 
 ```bash
 python deployments/dev-static-auth/migrate.py deploy \
@@ -177,6 +180,14 @@ python deployments/dev-static-auth/migrate.py cleanup-role \
 secret references, Application Insights, identity, ingress, traffic, scale,
 volumes, registries, sidecars, and unrelated environment.
 
+Before applying `cleanup-app`, the helper records an intent containing the
+approved source and digest, prior pinned revision, exact expected cleanup
+revision, and complete expected app-snapshot fingerprint. It promotes
+`artifact.pinnedRevision` only after the cleanup revision exactly matches that
+snapshot and passes readiness, health, and auth checks, followed by a fresh
+receipt check. The original build source, tag, and published revision remain
+unchanged.
+
 `cleanup-vault` restores the receipt's exact original writable snapshot. It
 does not synthesize a `Deny` object when the original `networkAcls` was missing
 or `null`, and it preserves existing rule arrays and flags byte-for-byte in the
@@ -198,6 +209,12 @@ deletion failed, rerun only `cleanup-role` plan and apply with a fresh
 fingerprint. Completed app or vault phases report `alreadyApplied`; they do not
 require the vault to remain transfer-enabled, overwrite the approved image, or
 repeat secret transfer.
+
+If deployment completed but the local cleanup pointer write was interrupted,
+rerun `cleanup-app` first. Its plan reports `reconciliationPending` only when
+the live revision exactly matches the previously persisted cleanup intent.
+Apply with that fresh app fingerprint to re-run health/auth checks and promote
+only the recorded revision; an arbitrary healthy revision is never adopted.
 
 ## Validation
 
