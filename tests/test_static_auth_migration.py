@@ -710,9 +710,76 @@ def test_missing_network_acl_property_remains_missing_in_original_snapshot(raw_v
     assert "networkAcls" not in receipt["vaultBaseline"]["properties"]
 
 
-def test_cleanup_vault_uses_exact_null_baseline(raw_app, raw_vault, monkeypatch):
+@pytest.mark.parametrize(
+    "network_acls",
+    [
+        pytest.param("missing", id="missing"),
+        pytest.param(None, id="null"),
+        pytest.param({}, id="empty"),
+        pytest.param(
+            {
+                "bypass": "None",
+                "defaultAction": "Deny",
+                "ipRules": [{"value": "192.0.2.1"}],
+                "virtualNetworkRules": [{"id": "/subscriptions/fixed/subnets/private"}],
+            },
+            id="rules",
+        ),
+    ],
+)
+def test_expected_restored_vault_is_canonical_and_keeps_receipt_baseline(raw_vault, network_acls):
+    if network_acls == "missing":
+        raw_vault["properties"].pop("networkAcls")
+    else:
+        raw_vault["properties"]["networkAcls"] = copy.deepcopy(network_acls)
+    receipt = static_auth.baseline_receipt(raw_vault, SOURCE)
+    before = copy.deepcopy(receipt)
+
+    restored = static_auth.expected_restored_vault(receipt["vaultBaseline"])
+
+    assert restored["properties"]["enabledForTemplateDeployment"] is False
+    assert restored["properties"]["networkAcls"] == {
+        "bypass": "None",
+        "defaultAction": "Deny",
+        "ipRules": [] if network_acls in ("missing", None, {}) else network_acls["ipRules"],
+        "virtualNetworkRules": (
+            [] if network_acls in ("missing", None, {}) else network_acls["virtualNetworkRules"]
+        ),
+    }
+    assert receipt == before
+    assert receipt["vaultBaselineHash"] == static_auth.fingerprint(receipt["vaultBaseline"])
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("bypass", "AzureServices"),
+        ("defaultAction", "Allow"),
+    ],
+)
+def test_expected_restored_vault_rejects_foreign_acl_policy(raw_vault, field, value):
+    baseline = static_auth.vault_snapshot(raw_vault)
+    baseline["properties"]["networkAcls"] = {field: value}
+    with pytest.raises(static_auth.GateError, match="ACL differs"):
+        static_auth.expected_restored_vault(baseline)
+
+
+def test_validate_restored_vault_requires_canonical_state(raw_vault):
+    baseline = static_auth.vault_snapshot(raw_vault)
+    with pytest.raises(static_auth.GateError, match="canonical restrictive restoration"):
+        static_auth.validate_restored_vault(raw_vault, baseline)
+
+    restored = copy.deepcopy(raw_vault)
+    restored["properties"] = static_auth.expected_restored_vault(baseline)["properties"]
+    static_auth.validate_restored_vault(restored, baseline)
+
+
+def test_cleanup_vault_uses_canonical_restore_without_resealing_receipt(
+    raw_app, raw_vault, monkeypatch
+):
     patch_source(monkeypatch)
     receipt = make_receipt(raw_vault)
+    original_receipt = copy.deepcopy(receipt)
     transfer = copy.deepcopy(raw_vault)
     transfer["properties"] = static_auth.expected_transfer_vault(receipt["vaultBaseline"])[
         "properties"
@@ -730,8 +797,97 @@ def test_cleanup_vault_uses_exact_null_baseline(raw_app, raw_vault, monkeypatch)
 
     monkeypatch.setattr(static_auth, "preview", preview)
     static_auth.run_cleanup_vault(args("cleanup-vault"))
-    assert captured["snapshot"]["value"]["properties"]["networkAcls"] is None
+    assert captured["snapshot"]["value"] == static_auth.expected_restored_vault(
+        receipt["vaultBaseline"]
+    )
     assert captured["enableTransferAccess"] == {"value": False}
+    assert receipt == original_receipt
+
+
+def test_cleanup_vault_apply_survives_azure_put_omission_retention(raw_app, raw_vault, monkeypatch):
+    patch_source(monkeypatch)
+    raw_vault["properties"].pop("networkAcls")
+    raw_vault["properties"].pop("enabledForTemplateDeployment")
+    receipt = make_receipt(raw_vault)
+    original_receipt = copy.deepcopy(receipt)
+    live = transfer_vault(raw_vault, receipt)
+    monkeypatch.setattr(static_auth, "load_receipt", lambda: receipt)
+    monkeypatch.setattr(static_auth, "get_app", lambda: copy.deepcopy(raw_app))
+    monkeypatch.setattr(static_auth, "healthz", lambda raw: True)
+    monkeypatch.setattr(static_auth, "get_vault", lambda: copy.deepcopy(live))
+    monkeypatch.setattr(static_auth, "build", lambda name: {"parameters": {}})
+    monkeypatch.setattr(static_auth, "preview", lambda *values: {"changes": [static_auth.VAULT]})
+
+    def merge_put(name, body):
+        payload = body["properties"]["parameters"]["snapshot"]["value"]["properties"]
+        for key, value in payload.items():
+            live["properties"][key] = copy.deepcopy(value)
+
+    monkeypatch.setattr(static_auth, "deploy", merge_put)
+    state = {
+        "receipt": static_auth.receipt_digest(receipt),
+        "app": static_auth.fingerprint(raw_app),
+        "vault": static_auth.fingerprint(live),
+    }
+    static_auth.run_cleanup_vault(
+        args(
+            "cleanup-vault",
+            apply=True,
+            approve_change=True,
+            reviewed=True,
+            expect_fingerprint=static_auth.fingerprint(state),
+        )
+    )
+
+    assert live["properties"]["enabledForTemplateDeployment"] is False
+    assert live["properties"]["networkAcls"] == {
+        "bypass": "None",
+        "defaultAction": "Deny",
+        "ipRules": [],
+        "virtualNetworkRules": [],
+    }
+    assert receipt == original_receipt
+
+
+def test_cleanup_vault_canonical_state_is_idempotent(raw_app, raw_vault, monkeypatch):
+    patch_source(monkeypatch)
+    receipt = make_receipt(raw_vault)
+    restored = copy.deepcopy(raw_vault)
+    restored["properties"] = static_auth.expected_restored_vault(receipt["vaultBaseline"])[
+        "properties"
+    ]
+    monkeypatch.setattr(static_auth, "load_receipt", lambda: receipt)
+    monkeypatch.setattr(static_auth, "get_app", lambda: raw_app)
+    monkeypatch.setattr(static_auth, "healthz", lambda raw: True)
+    monkeypatch.setattr(static_auth, "get_vault", lambda: restored)
+    monkeypatch.setattr(static_auth, "build", lambda name: pytest.fail("no deployment needed"))
+    static_auth.run_cleanup_vault(args("cleanup-vault"))
+
+
+def test_cleanup_vault_preserves_untouched_original_baseline(raw_app, raw_vault, monkeypatch):
+    patch_source(monkeypatch)
+    receipt = make_receipt(raw_vault)
+    before = copy.deepcopy(raw_vault)
+    monkeypatch.setattr(static_auth, "load_receipt", lambda: receipt)
+    monkeypatch.setattr(static_auth, "get_app", lambda: raw_app)
+    monkeypatch.setattr(static_auth, "healthz", lambda raw: True)
+    monkeypatch.setattr(static_auth, "get_vault", lambda: raw_vault)
+    monkeypatch.setattr(static_auth, "build", lambda name: pytest.fail("no deployment needed"))
+    static_auth.run_cleanup_vault(args("cleanup-vault"))
+    assert raw_vault == before
+
+
+def test_cleanup_vault_rejects_unapproved_partial_restore(raw_app, raw_vault, monkeypatch):
+    patch_source(monkeypatch)
+    receipt = make_receipt(raw_vault)
+    partial = transfer_vault(raw_vault, receipt)
+    partial["properties"]["enabledForTemplateDeployment"] = False
+    monkeypatch.setattr(static_auth, "load_receipt", lambda: receipt)
+    monkeypatch.setattr(static_auth, "get_app", lambda: raw_app)
+    monkeypatch.setattr(static_auth, "healthz", lambda raw: True)
+    monkeypatch.setattr(static_auth, "get_vault", lambda: partial)
+    with pytest.raises(static_auth.GateError, match="exact receipt-bound transfer posture"):
+        static_auth.run_cleanup_vault(args("cleanup-vault"))
 
 
 def test_cleanup_app_does_not_require_vault_access_or_secret_reads(raw_app, raw_vault, monkeypatch):
@@ -818,9 +974,13 @@ def test_cleanup_app_promotes_verified_revision_and_unblocks_downstream(
     assert "cleanupAppIntent" not in saved[-1]["artifact"]
 
     final_receipt = saved[-1]
+    restored = copy.deepcopy(raw_vault)
+    restored["properties"] = static_auth.expected_restored_vault(final_receipt["vaultBaseline"])[
+        "properties"
+    ]
     monkeypatch.setattr(static_auth, "load_receipt", lambda: final_receipt)
     monkeypatch.setattr(static_auth, "get_app", lambda: after)
-    monkeypatch.setattr(static_auth, "get_vault", lambda: raw_vault)
+    monkeypatch.setattr(static_auth, "get_vault", lambda: restored)
     monkeypatch.setattr(static_auth, "role_assignments", lambda: [])
     static_auth.run_cleanup_vault(args("cleanup-vault"))
     static_auth.run_cleanup_role(args("cleanup-role"))
@@ -937,9 +1097,13 @@ def test_stale_role_fingerprint_refuses_delete(raw_app, raw_vault, monkeypatch):
         if item["name"] not in static_auth.ROTATION_ONLY_ENV
     ]
     receipt = make_receipt(raw_vault)
+    restored = copy.deepcopy(raw_vault)
+    restored["properties"] = static_auth.expected_restored_vault(receipt["vaultBaseline"])[
+        "properties"
+    ]
     monkeypatch.setattr(static_auth, "load_receipt", lambda: receipt)
     monkeypatch.setattr(static_auth, "get_app", lambda: raw_app)
-    monkeypatch.setattr(static_auth, "get_vault", lambda: raw_vault)
+    monkeypatch.setattr(static_auth, "get_vault", lambda: restored)
     monkeypatch.setattr(static_auth, "healthz", lambda raw: True)
     monkeypatch.setattr(static_auth, "role_assignments", lambda: [exact_assignment()])
     monkeypatch.setattr(static_auth, "command", lambda values: pytest.fail("no delete"))
@@ -955,16 +1119,20 @@ def test_interrupted_cleanup_continues_with_role_only(raw_app, raw_vault, monkey
         if item["name"] not in static_auth.ROTATION_ONLY_ENV
     ]
     receipt = make_receipt(raw_vault)
+    restored = copy.deepcopy(raw_vault)
+    restored["properties"] = static_auth.expected_restored_vault(receipt["vaultBaseline"])[
+        "properties"
+    ]
     assignment = exact_assignment()
     assignments = iter([[assignment], [assignment], []])
     deleted = []
     monkeypatch.setattr(static_auth, "load_receipt", lambda: receipt)
     monkeypatch.setattr(static_auth, "get_app", lambda: raw_app)
-    monkeypatch.setattr(static_auth, "get_vault", lambda: raw_vault)
+    monkeypatch.setattr(static_auth, "get_vault", lambda: restored)
     monkeypatch.setattr(static_auth, "healthz", lambda raw: True)
     monkeypatch.setattr(static_auth, "role_assignments", lambda: next(assignments))
     monkeypatch.setattr(static_auth, "command", lambda values: deleted.append(values))
-    state = static_auth.role_stage_state(receipt, raw_app, raw_vault, [assignment])
+    state = static_auth.role_stage_state(receipt, raw_app, restored, [assignment])
     static_auth.run_cleanup_role(
         args(
             "cleanup-role",
@@ -985,10 +1153,14 @@ def test_role_delete_error_is_not_treated_as_absence(raw_app, raw_vault, monkeyp
         if item["name"] not in static_auth.ROTATION_ONLY_ENV
     ]
     receipt = make_receipt(raw_vault)
+    restored = copy.deepcopy(raw_vault)
+    restored["properties"] = static_auth.expected_restored_vault(receipt["vaultBaseline"])[
+        "properties"
+    ]
     assignment = exact_assignment()
     monkeypatch.setattr(static_auth, "load_receipt", lambda: receipt)
     monkeypatch.setattr(static_auth, "get_app", lambda: raw_app)
-    monkeypatch.setattr(static_auth, "get_vault", lambda: raw_vault)
+    monkeypatch.setattr(static_auth, "get_vault", lambda: restored)
     monkeypatch.setattr(static_auth, "healthz", lambda raw: True)
     monkeypatch.setattr(static_auth, "role_assignments", lambda: [assignment])
     monkeypatch.setattr(
@@ -998,7 +1170,7 @@ def test_role_delete_error_is_not_treated_as_absence(raw_app, raw_vault, monkeyp
             static_auth.GateError("Azure/tool command failed: RoleAssignmentDoesNotExist")
         ),
     )
-    state = static_auth.role_stage_state(receipt, raw_app, raw_vault, [assignment])
+    state = static_auth.role_stage_state(receipt, raw_app, restored, [assignment])
     with pytest.raises(static_auth.GateError, match="RoleAssignmentDoesNotExist"):
         static_auth.run_cleanup_role(
             args(
@@ -1170,7 +1342,7 @@ def test_provider_failure_redacts_raw_response(monkeypatch):
     assert str(error.value) == "Azure/tool command failed: ForbiddenByRbac"
 
 
-def test_templates_use_secure_parent_child_and_exact_vault_restore():
+def test_templates_use_secure_parent_child_and_canonical_vault_restore():
     parent = (ROOT / "deployments/dev-static-auth/infra/main.bicep").read_text()
     child = (ROOT / "deployments/dev-static-auth/infra/app.bicep").read_text()
     vault = (ROOT / "deployments/dev-static-auth/infra/vault-transfer-access.bicep").read_text()
@@ -1183,5 +1355,8 @@ def test_templates_use_secure_parent_child_and_exact_vault_restore():
     assert "name: 'kvfcagdevqhg3qc4rlbt4g'" in vault
     assert "publicNetworkAccess" not in vault
     assert "properties: enableTransferAccess ?" in vault
-    assert "}) : snapshot.properties" in vault
+    assert "enabledForTemplateDeployment: false" in vault
+    assert "bypass: priorNetworkAcls.?bypass ?? 'None'" in vault
+    assert "defaultAction: priorNetworkAcls.?defaultAction ?? 'Deny'" in vault
+    assert "}) : restoredProperties" in vault
     assert "priorNetworkAcls ?? {}" in vault

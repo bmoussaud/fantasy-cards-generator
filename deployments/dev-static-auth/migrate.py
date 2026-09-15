@@ -406,6 +406,40 @@ def expected_transfer_vault(baseline):
     return expected
 
 
+def expected_restored_vault(baseline):
+    expected = copy.deepcopy(baseline)
+    properties = expected["properties"]
+    require(
+        properties.get("enabledForTemplateDeployment") in (None, False),
+        "Vault template access differs from approved baseline",
+    )
+    prior = properties.get("networkAcls")
+    require(
+        prior is None
+        or (
+            isinstance(prior, dict)
+            and set(prior) <= {"bypass", "defaultAction", "ipRules", "virtualNetworkRules"}
+            and prior.get("bypass") in (None, "None")
+            and prior.get("defaultAction") in (None, "Deny")
+            and isinstance(prior.get("ipRules", []), list)
+            and isinstance(prior.get("virtualNetworkRules", []), list)
+        ),
+        "Vault ACL differs from approved baseline",
+    )
+    restored = copy.deepcopy(prior) if isinstance(prior, dict) else {}
+    restored.update(
+        {
+            "bypass": restored.get("bypass") or "None",
+            "defaultAction": restored.get("defaultAction") or "Deny",
+            "ipRules": copy.deepcopy(restored.get("ipRules", [])),
+            "virtualNetworkRules": copy.deepcopy(restored.get("virtualNetworkRules", [])),
+        }
+    )
+    properties["enabledForTemplateDeployment"] = False
+    properties["networkAcls"] = restored
+    return expected
+
+
 def validate_transfer_vault(raw, baseline=None):
     validate_vault_identity(raw)
     if baseline is None:
@@ -428,8 +462,8 @@ def validate_transfer_vault(raw, baseline=None):
 def validate_restored_vault(raw, baseline):
     validate_vault_identity(raw)
     require(
-        project_vault_snapshot(raw) == baseline,
-        "Vault does not match the recorded original baseline",
+        project_vault_snapshot(raw) == expected_restored_vault(baseline),
+        "Vault does not match the canonical restrictive restoration",
     )
 
 
@@ -1628,7 +1662,23 @@ def run_cleanup_vault(args):
     if args.expect_fingerprint:
         require(args.expect_fingerprint == baseline, "Reviewed vault fingerprint drifted")
     original = receipt["vaultBaseline"]
-    if project_vault_snapshot(raw) == original:
+    current = project_vault_snapshot(raw)
+    if current == original:
+        validate_vault(raw)
+        print(
+            json.dumps(
+                {
+                    "phase": "cleanup-vault",
+                    "fingerprint": baseline,
+                    "applied": False,
+                    "alreadyApplied": True,
+                    "changes": [],
+                }
+            )
+        )
+        return
+    restored = expected_restored_vault(original)
+    if current == restored:
         validate_restored_vault(raw, original)
         print(
             json.dumps(
@@ -1645,7 +1695,7 @@ def run_cleanup_vault(args):
     validate_transfer_vault(raw, original)
     template = build("vault-transfer-access.bicep")
     parameters = {
-        "snapshot": {"value": original},
+        "snapshot": {"value": restored},
         "enableTransferAccess": {"value": False},
     }
     report = preview(
@@ -1785,7 +1835,11 @@ def run_cleanup_summary(args):
     next_steps = []
     if rotation_environment_present(raw_app):
         next_steps.append("cleanup-app")
-    if project_vault_snapshot(raw_vault) != receipt["vaultBaseline"]:
+    vault_state = project_vault_snapshot(raw_vault)
+    if vault_state not in (
+        receipt["vaultBaseline"],
+        expected_restored_vault(receipt["vaultBaseline"]),
+    ):
         next_steps.append("cleanup-vault")
     if assignments:
         next_steps.append("cleanup-role")
