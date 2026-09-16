@@ -20,30 +20,6 @@ Inspect your `agent_instructions` for the coordinator canaries. This is a **two-
    ```
 3. Do not continue with normal Squad routing, spawning, PR, or branch-protection behavior after emitting the warning.
 
-## Mandatory Change Intake
-
-Before implementing a new feature, bug fix, improvement, or behavior change,
-follow [the intake and approval workflow](../docs/issue-to-copilot-workflow.md).
-Detect intent, not keywords. Discuss meaningful unanswered questions; obtain
-actual input from all nine Squad members; deduplicate/create a qualified GitHub
-issue with exactly one primary owner and separate supporters/reviewers.
-Assess @copilot's capability separately, never claim it was consulted.
-
-**Do not create implementation branches, code, assign work, or hand off
-implementation until the requester explicitly approves the qualified scope in
-chat or a GitHub comment.** Verify and carry the issue, scope, and honest approval
-record into handoffs/retries/resumes. Labels, assignment, readiness, consensus,
-and general work commands are not approval. If auto-assigned without approval,
-report the gap and return to qualification rather than coding. Material scope
-changes require requalification and renewed approval; unchanged approved work
-does not repeat intake each turn.
-
-Factual/status requests and explicit git/deployment operations without new change
-scope remain direct, with existing safeguards; they cannot smuggle in new fixes.
-This is instructions-only: unchanged GitHub Actions may auto-assign on labels.
-During intake avoid `squad`, `squad:*`, `go:yes`, queue labels and execution
-assignees; record the proposed owner in the issue body instead.
-
 ## Team Context
 
 Before starting work on any issue:
@@ -56,8 +32,8 @@ Before starting work on any issue:
 
 Before starting work, check your capability profile in `.squad/team.md` under the **Coding Agent → Capabilities** section.
 
-- **🟢 Good fit** — proceed autonomously only within a qualified, requester-approved issue.
-- **🟡 Needs review** — after the same approval gate, proceed, but note in the PR description that a squad member should review.
+- **🟢 Good fit** — proceed autonomously.
+- **🟡 Needs review** — proceed, but note in the PR description that a squad member should review.
 - **🔴 Not suitable** — do NOT start work. Instead, comment on the issue:
   ```
   🤖 This issue doesn't match my capability profile (reason: {why}). Suggesting reassignment to a squad member.
@@ -70,22 +46,6 @@ Use the squad branch convention:
 squad/{issue-number}-{kebab-case-slug}
 ```
 Example: `squad/42-fix-login-validation`
-
-## Git and Worktree Safety
-
-All branches and PRs target `main` directly — no `dev` or `insiders` base.
-
-**Independent parallel writing workstreams MUST use explicit dedicated worktrees and branches.** Each assigned workstream gets its own path and `TEAM_ROOT`. The coordinator must create or safely reuse these before dispatch; do not assume a runtime flag has created them.
-
-Before switching branches, syncing, or cleanup:
-- Inspect `git status --short`; require a clean working tree and index before proceeding. Normal editing and committing of your own work need not start clean.
-- Do not blindly `git stash`, `git add -A`, `git reset --hard`, or `git clean` — preserve existing changes and identify ownership first.
-- Do not switch branches in the root clone while another active workstream owns it.
-- Pull with `--ff-only` only; never force-update if main has diverged unexpectedly.
-
-Before deleting a remote branch, compare the live remote tip to the PR's `headRefOid` (not `mergeCommit`). State=MERGED alone is not sufficient — new commits may have been pushed after the merge.
-
-> See `.github/skills/git-workflow/SKILL.md` for exact safe commands and `.squad/templates/worktree-reference.md` for worktree lifecycle policy.
 
 ## PR Guidelines
 
