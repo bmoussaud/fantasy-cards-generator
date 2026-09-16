@@ -2,6 +2,28 @@
 
 Reference for connecting Squad to a repository and managing the issue→branch→PR→merge lifecycle.
 
+## Mandatory Qualification and Requester Approval
+
+Before the execution lifecycle below, follow
+[the shared intake workflow](../../docs/issue-to-copilot-workflow.md): discuss,
+consult all nine members genuinely, analyze, deduplicate/create a qualified
+GitHub issue, and name exactly one primary owner with separate supporters and
+reviewers. Assess @copilot separately, not as a consultation participant.
+
+No implementation branch, coding, assignment or implementation handoff until
+explicit requester approval of qualified scope in chat or a GitHub comment.
+Record and pass the actual approval context; labels, assignees, readiness,
+priorities, queues and Ralph commands are not approval. Material changes
+requalify; unchanged approved work continues without duplicate intake.
+During intake use issue-body ownership/status, not execution labels/assignees:
+unchanged Actions may auto-assign without checking approval.
+
+All examples below are **post-approval execution**, not shortcuts around intake.
+Apply the repository's current git-workflow and reviewer/CI/merge/deployment
+safeguards over generic commands below, including clean-state preflight,
+main-based worktrees and safe branch cleanup. Approval of scope does not waive
+operation restrictions or reviewer rejection lockout.
+
 ## Repo Connection Format
 
 When connecting Squad to an issue tracker, store the connection in `.squad/team.md`:
@@ -101,7 +123,7 @@ Planner does not have native Git integration. Squad uses Planner for task tracki
 **Trigger:** Ralph detects an untriaged issue or user manually assigns work.
 
 **Actions:**
-1. Read `.squad/routing.md` to determine which agent should handle the issue
+1. Read `.squad/routing.md`, the qualified issue and requester approval; if incomplete, return to qualification without execution assignment
 2. Apply `squad:{member}` label (GitHub) or tag (ADO)
 3. Transition issue to `assigned` state
 4. Optionally spawn agent immediately if issue is high-priority
@@ -109,7 +131,7 @@ Planner does not have native Git integration. Squad uses Planner for task tracki
 **Issue read command:**
 ```bash
 # GitHub
-gh issue view {number} --json number,title,body,labels,assignees
+gh issue view {number} --json number,title,body,comments,labels,assignees
 
 # Azure DevOps
 az boards work-item show --id {id} --output json
@@ -295,6 +317,13 @@ When spawning an agent to work on an issue, include this context block:
 **Platform:** {GitHub | Azure DevOps | Planner}  
 **Repository:** {owner}/{repo}  
 **Assigned to:** {member}
+**Primary owner:** {exactly one accountable owner; supporters/reviewers separate}
+**Approved scope:** {qualified revision and bounded implementation scope}
+**Requester approval:** {actual quotation, requester, time and chat/proposal context or comment URL}
+
+Verify this approval before implementation, including retries/resumes. If missing
+or the scope has materially changed, return to qualification; do not infer consent
+from labels, assignment or this handoff.
 
 **Description:**
 {issue body}
@@ -324,8 +353,8 @@ When spawning an agent to work on an issue, include this context block:
 
 Ralph (the work monitor) continuously checks issue and PR state:
 
-1. **Triage:** Detects untriaged issues, assigns `squad:{member}` labels
-2. **Spawn:** Launches agents for assigned issues
+1. **Triage:** Detects untriaged issues for qualification; no execution labels/assignees before requester approval
+2. **Spawn:** Launches implementation agents only for qualified, requester-approved scope
 3. **Monitor:** Tracks PR state transitions (needsReview → changesRequested → readyToMerge)
 4. **Merge:** Automatically merges approved PRs
 5. **Cleanup:** Marks issues as done when PRs merge

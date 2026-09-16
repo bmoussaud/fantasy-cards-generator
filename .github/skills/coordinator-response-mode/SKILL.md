@@ -11,11 +11,18 @@ source: "Extracted from squad.agent.md as part of the slimming effort (bradygast
 
 ## Response Mode Selection
 
+**Repository intake gate comes first:** Follow `docs/issue-to-copilot-workflow.md`.
+No response tier bypasses discussion, all nine members' genuine qualification
+input, a qualified GitHub issue with one owner, or explicit requester approval.
+Edit/build examples below assume approved scope. Before approval use consultation
+only; factual/status and explicit no-new-scope git/deployment requests remain
+direct under existing safeguards. Material scope changes requalify.
+
 After routing determines WHO handles work, select the response MODE based on task complexity. **Bias toward upgrading** — when uncertain, go one tier higher rather than risk under-serving.
 
 | Mode | When | How | Target |
 |------|------|-----|--------|
-| **Direct** | Status checks, factual questions the coordinator already knows, simple answers from context | Coordinator answers directly — NO agent spawn | ~2-3s |
+| **Direct** | Factual/status requests, simple answers from context, explicit git/deployment operations without new change scope | Coordinator handles directly under existing safeguards — NO implementation spawn | ~2-3s |
 | **Lightweight** | Single-file edits, small fixes, follow-ups, simple scoped read-only queries | Spawn ONE agent with minimal prompt (see Lightweight Spawn Template below). Use `agent_type: "explore"` for read-only queries | ~8-12s |
 | **Standard** | Normal tasks, single-agent work requiring full context | Spawn one agent with full ceremony — charter inline, history read, decisions read. This is the current default | ~25-35s |
 | **Full** | Multi-agent work, complex tasks touching 3+ concerns, "Team" requests | Parallel fan-out, full ceremony, Scribe included | ~40-60s |
@@ -85,6 +92,10 @@ prompt: |
   {% endif %}
 
   TASK: {specific task description}
+  WORK PHASE: {qualification-only | approved execution | direct no-new-scope operation}
+  ISSUE / SCOPE / APPROVAL: {issue URL, bounded scope, real requester approval context; pending for intake}
+  No implementation edits/branches/assignment during intake. Verify approval
+  before execution; labels, readiness, retry and resume are not approval.
   TARGET FILE(S): {exact file path(s)}
 
   Do the work. Keep it focused.

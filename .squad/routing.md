@@ -2,6 +2,22 @@
 
 How to decide who handles what.
 
+## Qualification Before Execution
+
+Follow [mandatory change intake](../docs/issue-to-copilot-workflow.md) before
+implementation routing. Every new feature, bug, improvement, or behavior change
+requires discussion, real input from all nine members, analysis, a deduplicated
+qualified GitHub issue, and explicit requester approval. Gandalf synthesizes
+recommendations into **exactly one primary owner**, with supporters and reviewers
+separate. @copilot is capability-assessed, not consulted during intake.
+
+Record the proposed owner in the issue body. Do not apply execution labels
+(`squad`, `squad:*`, `go:yes`, queue labels) or assignees during qualification:
+unchanged automation can auto-assign on labels. Labels, owner, readiness, and
+Ralph commands do not authorize implementation. Route unapproved issues to
+qualification only; carry issue/scope/approval into implementation handoffs.
+Material scope changes return to intake; unchanged approved work continues.
+
 ## Routing Table
 
 | Work Type | Route To | Examples |
@@ -21,24 +37,24 @@ How to decide who handles what.
 
 | Label | Action | Who |
 |-------|--------|-----|
-| `squad` | Triage: analyze issue, assign `squad:{member}` label | Lead |
-| `squad:{name}` | Pick up issue and complete the work | Named member |
+| `squad` | Inspect qualification/approval; propose owner in body until approved | Lead |
+| `squad:{name}` | Verify qualified scope and requester approval before pickup | Named member |
 
 ### How Issue Assignment Works
 
-1. When a GitHub issue gets the `squad` label, the **Lead** triages it — analyzing content, assigning the right `squad:{member}` label, and commenting with triage notes.
-2. When a `squad:{member}` label is applied, that member picks up the issue in their next session.
-3. Members can reassign by removing their label and adding another member's label.
-4. The `squad` label is the "inbox" — untriaged issues waiting for Lead review.
-5. During triage, Gandalf (Lead) also checks each issue against @copilot's capability profile in `team.md`. Auto-assign is **enabled** — 🟢/🟡 matches are assigned to `@copilot` automatically via `gh issue edit --add-assignee @copilot`; 🔴 matches route to a squad member instead.
+1. For an existing `squad` issue, the **Lead** checks qualification and approval before applying execution labels; absent either, discuss and update the draft issue.
+2. A `squad:{member}` label selects a routing candidate, not permission to start. Verify the approval record first.
+3. After approval, members can reassign execution routing while preserving exactly one accountable primary owner and the approved scope.
+4. Do not use `squad` as an intake inbox label: it can trigger unchanged assignment automation.
+5. During triage, Gandalf checks @copilot's capability profile in `team.md` without assigning it. Auto-assign is **enabled**, but complying agents may assign 🟢/🟡 matches only after requester approval; 🔴 matches route to a squad member. This instruction does not technically gate existing Actions.
 6. **@copilot concurrency limit: max 1 in-flight.** Before auto-assigning a new issue to `@copilot`, Gandalf checks whether `@copilot` already has an open, unmerged PR (or an assigned issue without a merged/closed PR yet) via `gh pr list --assignee "@copilot" --state open` and `gh issue list --assignee "@copilot" --state open`. If one exists, do **not** assign the new issue yet — leave it labeled `squad` (or add a `squad:queued-copilot` label) so it's picked up on the next triage pass once the prior PR is merged/closed. This avoids parallel `@copilot` branches touching overlapping files and causing merge conflicts. To change the limit, edit the number here and re-triage.
 
 ## Rules
 
-1. **Eager by default** — spawn all agents who could usefully start work, including anticipatory downstream work.
+1. **Qualify first, eager only within approved scope** — intake consultation is not an implementation assignment.
 2. **Scribe always runs** after substantial work, always as `mode: "background"`. Never blocks.
 3. **Quick facts → coordinator answers directly.** Don't spawn an agent for "what port does the server run on?"
 4. **When two agents could handle it**, pick the one whose domain is the primary concern.
-5. **"Team, ..." → fan-out.** Spawn all relevant agents in parallel as `mode: "background"`.
+5. **"Team, ..." → check intent.** New changes require all nine members' genuine qualification input; approved execution may fan out to relevant implementers.
 6. **Anticipate downstream work.** If a feature is being built, spawn the tester to write test cases from requirements simultaneously.
-7. **Issue-labeled work** — when a `squad:{member}` label is applied to an issue, route to that member. The Lead handles all `squad` (base label) triage.
+7. **Issue-labeled work** — verify qualification and requester approval before pickup; otherwise route to intake. Factual/status and explicit git/deployment operations with no new change scope remain direct under existing safeguards.
