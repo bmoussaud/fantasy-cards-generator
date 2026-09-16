@@ -139,10 +139,19 @@ def base_environment(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, N
     yield
 
 
+def begin_login(client: TestClient, *, import_profile_photo: bool = False):
+    page = client.get("/auth/login", follow_redirects=False)
+    assert page.status_code == 200
+    data = {"csrf_token": extract_hidden_value(page.text, "csrf_token")}
+    if import_profile_photo:
+        data["import_profile_photo"] = "true"
+    return client.post("/auth/login", data=data, follow_redirects=False)
+
+
 def make_authenticated_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setattr(main_module, "create_oauth_client", lambda settings: FakeOAuthClient())
     client = TestClient(create_app(), base_url="https://testserver")
-    login_response = client.get("/auth/login", follow_redirects=False)
+    login_response = begin_login(client)
     assert login_response.status_code == 307
     callback_response = client.get(
         "/auth/callback?code=valid-code&state=opaque",

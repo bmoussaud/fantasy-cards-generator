@@ -33,14 +33,34 @@ ENTRA_SCOPES=openid profile email
   `https://login.microsoftonline.com/organizations/v2.0`.
 - `ENTRA_REDIRECT_URI` must exactly match the app registration.
 - `ENTRA_SCOPES` defaults to `openid profile email`.
-- Profile-photo import requests delegated Microsoft Graph `User.Read` only after
-  the signed-in user explicitly accepts the post-login import notice. The Graph
-  access token is transient and is never stored in the browser session or database.
-- The import authorization `state` and nonce are also stored server-side in a
-  short-lived Cosmos record bound to the owner and `profile_photo_import`
-  operation. Callback consumption is one-time and expiry-checked; the browser
-  session stores only a pointer needed to correlate Authlib's callback. No
-  access token is stored in this record.
+- `GET /auth/login` displays an unchecked, optional photo-import checkbox.
+  Its CSRF-protected `POST /auth/login` requests delegated Microsoft Graph
+  `User.Read` alongside the OIDC scopes only when the user selects that option.
+  There is one Microsoft authorization redirect and one callback for sign-in
+  and photo import. Leaving the option unchecked signs in without fetching a photo.
+- The callback validates authentication first, then immediately uses the returned
+  Graph token to fetch, safety-check, and save the photo under the validated
+  account's owner ID. Access/refresh tokens are never stored in the browser
+  session or database, and there is no separate post-login authorization flow.
+  Import consent is bound to OAuth `state` in the signed session; Authlib retains
+  its normal state expiry, nonce, and PKCE validation. The separate Cosmos
+  OAuth-state repository and `/auth/profile-photo/{import,decline}` endpoints
+  have been removed.
+- Successful authentication survives photo-fetch, moderation, or storage failures.
+  `/app` displays a one-time import result and a diagnostic reference for failures.
+  Users can upload instead or opt in again on their next sign-in. Previously
+  imported photos are not duplicated, and deletion suppression is preserved.
+  Denied consent or invalid OAuth callbacks do not authenticate a new session:
+  they return to the sign-in screen with an error and the choice to sign in
+  without photo import.
+- Import diagnostics remain available in application logs without an Azure
+  Monitor exporter. Look for `auth.profile_photo_import_result` and the displayed
+  `request_id`; `stage`, `error_code`, and an optional Graph HTTP status distinguish
+  consent/token exchange, import claims, Graph retrieval, and photo storage
+  failures. Tokens, OAuth query parameters, and upstream error bodies are excluded.
+- Uvicorn access logs omit query strings on `/auth/callback`, while the callback
+  itself still receives the complete OAuth query for validation. Avoid sharing
+  historical callback URLs containing authorization codes.
 - Authentication testing on localhost requires HTTPS because the session cookie
   is marked `Secure`, and the default Entra redirect URIs use
   `https://localhost:8000/...`. Plain HTTP is fine only for anonymous pages

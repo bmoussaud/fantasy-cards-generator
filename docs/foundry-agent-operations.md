@@ -81,6 +81,70 @@ lifecycle hooks require prerequisites to be enabled before build, package,
 publish, or deploy. Do not use bare `azd deploy`; use `azd deploy web-nat`,
 `azd deploy card-orchestrator`, or `./deploy.sh {web|agent|full}`.
 
+## Build-time package TLS failures
+
+The root manifest builds `card-orchestrator` locally for `linux/amd64`, using
+`hosted_agents/card_orchestrator/Dockerfile` and the repository-root context.
+The legacy manifest resolves to the same Dockerfile and context. Its
+Dockerfile-specific allowlist excludes credentials and azd state.
+
+On 2026-09-16, the unchanged `python:3.12-slim` / uv `0.12.7` build reproduced
+`received fatal alert: HandshakeFailure` at line 11:
+`uv sync --frozen --no-dev --extra hosted-agent`. The first reported package
+can vary with concurrent downloads: the original report named
+`agent-framework-core==1.17.0`; reproduction named
+`azure-ai-agentserver-responses==2.1.0`. Both used locked
+`files.pythonhosted.org` wheel URLs, while Microsoft-feed downloads succeeded.
+
+Host curl/OpenSSL and Python/OpenSSL inside the same base image also failed
+against the exact reported core wheel URL. uv `0.12.7` supports
+`--system-certs`, but that mode failed identically; it selects a certificate
+store, not a different TLS implementation. The PyPI index was reachable while
+the artifact hostname failed TLS. This isolates a client-independent failure
+on the network path to the artifact host, not an Azure login/CAE problem or
+evidence of a uv-specific TLS defect. These probes cannot distinguish an
+egress intermediary from the remote CDN without network-operator evidence.
+
+The old explicit `hosted-sdk` PyPI override was no longer needed: the existing
+`https://packagefeedproxy.microsoft.io/pypi/simple/` index now supplies the
+locked SDKs. Removing that override and regenerating `uv.lock` moved the three
+remaining PyPI-sourced packages to that feed. Downloaded mirror wheels and
+source archives matched the original SHA256 hashes. One initial mirror
+source-archive request returned HTTP 500; the subsequent artifact check and
+actual image build succeeded. All **114 locked package versions and artifact
+hashes remain unchanged**. There is no TLS relaxation, retry increase,
+vendoring, dependency downgrade, or Docker base/uv version change.
+
+Changing an index only at build time is insufficient: `--frozen` follows the
+artifact URLs already in `uv.lock`. Keep the manifest and lock changes together.
+
+Verification from the repository root:
+
+```bash
+python -m pytest -q tests/test_hosted_agent_deployment_config.py
+uv lock --check
+docker build --platform linux/amd64 --progress plain \
+  -f hosted_agents/card_orchestrator/Dockerfile \
+  -t card-orchestrator:tls-investigation .
+AZURE_DEV_USER_AGENT=microsoft_foundry_skill \
+  azd package card-orchestrator --environment dev --no-prompt
+```
+
+Results on 2026-09-16: 62 tests passed; the lock check passed; the real image
+downloaded and installed 102 production packages; targeted azd 1.34.0 packaging
+succeeded. The packaged image's `/app/uv.lock` SHA256 matched the working-tree
+lock. A network-disabled container also imported the three pinned hosted SDKs
+successfully as a nonroot user.
+
+Before packaging, inspect lifecycle hooks: the current agent hooks only run
+`guard_agent_deploy.sh`, and the existing dev prerequisite opt-in was already
+`true`. Packaging does not require running provisioning or credential-changing
+hooks. No image was pushed and no cloud deployment or agent invocation was
+performed for this verification. If verified HTTPS downloads from the
+configured mirror fail persistently, provide the hostname, timestamp and
+cross-client errors to the network/feed operator; do not disable TLS
+verification or repeat cloud deployment to diagnose a local download failure.
+
 ## Dev model-capacity correction and successful ACA-MI E2E — 2026-09-09
 
 Safe management-plane inspection after the classified HTTP 429 found the exact

@@ -1,0 +1,24 @@
+{% extends "layout.html" %}
+
+{% block content %}
+    {% include "partials/profile_photo_import_notice.html" %}
+    <section class="panel" aria-labelledby="sign-in-heading">
+        <h1 id="sign-in-heading">Sign in with Microsoft</h1>
+        <p>Use your work or school account to generate cards.</p>
+        <form method="post" action="/auth/login">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+            <div class="field">
+                <label>
+                    <input type="checkbox" name="import_profile_photo" value="true" aria-describedby="profile-import-hint" />
+                    Import my Microsoft profile photo into My Photos
+                </label>
+                <p class="field__hint" id="profile-import-hint">
+                    Optional. Allow profile access during this sign-in to save a private,
+                    safety-checked copy for card generation. The photo will not sync automatically.
+                    Previously imported or deleted photos will not be imported again.
+                </p>
+            </div>
+            <button class="btn btn-primary" type="submit">Continue with Microsoft</button>
+        </form>
+    </section>
+{% endblock %}

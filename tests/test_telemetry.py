@@ -22,6 +22,56 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SENSITIVE_SENTINEL = "NEVER-EXPORT-user@example.com-secret-token"
 
 
+def test_callback_access_log_redaction_keeps_route_and_status(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    telemetry.configure_auth_access_logging()
+    telemetry.configure_auth_access_logging()
+    logger = logging.getLogger("uvicorn.access")
+    assert (
+        sum(isinstance(item, telemetry.AuthCallbackAccessLogFilter) for item in logger.filters) == 1
+    )
+    with caplog.at_level(logging.INFO, logger="uvicorn.access"):
+        logger.info(
+            '%s - "%s %s HTTP/%s" %d',
+            "127.0.0.1",
+            "GET",
+            f"/auth/callback?code={SENSITIVE_SENTINEL}&state=private-state&session_state=private",
+            "1.1",
+            303,
+        )
+        logger.info('%s - "%s %s HTTP/%s" %d', "127.0.0.1", "GET", "/healthz", "1.1", 200)
+
+    assert 'GET /auth/callback HTTP/1.1" 303' in caplog.text
+    assert 'GET /healthz HTTP/1.1" 200' in caplog.text
+    assert SENSITIVE_SENTINEL not in caplog.text
+    assert "private-state" not in caplog.text
+    assert "session_state" not in caplog.text
+
+
+def test_import_diagnostics_work_without_exporter_and_reject_sensitive_values(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(telemetry, "_enabled", False)
+    with caplog.at_level(logging.WARNING, logger=telemetry.LOGGER_NAME):
+        telemetry.safe_log(
+            "auth.profile_photo_import_result",
+            request_id=SENSITIVE_SENTINEL,
+            attributes={
+                "fcg.stage": SENSITIVE_SENTINEL,
+                "fcg.error_code": SENSITIVE_SENTINEL,
+                "fcg.outcome": "failed",
+                "http.response.status_code": SENSITIVE_SENTINEL,
+                "access_token": SENSITIVE_SENTINEL,
+            },
+        )
+    assert "auth.profile_photo_import_result" in caplog.text
+    assert "outcome=failed" in caplog.text
+    assert "error_code=internal_error" in caplog.text
+    assert SENSITIVE_SENTINEL not in caplog.text
+    assert all(record.exc_info is None for record in caplog.records)
+
+
 class CapturingInstrument:
     def __init__(self) -> None:
         self.measurements: list[tuple[float, dict[str, Any]]] = []

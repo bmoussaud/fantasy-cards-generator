@@ -1,25 +1,7 @@
 {% extends "layout.html" %}
 
 {% block content %}
-    {% if show_profile_photo_import_offer %}
-        <section class="panel" aria-labelledby="profile-photo-import-heading">
-            <h2 id="profile-photo-import-heading">Use your Microsoft profile photo</h2>
-            <p>
-                Copy your Microsoft Entra profile photo into your private photo library for
-                card generation. This is a one-time snapshot and will not sync automatically.
-            </p>
-            <div class="confirm-modal__actions">
-                <form method="post" action="/auth/profile-photo/import">
-                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-                    <button class="btn btn-primary" type="submit">Import profile photo</button>
-                </form>
-                <form method="post" action="/auth/profile-photo/decline">
-                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-                    <button class="btn btn-ghost" type="submit">Not now</button>
-                </form>
-            </div>
-        </section>
-    {% endif %}
+    {% include "partials/profile_photo_import_notice.html" %}
     <h1>Generate a fantasy card</h1>
     <p class="site-nav__user">
         Signed in as <strong>{{ user.name or user.email or user.sub }}</strong>
@@ -58,6 +40,7 @@
                     <legend class="field__label">Reference photo</legend>
                     <p class="field__hint">
                         Optional. Choose one saved photo from your library or upload a new JPG, PNG, or WebP image up to 5 MB.
+                        To import your Microsoft profile photo, select that option the next time you sign in.
                     </p>
                     <input
                         type="hidden"

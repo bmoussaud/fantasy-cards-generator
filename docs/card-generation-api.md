@@ -159,16 +159,22 @@ Returns `200 OK`:
 `DELETE /my/photos/{photoId}` returns `204 No Content`. The `image` and `thumbnail`
 routes stream owner-scoped bytes and return `404` for non-owned or missing photos.
 
-After sign-in, users may explicitly opt in to copying their Microsoft Entra profile
-photo into this library. The import is a one-time snapshot, labeled
+Before Microsoft sign-in, users may select the optional photo-import checkbox on
+`/auth/login`. The single sign-in callback uses its transient Graph token to copy
+the photo into this library, without a second authorization flow or stored token.
+The import is a one-time snapshot, labeled
 `Microsoft profile photo`, and does not synchronize later profile-photo changes.
 Deleting that imported item permanently suppresses automatic re-import for the
 account. Import state is durable and uses these lifecycle values:
 `not_offered`, `offered`, `declined`, `accepted`, `imported`, `no_photo`,
 `failed_retryable`, and `deleted_suppressed`. `accepted` is the short-lived
 claim held while an import runs; failures transition to `failed_retryable` so
-the offer remains actionable. Graph, moderation, validation, capacity, and
-storage failures never block authentication.
+users can opt in again on a later sign-in. New accounts are claimed atomically;
+legacy `not_offered`, `offered`, and `declined` states, as well as `no_photo`,
+allow a fresh explicitly requested import. `imported` and `deleted_suppressed`
+never trigger another copy. Graph, moderation, validation, capacity, and storage
+failures never undo successful authentication. Denied consent before token
+validation returns to the sign-in screen instead of establishing a session.
 
 ## Error contract
 

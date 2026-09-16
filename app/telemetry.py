@@ -27,6 +27,14 @@ SAFE_ROUTES = {
     "/ui/cards/{card_id}/artwork/retry",
     "/cards/{card_id}/image",
 }
+PROFILE_PHOTO_IMPORT_EVENTS = {
+    "auth.profile_photo_import_result",
+    "auth.profile_photo_import_failed",
+    "auth.profile_photo_import_state_unavailable",
+    "auth.profile_photo_import_offer_state_failed",
+    "auth.profile_photo_import_state_save_failed",
+    "auth.profile_photo_import_reset_failed",
+}
 SAFE_EVENTS = {
     "exception",
     "request.completed",
@@ -49,7 +57,7 @@ SAFE_EVENTS = {
     "agent.invocation",
     "agent.fallback",
     "generation.text_path",
-}
+} | PROFILE_PHOTO_IMPORT_EVENTS
 SAFE_OPERATIONS = {"generate", "artwork_retry", "fetch_image", "text", "image"}
 SAFE_GENERATION_PATHS = {"agent", "direct", "agent_fallback"}
 SAFE_OUTCOMES = {
@@ -65,6 +73,13 @@ SAFE_OUTCOMES = {
     "timed_out",
     "failed",
     "replayed",
+    "imported",
+    "already_imported",
+    "no_photo",
+    "consent_denied",
+    "invalid_state",
+    "owner_mismatch",
+    "unavailable",
 }
 SAFE_STAGES = {
     "reserved",
@@ -91,6 +106,12 @@ SAFE_STAGES = {
     "final_text",
     "final_art_prompt",
     "orchestration",
+    "oauth_state",
+    "oauth_token",
+    "import_claim",
+    "profile_photo_fetch",
+    "photo_save",
+    "import_complete",
 }
 SAFE_DEPENDENCIES = {"foundry_text", "foundry_image", "cosmos", "blob", "entra", "other"}
 SAFE_STORES = {"card", "audit", "blob", "cosmos", "memory"}
@@ -158,6 +179,14 @@ SAFE_ERROR_CODES = {
     "service_error",
     "transport_error",
     "invalid_response",
+    "invalid_oauth_state",
+    "owner_mismatch",
+    "oauth_error",
+    "graph_photo_failed",
+    "graph_token_missing",
+    "graph_photo_rejected",
+    "photo_moderation_unavailable",
+    "photo_moderation_unconfigured",
 }
 SAFE_ATTRIBUTE_KEYS = {
     "app.request_id",
@@ -278,6 +307,22 @@ class PrivacyLogRecordProcessor:
     def force_flush(self, timeout_millis: int = 30_000) -> bool:
         del timeout_millis
         return True
+
+
+class AuthCallbackAccessLogFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) == 5 and isinstance(args[2], str):
+            path = args[2].partition("?")[0]
+            if path == "/auth/callback":
+                record.args = (*args[:2], path, *args[3:])
+        return True
+
+
+def configure_auth_access_logging() -> None:
+    logger = logging.getLogger("uvicorn.access")
+    if not any(isinstance(item, AuthCallbackAccessLogFilter) for item in logger.filters):
+        logger.addFilter(AuthCallbackAccessLogFilter())
 
 
 def configure_telemetry(settings: TelemetrySettings | None = None) -> bool:
@@ -434,7 +479,8 @@ def safe_log(
     request_id: str | None = None,
     attributes: dict[str, Any] | None = None,
 ) -> None:
-    if not _enabled:
+    profile_import_event = name in PROFILE_PHOTO_IMPORT_EVENTS
+    if not _enabled and not profile_import_event:
         return
     if name not in SAFE_EVENTS:
         name = "generation.failed"
@@ -443,6 +489,16 @@ def safe_log(
     }
     if valid_request_id(request_id):
         extra["app_request_id"] = request_id
+    if profile_import_event:
+        outcome = extra.get("fcg_outcome", "failed")
+        if outcome not in {"imported", "already_imported", "no_photo"}:
+            level = max(level, logging.WARNING)
+        name = (
+            f"{name} request_id={extra.get('app_request_id', 'invalid')} "
+            f"stage={extra.get('fcg_stage', 'unknown')} outcome={outcome} "
+            f"error_code={extra.get('fcg_error_code', 'internal_error')} "
+            f"http_status={extra.get('http_response_status_code', 'none')}"
+        )
     _logger.log(level, name, extra=extra)
 
 

@@ -5,7 +5,7 @@ requires-python = ">=3.12"
 [[package]]
 name = "agent-framework-core"
 version = "1.17.0"
-source = { registry = "https://pypi.org/simple" }
+source = { registry = "https://packagefeedproxy.microsoft.io/pypi/simple/" }
 dependencies = [
     { name = "msgspec" },
     { name = "opentelemetry-api" },
@@ -13,15 +13,15 @@ dependencies = [
     { name = "python-dotenv" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/1d/a6/a47518b61275a7b001d3acebae6857ad98b7d10303ef8d7c9b6546b1a450/agent_framework_core-1.17.0.tar.gz", hash = "sha256:c1b69ab7f496d1ec9ab5dcb0afc5a99e60e5c820f03f5a755a9104fd89d01394", size = 593864, upload-time = "2026-09-03T09:53:46.019Z" }
+sdist = { url = "https://ms-feed-25.pkgs.visualstudio.com/6f084628-a36d-42cb-934d-057357e379dc/_packaging/49d7402f-07bb-4b18-a9ce-086e6e98a554/pypi/download/agent-framework-core/1.17/agent_framework_core-1.17.0.tar.gz", hash = "sha256:c1b69ab7f496d1ec9ab5dcb0afc5a99e60e5c820f03f5a755a9104fd89d01394" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/9c/cb/1fceefa6dc720774fc8180a8651045e583de550b946cc59c291684fcbbf6/agent_framework_core-1.17.0-py3-none-any.whl", hash = "sha256:75958ff692a38bf0c627aaa910bae6c4a89569dfec68e1e79eac8e206d88874d", size = 651715, upload-time = "2026-09-03T09:53:33.222Z" },
+    { url = "https://ms-feed-25.pkgs.visualstudio.com/6f084628-a36d-42cb-934d-057357e379dc/_packaging/49d7402f-07bb-4b18-a9ce-086e6e98a554/pypi/download/agent-framework-core/1.17/agent_framework_core-1.17.0-py3-none-any.whl", hash = "sha256:75958ff692a38bf0c627aaa910bae6c4a89569dfec68e1e79eac8e206d88874d" },
 ]
 
 [[package]]
 name = "agent-framework-foundry"
 version = "1.12.0"
-source = { registry = "https://pypi.org/simple" }
+source = { registry = "https://packagefeedproxy.microsoft.io/pypi/simple/" }
 dependencies = [
     { name = "agent-framework-core" },
     { name = "agent-framework-openai" },
@@ -30,9 +30,9 @@ dependencies = [
     { name = "azure-ai-projects" },
     { name = "httpx" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/14/a1/2a1a8b7d50d0ab6de9c7170b1f90a9d91f664a40f833913b2d2164dba91e/agent_framework_foundry-1.12.0.tar.gz", hash = "sha256:6361fb0ead699ddc907c95c4ecac7176d688f14a3d60f00e8dfdf06904336356", size = 51220, upload-time = "2026-09-03T09:53:48.254Z" }
+sdist = { url = "https://ms-feed-25.pkgs.visualstudio.com/6f084628-a36d-42cb-934d-057357e379dc/_packaging/49d7402f-07bb-4b18-a9ce-086e6e98a554/pypi/download/agent-framework-foundry/1.12/agent_framework_foundry-1.12.0.tar.gz", hash = "sha256:6361fb0ead699ddc907c95c4ecac7176d688f14a3d60f00e8dfdf06904336356" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/bc/6b/b066715e5ccc2d906920b1859160c54703aacc213f2f01c5e8e121d8555a/agent_framework_foundry-1.12.0-py3-none-any.whl", hash = "sha256:f48362cd01962a526ec8f88f67608fbac13d1c728400c6c6ec8a5bc9b1f42c94", size = 53787, upload-time = "2026-09-03T09:53:36.555Z" },
+    { url = "https://ms-feed-25.pkgs.visualstudio.com/6f084628-a36d-42cb-934d-057357e379dc/_packaging/49d7402f-07bb-4b18-a9ce-086e6e98a554/pypi/download/agent-framework-foundry/1.12/agent_framework_foundry-1.12.0-py3-none-any.whl", hash = "sha256:f48362cd01962a526ec8f88f67608fbac13d1c728400c6c6ec8a5bc9b1f42c94" },
 ]
 
 [[package]]
@@ -255,16 +255,16 @@ wheels = [
 [[package]]
 name = "azure-ai-agentserver-responses"
 version = "2.1.0"
-source = { registry = "https://pypi.org/simple" }
+source = { registry = "https://packagefeedproxy.microsoft.io/pypi/simple/" }
 dependencies = [
     { name = "aiohttp" },
     { name = "azure-ai-agentserver-core" },
     { name = "azure-core" },
     { name = "isodate" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/b0/07/dc550a77692941bfe45ff1f4ed560a20ddcfcb6e2a764b7cb2bdc1587764/azure_ai_agentserver_responses-2.1.0.tar.gz", hash = "sha256:cd40bf4382f583fe75a61ac039a4da51d6f6e1d54f916bf77ca1fc6e4132270b", size = 665126, upload-time = "2026-08-26T07:02:53.957Z" }
+sdist = { url = "https://ms-feed-25.pkgs.visualstudio.com/6f084628-a36d-42cb-934d-057357e379dc/_packaging/49d7402f-07bb-4b18-a9ce-086e6e98a554/pypi/download/azure-ai-agentserver-responses/2.1/azure_ai_agentserver_responses-2.1.0.tar.gz", hash = "sha256:cd40bf4382f583fe75a61ac039a4da51d6f6e1d54f916bf77ca1fc6e4132270b" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/61/3b/230a075d33d34b458d7ab5a55ab0dce12a26d3332af604e213db57740eb4/azure_ai_agentserver_responses-2.1.0-py3-none-any.whl", hash = "sha256:e2126c87bcee82c6790f154d1f41de959502d3ed3529531231a952d610dc61dc", size = 307809, upload-time = "2026-08-26T07:02:55.656Z" },
+    { url = "https://ms-feed-25.pkgs.visualstudio.com/6f084628-a36d-42cb-934d-057357e379dc/_packaging/49d7402f-07bb-4b18-a9ce-086e6e98a554/pypi/download/azure-ai-agentserver-responses/2.1/azure_ai_agentserver_responses-2.1.0-py3-none-any.whl", hash = "sha256:e2126c87bcee82c6790f154d1f41de959502d3ed3529531231a952d610dc61dc" },
 ]
 
 [[package]]
@@ -784,11 +784,11 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "agent-framework-core", marker = "extra == 'hosted-agent'", specifier = "==1.17.0", index = "https://pypi.org/simple" },
-    { name = "agent-framework-foundry", marker = "extra == 'hosted-agent'", specifier = "==1.12.0", index = "https://pypi.org/simple" },
+    { name = "agent-framework-core", marker = "extra == 'hosted-agent'", specifier = "==1.17.0" },
+    { name = "agent-framework-foundry", marker = "extra == 'hosted-agent'", specifier = "==1.12.0" },
     { name = "aiohttp", specifier = ">=3.14.3" },
     { name = "authlib", specifier = ">=1.6.4" },
-    { name = "azure-ai-agentserver-responses", marker = "extra == 'hosted-agent'", specifier = "==2.1.0", index = "https://pypi.org/simple" },
+    { name = "azure-ai-agentserver-responses", marker = "extra == 'hosted-agent'", specifier = "==2.1.0" },
     { name = "azure-cosmos", specifier = ">=4.9.0" },
     { name = "azure-identity", specifier = ">=1.23.0" },
     { name = "azure-monitor-opentelemetry", specifier = ">=1.8.9" },

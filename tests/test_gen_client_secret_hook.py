@@ -22,6 +22,10 @@ azd() {
 }
 az() {
   printf 'AZ_CREDENTIAL_RESET %s\n' "$*" >&2
+  if [[ "${MOCK_AZ_EXIT_CODE}" != "0" ]]; then
+    printf '%s\n' "ERROR: InteractionRequired: TokenCreatedWithOutdatedPolicies" >&2
+    return "${MOCK_AZ_EXIT_CODE}"
+  fi
   printf '%s\n' "mock-client-secret"
 }
 export -f az azd
@@ -29,8 +33,11 @@ exec "$@"
 """
 
 
-def _run_hook(env_values: str) -> subprocess.CompletedProcess[str]:
-    env = os.environ | {"MOCK_AZD_ENV_VALUES": env_values}
+def _run_hook(env_values: str, az_exit_code: int = 0) -> subprocess.CompletedProcess[str]:
+    env = os.environ | {
+        "MOCK_AZD_ENV_VALUES": env_values,
+        "MOCK_AZ_EXIT_CODE": str(az_exit_code),
+    }
     return subprocess.run(
         [
             "bash",
@@ -67,6 +74,23 @@ def test_managed_registration_generates_and_stores_secret() -> None:
     assert "AZ_CREDENTIAL_RESET ad app credential reset --id managed-client-id" in result.stderr
     assert "--append" in result.stderr
     assert "AZD_ENV_SET ENTRA_CLIENT_SECRET mock-client-secret" in result.stderr
+    assert "az login" not in result.stderr
+
+
+@pytest.mark.parametrize("exit_code", [1, 2])
+def test_credential_failure_displays_login_command_without_storing_secret(exit_code: int) -> None:
+    result = _run_hook(
+        'ENTRA_CLIENT_ID="managed-client-id"\nENTRA_APP_REGISTRATION_MANAGED="true"',
+        az_exit_code=exit_code,
+    )
+
+    assert result.returncode == exit_code
+    assert "ERROR: InteractionRequired: TokenCreatedWithOutdatedPolicies" in result.stderr
+    assert (
+        "az login --tenant 31b6a5c6-8762-4d6b-bf6e-f37931c67a75 --use-device-code" in result.stderr
+    )
+    assert "AZD_ENV_SET" not in result.stderr
+    assert "mock-client-secret" not in result.stdout + result.stderr
 
 
 @pytest.mark.parametrize(

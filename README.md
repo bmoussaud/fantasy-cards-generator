@@ -55,6 +55,9 @@ registration details.
 uv run pytest -q
 ```
 
+The issue qualification and remote Copilot execution process is documented in
+[`docs/issue-to-copilot-workflow.md`](docs/issue-to-copilot-workflow.md).
+
 ## Card generation configuration
 
 The single synchronous card-generation flow supports two local modes:

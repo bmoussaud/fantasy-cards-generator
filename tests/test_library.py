@@ -10,7 +10,7 @@ from app.generation import StoredCard, create_services
 from app.library import format_card_timestamp
 from app.main import create_app
 from app.settings import load_app_settings
-from tests.conftest import TEST_OWNER_ID, FakeOAuthClient
+from tests.conftest import TEST_OWNER_ID, FakeOAuthClient, begin_login
 
 OTHER_OWNER_ID = "00000000-0000-0000-0000-000000000999:11111111-1111-1111-1111-111111111999"
 
@@ -19,7 +19,7 @@ def make_authenticated_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     services = create_services(load_app_settings())
     monkeypatch.setattr(main_module, "create_oauth_client", lambda settings: FakeOAuthClient())
     client = TestClient(create_app(services=services), base_url="https://testserver")
-    login_response = client.get("/auth/login", follow_redirects=False)
+    login_response = begin_login(client)
     assert login_response.status_code == 307
     callback_response = client.get(
         "/auth/callback?code=valid-code&state=opaque",

@@ -52,7 +52,13 @@ client_secret=$(az ad app credential reset \
   --append \
   --display-name "gen-$(date +%Y%m%d%H%M%S)" \
   --end-date "${end_date}" \
-  --query password -o tsv)
+  --query password -o tsv) || {
+  status=$?
+  echo "Failed to generate client secret. If the error requires reauthentication, run:" >&2
+  echo "az login --tenant 31b6a5c6-8762-4d6b-bf6e-f37931c67a75 --use-device-code" >&2
+  echo "Then rerun the postprovision hook." >&2
+  exit "${status}"
+}
 
 if [[ -z "${client_secret}" || "${client_secret}" == "null" ]]; then
   echo "Failed to obtain client secret from az ad app credential reset" >&2

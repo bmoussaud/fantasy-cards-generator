@@ -462,8 +462,11 @@ uv run --frozen --extra hosted-agent python -m hosted_agents.card_orchestrator
 Ordinary web installs omit `--extra hosted-agent` and do not install the hosting
 stack. The lock pins `azure-ai-agentserver-responses==2.1.0`,
 `agent-framework-core==1.17.0`, and `agent-framework-foundry==1.12.0`.
-The explicit `hosted-sdk` PyPI source supplies SDK versions absent from the normal
-package proxy; the normal package source remains unchanged.
+The hosting SDKs now use the existing Microsoft package proxy, which supplies
+these exact versions and artifact hashes. The obsolete `hosted-sdk` PyPI
+override was removed so frozen installs do not fetch from the unreachable
+`files.pythonhosted.org` path in restricted build environments. See
+[build TLS troubleshooting](foundry-agent-operations.md#build-time-package-tls-failures).
 
 The runtime reads **only environment configuration**, never `.env`, web settings,
 Key Vault, storage credentials, or the account-scoped `FOUNDRY_ENDPOINT`:

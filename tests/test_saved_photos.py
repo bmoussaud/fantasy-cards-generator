@@ -24,12 +24,12 @@ from app.generation import (
 from app.main import create_app
 from app.photos import (
     PROFILE_PHOTO_IMPORT_SOURCE,
-    ProfilePhotoImportOAuthState,
     ProfilePhotoImportState,
     SavedPhotoResponseModel,
     normalize_imported_profile_photo,
 )
 from app.settings import load_app_settings
+from tests.conftest import begin_login
 
 TEST_TENANT_ID = "11111111-1111-1111-1111-111111111111"
 TEST_OBJECT_ID = "22222222-2222-2222-2222-222222222222"
@@ -122,7 +122,7 @@ def make_authenticated_client(
         lambda settings: FakeOAuthClient(tenant_id=tenant_id, object_id=object_id, name=name),
     )
     client = TestClient(create_app(services=services), base_url="https://testserver")
-    login_response = client.get("/auth/login", follow_redirects=False)
+    login_response = begin_login(client)
     assert login_response.status_code == 307
     callback_response = client.get(
         "/auth/callback?code=valid-code&state=opaque",
@@ -444,30 +444,94 @@ def test_import_claim_allows_only_one_concurrent_accept(monkeypatch: pytest.Monk
     assert state.status == "accepted"
 
 
-def test_import_oauth_state_is_one_time_expiring_and_contains_no_token() -> None:
-    repository = photos_module.InMemoryProfilePhotoImportOAuthStateRepository()
-    state = ProfilePhotoImportOAuthState(
-        state="oauth-state",
-        nonce="oauth-nonce",
-        owner_id=TEST_OWNER_ID,
+@pytest.mark.parametrize(
+    ("existing_status", "expected"),
+    [
+        (None, True),
+        ("not_offered", True),
+        ("offered", True),
+        ("declined", True),
+        ("failed_retryable", True),
+        ("no_photo", True),
+        ("imported", False),
+        ("deleted_suppressed", False),
+        ("accepted", False),
+    ],
+)
+@pytest.mark.parametrize("backend", ["memory", "cosmos"])
+def test_sign_in_import_claims_new_and_retryable_accounts_without_restoring_deleted_photos(
+    monkeypatch: pytest.MonkeyPatch,
+    existing_status: str | None,
+    expected: bool,
+    backend: str,
+) -> None:
+    state = (
+        ProfilePhotoImportState(owner_id=TEST_OWNER_ID, status=existing_status)
+        if existing_status
+        else None
     )
-    asyncio.run(repository.create(state))
 
-    consumed = asyncio.run(repository.consume("oauth-state"))
+    class FakeContainer:
+        async def create_item(self, document):
+            nonlocal state
+            assert state is None
+            assert document["userId"] == TEST_OWNER_ID
+            state = ProfilePhotoImportState.from_document(document)
 
-    assert consumed is not None
-    assert consumed.owner_id == TEST_OWNER_ID
-    assert consumed.nonce == "oauth-nonce"
-    assert "access_token" not in state.to_document()
-    assert asyncio.run(repository.consume("oauth-state")) is None
+        async def patch_item(self, item, *, partition_key, patch_operations, filter_predicate):
+            assert partition_key == TEST_OWNER_ID
+            assert f"'{existing_status}'" in filter_predicate
+            assert "c.updatedAt <=" in filter_predicate
+            assert state is not None
+            state.status = patch_operations[0]["value"]
 
-    expired = replace(
-        state,
-        state="expired-state",
-        expires_at="2000-01-01T00:00:00+00:00",
+    if backend == "cosmos":
+        repository = photos_module.AzureCosmosProfilePhotoImportStateRepository.__new__(
+            photos_module.AzureCosmosProfilePhotoImportStateRepository
+        )
+        repository._container = FakeContainer()
+
+        async def get(_):
+            return state
+
+        monkeypatch.setattr(repository, "get", get)
+    else:
+        repository = photos_module.InMemoryProfilePhotoImportStateRepository()
+        if state is not None:
+            asyncio.run(repository.save(state))
+
+    assert asyncio.run(repository.claim(TEST_OWNER_ID)) is expected
+    saved = asyncio.run(repository.get(TEST_OWNER_ID))
+    assert saved.status == ("accepted" if expected else existing_status)
+    assert "access_token" not in saved.to_document()
+    assert not asyncio.run(repository.claim(TEST_OWNER_ID))
+
+
+@pytest.mark.parametrize("status_code", [409, 403, 429])
+def test_new_cosmos_import_claim_handles_races_without_hiding_service_errors(
+    monkeypatch: pytest.MonkeyPatch, status_code: int
+) -> None:
+    from azure.cosmos.exceptions import CosmosHttpResponseError
+
+    class FakeContainer:
+        async def create_item(self, document):
+            raise CosmosHttpResponseError(status_code=status_code, message="Claim failed")
+
+    repository = photos_module.AzureCosmosProfilePhotoImportStateRepository.__new__(
+        photos_module.AzureCosmosProfilePhotoImportStateRepository
     )
-    asyncio.run(repository.create(expired))
-    assert asyncio.run(repository.consume("expired-state")) is None
+    repository._container = FakeContainer()
+
+    async def missing(_):
+        return None
+
+    monkeypatch.setattr(repository, "get", missing)
+    if status_code == 409:
+        assert not asyncio.run(repository.claim(TEST_OWNER_ID))
+    else:
+        with pytest.raises(CosmosHttpResponseError) as caught:
+            asyncio.run(repository.claim(TEST_OWNER_ID))
+        assert caught.value.status_code == status_code
 
 
 def test_imported_original_is_reencoded_with_bounded_dimensions_and_no_metadata() -> None:

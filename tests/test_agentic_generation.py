@@ -30,7 +30,7 @@ from app.generation import (
 )
 from app.main import create_app
 from app.settings import SettingsError, load_app_settings
-from tests.conftest import FakeOAuthClient, extract_hidden_value
+from tests.conftest import FakeOAuthClient, begin_login, extract_hidden_value
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -99,7 +99,7 @@ def _agent_client(monkeypatch: pytest.MonkeyPatch, services: AppServices) -> Tes
 
     monkeypatch.setattr(main_module, "create_oauth_client", lambda s: FakeOAuthClient())
     client = TestClient(create_app(services=services), base_url="https://testserver")
-    client.get("/auth/login", follow_redirects=False)
+    begin_login(client)
     client.get("/auth/callback?code=valid-code&state=opaque", follow_redirects=False)
     return client
 

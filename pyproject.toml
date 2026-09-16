@@ -44,18 +44,6 @@ target-version = ["py312"]
 url = "https://packagefeedproxy.microsoft.io/pypi/simple/"
 default = true
 
-[[tool.uv.index]]
-name = "hosted-sdk"
-url = "https://pypi.org/simple"
-explicit = true
-
-[tool.uv.sources]
-agent-framework-core = { index = "hosted-sdk" }
-agent-framework-foundry = { index = "hosted-sdk" }
-agent-framework-openai = { index = "hosted-sdk" }
-azure-ai-agentserver-core = { index = "hosted-sdk" }
-azure-ai-agentserver-responses = { index = "hosted-sdk" }
-
 [tool.ruff]
 line-length = 100
 target-version = "py312"

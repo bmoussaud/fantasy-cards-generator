@@ -4,7 +4,9 @@ import importlib.util
 import json
 import re
 import subprocess
+import tomllib
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -78,6 +80,36 @@ def test_container_contract_is_nonroot_frozen_and_independent_of_web() -> None:
     assert "app.entrypoint" not in dockerfile
     assert ":latest" not in dockerfile
     assert "8088" not in (ROOT / "Dockerfile").read_text()
+
+
+def test_hosted_dependencies_use_existing_mirror_without_public_pypi_artifacts() -> None:
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    lock = tomllib.loads((ROOT / "uv.lock").read_text())
+    mirror = "https://packagefeedproxy.microsoft.io/pypi/simple/"
+    assert project["tool"]["uv"]["index"] == [{"url": mirror, "default": True}]
+    assert not project["tool"]["uv"].get("sources")
+    packages = {package["name"]: package for package in lock["package"]}
+    for requirement in project["project"]["optional-dependencies"]["hosted-agent"]:
+        name, version = requirement.split("==")
+        assert packages[name]["version"] == version
+        assert packages[name]["source"] == {"registry": mirror}
+
+    # Frozen sync follows artifact URLs, not the index setting at build time.
+    for package in packages.values():
+        if "registry" not in package["source"]:
+            continue
+        assert package["source"]["registry"] == mirror
+        artifacts = [*package.get("wheels", [])]
+        if "sdist" in package:
+            artifacts.append(package["sdist"])
+        assert artifacts, package["name"]
+        for artifact in artifacts:
+            url = urlsplit(artifact["url"])
+            assert url.scheme == "https"
+            assert url.hostname == "packagefeedproxy.microsoft.io" or url.hostname.endswith(
+                ".pkgs.visualstudio.com"
+            )
+            assert re.fullmatch(r"sha256:[0-9a-f]{64}", artifact["hash"])
 
 
 def _context_includes(path: str) -> bool:

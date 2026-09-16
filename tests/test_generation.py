@@ -34,7 +34,12 @@ from app.generation import (
 from app.main import create_app
 from app.problems import ProblemDetails
 from app.settings import SettingsError, load_app_settings
-from tests.conftest import TEST_OWNER_ID, extract_hidden_value, make_authenticated_client
+from tests.conftest import (
+    TEST_OWNER_ID,
+    begin_login,
+    extract_hidden_value,
+    make_authenticated_client,
+)
 
 VALID_PNG_BYTES = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+nmJsAAAAASUVORK5CYII="
@@ -294,7 +299,7 @@ def test_generation_with_photo_uses_reference_image_edit_path(
     from tests.conftest import FakeOAuthClient
 
     monkeypatch.setattr(main_module, "create_oauth_client", lambda settings: FakeOAuthClient())
-    client.get("/auth/login", follow_redirects=False)
+    begin_login(client)
     client.get("/auth/callback?code=valid-code&state=opaque", follow_redirects=False)
     csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
 
@@ -354,7 +359,7 @@ def test_generation_with_photo_returns_clear_error_when_edits_are_unsupported(
     from tests.conftest import FakeOAuthClient
 
     monkeypatch.setattr(main_module, "create_oauth_client", lambda settings: FakeOAuthClient())
-    client.get("/auth/login", follow_redirects=False)
+    begin_login(client)
     client.get("/auth/callback?code=valid-code&state=opaque", follow_redirects=False)
     csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
 
@@ -434,7 +439,7 @@ def test_generation_without_photo_keeps_text_only_image_generation_path(
     from tests.conftest import FakeOAuthClient
 
     monkeypatch.setattr(main_module, "create_oauth_client", lambda settings: FakeOAuthClient())
-    client.get("/auth/login", follow_redirects=False)
+    begin_login(client)
     client.get("/auth/callback?code=valid-code&state=opaque", follow_redirects=False)
     csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
 
@@ -1270,7 +1275,7 @@ def test_ui_multipart_saved_photo_submission_uses_image_edit_path(
     from tests.conftest import FakeOAuthClient
 
     monkeypatch.setattr(main_module, "create_oauth_client", lambda settings: FakeOAuthClient())
-    client.get("/auth/login", follow_redirects=False)
+    begin_login(client)
     client.get("/auth/callback?code=valid-code&state=opaque", follow_redirects=False)
     csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
 
@@ -1328,7 +1333,7 @@ def test_ui_surfaces_saved_photo_limit_errors(monkeypatch: pytest.MonkeyPatch) -
     from tests.conftest import FakeOAuthClient
 
     monkeypatch.setattr(main_module, "create_oauth_client", lambda settings: FakeOAuthClient())
-    client.get("/auth/login", follow_redirects=False)
+    begin_login(client)
     client.get("/auth/callback?code=valid-code&state=opaque", follow_redirects=False)
     csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
     first_save = client.post(
@@ -1363,7 +1368,7 @@ def test_ui_surfaces_saved_photo_rejected_errors(monkeypatch: pytest.MonkeyPatch
     from tests.conftest import FakeOAuthClient
 
     monkeypatch.setattr(main_module, "create_oauth_client", lambda settings: FakeOAuthClient())
-    client.get("/auth/login", follow_redirects=False)
+    begin_login(client)
     client.get("/auth/callback?code=valid-code&state=opaque", follow_redirects=False)
     csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
 
@@ -1458,7 +1463,7 @@ def test_persistence_cleanup_deletes_orphaned_blob(
     from tests.conftest import FakeOAuthClient
 
     monkeypatch.setattr(main_module, "create_oauth_client", lambda settings: FakeOAuthClient())
-    client.get("/auth/login", follow_redirects=False)
+    begin_login(client)
     client.get("/auth/callback?code=valid-code&state=opaque", follow_redirects=False)
     csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
 
@@ -1513,7 +1518,7 @@ def test_blob_upload_failure_logs_safe_azure_diagnostic(
     from tests.conftest import FakeOAuthClient
 
     monkeypatch.setattr(main_module, "create_oauth_client", lambda settings: FakeOAuthClient())
-    client.get("/auth/login", follow_redirects=False)
+    begin_login(client)
     client.get("/auth/callback?code=valid-code&state=opaque", follow_redirects=False)
     csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
 
@@ -1569,7 +1574,7 @@ def test_failed_blob_compensation_does_not_mask_persistence_problem(
     from tests.conftest import FakeOAuthClient
 
     monkeypatch.setattr(main_module, "create_oauth_client", lambda settings: FakeOAuthClient())
-    client.get("/auth/login", follow_redirects=False)
+    begin_login(client)
     client.get("/auth/callback?code=valid-code&state=opaque", follow_redirects=False)
     csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
 

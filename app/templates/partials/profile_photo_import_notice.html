@@ -1,0 +1,12 @@
+{% if profile_photo_import_notice %}
+    <section class="panel" role="{{ 'alert' if profile_photo_import_notice.is_error else 'status' }}" aria-labelledby="profile-photo-import-result-heading">
+        <h2 id="profile-photo-import-result-heading">Microsoft profile photo import</h2>
+        <p>{{ profile_photo_import_notice.message }}</p>
+        {% if profile_photo_import_notice.is_error %}
+            <p class="field__hint">Reference: {{ profile_photo_import_notice.request_id }}</p>
+        {% endif %}
+        {% if user %}
+            <a class="btn btn-ghost" href="/my/photos/library">Open My Photos</a>
+        {% endif %}
+    </section>
+{% endif %}
