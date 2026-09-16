@@ -221,3 +221,25 @@ Card generation now accepts a saved photo as an alternative reference source. `P
 **Testing & Review:** Baseline 690 passed/2 skipped; Samwise initial review REJECTED (RBAC description error); Aragorn corrected and locked out; Legolas independently revised with commit 4983c6e (generation_path fix, client lifecycle); Samwise re-reviewed and APPROVED (723 passed/2 skipped); Gimli deployed app-side infra with dev capacity 10/min; Rai final verdict GREEN. Merged at 2026-09-09T14:34:30Z as 939d1ed0d19671d725aa124df3a2d76f90c580eb.
 **Scope & Deferral:** Out of scope: auth/persistence migration into agent, broad MCP toolbox, premature standalone agents. Open placeholder #102 remains for future agent-driven persistence.
 **Blockers Resolved:** (1) Pre-existing Bicep Entra redeploy footgun discovered during deployment, repaired live, tracked as issue #127 (out of #126 scope). (2) Reviewer lockout recovery per reviewer-protocol: Gandalf independently corrected RBAC conditional assignments (enableFoundryAgentAccess two assignments; Cognitive Services User one unconditional).
+
+### 2026-09-16: Mandatory discussion and issue-first intake
+
+**By:** User request, captured by Squad
+**What:** Feature, bug, and improvement requests must begin with discussion, questions, and analysis, followed by a GitHub issue. Involve every team member in qualification to identify one primary owner before implementation.
+**Why:** The user explicitly requested a mandatory team workflow instead of immediate implementation.
+
+This requirement applies to this repository. Workflow setup is requested; application changes must not bypass intake.
+
+**Approval gate:** The user confirmed: "Only after I explicitly approve the qualified issue". Team agreement, an owner label, and readiness alone do not authorize implementation.
+
+### 2026-09-16T12:53:00.472+00:00: Consolidated root azure.yaml deployment contract for issue #130 (consolidated)
+**By:** Gandalf, Gimli
+**What:** The root `azure.yaml` remains the single supported manifest for `web-nat` and `card-orchestrator`, with `workflows.up` constrained to web-only. The earlier proposal to protect raw bare `azd deploy` through a service `condition` was superseded after validation against azd 1.32.0: that condition is unsupported and was removed. Bare `azd deploy` is therefore unsupported. Supported entrypoints are `./deploy.sh {web|agent|full|provision|preview}` and targeted `azd deploy <service-name>` commands. The agent service retains `prebuild`, `prepackage`, `prepublish`, and `predeploy` guards; agent infrastructure and RBAC remain explicitly gated without duplication. The nested card-orchestrator manifest stays deprecated as a legacy reference. Production approval remains an external gate.
+**Why:** azd 1.32.0 deploys every service selected by the root manifest for a bare deploy, supports only `workflows.up` for this design, and exposed no verified root-hook service-selection signal before service hooks. Consolidating the validated outcome removes a false safety claim while preserving explicit deploy paths, prerequisite guards, web-only `azd up`, separation of RBAC ownership, and rollback-compatible legacy documentation. No Azure resources are provisioned or deployed by this decision.
+
+
+### 2026-09-16T13:45:55.855+00:00: Approbation explicite des décisions communes #143/#146, sans autorisation d’implémentation
+**By:** Squad (au nom du demandeur)
+**What:** Le demandeur approuve explicitement les décisions communes suivantes : production Agent-only via le hosted agent Microsoft Foundry sans chemin direct ni fallback automatique ; mock déterministe réservé aux tests automatisés et interdit ailleurs ; traces soumises à une allowlist stricte, à des plafonds de taille, à une troncature explicite et à une suppression avec la carte ; politique deny-wins ne conservant/exposant pour tout contenu refusé qu’un statut et un code public borné ; conservation de la carte sûre avec signalement `trace_unavailable` si la trace échoue ; préflight bloquant configuration/identité/RBAC puis rollback explicite vers la version précédente sans réactivation automatique d’un fallback ; ordre #143 schéma/persistance → #146 Agent-only → #143 interface finale. Cette approbation valide les décisions mais **n’autorise pas le démarrage de l’implémentation** : aucun code, aucune assignation et aucun label d’exécution ne sont autorisés.
+**References:** https://github.com/bmoussaud/fantasy-cards-generator/issues/143, https://github.com/bmoussaud/fantasy-cards-generator/issues/146, https://github.com/bmoussaud/fantasy-cards-generator/issues/143#issuecomment-5698533438, https://github.com/bmoussaud/fantasy-cards-generator/issues/146#issuecomment-5698533415
+**Why:** Formaliser l’approbation explicite du demandeur sur les décisions communes de #143/#146 tout en préservant strictement la limite d’autorisation : décisions approuvées, implémentation non autorisée.
