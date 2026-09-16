@@ -54,11 +54,6 @@ In `team.md`, @copilot always appears as:
 
 ## Auto-Assign Behavior
 
-Follow [mandatory intake](../../docs/issue-to-copilot-workflow.md) first. During
-qualification @copilot is capability-assessed, not consulted or assigned. Record
-the proposed owner in the issue body without execution labels. Existing Actions
-can auto-assign independently; this instruction does not technically gate them.
-
 Controlled by the HTML comment in team.md:
 
 ```markdown
@@ -67,15 +62,15 @@ Controlled by the HTML comment in team.md:
 
 | Setting | Behavior |
 |---------|----------|
-| `true` | After qualified-scope requester approval and concurrency checks, Lead may assign suitable routed issues to @copilot |
-| `false` | Lead presents recommendation; qualified-scope requester approval is still required before assignment |
+| `true` | Lead assigns routed issues to @copilot automatically via `gh issue edit --add-assignee @copilot` |
+| `false` | Lead presents recommendation; user confirms before assignment |
 
 ## Lead Triage Integration
 
 During triage, Lead evaluates each issue against @copilot's capability profile:
 
-1. **🟢 Match** — Record recommendation; assign only after qualification and explicit requester approval.
-2. **🟡 Match** — Same approval gate, with note: "⚠️ May need review — @copilot is 🟡 for this type of work."
+1. **🟢 Match** — Auto-assign (if enabled) or recommend assignment.
+2. **🟡 Match** — Assign with note: "⚠️ May need review — @copilot is 🟡 for this type of work."
 3. **🔴 Match** — Skip @copilot; route to appropriate spawned agent or human.
 
 ## Routing Details
@@ -89,8 +84,7 @@ Add to `routing.md`:
 ```
 
 Work that routes to @copilot:
-- Uses an existing qualified GitHub issue explicitly approved by the requester; no create-and-immediately-assign shortcut
-- Passes issue, bounded scope and actual chat/comment approval context; readiness/labels/assignment alone are not approval
+- Creates/assigns the GitHub issue (if not already)
 - Does NOT spawn a sub-agent — @copilot works asynchronously
 - Coordinator reports: "🤖 Assigned #{number} to @copilot — will open a PR when ready."
 - Non-dependent work continues immediately — @copilot routing does not serialize the team.

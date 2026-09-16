@@ -68,7 +68,7 @@ TASK CONTEXT:
 1. **Before ceremonies** fire AFTER routing decisions but BEFORE agent spawn. The ceremony summary is included in all subsequent work-batch spawn prompts.
 2. **After ceremonies** fire when ALL agents in the batch have completed (success or failure).
 3. **Manual ceremonies** fire only on explicit user request ("run retro", "do a design review").
-4. **Cooldown:** Skip repeats for unchanged scope, never pending Change Intake or requalification of materially changed scope.
+4. **Cooldown:** After a ceremony completes, skip auto-trigger checks for the immediately following step. This prevents ceremony loops.
 5. **Participant resolution:**
    - `all-relevant` → agents routed to the current task
    - `all-involved` → agents that participated in the completed batch
@@ -79,9 +79,4 @@ TASK CONTEXT:
    📋 {CeremonyName} completed — facilitated by {Facilitator}.
    Decisions: {count} | Action items: {count}.
    ```
-8. **Failure handling:** Report facilitator/participant failure or timeout.
-   Mandatory Change Intake stays pending until every required member has actual
-   input and qualification is complete; never treat failure as consensus or
-   permission to implement. Other advisory ceremonies retain their normal
-   failure handling. Requester approval of the qualified issue is still required
-   after the ceremony; see [the shared workflow](../../docs/issue-to-copilot-workflow.md).
+8. **Failure handling:** If the facilitator fails or times out, log a warning and proceed with work. Ceremonies must never block the pipeline indefinitely.

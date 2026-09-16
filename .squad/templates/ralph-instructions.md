@@ -45,28 +45,11 @@
 ## Ralph, Go!
 
 Read this file for your full instructions.  Follow ALL sections.
-MAXIMIZE PARALLELISM only for qualified, requester-approved execution in dedicated
-worktrees; consultation may run in parallel without implementation edits.
-
-### Mandatory Intake and Approval
-
-Follow `docs/issue-to-copilot-workflow.md` and the installed coordinator's
-Mandatory Change Intake gate. Verify the qualified issue, one primary owner,
-approved scope and real requester approval context before implementation,
-assignment or branches; pass them through every handoff, retry and resume.
-Labels, readiness, queues and Ralph commands are not approval. Material changes
-requalify; unchanged approved work does not repeat intake.
-
-Pending qualification or approval means report and continue with other eligible
-work, not code. Obtain all nine members' real input; @copilot is assessed, not
-consulted. Avoid execution labels/assignees during intake and record owner/open
-questions in the issue body. Status-only requests are read-only. This governs
-complying sessions, not the unchanged watch/Actions eligibility or auto-assignment.
+MAXIMIZE PARALLELISM — spawn agents for ALL actionable issues simultaneously.
 
 ### Issue Selection
 
-Inspect every open, unblocked, unassigned issue labeled `squad` or `squad:{member}`;
-implement only when qualified and explicitly requester-approved.
+Work on every open, unblocked, unassigned issue labeled `squad` or `squad:{member}`.
 Skip issues that are assigned to a human, blocked, or marked `status:on-hold`.
 
 ### Post-Task Actions
@@ -81,6 +64,4 @@ After completing work on each issue:
 ### Escalation
 
 If you are blocked on an issue, comment on it explaining why, add a `status:blocked`
-label only for approved execution, and move to the next actionable item. During
-intake record blockers in the body without execution labels. When only pending
-approval/input remains, report and idle; do not claim the board is clear.
+label, and move to the next actionable item.  Do not halt the loop.

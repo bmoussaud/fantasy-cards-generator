@@ -1,11 +1,5 @@
 # Spawn Reference
 
-**Repository intake gate:** Follow [the shared workflow](../../docs/issue-to-copilot-workflow.md)
-before implementation dispatch. Qualification consultations do not authorize
-product edits, implementation worktrees/branches, labels or assignees. Only
-qualified, requester-approved scope may execute; carry approval into all retries
-and resumes. Existing worktree and reviewer safeguards remain mandatory.
-
 ### How to Spawn an Agent
 
 **You MUST dispatch every agent spawn** via the platform's tool:
@@ -159,18 +153,12 @@ prompt: |
   {end MCP block}
 
   **Requested by:** {current user name}
-  WORK PHASE: {qualification-only | approved execution | direct no-new-scope operation}
-  ISSUE: {qualified issue URL, or pending creation during intake}
-  SCOPE / PRIMARY OWNER: {bounded scope; one primary owner; supporters/reviewers separate}
-  REQUESTER APPROVAL: {real quotation, source/time and proposal context; pending for intake}
-  Verify approval before implementation. Missing approval or materially changed
-  scope means return to intake, not execution. Labels/readiness/retry are not consent.
 
   INPUT ARTIFACTS: {list exact file paths to review/modify}
 
   The user says: "{message}"
 
-  Do only the work authorized by WORK PHASE and approved scope. Respond as {Name}.
+  Do the work. Respond as {Name}.
 
   ⚠️ OUTPUT: Report outcomes in human terms. Never expose tool internals or SQL.
   ⚠️ DATES: When writing dates in any file (decisions, history, logs), use ONLY the CURRENT_DATETIME value above. Never infer or guess the date.

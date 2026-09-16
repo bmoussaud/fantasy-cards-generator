@@ -4,17 +4,7 @@
 
 Ralph is a built-in squad member whose job is keeping tabs on work. **Ralph tracks and drives the work queue.** Always on the roster, one job: make sure the team never sits idle.
 
-**Mandatory gate:** Follow [change intake](../../docs/issue-to-copilot-workflow.md).
-Only qualified issues with explicit requester approval of scope are executable.
-Carry issue/scope/approval into handoffs, retries and resumes; labels, readiness,
-queue presence and Ralph commands are not approval. Material scope changes
-requalify. During intake record proposed owner/open questions in the body without
-execution labels or assignees; unchanged automation can still auto-assign.
-
-**Continuous execution applies only to approved scope.** Continue with eligible
-work without asking again each turn. If only pending qualification/approval
-remains, report those items and idle-watch, not a clear board or a busy retry
-loop. Never execute them just to keep the pipeline moving.
+**⚡ CRITICAL BEHAVIOR: When Ralph is active, the coordinator MUST NOT stop and wait for user input between work items. Ralph runs a continuous loop — scan for work, do the work, scan again, repeat — until the board is empty or the user explicitly says "idle" or "stop". This is not optional. If work exists, keep going. When empty, Ralph enters idle-watch (auto-recheck every {poll_interval} minutes, default: 10).**
 
 **Between checks:** Ralph's in-session loop runs while work exists. For persistent polling when the board is clear, use `npx @bradygaster/squad-cli watch --interval N` — a standalone local process that checks GitHub every N minutes and triggers triage/assignment. See [Watch Mode](#watch-mode-squad-watch).
 
@@ -29,7 +19,7 @@ Ralph always appears in `team.md`: `| Ralph | Work Monitor | — | 🔄 Monitor 
 | User says | Action |
 |-----------|--------|
 | "Ralph, go" / "Ralph, start monitoring" / "keep working" | Activate work-check loop |
-| "Ralph, status" / "What's on the board?" / "How's the backlog?" | Scan and report only; no dispatch, assignment, merge or loop |
+| "Ralph, status" / "What's on the board?" / "How's the backlog?" | Run one work-check cycle, report results, don't loop |
 | "Ralph, check every N minutes" | Set idle-watch polling interval |
 | "Ralph, idle" / "Take a break" / "Stop monitoring" | Fully deactivate (stop loop + idle-watch) |
 | "Ralph, scope: just issues" / "Ralph, skip CI" | Adjust what Ralph monitors this session |
@@ -60,18 +50,18 @@ gh pr list --state open --draft --json number,title,author,labels,checks --limit
 
 | Category | Signal | Action |
 |----------|--------|--------|
-| **Untriaged issues** | `squad` label, no `squad:{member}` label | Lead qualifies with all nine members; record owner in body, await requester approval |
-| **Assigned but unstarted** | `squad:{member}` label, no assignee or no PR | Verify qualified scope and requester approval before implementation spawn |
-| **Draft PRs** | PR in draft from squad member | Verify approved scope before nudge/resume |
-| **Review feedback** | PR has `CHANGES_REQUESTED` review | Route within approved scope, respecting reviewer rejection lockout |
-| **CI failures** | PR checks failing | Fix within approved scope; newly discovered change scope enters intake |
+| **Untriaged issues** | `squad` label, no `squad:{member}` label | Lead triages: reads issue, assigns `squad:{member}` label |
+| **Assigned but unstarted** | `squad:{member}` label, no assignee or no PR | Spawn the assigned agent to pick it up |
+| **Draft PRs** | PR in draft from squad member | Check if agent needs to continue; if stalled, nudge |
+| **Review feedback** | PR has `CHANGES_REQUESTED` review | Route feedback to PR author agent to address |
+| **CI failures** | PR checks failing | Notify assigned agent to fix, or create a fix issue |
 | **Approved PRs** | PR approved, CI green, ready to merge | Merge and close related issue |
 | **No work found** | All clear | Report: "📋 Board is clear. Ralph is idling." Suggest `npx @bradygaster/squad-cli watch` for persistent polling. |
 
 **Step 3 — Act on highest-priority item:**
 - Process one category at a time, highest priority first (untriaged > assigned > CI failures > review feedback > approved PRs)
 - Spawn agents as needed, collect results
-- **After results are collected, rescan for eligible work.** Pending approval is not eligibility; if only blocked items remain, report and idle-watch. Each cycle is one "round".
+- **⚡ CRITICAL: After results are collected, DO NOT stop. DO NOT wait for user input. IMMEDIATELY go back to Step 1 and scan again.** This is a loop — Ralph keeps cycling until the board is clear or the user says "idle". Each cycle is one "round".
 - If multiple items exist in the same category, process them in parallel (spawn multiple agents)
 
 **Step 4 — Periodic check-in** (every 3-5 rounds):
@@ -85,12 +75,9 @@ After every 3-5 rounds, pause and report before continuing:
    Continuing... (say "Ralph, idle" to stop)
 ```
 
-**Do not ask again for unchanged approved scope.** Obtain missing requester approval before execution, not from a general continue command. New user input is checked for change intent before resuming.
+**Do NOT ask for permission to continue.** Just report and keep going. The user must explicitly say "idle" or "stop" to break the loop. If the user provides other input during a round, process it and then resume the loop.
 
 ### Watch Mode (`squad watch`)
-
-Watch and heartbeat automation are unchanged and do not verify this instruction's
-approval gate. Do not use them or execution labels to bypass intake.
 
 Ralph's in-session loop processes work while it exists, then idles. For **persistent polling** between sessions or when you're away from the keyboard, use the `squad watch` CLI command:
 
@@ -140,8 +127,7 @@ Next action: Triaging #42 — "Fix auth endpoint timeout"
 
 ### Integration with Follow-Up Work
 
-After follow-up assessment, if Ralph is active, run the work-check cycle for
-eligible work under the mandatory gate above. This creates a continuous pipeline:
+After the coordinator's step 6 ("Immediately assess: Does anything trigger follow-up work?"), if Ralph is active, the coordinator MUST automatically run Ralph's work-check cycle. **Do NOT return control to the user.** This creates a continuous pipeline:
 
 1. User activates Ralph → work-check cycle runs
 2. Work found → agents spawned → results collected
@@ -150,8 +136,6 @@ eligible work under the mandatory gate above. This creates a continuous pipeline
 5. More work found → repeat from step 2
 6. No more work → "📋 Board is clear. Ralph is idling." (suggest `npx @bradygaster/squad-cli watch` for persistent polling)
 
-**Ralph continues approved work without redundant approval prompts.** Pending
-qualification/approval moves the affected items to waiting, never execution.
-A clear or input-blocked board moves to idle-watch with an honest status report.
+**Ralph does NOT ask "should I continue?" — Ralph KEEPS GOING.** Only stops on explicit "idle"/"stop" or session end. A clear board → idle-watch, not full stop. For persistent monitoring after the board clears, use `npx @bradygaster/squad-cli watch`.
 
 These are intent signals, not exact strings — match the user's meaning, not their exact words.

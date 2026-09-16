@@ -2,14 +2,6 @@
 
 On-demand reference for ingesting a PRD, decomposing it into work items, and managing updates.
 
-**Repository gate:** Follow [change intake](../../docs/issue-to-copilot-workflow.md).
-A PRD, decomposition table or offline backlog is not a qualified GitHub issue or
-approval to implement. Discuss unanswered questions, obtain all nine members'
-real input and separately assess @copilot. Deduplicate/create qualified GitHub
-issues with one primary owner each before requester approval and execution.
-If GitHub/input is unavailable, keep draft qualification and report the blocker.
-Existing PRD change-detection metadata below is not an approval hash or verifier.
-
 ## Triggers
 
 | User says | Action |
@@ -31,8 +23,8 @@ Existing PRD change-detection metadata below is not an approval hash or verifier
    **Hash:** {sha256 of content, for change detection}
    ```
 3. **Spawn Lead (sync, premium bump)** with decomposition prompt (see below).
-4. **Qualify and present GitHub issues**, with bounded scopes, actual team input and one primary owner each, for explicit requester approval.
-5. **On approval of those scopes:** Record the real chat/comment context and route with issue/scope/approval, respecting dependency order. Do not apply execution labels or assignees during intake.
+4. **Present work items** to user for approval in table format.
+5. **On approval:** Route items to agents respecting dependency order.
 
 ## Lead Decomposition Spawn Template
 
@@ -103,9 +95,7 @@ When the user says the PRD changed:
 
    Approve these updates?
    ```
-5. Requalify material changes in the affected GitHub issues and obtain fresh
-   requester approval before changed-scope execution. Then update/cancel
-   obsoleted work as authorized and hand off issue/scope/approval.
+5. On approval: Cancel obsoleted work (if not yet started), update items, re-route.
 
 ## State Tracking
 
