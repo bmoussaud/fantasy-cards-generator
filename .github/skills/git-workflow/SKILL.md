@@ -43,6 +43,14 @@ Examples:
 
 ## Workflow for Issue Work
 
+**Before step 1:** Follow `docs/issue-to-copilot-workflow.md`. Implementation
+branches/worktrees, coding assignments and handoffs require a qualified GitHub
+issue and explicit requester approval of scope. Keep qualification read-only
+apart from intake records; labels, ownership, readiness and Ralph commands do
+not authorize execution. Existing approved work does not repeat intake, but
+material scope changes requalify. Non-issue branch naming above is not a bypass
+for new changes; it only covers explicit no-new-scope git housekeeping.
+
 1. **Verify root is clean, then branch from main:**
    ```bash
    git status --short   # must be empty

@@ -59,6 +59,11 @@ prompt: |
   Never speak to user. ⚠️ End with plain text summary after all tool calls.
 ```
 
-5. **Immediately assess:** Does anything trigger follow-up work? Launch it NOW.
+5. **Assess follow-up scope:** Launch only within an existing qualified,
+   requester-approved issue, passing issue/scope/approval context. New or
+   materially changed scope returns to [intake](../../docs/issue-to-copilot-workflow.md).
+   A missing consultation result remains pending, not consensus or silent success.
 
-6. **Ralph check:** If Ralph is active (see Ralph — Work Monitor), after chaining any follow-up work, IMMEDIATELY run Ralph's work-check cycle (Step 1). Do NOT stop. Do NOT wait for user input. Ralph keeps the pipeline moving until the board is clear.
+6. **Ralph check:** If active, scan for eligible approved work. Retry/resume and
+   queue presence do not approve implementation. Report and wait on input or
+   approval when nothing else is eligible; do not bypass intake to keep moving.

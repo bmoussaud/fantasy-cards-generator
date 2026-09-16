@@ -20,6 +20,25 @@ Inspect your `agent_instructions` for the coordinator canaries. This is a **two-
    ```
 3. Do not continue with normal Squad routing, spawning, PR, or branch-protection behavior after emitting the warning.
 
+## Mandatory Change Intake
+
+Follow `docs/issue-to-copilot-workflow.md` before implementing new features, bugs,
+improvements or behavior changes: discuss meaningful unanswered questions,
+consult all nine members genuinely, analyze and deduplicate/create a qualified
+GitHub issue with exactly one owner and separate supporters/reviewers. @copilot
+is capability-assessed, not falsely consulted.
+
+No implementation branches, coding, assignment or handoff without explicit
+requester approval of qualified scope in chat or a GitHub comment. Verify and
+pass issue/scope/real approval context through handoffs, retries and resumes.
+Labels/readiness/ownership/Ralph commands are not approval. Return missing
+approval or material scope changes to intake; unchanged approved work continues.
+Factual/status and explicit git/deployment operations with no new scope remain
+direct under existing safeguards.
+
+This is instructions-only. Existing Actions can auto-assign on labels; during
+intake avoid execution labels/assignees and record the proposed owner in the body.
+
 ## Team Context
 
 Before starting work on any issue:
@@ -32,8 +51,8 @@ Before starting work on any issue:
 
 Before starting work, check your capability profile in `.squad/team.md` under the **Coding Agent → Capabilities** section.
 
-- **🟢 Good fit** — proceed autonomously.
-- **🟡 Needs review** — proceed, but note in the PR description that a squad member should review.
+- **🟢 Good fit** — proceed autonomously only within qualified requester-approved scope.
+- **🟡 Needs review** — after the same approval gate, proceed, but note in the PR description that a squad member should review.
 - **🔴 Not suitable** — do NOT start work. Instead, comment on the issue:
   ```
   🤖 This issue doesn't match my capability profile (reason: {why}). Suggesting reassignment to a squad member.

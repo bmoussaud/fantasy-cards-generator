@@ -2,6 +2,14 @@
 
 How to decide who handles what.
 
+**Repository gate:** Follow `docs/issue-to-copilot-workflow.md` before execution.
+New changes require discussion, all nine members' actual input, analysis, a
+deduplicated qualified GitHub issue, one primary owner and explicit requester
+approval. Supporters/reviewers are separate; @copilot is capability-assessed,
+not consulted. Record proposed ownership in the body without execution labels
+or assignees during intake: unchanged automation can auto-assign on labels.
+All execution/fan-out below is post-approval only, not permission from labels.
+
 ## Routing Table
 
 | Work Type | Route To | Examples |
@@ -19,19 +27,19 @@ How to decide who handles what.
 
 | Label | Action | Who |
 |-------|--------|-----|
-| `squad` | Triage: analyze issue, assign `squad:{member}` label | Lead |
-| `squad:{name}` | Pick up issue and complete the work | Named member |
+| `squad` | Check qualification/approval; record proposed owner in body until approved | Lead |
+| `squad:{name}` | Verify qualified scope and requester approval before pickup | Named member |
 
 ### How Issue Assignment Works
 
-1. When a GitHub issue gets the `squad` label, the **Lead** triages it — analyzing content, assigning the right `squad:{member}` label, and commenting with triage notes.
-2. When a `squad:{member}` label is applied, that member picks up the issue in their next session.
+1. For existing labeled issues, the **Lead** checks qualification and requester approval before execution labels/assignees.
+2. A `squad:{member}` label names a routing candidate; pickup requires approval of qualified scope.
 3. Members can reassign by removing their label and adding another member's label.
-4. The `squad` label is the "inbox" — untriaged issues waiting for Lead review.
+4. Do not use `squad` as an intake inbox label; it can trigger assignment automation.
 
 ## Rules
 
-1. **Eager by default** — spawn all agents who could usefully start work, including anticipatory downstream work.
+1. **Qualify first, eager only within approved scope** — consultation is not an implementation assignment.
 2. **Scribe always runs** after substantial work, always as `mode: "background"`. Never blocks.
 3. **Quick facts → coordinator answers directly.** Don't spawn an agent for "what port does the server run on?"
 4. **When two agents could handle it**, pick the one whose domain is the primary concern.

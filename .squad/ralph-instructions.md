@@ -45,11 +45,32 @@
 ## Ralph, Go!
 
 Read this file for your full instructions.  Follow ALL sections.
-MAXIMIZE PARALLELISM — spawn agents for ALL actionable issues simultaneously.
+MAXIMIZE PARALLELISM only for qualified, requester-approved execution in dedicated
+worktrees; consultation may run in parallel without implementation edits.
+
+### Mandatory Intake and Approval
+
+Follow [the shared workflow](../docs/issue-to-copilot-workflow.md). Verify each
+issue's qualification, exactly one primary owner and explicit requester approval
+of scope before implementation, assignment, branches or handoffs. Carry the
+issue/scope/real approval context through retries and resumed sessions. Queue
+presence, readiness, labels, "Ralph, go", retry and resume are not approval.
+Material scope changes requalify; unchanged approved scope needs no duplicate
+intake. Factual/status requests are read-only; explicit git/deployment operations
+without new scope retain existing safeguards.
+
+Unapproved issues remain in qualification: discuss missing answers and obtain
+real input from all nine members, with @copilot separately capability-assessed.
+Missing contributions are pending, not consensus. Do not apply `squad`,
+`squad:*`, `go:yes`, queue labels or execution assignees during intake; record the
+owner and blockers in the issue body. This is an agent instruction, not a change
+to watch/Actions eligibility or technical blocking of automatic assignment.
 
 ### Issue Selection
 
-Work on every open, unblocked, unassigned issue labeled `squad` or `squad:{member}`.
+Inspect open, unblocked, unassigned issues labeled `squad` or `squad:{member}`.
+Implement only those that pass the intake and approval gate; report pending
+qualification/approval and continue with other eligible work.
 Skip issues that are assigned to a human, blocked, or marked `status:on-hold`.
 
 ### Post-Task Actions
@@ -64,4 +85,7 @@ After completing work on each issue:
 ### Escalation
 
 If you are blocked on an issue, comment on it explaining why, add a `status:blocked`
-label, and move to the next actionable item.  Do not halt the loop.
+label only for approved execution, and move to the next actionable item. During
+intake use body text instead of labels. If only approval/input-blocked items
+remain, report that state and idle rather than repeatedly requesting approval
+or claiming the board is clear.
