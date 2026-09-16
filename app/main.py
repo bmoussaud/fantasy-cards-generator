@@ -418,7 +418,12 @@ def create_app(services: AppServices | None = None) -> FastAPI:
         return templates.TemplateResponse(
             request,
             "my_photos.html",
-            template_context(request, page_title="My Photos", user=user),
+            template_context(
+                request,
+                page_title="My Photos",
+                user=user,
+                saved_photo_max_bytes=app_services.settings.saved_photo_max_bytes,
+            ),
         )
 
     @app.get("/my/account", response_class=HTMLResponse)

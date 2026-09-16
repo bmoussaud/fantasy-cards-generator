@@ -159,6 +159,18 @@ Returns `200 OK`:
 `DELETE /my/photos/{photoId}` returns `204 No Content`. The `image` and `thumbnail`
 routes stream owner-scoped bytes and return `404` for non-owned or missing photos.
 
+In the browser, uploads are available only on **My Photos**
+(`/my/photos/library`). Choose an image, optionally add a label, then select
+**Save photo to my library**. The page posts to `/my/photos`, displays moderation,
+capacity, and storage errors, and refreshes the library after a successful save.
+The upload limit shown in the form follows `SAVED_PHOTO_MAX_BYTES` (4 MB by default).
+Every upload from this page is explicitly saved; there is no separate save checkbox.
+
+The generator (`/app`) only selects an existing saved photo, or generates without
+one. Its **Add or manage photos** link opens My Photos. The underlying generation
+API continues accepting fresh uploads and `save_photo` for existing clients;
+these controls are no longer exposed in the generator UI.
+
 Before Microsoft sign-in, users may select the optional photo-import checkbox on
 `/auth/login`. The single sign-in callback uses its transient Graph token to copy
 the photo into this library, without a second authorization flow or stored token.

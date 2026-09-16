@@ -174,6 +174,28 @@ def test_my_photos_library_renders_management_shell(
     assert "data-photo-library-manager" in response.text
     assert 'data-photo-library-endpoint="/my/photos"' in response.text
     assert "Delete any photo you no longer want to keep" in response.text
+    assert 'action="/my/photos"' in response.text
+    assert 'enctype="multipart/form-data"' in response.text
+    assert 'name="photo"' in response.text
+    assert 'name="label"' in response.text
+    assert 'name="csrf_token"' in response.text
+    assert 'accept="image/jpeg,image/png,image/webp"' in response.text
+    assert "data-photo-upload-form" in response.text
+    assert 'data-max-photo-bytes="4194304"' in response.text
+    assert "Save photo to my library" in response.text
+    assert 'name="save_photo"' not in response.text
+
+
+def test_photo_library_upload_limit_matches_service_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SAVED_PHOTO_MAX_BYTES", "2097152")
+    client = make_authenticated_client(monkeypatch)
+
+    response = client.get("/my/photos/library")
+
+    assert 'data-max-photo-bytes="2097152"' in response.text
+    assert "up to 2.0 MB" in response.text
 
 
 def test_my_card_detail_requires_authentication() -> None:

@@ -5,7 +5,6 @@
  */
 (function () {
   "use strict";
-  var MAX_PHOTO_BYTES = 5 * 1024 * 1024;
   var ALLOWED_PHOTO_TYPES = ["image/jpeg", "image/png", "image/webp"];
 
   function formatPhotoSize(bytes) {
@@ -206,86 +205,21 @@
       return;
     }
 
-    var input = form.querySelector("[data-photo-input]");
-    var preview = form.querySelector("[data-photo-preview]");
-    var image = form.querySelector("[data-photo-preview-image]");
-    var meta = form.querySelector("[data-photo-preview-meta]");
-    var feedback = form.querySelector("[data-photo-feedback]");
     var picker = form.querySelector("[data-saved-photo-picker]");
     var pickerGrid = form.querySelector("[data-saved-photo-picker-grid]");
     var pickerFeedback = form.querySelector("[data-saved-photo-picker-feedback]");
     var clearSavedPhotoButton = form.querySelector("[data-clear-saved-photo]");
     var savedPhotoInput = form.querySelector("[data-saved-photo-id-input]");
-    var savePhotoToggle = form.querySelector("[data-save-photo-toggle]");
-    var photoLabelField = form.querySelector("[data-photo-label-field]");
-    var photoLabelInput = form.querySelector("[data-photo-label-input]");
-    var objectUrl = null;
     var selectedSavedPhotoId = "";
 
     if (
-      !input ||
-      !preview ||
-      !image ||
-      !meta ||
-      !feedback ||
       !picker ||
       !pickerGrid ||
       !pickerFeedback ||
       !clearSavedPhotoButton ||
-      !savedPhotoInput ||
-      !savePhotoToggle ||
-      !photoLabelField ||
-      !photoLabelInput
+      !savedPhotoInput
     ) {
       return;
-    }
-
-    function clearObjectUrl() {
-      if (objectUrl) {
-        URL.revokeObjectURL(objectUrl);
-        objectUrl = null;
-      }
-    }
-
-    function hidePreview() {
-      clearObjectUrl();
-      preview.hidden = true;
-      image.removeAttribute("src");
-      meta.textContent = "";
-    }
-
-    function setUploadFeedback(message, isError) {
-      feedback.textContent = message;
-      feedback.dataset.invalid = isError ? "true" : "false";
-      input.setAttribute("aria-invalid", isError ? "true" : "false");
-    }
-
-    function getCurrentUploadValidation() {
-      var file = input.files && input.files[0];
-      if (!file) {
-        return { file: null, valid: false, error: "" };
-      }
-      if (ALLOWED_PHOTO_TYPES.indexOf(file.type) === -1) {
-        return { file: file, valid: false, error: "Choose a JPG, PNG, or WebP image." };
-      }
-      if (file.size > MAX_PHOTO_BYTES) {
-        return { file: file, valid: false, error: "Choose an image that is 5 MB or smaller." };
-      }
-      return { file: file, valid: true, error: "" };
-    }
-
-    function syncSavePhotoControls() {
-      var uploadState = getCurrentUploadValidation();
-      var disableSave = !uploadState.valid || Boolean(selectedSavedPhotoId);
-      savePhotoToggle.disabled = disableSave;
-      if (disableSave) {
-        savePhotoToggle.checked = false;
-      }
-      photoLabelField.hidden = !uploadState.valid || !savePhotoToggle.checked || Boolean(selectedSavedPhotoId);
-      photoLabelInput.disabled = photoLabelField.hidden;
-      if (photoLabelInput.disabled) {
-        photoLabelInput.value = "";
-      }
     }
 
     function syncSavedPhotoInput() {
@@ -303,7 +237,6 @@
       if (!pickerFeedback.dataset.loading) {
         pickerFeedback.textContent = "";
       }
-      syncSavePhotoControls();
     }
 
     function selectSavedPhoto(button) {
@@ -321,12 +254,8 @@
         item.classList.toggle("is-selected", isSelected);
         item.setAttribute("aria-pressed", isSelected ? "true" : "false");
       });
-      input.value = "";
-      hidePreview();
-      setUploadFeedback("Using a saved photo instead of a new upload.", false);
       pickerFeedback.textContent = "Using " + nextLabel + " as your saved reference photo.";
       clearSavedPhotoButton.hidden = false;
-      syncSavePhotoControls();
     }
 
     function renderPickerPhotos(photos) {
@@ -336,7 +265,7 @@
         pickerGrid.appendChild(
           createEmptyState(
             "No saved photos yet",
-            "Upload a reference photo and choose to save it if you want to reuse it later."
+            "Open My Photos to upload a photo, or generate a card without a reference photo."
           )
         );
         pickerFeedback.textContent = "";
@@ -351,55 +280,10 @@
         });
         pickerGrid.appendChild(button);
       });
-      pickerFeedback.textContent = "Select one saved photo or upload a new one.";
+      pickerFeedback.textContent = "Select one saved photo, or generate without a reference photo.";
     }
 
-    input.addEventListener("change", function () {
-      var uploadState = getCurrentUploadValidation();
-      if (!uploadState.file) {
-        hidePreview();
-        setUploadFeedback("", false);
-        syncSavePhotoControls();
-        return;
-      }
-
-      clearSavedPhotoSelection();
-      if (!uploadState.valid) {
-        hidePreview();
-        setUploadFeedback(uploadState.error, true);
-        syncSavePhotoControls();
-        return;
-      }
-
-      clearObjectUrl();
-      objectUrl = URL.createObjectURL(uploadState.file);
-      image.src = objectUrl;
-      image.alt = "Preview of " + uploadState.file.name;
-      meta.textContent = uploadState.file.name + " \u00b7 " + formatPhotoSize(uploadState.file.size);
-      preview.hidden = false;
-      setUploadFeedback("Selected photo is ready to use as your reference image.", false);
-      syncSavePhotoControls();
-    });
-
-    savePhotoToggle.addEventListener("change", syncSavePhotoControls);
     clearSavedPhotoButton.addEventListener("click", clearSavedPhotoSelection);
-    form.addEventListener("htmx:configRequest", function (event) {
-      var request = event.detail;
-      if (!request || !request.formData || !request.parameters) {
-        return;
-      }
-      syncSavedPhotoInput();
-      if (selectedSavedPhotoId) {
-        request.formData.set("saved_photo_id", selectedSavedPhotoId);
-        request.parameters.saved_photo_id = selectedSavedPhotoId;
-        request.formData.delete("photo");
-        delete request.parameters.photo;
-        return;
-      }
-      request.formData.delete("saved_photo_id");
-      delete request.parameters.saved_photo_id;
-    });
-    window.addEventListener("pagehide", clearObjectUrl);
 
     pickerFeedback.dataset.loading = "true";
     fetchSavedPhotos(picker.dataset.photoLibraryEndpoint)
@@ -417,7 +301,6 @@
         pickerFeedback.textContent = "";
       });
 
-    syncSavePhotoControls();
     syncSavedPhotoInput();
     form.dataset.photoReferenceBound = "true";
   }
@@ -453,7 +336,7 @@
         grid.appendChild(
           createEmptyState(
             "No saved photos yet",
-            "Generate a card with a new upload and choose to save it to build your library."
+            "Upload a photo using the form above, then select it in the generator."
           )
         );
         return;
@@ -476,6 +359,114 @@
             (error.payload && error.payload.detail) || "We could not load your saved photos."
           );
         });
+    }
+
+    var uploadForm = manager.querySelector("[data-photo-upload-form]");
+    if (uploadForm) {
+      var input = uploadForm.querySelector("[data-photo-input]");
+      var fields = uploadForm.querySelector("[data-photo-upload-fields]");
+      var preview = uploadForm.querySelector("[data-photo-preview]");
+      var image = uploadForm.querySelector("[data-photo-preview-image]");
+      var meta = uploadForm.querySelector("[data-photo-preview-meta]");
+      var feedback = uploadForm.querySelector("[data-photo-feedback]");
+      var maxBytes = Number(uploadForm.dataset.maxPhotoBytes);
+      var objectUrl = null;
+      var uploading = false;
+
+      function clearPreview() {
+        if (objectUrl) {
+          URL.revokeObjectURL(objectUrl);
+          objectUrl = null;
+        }
+        preview.hidden = true;
+        image.removeAttribute("src");
+        meta.textContent = "";
+      }
+
+      function uploadValidationError(file) {
+        if (!file) {
+          return "Choose a photo to save.";
+        }
+        if (ALLOWED_PHOTO_TYPES.indexOf(file.type) === -1) {
+          return "Choose a JPG, PNG, or WebP image.";
+        }
+        if (file.size === 0 || file.size > maxBytes) {
+          return "Choose a non-empty image no larger than " + formatPhotoSize(maxBytes) + ".";
+        }
+        return "";
+      }
+
+      function setUploadFeedback(message, isError) {
+        feedback.textContent = message;
+        feedback.dataset.invalid = isError ? "true" : "false";
+        input.setAttribute("aria-invalid", isError ? "true" : "false");
+      }
+
+      input.addEventListener("change", function () {
+        clearPreview();
+        var file = input.files && input.files[0];
+        var error = file ? uploadValidationError(file) : "";
+        input.setCustomValidity(error);
+        setUploadFeedback(error, Boolean(error));
+        if (!file || error) {
+          return;
+        }
+        objectUrl = URL.createObjectURL(file);
+        image.src = objectUrl;
+        image.alt = "Preview of " + file.name;
+        meta.textContent = file.name + " \u00b7 " + formatPhotoSize(file.size);
+        preview.hidden = false;
+        setUploadFeedback("Ready to save to My Photos.", false);
+      });
+
+      uploadForm.addEventListener("submit", function (event) {
+        event.preventDefault();
+        if (uploading) {
+          return;
+        }
+        var error = uploadValidationError(input.files && input.files[0]);
+        input.setCustomValidity(error);
+        setUploadFeedback(error, Boolean(error));
+        if (!uploadForm.reportValidity()) {
+          return;
+        }
+        var body = new FormData(uploadForm);
+        clearError();
+        uploading = true;
+        fields.disabled = true;
+        uploadForm.setAttribute("aria-busy", "true");
+        setUploadFeedback("Checking and saving your photo\u2026", false);
+        fetch(endpoint, {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { Accept: "application/json", "X-CSRF-Token": csrfToken },
+          body: body,
+        })
+          .then(readJsonOrProblem)
+          .then(function () {
+            uploadForm.reset();
+            input.setCustomValidity("");
+            clearPreview();
+            setUploadFeedback(
+              "Photo saved to My Photos. You can now select it in the generator.",
+              false
+            );
+            return loadLibrary();
+          })
+          .catch(function (error) {
+            setUploadFeedback("Photo was not saved. Review the error and try again.", true);
+            showError(
+              (error.payload && error.payload.title) || "Photo Upload Failed",
+              (error.payload && error.payload.detail) || "Your photo could not be saved. Please try again."
+            );
+          })
+          .finally(function () {
+            uploading = false;
+            fields.disabled = false;
+            uploadForm.setAttribute("aria-busy", "false");
+          });
+      });
+      window.addEventListener("pagehide", clearPreview);
     }
 
     manager.addEventListener("click", function (event) {

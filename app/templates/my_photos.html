@@ -13,6 +13,60 @@
         data-photo-library-endpoint="/my/photos"
         data-photo-library-csrf-token="{{ csrf_token }}"
     >
+        <form
+            method="post"
+            action="/my/photos"
+            enctype="multipart/form-data"
+            data-photo-upload-form
+            data-max-photo-bytes="{{ saved_photo_max_bytes }}"
+        >
+            <h2>Upload your photo</h2>
+            <p class="field__hint">
+                Save a private, safety-checked reference photo to select in the generator.
+                It stays in your library until you delete it.
+            </p>
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+            <fieldset class="reference-photo-section" data-photo-upload-fields>
+                <legend class="field__label">New reference photo</legend>
+                <div class="field">
+                    <label class="field__label" for="photo">Photo file</label>
+                    <p class="field__hint" id="photo-hint">
+                        Choose a JPG, PNG, or WebP image up to {{ (saved_photo_max_bytes / 1024 / 1024)|round(1) }} MB.
+                    </p>
+                    <input
+                        class="field__control field__control--file"
+                        id="photo"
+                        name="photo"
+                        type="file"
+                        accept="image/jpeg,image/png,image/webp"
+                        aria-describedby="photo-hint photo-feedback"
+                        data-photo-input
+                        required
+                    />
+                    <div class="photo-preview" data-photo-preview hidden>
+                        <p class="photo-preview__label">Reference photo preview</p>
+                        <img class="photo-preview__image" data-photo-preview-image alt="Selected photo preview" />
+                        <p class="photo-preview__meta" data-photo-preview-meta></p>
+                    </div>
+                </div>
+                <div class="field">
+                    <label class="field__label" for="photo-label">Photo label</label>
+                    <p class="field__hint" id="photo-label-hint">Optional. Add a short name to find this photo later.</p>
+                    <input
+                        class="field__control"
+                        id="photo-label"
+                        name="label"
+                        type="text"
+                        maxlength="80"
+                        placeholder="Archer portrait"
+                        aria-describedby="photo-label-hint"
+                    />
+                </div>
+                <button class="btn btn-primary" type="submit">Save photo to my library</button>
+            </fieldset>
+            <p class="field__hint" id="photo-feedback" data-photo-feedback role="status" aria-live="polite"></p>
+            <p class="field__hint">To import your Microsoft profile photo, select that option the next time you sign in.</p>
+        </form>
         <div class="saved-photo-picker__header">
             <div>
                 <h2 class="saved-photo-picker__title">Saved reference photos</h2>

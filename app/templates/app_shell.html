@@ -15,9 +15,7 @@
                 hx-post="/ui/cards/generate"
                 hx-target="#generation-result"
                 hx-swap="innerHTML"
-                hx-encoding="multipart/form-data"
                 hx-indicator="#generation-pending"
-                enctype="multipart/form-data"
             >
                 <div class="field">
                     <label class="field__label" for="prompt">Card prompt</label>
@@ -37,10 +35,10 @@
                     ></textarea>
                 </div>
                 <fieldset class="reference-photo-section">
-                    <legend class="field__label">Reference photo</legend>
+                    <legend class="field__label">Reference photos</legend>
                     <p class="field__hint">
-                        Optional. Choose one saved photo from your library or upload a new JPG, PNG, or WebP image up to 5 MB.
-                        To import your Microsoft profile photo, select that option the next time you sign in.
+                        Optional. Select one available photo from My Photos, or generate without a reference photo.
+                        To upload new photos, go to <a href="/my/photos/library">My Photos</a>.
                     </p>
                     <input
                         type="hidden"
@@ -58,7 +56,7 @@
                                 <h3 class="saved-photo-picker__title">Pick from your library</h3>
                                 <p class="field__hint">Reuse a saved reference photo without uploading it again.</p>
                             </div>
-                            <a class="btn btn-ghost saved-photo-picker__manage-link" href="/my/photos/library">Manage library</a>
+                            <a class="btn btn-ghost saved-photo-picker__manage-link" href="/my/photos/library">Add or manage photos</a>
                         </div>
                         <div class="saved-photo-picker__grid" data-saved-photo-picker-grid aria-live="polite">
                             <p class="field__hint">Loading saved photos&hellip;</p>
@@ -72,67 +70,6 @@
                         >
                             Clear saved photo selection
                         </button>
-                    </div>
-                    <div class="reference-photo-divider" aria-hidden="true">
-                        <span>or upload a new photo</span>
-                    </div>
-                    <div class="field">
-                        <label class="field__label" for="photo">Upload your photo</label>
-                        <p class="field__hint" id="photo-hint">
-                            Optional. We use it only as a reference for this generation request unless you choose to save it.
-                        </p>
-                        <input
-                            class="field__control field__control--file"
-                            id="photo"
-                            name="photo"
-                            type="file"
-                            accept="image/jpeg,image/png,image/webp"
-                            aria-describedby="photo-hint photo-feedback"
-                            data-photo-input
-                        />
-                        <p class="field__hint" id="photo-feedback" data-photo-feedback aria-live="polite"></p>
-                        <div class="photo-preview" data-photo-preview hidden>
-                            <p class="photo-preview__label">Reference photo preview</p>
-                            <img
-                                class="photo-preview__image"
-                                data-photo-preview-image
-                                alt="Selected profile photo preview"
-                            />
-                            <p class="photo-preview__meta" data-photo-preview-meta></p>
-                        </div>
-                    </div>
-                    <div class="checkbox-field">
-                        <label class="checkbox-field__label" for="save_photo">
-                            <input
-                                id="save_photo"
-                                name="save_photo"
-                                type="checkbox"
-                                value="true"
-                                data-save-photo-toggle
-                                disabled
-                            />
-                            <span>Save this photo to my library</span>
-                        </label>
-                        <p class="field__hint">
-                            Optional. Stored until you delete it from <a href="/my/photos/library">My Photos</a>.
-                        </p>
-                    </div>
-                    <div class="field" data-photo-label-field hidden>
-                        <label class="field__label" for="photo_label">Photo label</label>
-                        <p class="field__hint" id="photo-label-hint">
-                            Optional. Add a short name so you can find it again later.
-                        </p>
-                        <input
-                            class="field__control"
-                            id="photo_label"
-                            name="photo_label"
-                            type="text"
-                            maxlength="80"
-                            placeholder="Archer portrait"
-                            aria-describedby="photo-label-hint"
-                            data-photo-label-input
-                            disabled
-                        />
                     </div>
                 </fieldset>
                 <input id="generate-idempotency-key" type="hidden" name="idempotency_key" value="{{ generate_idempotency_key }}" />

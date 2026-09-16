@@ -83,22 +83,28 @@ def test_app_shell_renders_generation_form(authenticated_client: TestClient) -> 
 
     assert response.status_code == 200
     assert 'hx-post="/ui/cards/generate"' in response.text
-    assert 'hx-encoding="multipart/form-data"' in response.text
-    assert 'enctype="multipart/form-data"' in response.text
+    assert 'hx-encoding="multipart/form-data"' not in response.text
+    assert 'enctype="multipart/form-data"' not in response.text
     assert 'name="csrf_token"' in response.text
     assert 'name="idempotency_key"' in response.text
     assert "Image quality" not in response.text
     assert 'name="quality"' not in response.text
-    assert 'name="photo"' in response.text
+    assert 'name="photo"' not in response.text
     assert 'name="saved_photo_id"' in response.text
     assert "data-saved-photo-id-input" in response.text
-    assert 'name="save_photo"' in response.text
-    assert 'name="photo_label"' in response.text
-    assert 'accept="image/jpeg,image/png,image/webp"' in response.text
-    assert "Reference photo preview" in response.text
-    assert "up to 5 MB" in response.text
+    assert 'name="save_photo"' not in response.text
+    assert 'name="photo_label"' not in response.text
+    assert 'type="file"' not in response.text
+    assert "Upload your photo" not in response.text
+    assert "Save this photo to my library" not in response.text
+    assert "generate without a reference photo" in response.text
+    assert '<legend class="field__label">Reference photos</legend>' in response.text
+    assert (
+        'To upload new photos, go to <a href="/my/photos/library">My Photos</a>.' in response.text
+    )
     assert "Pick from your library" in response.text
     assert "/my/photos/library" in response.text
+    assert "Add or manage photos" in response.text
     assert 'minlength="12"' in response.text
     assert "12 to 400 characters" in response.text
 
@@ -1228,8 +1234,10 @@ def test_ui_rejects_photo_and_saved_photo_together_with_error_panel(
     assert "Provide either photo or saved_photo_id, but not both." in response.text
 
 
-def test_ui_multipart_saved_photo_submission_uses_image_edit_path(
+@pytest.mark.parametrize("encoding", ["multipart", "urlencoded"])
+def test_ui_saved_photo_submission_uses_image_edit_path(
     monkeypatch: pytest.MonkeyPatch,
+    encoding: str,
 ) -> None:
     class TrackingAIClient(MockAIClient):
         def __init__(self, settings) -> None:
@@ -1286,15 +1294,18 @@ def test_ui_multipart_saved_photo_submission_uses_image_edit_path(
     )
     saved_photo_id = saved.json()["photoId"]
 
-    response = client.post(
-        "/ui/cards/generate",
-        files=[
-            ("prompt", (None, "create a safe fantasy knight with a moonlit shield")),
-            ("idempotency_key", (None, "idem-ui-saved-photo-multipart")),
-            ("csrf_token", (None, csrf_token)),
-            ("saved_photo_id", (None, saved_photo_id)),
-        ],
-    )
+    fields = {
+        "prompt": "create a safe fantasy knight with a moonlit shield",
+        "idempotency_key": f"idem-ui-saved-photo-{encoding}",
+        "csrf_token": csrf_token,
+        "saved_photo_id": saved_photo_id,
+    }
+    if encoding == "multipart":
+        response = client.post(
+            "/ui/cards/generate", files=[(key, (None, value)) for key, value in fields.items()]
+        )
+    else:
+        response = client.post("/ui/cards/generate", data=fields)
 
     assert response.status_code == 200
     assert services.ai_client.image_calls == 0
