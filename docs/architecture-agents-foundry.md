@@ -689,7 +689,7 @@ Any implementation should preserve:
 **Current agent-only latency and failure decision**
 
 - Keep the external request ceiling at **225.0 seconds**, the hosted-agent
-  timeout at **5.0 seconds**, and the image timeout at **150.0 seconds**.
+  timeout at **70.0 seconds**, and the image timeout at **150.0 seconds**.
 - Do not retry or replace a failed agent response with direct card-text
   generation. Timeout, transient service failure, `routing_defer`,
   authentication/authorization, configuration, parse/contract failure, and
@@ -760,7 +760,7 @@ Any implementation should preserve:
    Hosted-agent support, model availability, and quota must be checked against the actual deployment region strategy before implementation.
 
 2. **Latency budget**  
-   The hosted-agent request has a 5.0-second bound and no direct text fallback;
+   The hosted-agent request has a 70.0-second bound and no direct text fallback;
    the 150.0-second image budget and `awaiting_artwork_retry` behavior remain.
 
 3. **Project endpoint vs account endpoint confusion**  

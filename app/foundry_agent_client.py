@@ -219,13 +219,14 @@ class FoundryAgentClient:
             return "misconfigured"
         if body.get("status") != "active":
             return "unavailable"
-        returned_name = body.get("name") or body.get("agent_name")
-        returned_version = body.get("version") or body.get("agent_version")
-        if returned_name is not None and returned_name != self._settings.foundry_agent_name:
+        returned_names = [body[key] for key in ("name", "agent_name") if key in body]
+        returned_versions = [body[key] for key in ("version", "agent_version") if key in body]
+        if not returned_names or any(
+            value != self._settings.foundry_agent_name for value in returned_names
+        ):
             return "misconfigured"
-        if (
-            returned_version is not None
-            and str(returned_version) != self._settings.foundry_agent_version
+        if not returned_versions or any(
+            value != self._settings.foundry_agent_version for value in returned_versions
         ):
             return "misconfigured"
         return "ok"
@@ -438,6 +439,14 @@ def _http_error_result(
             request_id=request_id,
             error_code=code,
             message="Foundry policy refused the request.",
+        )
+    if response.status_code == 408:
+        return FoundryAgentInvocationResult(
+            status="transient_error",
+            retryable=True,
+            request_id=request_id,
+            error_code="timeout",
+            message="Foundry agent request timed out.",
         )
     if response.status_code == 429 or response.status_code >= 500:
         return FoundryAgentInvocationResult(

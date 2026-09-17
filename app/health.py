@@ -63,6 +63,20 @@ class NotApplicableHealthProbe:
 
 
 @dataclass(frozen=True, slots=True)
+class MisconfiguredHealthProbe:
+    name: Literal["cosmos", "blob", "agent"]
+
+    async def check(self, timeout_seconds: float) -> DependencyHealthResult:
+        del timeout_seconds
+        return DependencyHealthResult(
+            name=self.name,
+            status="misconfigured",
+            duration_ms=0,
+            error_category="misconfigured",
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class AzureCosmosHealthProbe:
     get_container_client: Callable[[], Awaitable[Any]]
     endpoint: str | None

@@ -283,9 +283,11 @@ Additional operational settings:
 - `SAVED_PHOTO_MAX_BYTES`
 - `SAVED_PHOTO_THUMBNAIL_SIZE`
 
-Startup validates the endpoint syntax, exact agent name/version, active hosted
-version status, and managed-identity access with a bounded content-free
-`GET /agents/{name}/versions/{version}` request. The 70-second client cap covers
+Startup validates local settings and mandatory telemetry. Dependency readiness
+then validates the exact agent name/version, active hosted version status, and
+managed-identity access with a bounded content-free
+`GET /agents/{name}/versions/{version}` request after the server listens. The
+70-second client cap covers
 the hosted runtime's 65-second overall budget while remaining inside the
 application's 225-second request budget. Missing configuration, identity/RBAC
 failure, inactive or absent versions, and telemetry initialization failure

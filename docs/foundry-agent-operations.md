@@ -973,8 +973,8 @@ timeout/policy defaults belong to the runtime; inspect their bounded values duri
 integration rather than adding guessed SDK settings here.
 
 The implemented defaults/maxima are 20 seconds per specialist and 65 seconds
-overall. These are **offline candidate budgets**, not compliance with the
-web client's bounded 5-second hosted-agent timeout.
+overall. These fit inside the web client's bounded 70-second hosted-agent
+timeout and the complete request's 225-second outer budget.
 Narrow local safety heuristics are not comprehensive safety or prompt-injection
 protection; unobserved hosted guardrails remain unavailable and post-image checks
 are not applicable. Application nonpersistence does not guarantee zero platform

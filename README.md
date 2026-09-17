@@ -63,9 +63,10 @@ The issue qualification and remote Copilot execution process is documented in
 
 Application construction always uses the live Foundry agent and image clients;
 there is no runtime environment switch for mocks. Automated tests inject their
-deterministic clients explicitly. Startup requires the hosted-agent project
-endpoint, exact active name/version, managed-identity access, image-model
-configuration, and working Application Insights telemetry.
+deterministic clients explicitly. Startup requires valid local agent and
+image-model configuration plus working Application Insights telemetry.
+Dependency readiness then requires the exact active hosted-agent name/version
+and managed-identity access before the revision receives traffic.
 
 See `docs/card-generation-api.md` for the API contract, moderation policy, and
 runtime settings.

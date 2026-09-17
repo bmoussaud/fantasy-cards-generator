@@ -341,6 +341,27 @@ def test_memory_mode_reports_not_applicable_without_instantiating_azure_clients(
     }
 
 
+def test_missing_agent_probe_fails_readiness_closed() -> None:
+    base_settings = load_app_settings()
+    defaults = create_services(
+        base_settings,
+        ai_client=MockAIClient(base_settings),
+        agent_client=MockAgentClient(),
+    )
+    services = replace(defaults, agent_health_probe=None)
+
+    with TestClient(create_app(services=services), base_url="https://testserver") as client:
+        assert client.get("/livez").status_code == 200
+        response = client.get("/healthz")
+
+    assert response.status_code == 503
+    assert response.json()["dependencies"]["agent"] == {
+        "status": "misconfigured",
+        "durationMs": 0,
+        "errorCategory": "misconfigured",
+    }
+
+
 def test_healthz_honors_and_generates_request_ids() -> None:
     client = make_client(
         persistence_mode="azure",

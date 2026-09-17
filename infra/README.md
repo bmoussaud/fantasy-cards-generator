@@ -37,11 +37,12 @@ keeps dependency-aware `/healthz` checks bounded through IaC rather than portal 
 
 - `HEALTHZ_COSMOS_TIMEOUT_MS` and `HEALTHZ_BLOB_TIMEOUT_MS` are plain azd/Bicep
   parameters, both defaulting to `1500` ms and both overrideable per environment.
-- ACA startup and readiness call dependency-aware `/healthz` with a 75-second
-  platform timeout, exceeding the app's 70-second Foundry health-check budget.
-  Liveness calls dependency-free `/livez`, so an upstream outage removes the
-  replica from readiness without causing a restart loop. Startup checks every
-  5s until healthy, readiness every 10s, and liveness every 30s.
+- ACA startup and liveness call dependency-free `/livez`; startup allows up to
+  150 seconds for local process initialization without waiting on Foundry.
+  Readiness alone calls dependency-aware `/healthz` with a 75-second platform
+  timeout, exceeding the app's 70-second Foundry health-check budget. An upstream
+  outage therefore removes the replica from traffic without causing a restart
+  loop. Startup checks every 5s, readiness every 10s, and liveness every 30s.
 - The app response contract keeps `Cache-Control: no-store`; do not add an
   external cache in front of `/healthz`, and do not tighten the probe interval
   below the existing ACA configuration unless RU / transaction impact is

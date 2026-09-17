@@ -190,6 +190,17 @@ def test_agent_access_probe_classifies_bounded_failures(
         {"name": AGENT_NAME, "version": "7", "status": "creating"},
         {"name": "another-agent", "version": "7", "status": "active"},
         {"name": AGENT_NAME, "version": "8", "status": "active"},
+        {"version": "7", "status": "active"},
+        {"name": AGENT_NAME, "status": "active"},
+        {"status": "active"},
+        {"name": "", "agent_name": AGENT_NAME, "version": "7", "status": "active"},
+        {"name": AGENT_NAME, "version": 7, "status": "active"},
+        {
+            "name": AGENT_NAME,
+            "agent_name": "another-agent",
+            "version": "7",
+            "status": "active",
+        },
     ],
 )
 def test_agent_access_probe_rejects_malformed_or_wrong_version(
@@ -390,6 +401,21 @@ def test_transient_http_statuses_are_retryable(status_code: int) -> None:
     assert result.status == "transient_error"
     assert result.retryable is True
     assert result.error_code == "busy"
+
+
+def test_http_408_is_classified_as_bounded_timeout() -> None:
+    result, _ = invoke_with_transport(
+        configured_settings(),
+        lambda request: httpx.Response(
+            408,
+            json={"error": {"code": "request_timeout"}},
+            request=request,
+        ),
+    )
+
+    assert result.status == "transient_error"
+    assert result.retryable is True
+    assert result.error_code == "timeout"
 
 
 @pytest.mark.parametrize("status_code", [401, 403])

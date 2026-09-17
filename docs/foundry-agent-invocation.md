@@ -22,11 +22,12 @@ deployed agent:
 `FOUNDRY_PROJECT_ENDPOINT` is intentionally separate from `FOUNDRY_ENDPOINT`;
 there is no fallback to the account/model endpoint or to direct text generation.
 
-At startup, the web app validates configuration, acquires an Entra token, and
-performs a bounded, content-free
+At startup, the web app synchronously validates local configuration and mandatory
+telemetry, then begins serving dependency-free `/livez`. Dependency-aware
+`/healthz` readiness acquires an Entra token and performs a bounded, content-free
 `GET /agents/{name}/versions/{version}?api-version=2025-11-15-preview` check.
 Only the exact configured version with `status: active` passes. Failure prevents
-readiness rather than accepting traffic in a degraded mode.
+traffic routing without blocking ASGI startup or causing liveness restart loops.
 
 ## Manual smoke command
 
@@ -513,10 +514,9 @@ as `metadata.hostedVersion`; it is not the application-version check.
 Maximum **three model requests**, with model retries and function-invocation loops
 disabled, no repair loops and no automatic fallback. All agents/sessions are fresh
 per stage and clients are owned/closed per invocation, including cancellation.
-The 20-second stage / 65-second orchestration budgets are an **OFFLINE CANDIDATE**:
-they do **not** replace or provide evidence for the web client's bounded
-5-second hosted-agent timeout. Any later approved nonproduction live trial
-needs its own explicit deadline.
+The 20-second stage / 65-second orchestration budgets fit inside the web client's
+bounded 70-second hosted-agent timeout. The complete card-generation request
+remains bounded by the 225-second outer deadline.
 
 Completed domain JSON is returned in the SDK's `TextResponse`, inside a genuine
 Responses API envelope. `refused`, `held` and `routing_defer` always omit content

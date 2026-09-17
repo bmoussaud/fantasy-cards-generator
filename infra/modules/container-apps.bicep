@@ -547,14 +547,14 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             {
               type: 'Startup'
               httpGet: {
-                path: '/healthz'
+                path: '/livez'
                 port: 8000
                 scheme: 'HTTP'
               }
               initialDelaySeconds: 0
               periodSeconds: 5
-              timeoutSeconds: 75
-              failureThreshold: 3
+              timeoutSeconds: 3
+              failureThreshold: 30
               successThreshold: 1
             }
             {
@@ -580,7 +580,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
               initialDelaySeconds: 5
               periodSeconds: 10
               timeoutSeconds: 75
-              failureThreshold: 3
+              failureThreshold: 1
               successThreshold: 1
             }
           ]

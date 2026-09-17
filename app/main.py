@@ -48,7 +48,12 @@ from app.generation import (
     client_ip_from_request,
     create_services,
 )
-from app.health import NotApplicableHealthProbe, build_healthz_payload, run_dependency_probes
+from app.health import (
+    MisconfiguredHealthProbe,
+    NotApplicableHealthProbe,
+    build_healthz_payload,
+    run_dependency_probes,
+)
 from app.library import CardLibraryService
 from app.photos import (
     PROFILE_PHOTO_IMPORT_SOURCE,
@@ -166,23 +171,6 @@ def create_app(services: AppServices | None = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         del app
         try:
-            probe = app_services.agent_health_probe
-            if probe is None:
-                raise SettingsError("Foundry agent readiness probe is not configured.")
-            result = await probe.check(app_services.settings.foundry_agent_timeout_seconds)
-            if result.status != "ok":
-                safe_log(
-                    "dependency.failed",
-                    attributes={
-                        "fcg.dependency": "foundry_agent",
-                        "fcg.outcome": "failed",
-                        "fcg.error_code": result.error_category,
-                        "fcg.duration_ms": result.duration_ms,
-                    },
-                )
-                raise SettingsError(
-                    f"Foundry agent startup validation failed: {result.error_category}."
-                )
             yield
         finally:
             if app_services.agent_client is not None and hasattr(
@@ -920,7 +908,7 @@ def create_app(services: AppServices | None = None) -> FastAPI:
                     services.settings.healthz_blob_timeout_ms / 1000,
                 ),
                 (
-                    services.agent_health_probe or NotApplicableHealthProbe("agent"),
+                    services.agent_health_probe or MisconfiguredHealthProbe("agent"),
                     services.settings.foundry_agent_timeout_seconds,
                 ),
             ],

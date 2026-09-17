@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from typing import Any
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
 from app import generation as generation_module
-from app.foundry_agent_client import FoundryAgentInvocationResult
+from app.foundry_agent_client import FoundryAgentClient, FoundryAgentInvocationResult
 from app.generation import (
     AppServices,
     GeneratedCardModel,
@@ -361,6 +363,37 @@ def test_agent_failures_are_structured_and_never_fallback(
     assert "silver shield" not in response.text
 
 
+def test_hosted_agent_http_408_returns_public_upstream_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Credential:
+        def get_token(self, *scopes: str) -> str:
+            del scopes
+            return "fake-token"
+
+    settings = _live_settings(monkeypatch)
+    agent = FoundryAgentClient(
+        settings,
+        credential=Credential(),
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                408,
+                json={"error": {"code": "request_timeout"}},
+                request=request,
+            )
+        ),
+    )
+    services = _services(monkeypatch, agent)
+
+    with _client(monkeypatch, services) as client:
+        response = _generate(client, key="hosted-http-408")
+
+    assert response.status_code == 504
+    assert response.json()["errorCode"] == "upstream_timeout"
+    assert not services.card_repository._records
+    assert not services.asset_store._assets
+
+
 def test_input_moderation_blocks_before_agent(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = 0
 
@@ -442,14 +475,83 @@ def test_valid_refused_status_blocks_image_and_persistence(
     assert not services.asset_store._assets
 
 
-def test_startup_rejects_failed_agent_identity_or_rbac_probe(
+def test_startup_does_not_wait_for_remote_agent_preflight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class UnexpectedProbe:
+        name = "agent"
+
+        async def check(self, timeout_seconds: float) -> DependencyHealthResult:
+            del timeout_seconds
+            raise AssertionError("startup must not run the remote agent preflight")
+
+    services = _services(monkeypatch, object(), agent_probe=UnexpectedProbe())
+    app = create_app(services=services)
+
+    async def scenario() -> None:
+        async with app.router.lifespan_context(app):
+            pass
+
+    asyncio.run(scenario())
+
+
+def test_livez_remains_responsive_while_readiness_waits_for_agent_preflight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DelayedAgentProbe:
+        name = "agent"
+
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def check(self, timeout_seconds: float) -> DependencyHealthResult:
+            del timeout_seconds
+            self.started.set()
+            await self.release.wait()
+            return DependencyHealthResult("agent", "ok", 70_000)
+
+    probe = DelayedAgentProbe()
+    services = _services(monkeypatch, object(), agent_probe=probe)
+    app = create_app(services=services)
+
+    async def scenario() -> None:
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="https://testserver",
+            ) as client:
+                readiness = asyncio.create_task(client.get("/healthz"))
+                await asyncio.wait_for(probe.started.wait(), timeout=0.1)
+
+                live = await asyncio.wait_for(client.get("/livez"), timeout=0.1)
+                assert live.status_code == 200
+                assert live.json() == {"status": "ok"}
+                assert not readiness.done()
+
+                probe.release.set()
+                ready = await readiness
+                assert ready.status_code == 200
+                assert ready.json()["dependencies"]["agent"]["status"] == "ok"
+
+    asyncio.run(scenario())
+
+
+def test_readiness_fails_closed_when_agent_preflight_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     services = _services(monkeypatch, object(), agent_probe=FailingAgentProbe())
 
-    with pytest.raises(SettingsError, match="unauthorized"):
-        with TestClient(create_app(services=services), base_url="https://testserver"):
-            pass
+    with TestClient(create_app(services=services), base_url="https://testserver") as client:
+        assert client.get("/livez").status_code == 200
+        response = client.get("/healthz")
+
+    assert response.status_code == 503
+    assert response.json()["dependencies"]["agent"] == {
+        "status": "unauthorized",
+        "durationMs": 1,
+        "errorCategory": "unauthorized",
+    }
 
 
 def test_agent_client_is_closed_on_shutdown(monkeypatch: pytest.MonkeyPatch) -> None:
