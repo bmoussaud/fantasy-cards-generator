@@ -112,6 +112,7 @@ def test_entra_user_provisioning_uses_postprovision_hook_and_is_secret_safe() ->
 
 def test_bicep_exposes_azd_container_outputs_without_helloworld_image() -> None:
     main_bicep = (REPO_ROOT / "infra" / "main.bicep").read_text()
+    main_parameters = json.loads((REPO_ROOT / "infra" / "main.parameters.json").read_text())
     container_apps_bicep = (REPO_ROOT / "infra" / "modules" / "container-apps.bicep").read_text()
 
     # The helloworld image is allowed in main.bicep only as a safe-provision
@@ -129,6 +130,7 @@ def test_bicep_exposes_azd_container_outputs_without_helloworld_image() -> None:
     assert "modules/container-registry.bicep" in main_bicep
     assert "output AZURE_CONTAINER_REGISTRY_ENDPOINT" in main_bicep
     assert "output AZURE_CONTAINER_APP_NAME" in main_bicep
+    assert main_parameters["parameters"]["containerImage"]["value"] == "${CONTAINER_IMAGE=}"
     assert "param serviceName string = 'web-nat'" in main_bicep
     assert "param serviceName string = 'web-nat'" in container_apps_bicep
     assert "targetPort: 8000" in container_apps_bicep
@@ -1137,6 +1139,114 @@ def test_azd_yaml_wires_preprovision_session_secret_hook() -> None:
     assert "ensure_session_secret.sh" in azure_yaml
 
 
+def test_preprovision_hook_preserves_existing_web_image(tmp_path: Path) -> None:
+    script = REPO_ROOT / "hooks" / "preserve_web_image.sh"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    azd_log = tmp_path / "azd.log"
+    fake_azd = fake_bin / "azd"
+    fake_azd.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1 $2 $3" = "env get-value AZURE_RESOURCE_GROUP" ]; then\n'
+        "  printf '%s\\n' rg-fcag-dev\n"
+        'elif [ "$1 $2 $3" = "env get-value AZURE_CONTAINER_APP_NAME" ]; then\n'
+        "  printf '%s\\n' fcag-dev-app\n"
+        'elif [ "$1 $2" = "env set" ]; then\n'
+        f'  printf "%s\\n" "$*" > "{azd_log}"\n'
+        "else\n"
+        "  exit 2\n"
+        "fi\n"
+    )
+    fake_azd.chmod(0o755)
+    fake_az = fake_bin / "az"
+    fake_az.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' "
+        "fcagdev.azurecr.io/fantasy-cards-generator/web-nat-dev@sha256:abc123\n"
+    )
+    fake_az.chmod(0o755)
+
+    result = subprocess.run(
+        ["sh", str(script)],
+        capture_output=True,
+        text=True,
+        env={"PATH": f"{fake_bin}:/usr/bin:/bin"},
+    )
+
+    assert result.returncode == 0
+    assert azd_log.read_text().strip() == (
+        "env set CONTAINER_IMAGE="
+        "fcagdev.azurecr.io/fantasy-cards-generator/web-nat-dev@sha256:abc123"
+    )
+    assert "sha256:abc123" not in result.stdout
+    assert "sha256:abc123" not in result.stderr
+
+
+def test_preprovision_hook_keeps_bootstrap_when_web_app_does_not_exist(
+    tmp_path: Path,
+) -> None:
+    script = REPO_ROOT / "hooks" / "preserve_web_image.sh"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    azd_log = tmp_path / "azd.log"
+    fake_azd = fake_bin / "azd"
+    fake_azd.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1 $2 $3" = "env get-value AZURE_RESOURCE_GROUP" ]; then\n'
+        "  printf '%s\\n' rg-fcag-dev\n"
+        'elif [ "$1 $2 $3" = "env get-value AZURE_CONTAINER_APP_NAME" ]; then\n'
+        "  printf '%s\\n' fcag-dev-app\n"
+        'elif [ "$1 $2" = "env set" ]; then\n'
+        f'  printf "%s\\n" "$*" > "{azd_log}"\n'
+        "fi\n"
+    )
+    fake_azd.chmod(0o755)
+    fake_az = fake_bin / "az"
+    fake_az.write_text("#!/bin/sh\nexit 0\n")
+    fake_az.chmod(0o755)
+
+    result = subprocess.run(
+        ["sh", str(script)],
+        capture_output=True,
+        text=True,
+        env={"PATH": f"{fake_bin}:/usr/bin:/bin"},
+    )
+
+    assert result.returncode == 0
+    assert not azd_log.exists()
+
+
+def test_preprovision_hook_fails_closed_when_live_image_lookup_fails(
+    tmp_path: Path,
+) -> None:
+    script = REPO_ROOT / "hooks" / "preserve_web_image.sh"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_azd = fake_bin / "azd"
+    fake_azd.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1 $2 $3" = "env get-value AZURE_RESOURCE_GROUP" ]; then\n'
+        "  printf '%s\\n' rg-fcag-dev\n"
+        'elif [ "$1 $2 $3" = "env get-value AZURE_CONTAINER_APP_NAME" ]; then\n'
+        "  printf '%s\\n' fcag-dev-app\n"
+        "fi\n"
+    )
+    fake_azd.chmod(0o755)
+    fake_az = fake_bin / "az"
+    fake_az.write_text("#!/bin/sh\nexit 1\n")
+    fake_az.chmod(0o755)
+
+    result = subprocess.run(
+        ["sh", str(script)],
+        capture_output=True,
+        text=True,
+        env={"PATH": f"{fake_bin}:/usr/bin:/bin"},
+    )
+
+    assert result.returncode == 1
+    assert "currently deployed web image" in result.stderr
+
+
 def test_session_secret_flows_into_key_vault_and_container_app_secret() -> None:
     """Verify APP_SESSION_SECRET_KEY is persisted and wired through ACA secretRef."""
     container_apps_bicep = (REPO_ROOT / "infra" / "modules" / "container-apps.bicep").read_text()
@@ -1223,6 +1333,7 @@ def test_root_manifest_hooks_stamp_agent_identity_after_deploy() -> None:
     azure_yaml = (REPO_ROOT / "azure.yaml").read_text()
 
     assert "preprovision:" in azure_yaml
+    assert "preserve_web_image.sh" in azure_yaml
     assert "postprovision:" in azure_yaml
     assert "postdeploy:" in azure_yaml
     assert "sync_agent_deployment.sh" in azure_yaml
@@ -1415,6 +1526,12 @@ def test_deploy_script_exists_and_is_executable() -> None:
     script = REPO_ROOT / "deploy.sh"
     assert script.is_file()
     assert script.stat().st_mode & 0o111
+
+
+def test_deploy_script_sets_foundry_user_agent_for_every_azd_execution() -> None:
+    script = (REPO_ROOT / "deploy.sh").read_text()
+
+    assert script.count("AZURE_DEV_USER_AGENT=microsoft_foundry_skill") == 7
 
 
 @pytest.mark.parametrize("action", ["web", "agent", "full", "provision"])

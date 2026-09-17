@@ -98,8 +98,12 @@ the web deployment inputs, re-provisions the Container App with that exact
 active agent identity, and only then deploys `web-nat` on port 8000. The
 postdeploy hook rejects missing or malformed agent output instead of allowing an
 empty `FOUNDRY_AGENT_NAME` or `FOUNDRY_AGENT_VERSION`. The repeated provision
-does not rotate an existing managed Entra client secret; clear that azd value
-only as part of an explicit credential-rotation operation.
+preserves the currently deployed web image through `CONTAINER_IMAGE`, so it
+cannot replace a running application with the bootstrap image. On a clean
+environment, the empty value still selects the public placeholder until the
+first web deployment. The repeated provision also does not rotate an existing
+managed Entra client secret; clear that azd value only as part of an explicit
+credential-rotation operation.
 
 The workload-profile Container Apps environment uses the delegated `aca-infra`
 subnet and a NAT Gateway with a static public IP for public-service egress.

@@ -110,6 +110,12 @@ environment variables. Agent deployment then writes
 `postdeploy` hook validates and persists them as `FOUNDRY_AGENT_NAME` and
 `FOUNDRY_AGENT_VERSION`. The second provision injects the pair before the real
 web revision can become ready. A partial pair fails Bicep validation.
+Before every provision, `hooks/preserve_web_image.sh` reads the currently
+deployed Container App image and stores it as `CONTAINER_IMAGE`; the Bicep
+parameter consumes that exact value. Therefore repeat `azd provision` runs
+preserve the running web artifact. A clean environment has no deployed image,
+so the empty value intentionally selects the public bootstrap image until
+`azd deploy web-nat` completes the first deployment.
 The second provision reuses an existing `ENTRA_CLIENT_SECRET`; the
 postprovision hook creates one only when the managed registration has no stored
 secret. Clear that azd value only for an explicit, coordinated rotation.
@@ -334,7 +340,9 @@ before applying it. This avoids unrelated full-provision effects: the current
 `postprovision` hook creates a new Entra client credential only when Bicep
 explicitly reports that the deployment manages the registration, and
 provisioning without `containerImage` selects the bootstrap image. Normal
-full-environment orchestration remains `azd`.
+full-environment orchestration remains `azd`. Ordinary root provisioning runs
+the image-preservation hook first; only direct Bicep deployments that omit
+`containerImage` select the bootstrap image.
 
 Why the extra env var:
 

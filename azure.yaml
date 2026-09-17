@@ -85,6 +85,10 @@ workflows:
     - azd: deploy web-nat
 hooks:
   preprovision:
+    # Preserve an existing deployed web image so repeat provisioning cannot
+    # replace it with the first-deploy bootstrap container.
+    - shell: sh
+      run: ./hooks/preserve_web_image.sh
     # Ensures APP_SESSION_SECRET_KEY is set before provisioning. If absent,
     # the Bicep conditional !empty(appSessionSecretKeyValue) silently omits the
     # ACA secret and env ref, causing a crash-loop on the next deployment.
