@@ -99,10 +99,11 @@ requests/day; rules therefore remain disabled initially while dashboards establi
 baseline. Ratio and latency rules retain a configurable traffic floor to avoid noisy
 low-volume alerts.
 
-The availability test checks `GET /healthz` every five minutes from two configured
-Azure test locations. Startup, liveness, and readiness probes use the same
-dependency-free endpoint on port 8000. Probe success does not depend on telemetry
-export or downstream Azure services.
+The availability test checks dependency-aware `GET /healthz` every five minutes
+from two configured Azure test locations. ACA startup and liveness probes use
+dependency-free `/livez` on port 8000; readiness uses `/healthz`. Telemetry export
+is not part of either probe response, while readiness fails closed on required
+Azure dependencies.
 
 ## Privacy exclusions
 
@@ -208,7 +209,8 @@ No deployment was performed for this implementation. During an authorized rollou
 
 1. Record the active ACA revision and image.
 2. Provision the monitoring resources and deploy the telemetry-first image.
-3. Verify `/healthz`, all three probes, Application Insights role/environment/revision
+3. Verify dependency readiness on `/healthz`, process liveness on `/livez`, all
+   three platform probes, Application Insights role/environment/revision
    dimensions, W3C correlation, workbook queries, availability results, and Action
    Group routing.
 4. Exercise successful, rejected, retried/throttled, timed-out, partial-result, and

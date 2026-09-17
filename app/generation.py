@@ -4,7 +4,6 @@ import asyncio
 import base64
 import hashlib
 import hmac
-import logging
 import time
 from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable
@@ -44,8 +43,18 @@ PNG_1X1_BASE64 = (
 )
 CARD_DOCUMENT_ID_PREFIX = "card:"
 AUDIT_DOCUMENT_ID_PREFIX = "audit:"
-AI_DEBUG_LOGGER_NAME = "app.ai_debug"
-_ai_debug_logger = logging.getLogger(AI_DEBUG_LOGGER_NAME)
+
+
+class _GenerationRefusal(ProblemDetails):
+    pass
+
+
+@dataclass(slots=True)
+class _GenerationFlight:
+    request_hash: str
+    completed: asyncio.Event = field(default_factory=asyncio.Event)
+    response: CardResponseModel | None = None
+    error: BaseException | None = None
 
 
 def _exception_diagnostic(exc: Exception) -> tuple[str, int | None, str | None]:
@@ -1197,9 +1206,9 @@ class MockAIClient:
         return AITextResult(
             payload=payload,
             metadata=ModelMetadata(
-                provider="azure-openai",
-                deployment=self.settings.foundry_text_deployment or "mock-gpt-5-5",
-                model="gpt-5.5",
+                provider="deterministic-test",
+                deployment="mock-card-generator",
+                model="deterministic",
                 mode="mock",
             ),
             usage=usage,
@@ -1266,11 +1275,18 @@ class MockAIClient:
         )
 
 
+class MockAgentClient:
+    """Explicit test-only marker selecting deterministic text generation."""
+
+    async def check_access(self, timeout_seconds: float) -> str:
+        del timeout_seconds
+        return "ok"
+
+
 class AzureFoundryAIClient:
     def __init__(self, settings: AppSettings) -> None:
         self.settings = settings
         self._credential = _default_azure_credential()
-        self._debug_log_ai_payloads = settings.debug_log_ai_payloads
 
     async def _access_token(self) -> str:
         token = await asyncio.to_thread(
@@ -1278,76 +1294,6 @@ class AzureFoundryAIClient:
             "https://cognitiveservices.azure.com/.default",
         )
         return token.token
-
-    async def generate_card(self, prompt: str, *, request_id: str) -> AITextResult:
-        schema = GeneratedCardModel.model_json_schema()
-        payload = {
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "You generate a safe fantasy trading card as strict JSON only. "
-                        "Respect schemaVersion 1 and never add extra fields."
-                    ),
-                },
-                {"role": "user", "content": prompt},
-            ],
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "fantasy_card",
-                    "strict": True,
-                    "schema": schema,
-                },
-            },
-        }
-        self._debug_log(
-            "generate_card.request",
-            request_id=request_id,
-            payload=payload,
-        )
-        started_at = time.perf_counter()
-        response = await self._post(
-            f"/openai/deployments/{self.settings.foundry_text_deployment}/chat/completions",
-            payload,
-            api_version=self.settings.foundry_api_version,
-            service_name="foundry-text",
-        )
-        self._debug_log(
-            "generate_card.response",
-            request_id=request_id,
-            response=response,
-        )
-        choices = response.get("choices") or []
-        if not choices:
-            raise UpstreamServiceError("foundry-text", "Text generation returned no choices.")
-        message = choices[0].get("message") or {}
-        content = message.get("content")
-        if isinstance(content, list):
-            content = "".join(
-                part.get("text", "") if isinstance(part, dict) else str(part) for part in content
-            )
-        if not isinstance(content, str):
-            raise UpstreamServiceError("foundry-text", "Text generation returned invalid content.")
-        import json
-
-        usage_payload = response.get("usage") or {}
-        usage = UsageAudit(
-            inputTokens=int(usage_payload.get("prompt_tokens", 0)),
-            outputTokens=int(usage_payload.get("completion_tokens", 0)),
-            totalTokens=int(usage_payload.get("total_tokens", 0)),
-            latencyMs=int((time.perf_counter() - started_at) * 1000),
-        )
-        return AITextResult(
-            payload=json.loads(content),
-            metadata=ModelMetadata(
-                provider="azure-openai",
-                deployment=self.settings.foundry_text_deployment or "",
-                model="gpt-5.5",
-                mode="live",
-            ),
-            usage=usage,
-        )
 
     async def generate_image(
         self,
@@ -1359,16 +1305,6 @@ class AzureFoundryAIClient:
         quality = image_quality if image_quality is not None else self.settings.image_quality
         if quality not in {"low", "medium", "high"}:
             raise ValueError(f"image_quality must be low, medium, or high; got {quality!r}")
-        self._debug_log(
-            "generate_image.request",
-            request_id=request_id,
-            payload={
-                "deployment": self.settings.foundry_image_deployment,
-                "prompt": art_prompt,
-                "size": self.settings.image_size,
-                "quality": quality,
-            },
-        )
         started_at = time.perf_counter()
         response = await self._post(
             f"/openai/deployments/{self.settings.foundry_image_deployment}/images/generations",
@@ -1381,11 +1317,6 @@ class AzureFoundryAIClient:
             service_name="foundry-image",
         )
         data = response.get("data") or []
-        self._debug_log(
-            "generate_image.response",
-            request_id=request_id,
-            response=_image_debug_response_metadata(data),
-        )
         if not data:
             raise UpstreamServiceError("foundry-image", "Image generation returned no data.")
         first = data[0]
@@ -1425,18 +1356,6 @@ class AzureFoundryAIClient:
         quality = image_quality if image_quality is not None else self.settings.image_quality
         if quality not in {"low", "medium", "high"}:
             raise ValueError(f"image_quality must be low, medium, or high; got {quality!r}")
-        self._debug_log(
-            "generate_image_edit.request",
-            request_id=request_id,
-            payload={
-                "deployment": self.settings.foundry_image_deployment,
-                "prompt": art_prompt,
-                "size": self.settings.image_size,
-                "quality": quality,
-                "reference_image_content_type": reference_image.content_type,
-                "reference_image_bytes": len(reference_image.content),
-            },
-        )
         started_at = time.perf_counter()
         response = await self._post_multipart(
             f"/openai/deployments/{self.settings.foundry_image_deployment}/images/edits",
@@ -1456,11 +1375,6 @@ class AzureFoundryAIClient:
             service_name="foundry-image",
         )
         data = response.get("data") or []
-        self._debug_log(
-            "generate_image_edit.response",
-            request_id=request_id,
-            response=_image_debug_response_metadata(data),
-        )
         if not data:
             raise UpstreamServiceError("foundry-image", "Image edit returned no data.")
         first = data[0]
@@ -1512,29 +1426,15 @@ class AzureFoundryAIClient:
                 json=payload,
             )
         if response.is_error:
-            error_code, diagnostic_message = _azure_error_diagnostic(response, payload)
+            error_code = _azure_error_code(response)
             raise UpstreamServiceError(
                 service_name,
-                (
-                    f"{service_name} request failed with Azure error "
-                    f"{error_code}: {diagnostic_message}"
-                ),
+                f"{service_name} request failed.",
                 status_code=response.status_code,
                 retryable=response.status_code == 429 or response.status_code >= 500,
                 error_code=error_code,
-                diagnostic_message=diagnostic_message,
             )
         return response.json()
-
-    def _debug_log(self, event: str, *, request_id: str, **fields: object) -> None:
-        if not self._debug_log_ai_payloads:
-            return
-        _ai_debug_logger.error(
-            "azure_foundry.%s request_id=%s %s",
-            event,
-            request_id,
-            " ".join(f"{name}={value!r}" for name, value in fields.items()),
-        )
 
     async def _post_multipart(
         self,
@@ -1560,91 +1460,35 @@ class AzureFoundryAIClient:
                 files=files,
             )
         if response.is_error:
-            error_code, diagnostic_message = _azure_error_diagnostic(response, dict(data))
+            error_code = _azure_error_code(response)
             raise UpstreamServiceError(
                 service_name,
-                (
-                    f"{service_name} request failed with Azure error "
-                    f"{error_code}: {diagnostic_message}"
-                ),
+                f"{service_name} request failed.",
                 status_code=response.status_code,
                 retryable=response.status_code == 429 or response.status_code >= 500,
                 error_code=error_code,
-                diagnostic_message=diagnostic_message,
             )
         return response.json()
 
 
-def _image_debug_response_metadata(data: object) -> dict[str, object]:
-    if not isinstance(data, list) or not data:
-        return {
-            "data_count": len(data) if isinstance(data, list) else 0,
-            "b64_json_present": False,
-            "decoded_image_bytes": None,
-            "revised_prompt": None,
-        }
-    first = data[0] if isinstance(data[0], dict) else {}
-    b64_image = first.get("b64_json") if isinstance(first, dict) else None
-    decoded_length = None
-    if isinstance(b64_image, str):
-        try:
-            decoded_length = len(base64.b64decode(b64_image))
-        except (ValueError, TypeError):
-            decoded_length = None
-    return {
-        "data_count": len(data),
-        "b64_json_present": isinstance(b64_image, str),
-        "decoded_image_bytes": decoded_length,
-        "revised_prompt": first.get("revised_prompt") if isinstance(first, dict) else None,
-    }
-
-
-def _azure_error_diagnostic(
-    response: httpx.Response,
-    request_payload: dict[str, Any],
-) -> tuple[str, str]:
+def _azure_error_code(response: httpx.Response) -> str:
     error_code = "unknown_error"
-    diagnostic_message = "No Azure error message was returned."
     try:
         payload = response.json()
     except ValueError:
-        return error_code, diagnostic_message
+        return error_code
     if not isinstance(payload, dict):
-        return error_code, diagnostic_message
+        return error_code
     error = payload.get("error")
     if not isinstance(error, dict):
-        return error_code, diagnostic_message
+        return error_code
     if isinstance(error.get("code"), str) and error["code"].strip():
         error_code = _sanitize_diagnostic(error["code"], limit=100)
-    if isinstance(error.get("message"), str) and error["message"].strip():
-        diagnostic_message = _sanitize_diagnostic(
-            _redact_request_content(error["message"], request_payload),
-            limit=500,
-        )
-    return error_code, diagnostic_message
+    return error_code
 
 
 def _sanitize_diagnostic(value: str, *, limit: int) -> str:
     return " ".join(value.split())[:limit]
-
-
-def _redact_request_content(message: str, payload: dict[str, Any]) -> str:
-    sensitive_values: list[str] = []
-    prompt = payload.get("prompt")
-    if isinstance(prompt, str):
-        sensitive_values.append(prompt)
-    input_value = payload.get("input")
-    if isinstance(input_value, str):
-        sensitive_values.append(input_value)
-    messages = payload.get("messages")
-    if isinstance(messages, list):
-        for item in messages:
-            if isinstance(item, dict) and isinstance(item.get("content"), str):
-                sensitive_values.append(item["content"])
-    for value in sensitive_values:
-        if len(value) >= 8:
-            message = message.replace(value, "<redacted>")
-    return message
 
 
 @dataclass(slots=True)
@@ -1659,6 +1503,7 @@ class AppServices:
     csrf_protector: CsrfProtector
     cosmos_health_probe: HealthDependencyProbe | None = None
     blob_health_probe: HealthDependencyProbe | None = None
+    agent_health_probe: HealthDependencyProbe | None = None
     saved_photo_repository: Any | None = None
     profile_photo_import_state_repository: Any | None = None
     photo_asset_store: AbstractAssetStore | None = None
@@ -1670,6 +1515,8 @@ class AppServices:
 class CardGenerationService:
     def __init__(self, services: AppServices) -> None:
         self.services = services
+        self._flight_lock = asyncio.Lock()
+        self._flights: dict[str, _GenerationFlight] = {}
 
     @instrument_generation("generate")
     async def generate_card(
@@ -1689,27 +1536,60 @@ class CardGenerationService:
         normalized_prompt = normalize_prompt(prompt)
         request_hash = digest_generation_request(normalized_prompt, reference_image)
         card_id = deterministic_card_id(owner.owner_id, idempotency_key)
-        reservation, created = await self.services.card_repository.reserve_document(
-            owner_id=owner.owner_id,
-            card_id=card_id,
-            request_hash=request_hash,
-            idempotency_key=idempotency_key,
-            request_id=request_id,
-        )
-        if reservation and not created:
-            if reservation.request_hash != request_hash:
-                raise ProblemDetails(
-                    status_code=409,
-                    title="Conflict",
-                    detail=(
-                        "The idempotency key has already been used with "
-                        "different request content."
-                    ),
-                    type="/problems/idempotency-conflict",
-                    error_code="idempotency_conflict",
-                )
-            return await self._replay_existing_or_wait(owner.owner_id, card_id)
+        existing = await self.services.card_repository.get(owner.owner_id, card_id)
+        if existing is not None:
+            return await self._response_for_existing_generation(
+                existing=existing,
+                request_hash=request_hash,
+                owner_id=owner.owner_id,
+                card_id=card_id,
+            )
 
+        flight_key = f"generation:{owner.owner_id}:{card_id}"
+        flight, leader = await self._join_flight(flight_key, request_hash)
+        if not leader:
+            return await self._await_flight(flight)
+
+        try:
+            existing = await self.services.card_repository.get(owner.owner_id, card_id)
+            if existing is not None:
+                result = await self._response_for_existing_generation(
+                    existing=existing,
+                    request_hash=request_hash,
+                    owner_id=owner.owner_id,
+                    card_id=card_id,
+                )
+            else:
+                result = await self._generate_card_once(
+                    owner=owner,
+                    prompt=normalized_prompt,
+                    idempotency_key=idempotency_key,
+                    request_id=request_id,
+                    client_ip=client_ip,
+                    image_quality=resolved_quality,
+                    reference_image=reference_image,
+                    request_hash=request_hash,
+                    card_id=card_id,
+                )
+        except BaseException as exc:
+            await self._finish_flight(flight_key, flight, error=exc)
+            raise
+        await self._finish_flight(flight_key, flight, response=result)
+        return result
+
+    async def _generate_card_once(
+        self,
+        *,
+        owner: AuthenticatedOwner,
+        prompt: str,
+        idempotency_key: str,
+        request_id: str,
+        client_ip: str,
+        image_quality: Literal["low", "medium", "high"],
+        reference_image: ReferenceImageUpload | None,
+        request_hash: str,
+        card_id: str,
+    ) -> CardResponseModel:
         try:
             await self._enforce_rate_limits(owner.owner_id, client_ip)
         except ProblemDetails as exc:
@@ -1722,7 +1602,6 @@ class CardGenerationService:
                 exc.error_code,
                 problem=exc,
             )
-            await self.services.card_repository.delete(owner.owner_id, card_id)
             raise
 
         try:
@@ -1731,12 +1610,12 @@ class CardGenerationService:
                 self._run_generation(
                     owner=owner,
                     card_id=card_id,
-                    prompt=normalized_prompt,
+                    prompt=prompt,
                     request_hash=request_hash,
                     idempotency_key=idempotency_key,
                     request_id=request_id,
                     progress=progress,
-                    image_quality=resolved_quality,
+                    image_quality=image_quality,
                     reference_image=reference_image,
                 ),
                 timeout=self.services.settings.retry.overall_timeout_seconds,
@@ -1756,12 +1635,12 @@ class CardGenerationService:
                     request_id=request_id,
                     idempotency_key=idempotency_key,
                     request_hash=request_hash,
-                    prompt=normalized_prompt,
+                    prompt=prompt,
                     validated_payload=progress.validated_payload,
                     derived_art_prompt=progress.derived_art_prompt,
                     moderation=progress.moderation,
                     text_result=progress.text_result,
-                    image_quality=resolved_quality,
+                    image_quality=image_quality,
                     partial_reason="image_timeout",
                 )
                 return self._as_response(partial)
@@ -1784,7 +1663,6 @@ class CardGenerationService:
                     error_code="upstream_timeout",
                 )
             )
-            await self.services.card_repository.delete(owner.owner_id, card_id)
             await self._save_audit_failure(
                 owner.owner_id,
                 card_id,
@@ -1817,22 +1695,11 @@ class CardGenerationService:
             )
         request_hash = digest_text(f"retry:{card_id}")
         retry_card_id = deterministic_card_id(owner.owner_id, idempotency_key)
-        reservation, created = await self.services.audit_repository.reserve_audit(
-            owner_id=owner.owner_id,
-            card_id=retry_card_id,
-            request_hash=request_hash,
-            idempotency_key=idempotency_key,
-            request_id=request_id,
+        existing_audit = await self.services.audit_repository.get_audit(
+            owner.owner_id, retry_card_id
         )
-        if reservation is not None and not created:
-            if reservation.request_hash != request_hash:
-                raise ProblemDetails(
-                    status_code=409,
-                    title="Conflict",
-                    detail="The artwork retry idempotency key has already been used differently.",
-                    type="/problems/idempotency-conflict",
-                    error_code="idempotency_conflict",
-                )
+        if existing_audit is not None:
+            self._assert_matching_request_hash(existing_audit.request_hash, request_hash)
             return await self._replay_artwork_retry_or_wait(
                 owner_id=owner.owner_id,
                 card_id=card_id,
@@ -1840,58 +1707,83 @@ class CardGenerationService:
                 fallback_record=record,
             )
 
-        try:
-            await self._enforce_rate_limits(owner.owner_id, client_ip)
-        except ProblemDetails as exc:
-            await self._save_audit_failure(
-                owner.owner_id,
-                retry_card_id,
-                request_id,
-                idempotency_key,
-                request_hash,
-                exc.error_code,
-                problem=exc,
-            )
-            raise
+        flight_key = f"artwork-retry:{owner.owner_id}:{retry_card_id}"
+        flight, leader = await self._join_flight(flight_key, request_hash)
+        if not leader:
+            return await self._await_flight(flight)
 
         try:
-            return await asyncio.wait_for(
-                self._complete_artwork(
-                    record,
-                    request_id=request_id,
-                    retry_idempotency_key=idempotency_key,
-                ),
-                timeout=self.services.settings.retry.overall_timeout_seconds,
+            existing_audit = await self.services.audit_repository.get_audit(
+                owner.owner_id, retry_card_id
             )
-        except ProblemDetails as exc:
-            await self._save_audit_failure(
-                owner.owner_id,
-                retry_card_id,
-                request_id,
-                idempotency_key,
-                request_hash,
-                exc.error_code,
-                problem=exc,
-            )
+            if existing_audit is not None:
+                self._assert_matching_request_hash(existing_audit.request_hash, request_hash)
+                result = await self._replay_artwork_retry_or_wait(
+                    owner_id=owner.owner_id,
+                    card_id=card_id,
+                    retry_card_id=retry_card_id,
+                    fallback_record=record,
+                )
+            else:
+                try:
+                    await self._enforce_rate_limits(owner.owner_id, client_ip)
+                except ProblemDetails as exc:
+                    await self._save_audit_failure(
+                        owner.owner_id,
+                        retry_card_id,
+                        request_id,
+                        idempotency_key,
+                        request_hash,
+                        exc.error_code,
+                        problem=exc,
+                    )
+                    raise
+
+                try:
+                    result = await asyncio.wait_for(
+                        self._complete_artwork(
+                            record,
+                            request_id=request_id,
+                            retry_idempotency_key=idempotency_key,
+                        ),
+                        timeout=self.services.settings.retry.overall_timeout_seconds,
+                    )
+                except _GenerationRefusal:
+                    raise
+                except ProblemDetails as exc:
+                    await self._save_audit_failure(
+                        owner.owner_id,
+                        retry_card_id,
+                        request_id,
+                        idempotency_key,
+                        request_hash,
+                        exc.error_code,
+                        problem=exc,
+                    )
+                    raise
+                except asyncio.TimeoutError:
+                    problem = ProblemDetails(
+                        status_code=200,
+                        title="Artwork Pending",
+                        detail="Artwork generation timed out and can be retried.",
+                        type="/problems/artwork-pending",
+                        error_code="artwork_retry_available",
+                    )
+                    await self._save_audit_failure(
+                        owner.owner_id,
+                        retry_card_id,
+                        request_id,
+                        idempotency_key,
+                        request_hash,
+                        problem.error_code,
+                        problem=problem,
+                    )
+                    result = self._as_response(record)
+        except BaseException as exc:
+            await self._finish_flight(flight_key, flight, error=exc)
             raise
-        except asyncio.TimeoutError:
-            problem = ProblemDetails(
-                status_code=200,
-                title="Artwork Pending",
-                detail="Artwork generation timed out and can be retried.",
-                type="/problems/artwork-pending",
-                error_code="artwork_retry_available",
-            )
-            await self._save_audit_failure(
-                owner.owner_id,
-                retry_card_id,
-                request_id,
-                idempotency_key,
-                request_hash,
-                problem.error_code,
-                problem=problem,
-            )
-            return self._as_response(record)
+        await self._finish_flight(flight_key, flight, response=result)
+        return result
 
     async def fetch_image(self, owner: AuthenticatedOwner, card_id: str) -> tuple[bytes, str]:
         record = await self.services.card_repository.get(owner.owner_id, card_id)
@@ -1956,24 +1848,13 @@ class CardGenerationService:
         )
         moderation.append(pre_decision)
         if not pre_decision.allowed:
-            problem = ProblemDetails(
+            raise _GenerationRefusal(
                 status_code=422,
                 title="Prompt Rejected",
                 detail="The prompt was rejected by the moderation policy.",
                 type="/problems/prompt-rejected",
                 error_code="prompt_rejected",
             )
-            await self.services.card_repository.delete(owner.owner_id, card_id)
-            await self._save_audit_failure(
-                owner.owner_id,
-                card_id,
-                request_id,
-                idempotency_key,
-                request_hash,
-                pre_decision.reasonCode,
-                problem=problem,
-            )
-            raise problem
 
         progress.stage = "foundry-text"
         (
@@ -2005,24 +1886,13 @@ class CardGenerationService:
         )
         moderation.append(post_text)
         if not post_text.allowed:
-            problem = ProblemDetails(
+            raise _GenerationRefusal(
                 status_code=422,
                 title="Generated Content Rejected",
                 detail="The generated card text was rejected by moderation.",
                 type="/problems/generated-text-rejected",
                 error_code="generated_text_rejected",
             )
-            await self.services.card_repository.delete(owner.owner_id, card_id)
-            await self._save_audit_failure(
-                owner.owner_id,
-                card_id,
-                request_id,
-                idempotency_key,
-                request_hash,
-                post_text.reasonCode,
-                problem=problem,
-            )
-            raise problem
 
         derived_art_prompt = (
             agent_art_prompt
@@ -2036,24 +1906,13 @@ class CardGenerationService:
         )
         moderation.append(post_art_prompt)
         if not post_art_prompt.allowed:
-            problem = ProblemDetails(
+            raise _GenerationRefusal(
                 status_code=422,
                 title="Artwork Prompt Rejected",
                 detail="The derived artwork prompt was rejected by moderation.",
                 type="/problems/generated-art-rejected",
                 error_code="generated_art_rejected",
             )
-            await self.services.card_repository.delete(owner.owner_id, card_id)
-            await self._save_audit_failure(
-                owner.owner_id,
-                card_id,
-                request_id,
-                idempotency_key,
-                request_hash,
-                post_art_prompt.reasonCode,
-                problem=problem,
-            )
-            raise problem
 
         progress.validated_payload = validated_payload
         progress.derived_art_prompt = derived_art_prompt
@@ -2086,7 +1945,6 @@ class CardGenerationService:
             record_token_usage("image", image_result.usage)
         except ProblemDetails as exc:
             if reference_image is not None:
-                await self.services.card_repository.delete(owner.owner_id, card_id)
                 await self._save_audit_failure(
                     owner.owner_id,
                     card_id,
@@ -2117,29 +1975,13 @@ class CardGenerationService:
         post_image = await self.services.moderation_service.moderate_image(image_result.image)
         moderation.append(post_image)
         if not post_image.allowed:
-            partial = await self._persist_partial(
-                owner=owner,
-                card_id=card_id,
-                request_id=request_id,
-                idempotency_key=idempotency_key,
-                request_hash=request_hash,
-                prompt=prompt,
-                validated_payload=validated_payload,
-                derived_art_prompt=derived_art_prompt,
-                moderation=moderation,
-                text_result=text_result,
-                partial_reason="moderation_rejection",
-                image_quality=image_quality,
+            raise _GenerationRefusal(
+                status_code=422,
+                title="Generated Artwork Rejected",
+                detail="The generated artwork was rejected by moderation.",
+                type="/problems/generated-art-rejected",
+                error_code="generated_art_rejected",
             )
-            await self._save_audit_failure(
-                owner.owner_id,
-                f"{card_id}:unsafe-image",
-                request_id,
-                idempotency_key,
-                request_hash,
-                post_image.reasonCode,
-            )
-            return self._as_response(partial)
 
         progress.stage = "persistence"
         completed = await self._persist_completed(
@@ -2167,15 +2009,15 @@ class CardGenerationService:
         idempotency_key: str,
         request_id: str,
     ) -> tuple[str, AITextResult, GeneratedCardModel, str | None]:
-        """Generate card text via agent (if enabled) or direct model path.
+        """Generate card text through the only supported path for the configured runtime.
 
         Returns (generation_path, text_result, validated_payload, agent_art_prompt) where
-        generation_path is one of "agent", "agent_fallback", or "direct" and
+        generation_path is "agent" in application construction. Automated tests
+        may explicitly inject MockAgentClient to select deterministic text.
         agent_art_prompt is the pre-crafted art prompt from the agent (or None).
         """
-        settings = self.services.settings
-        if settings.agent_generation_enabled and self.services.agent_client is not None:
-            return await self._generate_text_via_agent(
+        if isinstance(self.services.agent_client, MockAgentClient):
+            return await self._generate_text_mock(
                 owner_id=owner_id,
                 card_id=card_id,
                 prompt=prompt,
@@ -2183,14 +2025,32 @@ class CardGenerationService:
                 idempotency_key=idempotency_key,
                 request_id=request_id,
             )
-        return await self._generate_text_direct(
+        if self.services.agent_client is None:
+            problem = ProblemDetails(
+                status_code=503,
+                title="Service Unavailable",
+                detail="The card generation agent is unavailable.",
+                type="/problems/agent-unavailable",
+                error_code="agent_unavailable",
+            )
+            await self._save_audit_failure(
+                owner_id,
+                card_id,
+                request_id,
+                idempotency_key,
+                request_hash,
+                problem.error_code,
+                problem=problem,
+            )
+            set_generation_path("agent")
+            raise problem
+        return await self._generate_text_via_agent(
             owner_id=owner_id,
             card_id=card_id,
             prompt=prompt,
             request_hash=request_hash,
             idempotency_key=idempotency_key,
             request_id=request_id,
-            generation_path="direct",
         )
 
     async def _generate_text_via_agent(
@@ -2205,8 +2065,7 @@ class CardGenerationService:
     ) -> tuple[str, AITextResult, GeneratedCardModel, str | None]:
         """Invoke the Foundry hosted agent for card text generation.
 
-        On retryable/routing_defer outcomes, falls back once to the direct path.
-        On non-retryable failures (auth, policy, config, schema), raises ProblemDetails.
+        Every failure is surfaced through the structured public error contract.
         """
         from app.foundry_agent_client import FoundryAgentInvocationResult  # noqa: F401
 
@@ -2219,7 +2078,7 @@ class CardGenerationService:
         add_event(
             "agent.invocation",
             {
-                "fcg.dependency": "foundry-agent",
+                "fcg.dependency": "foundry_agent",
                 "fcg.outcome": agent_result.status,
                 "fcg.error_code": agent_result.error_code or "none",
                 "fcg.duration_ms": int(duration_ms),
@@ -2250,73 +2109,59 @@ class CardGenerationService:
             )
             return "agent", text_result, agent_result.card, agent_result.art_prompt
 
-        # Determine whether to fall back or hard-fail.
-        is_fallback_eligible = agent_result.retryable or agent_result.status in (
-            "routing_defer",
-            "transient_error",
-        )
-
-        if not is_fallback_eligible:
-            # Non-retryable: do not silently bypass the agent.
-            error_code = agent_result.error_code or "agent_failure"
-            if agent_result.status in ("auth_error", "configuration_error"):
-                problem = ProblemDetails(
-                    status_code=503,
-                    title="Service Unavailable",
-                    detail="The card generation agent is temporarily unavailable.",
-                    type="/problems/agent-unavailable",
-                    error_code="agent_unavailable",
-                )
-            elif agent_result.status == "policy_refusal":
-                problem = ProblemDetails(
-                    status_code=422,
-                    title="Prompt Rejected",
-                    detail="The prompt was rejected by the generation agent policy.",
-                    type="/problems/prompt-rejected",
-                    error_code="prompt_rejected",
-                )
-            else:
-                problem = ProblemDetails(
-                    status_code=502,
-                    title="Bad Gateway",
-                    detail="The card generation agent returned a non-retryable error.",
-                    type="/problems/agent-failure",
-                    error_code=error_code,
-                )
-            await self.services.card_repository.delete(owner_id, card_id)
-            await self._save_audit_failure(
-                owner_id,
-                card_id,
-                request_id,
-                idempotency_key,
-                request_hash,
-                error_code,
-                problem=problem,
+        if agent_result.status in {"policy_refusal", "refused"}:
+            raise _GenerationRefusal(
+                status_code=422,
+                title="Prompt Rejected",
+                detail="The prompt was rejected by the generation agent policy.",
+                type="/problems/prompt-rejected",
+                error_code="prompt_rejected",
             )
-            set_generation_path("agent")
-            raise problem
-
-        # Retryable/routing_defer: fall back to direct path once.
-        add_event(
-            "agent.fallback",
-            {
-                "fcg.dependency": "foundry-agent",
-                "fcg.outcome": agent_result.status,
-                "fcg.error_code": agent_result.error_code or "none",
-                "fcg.generation_path": "agent_fallback",
-            },
+        elif _agent_failure_class(agent_result) == "timeout":
+            problem = ProblemDetails(
+                status_code=504,
+                title="Gateway Timeout",
+                detail="The card generation agent timed out.",
+                type="/problems/upstream-timeout",
+                error_code="upstream_timeout",
+            )
+        elif _agent_failure_class(agent_result) == "configuration":
+            problem = ProblemDetails(
+                status_code=503,
+                title="Service Unavailable",
+                detail="The card generation agent is not configured or authorized.",
+                type="/problems/configuration-error",
+                error_code="configuration_error",
+            )
+        elif _agent_failure_class(agent_result) == "unavailable":
+            problem = ProblemDetails(
+                status_code=503,
+                title="Service Unavailable",
+                detail="The card generation agent is temporarily unavailable.",
+                type="/problems/agent-unavailable",
+                error_code="agent_unavailable",
+            )
+        else:
+            problem = ProblemDetails(
+                status_code=502,
+                title="Bad Gateway",
+                detail="The card generation agent returned invalid output.",
+                type="/problems/invalid-model-output",
+                error_code="invalid_model_output",
+            )
+        await self._save_audit_failure(
+            owner_id,
+            card_id,
+            request_id,
+            idempotency_key,
+            request_hash,
+            problem.error_code,
+            problem=problem,
         )
-        return await self._generate_text_direct(
-            owner_id=owner_id,
-            card_id=card_id,
-            prompt=prompt,
-            request_hash=request_hash,
-            idempotency_key=idempotency_key,
-            request_id=request_id,
-            generation_path="agent_fallback",
-        )
+        set_generation_path("agent")
+        raise problem
 
-    async def _generate_text_direct(
+    async def _generate_text_mock(
         self,
         *,
         owner_id: str,
@@ -2325,9 +2170,8 @@ class CardGenerationService:
         request_hash: str,
         idempotency_key: str,
         request_id: str,
-        generation_path: str,
     ) -> tuple[str, AITextResult, GeneratedCardModel, str | None]:
-        """Generate card text via the direct AzureFoundryAI model call."""
+        """Generate deterministic card text for automated tests only."""
         try:
             text_result = await self._retry_upstream(
                 lambda: self.services.ai_client.generate_card(prompt, request_id=request_id),
@@ -2336,7 +2180,6 @@ class CardGenerationService:
             )
             record_token_usage("text", text_result.usage)
         except ProblemDetails as exc:
-            await self.services.card_repository.delete(owner_id, card_id)
             await self._save_audit_failure(
                 owner_id,
                 card_id,
@@ -2357,7 +2200,6 @@ class CardGenerationService:
                 type="/problems/invalid-model-output",
                 error_code="invalid_model_output",
             )
-            await self.services.card_repository.delete(owner_id, card_id)
             await self._save_audit_failure(
                 owner_id,
                 card_id,
@@ -2370,9 +2212,9 @@ class CardGenerationService:
             raise problem from exc
         add_event(
             "generation.text_path",
-            {"fcg.generation_path": generation_path},
+            {"fcg.generation_path": "mock"},
         )
-        return generation_path, text_result, validated_payload, None
+        return "mock", text_result, validated_payload, None
 
     async def _complete_artwork(
         self,
@@ -2420,15 +2262,28 @@ class CardGenerationService:
         moderation = [ModerationDecision.model_validate(item) for item in record.moderation]
         moderation.append(post_image)
         if not post_image.allowed:
-            await self._save_audit_failure(
-                record.owner_id,
-                retry_card_id,
-                request_id,
-                retry_idempotency_key,
-                request_hash,
-                post_image.reasonCode,
+            raise _GenerationRefusal(
+                status_code=422,
+                title="Generated Artwork Rejected",
+                detail="The generated artwork was rejected by moderation.",
+                type="/problems/generated-art-rejected",
+                error_code="generated_art_rejected",
             )
-            return self._as_response(record)
+        reservation, created = await self.services.audit_repository.reserve_audit(
+            owner_id=record.owner_id,
+            card_id=retry_card_id,
+            request_hash=request_hash,
+            idempotency_key=retry_idempotency_key,
+            request_id=request_id,
+        )
+        if reservation is not None and not created:
+            self._assert_matching_request_hash(reservation.request_hash, request_hash)
+            return await self._replay_artwork_retry_or_wait(
+                owner_id=record.owner_id,
+                card_id=record.id,
+                retry_card_id=retry_card_id,
+                fallback_record=record,
+            )
         payload = GeneratedCardModel.model_validate(record.validated_payload)
         completed = await self._persist_completed(
             owner=AuthenticatedOwner(
@@ -2453,6 +2308,7 @@ class CardGenerationService:
                 usage=UsageAudit.model_validate((record.usage or {}).get("text", {})),
             ),
             image_result=image_result,
+            claim_persistence=False,
         )
         await self.services.audit_repository.save_audit(
             StoredCard(
@@ -2484,6 +2340,15 @@ class CardGenerationService:
         image_quality: Literal["low", "medium", "high"],
         partial_reason: str,
     ) -> StoredCard:
+        replay = await self._claim_card_persistence(
+            owner_id=owner.owner_id,
+            card_id=card_id,
+            request_hash=request_hash,
+            idempotency_key=idempotency_key,
+            request_id=request_id,
+        )
+        if replay is not None:
+            return replay
         record = StoredCard(
             id=card_id,
             document_type="card",
@@ -2544,7 +2409,18 @@ class CardGenerationService:
         moderation: list[ModerationDecision],
         text_result: AITextResult,
         image_result: AIImageResult,
+        claim_persistence: bool = True,
     ) -> StoredCard:
+        if claim_persistence:
+            replay = await self._claim_card_persistence(
+                owner_id=owner.owner_id,
+                card_id=card_id,
+                request_hash=request_hash,
+                idempotency_key=idempotency_key,
+                request_id=request_id,
+            )
+            if replay is not None:
+                return replay
         blob_name = build_blob_name(owner.owner_id, card_id)
         blob_uploaded = False
         blob_metadata: dict[str, Any] | None = None
@@ -2686,6 +2562,91 @@ class CardGenerationService:
                     exc=audit_exc,
                 )
             raise problem from exc
+
+    async def _claim_card_persistence(
+        self,
+        *,
+        owner_id: str,
+        card_id: str,
+        request_hash: str,
+        idempotency_key: str,
+        request_id: str,
+    ) -> StoredCard | None:
+        reservation, created = await self.services.card_repository.reserve_document(
+            owner_id=owner_id,
+            card_id=card_id,
+            request_hash=request_hash,
+            idempotency_key=idempotency_key,
+            request_id=request_id,
+        )
+        if created:
+            return None
+        if reservation is None:
+            raise RuntimeError("Card persistence reservation returned no record.")
+        self._assert_matching_request_hash(reservation.request_hash, request_hash)
+        response = await self._replay_existing_or_wait(owner_id, card_id)
+        replay = await self.services.card_repository.get(owner_id, response.cardId)
+        if replay is None:
+            raise RuntimeError("Persisted card disappeared during idempotency replay.")
+        return replay
+
+    async def _response_for_existing_generation(
+        self,
+        *,
+        existing: StoredCard,
+        request_hash: str,
+        owner_id: str,
+        card_id: str,
+    ) -> CardResponseModel:
+        self._assert_matching_request_hash(existing.request_hash, request_hash)
+        if existing.status in {"completed", "awaiting_artwork_retry"}:
+            return self._as_response(existing)
+        return await self._replay_existing_or_wait(owner_id, card_id)
+
+    def _assert_matching_request_hash(self, existing_hash: str, request_hash: str) -> None:
+        if existing_hash != request_hash:
+            raise ProblemDetails(
+                status_code=409,
+                title="Conflict",
+                detail="The idempotency key has already been used with different request content.",
+                type="/problems/idempotency-conflict",
+                error_code="idempotency_conflict",
+            )
+
+    async def _join_flight(
+        self, flight_key: str, request_hash: str
+    ) -> tuple[_GenerationFlight, bool]:
+        async with self._flight_lock:
+            existing = self._flights.get(flight_key)
+            if existing is not None:
+                self._assert_matching_request_hash(existing.request_hash, request_hash)
+                return existing, False
+            flight = _GenerationFlight(request_hash=request_hash)
+            self._flights[flight_key] = flight
+            return flight, True
+
+    async def _finish_flight(
+        self,
+        flight_key: str,
+        flight: _GenerationFlight,
+        *,
+        response: CardResponseModel | None = None,
+        error: BaseException | None = None,
+    ) -> None:
+        async with self._flight_lock:
+            flight.response = response
+            flight.error = error
+            flight.completed.set()
+            if self._flights.get(flight_key) is flight:
+                self._flights.pop(flight_key, None)
+
+    async def _await_flight(self, flight: _GenerationFlight) -> CardResponseModel:
+        await flight.completed.wait()
+        if flight.error is not None:
+            raise flight.error
+        if flight.response is None:
+            raise RuntimeError("Generation flight completed without a response.")
+        return flight.response
 
     async def _save_audit_failure(
         self,
@@ -3019,7 +2980,13 @@ class CardGenerationService:
         )
 
 
-def create_services(settings: AppSettings) -> AppServices:
+def create_services(
+    settings: AppSettings,
+    *,
+    ai_client: Any | None = None,
+    agent_client: Any | None = None,
+    agent_health_probe: HealthDependencyProbe | None = None,
+) -> AppServices:
     from app.deletion import AzureCosmosDeletionAuditRepository, InMemoryDeletionAuditRepository
     from app.photos import (
         AzureCosmosProfilePhotoImportStateRepository,
@@ -3066,20 +3033,23 @@ def create_services(settings: AppSettings) -> AppServices:
         cosmos_health_probe = NotApplicableHealthProbe("cosmos")
         blob_health_probe = NotApplicableHealthProbe("blob")
 
-    ai_client = (
-        MockAIClient(settings) if settings.ai_mode == "mock" else AzureFoundryAIClient(settings)
-    )
-    agent_client = None
-    if settings.agent_generation_enabled and settings.ai_mode == "live":
+    resolved_ai_client = ai_client or AzureFoundryAIClient(settings)
+    resolved_agent_client = agent_client
+    resolved_agent_health_probe = agent_health_probe
+    if resolved_agent_client is None:
         from app.foundry_agent_client import FoundryAgentClient
 
-        agent_client = FoundryAgentClient(settings)
+        resolved_agent_client = FoundryAgentClient(settings)
+    if resolved_agent_health_probe is None:
+        from app.health import FoundryAgentHealthProbe
+
+        resolved_agent_health_probe = FoundryAgentHealthProbe(resolved_agent_client)
     return AppServices(
         settings=settings,
         card_repository=card_repository,
         audit_repository=audit_repository,
         asset_store=asset_store,
-        ai_client=ai_client,
+        ai_client=resolved_ai_client,
         moderation_service=HeuristicModerationService(settings.moderation_policy_name),
         rate_limiter=RateLimiter(),
         csrf_protector=CsrfProtector(),
@@ -3090,8 +3060,36 @@ def create_services(settings: AppSettings) -> AppServices:
         photo_asset_store=photo_asset_store,
         photo_moderation_service=ContentSafetyPhotoModerationService(settings),
         deletion_audit_repository=deletion_audit_repository,
-        agent_client=agent_client,
+        agent_client=resolved_agent_client,
+        agent_health_probe=resolved_agent_health_probe,
     )
+
+
+def _agent_failure_class(
+    agent_result: Any,
+) -> Literal["timeout", "configuration", "unavailable", "invalid_output"]:
+    reason = agent_result.runtime_failure_reason
+    if agent_result.error_code == "timeout" or reason == "timeout":
+        return "timeout"
+    if agent_result.status in {
+        "auth_error",
+        "configuration_error",
+        "version_mismatch",
+    } or reason in {
+        "authentication",
+        "authorization",
+        "resource_not_found",
+        "invalid_request",
+    }:
+        return "configuration"
+    if agent_result.status in {"routing_defer", "transient_error"} or reason in {
+        "rate_limited",
+        "service_error",
+        "transport_error",
+        "dependency_error",
+    }:
+        return "unavailable"
+    return "invalid_output"
 
 
 def derive_art_prompt(payload: GeneratedCardModel) -> str:

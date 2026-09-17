@@ -1125,7 +1125,7 @@ def test_single_invocation_real_parser_and_versions(modules, monkeypatch, status
     assert opener.calls == 2
     assert result["invocationsAttempted"] == 1
     assert result["invocationVerified"] and result["schemaValid"]
-    assert result["outcome"] == status
+    assert result["outcome"] == ("policy_refusal" if status == "refused" else status)
     assert wrapper.extract_result(payload.MARKER + json.dumps(result)) == result
     assert "Lantern Guardian" not in json.dumps(result)
     assert "artPrompt" not in json.dumps(result)
@@ -1590,7 +1590,8 @@ def test_invocation_real_bundle_full_canonical_transport(modules, monkeypatch, r
         total_timeout=110,
         require_persisted_endpoint=required,
     )
-    assert result["status"] == "invocation_verified" and result["outcome"] == "refused"
+    assert result["status"] == "invocation_verified"
+    assert result["outcome"] == "policy_refusal"
     assert result["sessionCreateAttempted"] and result["sessionReady"]
     assert result["invocationsAttempted"] == 1 and result["sessionCleanupRequired"]
     assert result["endpointPersisted"] is required

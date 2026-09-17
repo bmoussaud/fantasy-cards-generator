@@ -3,9 +3,14 @@ def _load_app():
 
     load_dotenv()
 
+    from app.settings import SettingsError, load_app_settings, load_telemetry_settings
     from app.telemetry import configure_telemetry
 
-    configure_telemetry()
+    load_app_settings()
+    telemetry_settings = load_telemetry_settings()
+    telemetry_ready = configure_telemetry(telemetry_settings)
+    if not telemetry_ready:
+        raise SettingsError("Mandatory application telemetry failed to initialize.")
 
     # Import only after telemetry can patch instrumented libraries.
     from app.main import app

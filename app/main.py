@@ -48,7 +48,12 @@ from app.generation import (
     client_ip_from_request,
     create_services,
 )
-from app.health import NotApplicableHealthProbe, build_healthz_payload, run_dependency_probes
+from app.health import (
+    MisconfiguredHealthProbe,
+    NotApplicableHealthProbe,
+    build_healthz_payload,
+    run_dependency_probes,
+)
 from app.library import CardLibraryService
 from app.photos import (
     PROFILE_PHOTO_IMPORT_SOURCE,
@@ -902,6 +907,10 @@ def create_app(services: AppServices | None = None) -> FastAPI:
                     services.blob_health_probe or NotApplicableHealthProbe("blob"),
                     services.settings.healthz_blob_timeout_ms / 1000,
                 ),
+                (
+                    services.agent_health_probe or MisconfiguredHealthProbe("agent"),
+                    services.settings.foundry_agent_timeout_seconds,
+                ),
             ],
             request_id=request.state.request_id,
         )
@@ -911,6 +920,10 @@ def create_app(services: AppServices | None = None) -> FastAPI:
             status_code=200 if payload["status"] == "ok" else 503,
             headers={"Cache-Control": "no-store"},
         )
+
+    @app.get("/livez")
+    async def livez() -> JSONResponse:
+        return JSONResponse({"status": "ok"}, headers={"Cache-Control": "no-store"})
 
     @app.get("/partials/ping", response_class=HTMLResponse)
     async def ping_partial(request: Request) -> HTMLResponse:

@@ -9,8 +9,10 @@ only.
 
 ### Deploy guards
 
-1. **`workflows.up`** — azd 1.32 supports only the `up` workflow override, so
-   root `azd up` provisions and deploys web-nat only.
+1. **`workflows.up`** — azd 1.32 supports only the `up` workflow override.
+   Root `azd up` provisions shared resources, deploys and stamps the immutable
+   hosted-agent identity, re-provisions the web configuration, then deploys
+   web-nat.
 2. **Service lifecycle hooks** — `hooks/guard_agent_deploy.sh` is registered on
    `prebuild`, `prepackage`, `prepublish`, and `predeploy` to block
    build/package/push/deploy unless `CARD_ORCHESTRATOR_ENABLE_PREREQUISITES=true`.
@@ -27,23 +29,24 @@ signal in root hooks before service hooks run. Use targeted `azd deploy
 
 | Workflow | Command | Notes |
 |---|---|---|
-| Web-only (default) | `azd up` | Provisions and deploys only web-nat |
+| Clean full bootstrap | `azd up` | Provisions, deploys agent, stamps exact version, then deploys web |
 | Bare deploy | `azd deploy` | **Unsupported**: azd targets both declared services |
 | Web redeploy | `azd deploy web-nat` | Does not trigger provision hooks or the agent guard |
 | Agent deploy | `azd deploy card-orchestrator` | Requires prerequisites enabled via lifecycle hooks |
-| Full provision | `azd provision` | Deploys all infra including agent prereqs if enabled |
+| Full provision | `azd provision` | Deploys all infra and preserves the current web image |
 | Approved deploy | `./deploy.sh agent --approve-change` | Plan-only by default |
 
-### Agent prerequisite opt-in
+### Agent deployment prerequisites
 
 Before deploying the card-orchestrator for the first time:
 
 ```bash
-azd env set ENABLE_FOUNDRY_AGENT_ACCESS true
 azd env set CARD_ORCHESTRATOR_ENABLE_PREREQUISITES true
 azd env set CARD_ORCHESTRATOR_CREATE_REGISTRY_CONNECTION true
 azd provision
 azd deploy card-orchestrator
+azd provision
+azd deploy web-nat
 ```
 
 Or via the root orchestrator:
@@ -55,16 +58,11 @@ Or via the root orchestrator:
 
 ### Rollback
 
-To disable agent infrastructure after a failed deployment:
-
-```bash
-azd env set CARD_ORCHESTRATOR_ENABLE_PREREQUISITES false
-azd env set ENABLE_FOUNDRY_AGENT_ACCESS false
-azd provision
-```
-
-Note: Setting flags to `false` does not revoke already-created RBAC assignments.
-Manual cleanup is required for existing Azure role assignments.
+Use the immutable-version redeployment procedure in
+[Agent operational ownership](agent-operational-ownership.md#restore-first-rollback).
+Disabling optional prerequisites is cleanup, not rollback; mandatory
+web-to-agent RBAC remains because live card-text generation has no alternate
+path.
 
 ### Deprecated launcher equivalents
 
@@ -74,6 +72,21 @@ Manual cleanup is required for existing Azure role assignments.
 | `cd deployments/card-orchestrator && python deploy.py provision --execute --approve-change` | `./deploy.sh provision --approve-change` |
 | `cd deployments/card-orchestrator && python deploy.py deploy --execute --approve-change` | `./deploy.sh agent --approve-change` |
 | `cd ... && python deploy.py deploy --environment prod --execute --approve-change --approve-prod` | `./deploy.sh agent --environment prod --approve-change --approve-prod` |
+
+The agent `postdeploy` hook reads azd's generated
+`AGENT_CARD_ORCHESTRATOR_NAME` and `AGENT_CARD_ORCHESTRATOR_VERSION`, validates
+their bounded shapes, and reads the explicitly selected
+`CARD_ORCHESTRATOR_VERSION` artifact identity. It validates all three before one
+`azd env set` transaction persists `FOUNDRY_AGENT_NAME`,
+`FOUNDRY_AGENT_VERSION`, and `FOUNDRY_AGENT_EXPECTED_VERSION`. It never derives
+a version from logs or exception text. The following provision injects the
+triplet atomically; Bicep omits all three during initial placeholder
+provisioning and rejects a partial triplet. Agent deploy and rollback therefore
+fail before changing web configuration state when the artifact identity is
+missing or malformed.
+The second provision does not rotate an existing managed Entra client secret:
+the credential hook now creates a secret only when the azd environment has none.
+Clear `ENTRA_CLIENT_SECRET` only for an explicit, coordinated rotation.
 
 The root `deploy.sh` enforces approval gates natively. Raw targeted
 `azd deploy card-orchestrator` is still available, but the service-level
@@ -803,6 +816,15 @@ PR #122 is not merged by this operation.
 | Model | Existing text deployment; three bounded concept/lore/art-direction specialists |
 | Excluded | Image generation, persistence, web activation, scheduled evaluation/probes |
 
+At the web boundary, a hosted-agent policy refusal and every authoritative
+generation-moderation refusal use deny-wins handling. Operations may observe
+only the allowlisted status/public code in response telemetry; the application
+stores no refusal card, artwork blob, generation-audit document, repository
+error payload, or owner/request/idempotency hash. TTL-limited generation audits
+remain available for unrelated operational failures. Application
+nonpersistence does not imply that the Foundry platform itself emits no
+platform telemetry.
+
 The real runtime and `hosted-agent` optional extra are integrated with the
 dedicated container/deployment package in PR #119. Packaging-only tests are not
 startup evidence; the integrated validation below includes the correct agent
@@ -975,8 +997,8 @@ timeout/policy defaults belong to the runtime; inspect their bounded values duri
 integration rather than adding guessed SDK settings here.
 
 The implemented defaults/maxima are 20 seconds per specialist and 65 seconds
-overall. These are **offline candidate budgets**, not compliance with the
-proposed production budgets of 8.15 seconds per stage and 30.15 seconds overall.
+overall. These fit inside the web client's bounded 70-second hosted-agent
+timeout and the complete request's 225-second outer budget.
 Narrow local safety heuristics are not comprehensive safety or prompt-injection
 protection; unobserved hosted guardrails remain unavailable and post-image checks
 are not applicable. Application nonpersistence does not guarantee zero platform
@@ -1167,8 +1189,8 @@ The first two assignments are a **repair facade**, not new ownership:
 principals and role IDs exactly match main; offline tests enforce parity.
 Do not run root and isolated provisioning concurrently. Use incremental
 deployment only, never complete mode or `azd down` on this shared-resource
-package. At the next independently approved root rollout keep its existing
-`ENABLE_FOUNDRY_AGENT_ACCESS=true` setting aligned.
+package. At the next independently approved root rollout keep the mandatory hosted-agent
+RBAC assignments aligned.
 
 A same-scope/principal/role assignment under another GUID must be reconciled
 before apply: do not delete/recreate or silently invent a second assignment.
@@ -1538,12 +1560,17 @@ alert rules, recurring evaluations, billable synthetic model probes, ingestion
 budget or production SLO have been provisioned by this change.
 
 Keep a release record of commit, digest, Foundry version, configuration and the
-last approved version. A rollback is **agent-only**: route an approved caller to
-the recorded immutable Foundry version when version pinning is supported, or
-deploy the recorded image/configuration as a new agent version through this
-isolated azd service. Preserve the original image and app build SHA; record the
-new Foundry version separately. Confirm the current extension's version/image
-selection interface before executing—do not guess an `azd rollback` command.
+last approved version. A rollback is **agent-only**: redeploy the recorded
+image/configuration through the isolated agent service so Foundry creates and
+activates a new immutable version, let the postdeploy hook stamp that new
+platform version, then run `azd provision`. The preprovision hook captures and
+reuses the currently deployed `web-nat` image while Bicep updates
+`FOUNDRY_AGENT_VERSION`, so provisioning creates only the required web
+configuration revision; it does not rebuild or push the web image. Preserve the
+original agent image and application build SHA, and record the new Foundry
+platform version separately.
+Do not guess an `azd rollback` command or manually point readiness at an
+inactive version.
 The hosted agent endpoint serves one version with 100% traffic; agent-version
 traffic splitting is not supported and is not a rollback strategy.
 Stop idle/candidate sessions using the supported agent session lifecycle after

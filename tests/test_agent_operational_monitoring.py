@@ -148,17 +148,15 @@ def test_monitoring_queries_are_service_scoped_and_content_free() -> None:
         assert forbidden.lower() not in source.lower()
 
 
-def test_runbook_is_restore_first_and_keeps_web_deployment_immutable() -> None:
+def test_runbook_uses_immutable_redeployment_and_preserves_web_image() -> None:
     runbook = (ROOT / "docs/agent-operational-ownership.md").read_text()
-    selector_patch = runbook.index('\\"version_selection_rules\\"')
-    delete_version = runbook.index("delete_version")
-    assert selector_patch < delete_version
-    assert "/agents/${AGENT_NAME}" in runbook
-    assert "/agents/${AGENT_NAME}/versions/${BAD_VERSION}" in runbook
-    assert "project_client.agents.update_details(" in runbook
-    assert "project_client.agents.delete_version(" in runbook
-    assert "azd ai agent endpoint show --output json" in runbook
-    assert "web ACA" in runbook
+    assert "azd deploy card-orchestrator" in runbook
+    assert "azd provision" in runbook
+    assert "FOUNDRY_AGENT_VERSION" in runbook
+    assert "CONTAINER_IMAGE" in runbook
+    assert "endpoint-selector-only patch" in runbook
+    assert "web image is not rebuilt or redeployed" in runbook
+    assert "Container App revision may" in runbook.replace("\n", " ")
     assert "no azure deployment" in runbook.lower()
 
 

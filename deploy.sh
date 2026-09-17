@@ -88,8 +88,9 @@ if [[ "$ACTION" != "preview" && "$APPROVE_CHANGE" != "true" ]]; then
             echo "Command: azd --cwd $ROOT deploy card-orchestrator --environment $ENVIRONMENT --no-prompt"
             ;;
         full)
-            echo "Command: azd --cwd $ROOT deploy web-nat --environment $ENVIRONMENT --no-prompt"
             echo "Command: azd --cwd $ROOT deploy card-orchestrator --environment $ENVIRONMENT --no-prompt"
+            echo "Command: azd --cwd $ROOT provision --environment $ENVIRONMENT --no-prompt"
+            echo "Command: azd --cwd $ROOT deploy web-nat --environment $ENVIRONMENT --no-prompt"
             ;;
         provision)
             echo "Command: azd --cwd $ROOT provision --environment $ENVIRONMENT --no-prompt"
@@ -102,19 +103,27 @@ fi
 
 case "$ACTION" in
     preview)
-        exec azd --cwd "$ROOT" provision --preview --environment "$ENVIRONMENT" --no-prompt
+        AZURE_DEV_USER_AGENT=microsoft_foundry_skill \
+            exec azd --cwd "$ROOT" provision --preview --environment "$ENVIRONMENT" --no-prompt
         ;;
     web)
-        exec azd --cwd "$ROOT" deploy web-nat --environment "$ENVIRONMENT" --no-prompt
+        AZURE_DEV_USER_AGENT=microsoft_foundry_skill \
+            exec azd --cwd "$ROOT" deploy web-nat --environment "$ENVIRONMENT" --no-prompt
         ;;
     agent)
-        exec azd --cwd "$ROOT" deploy card-orchestrator --environment "$ENVIRONMENT" --no-prompt
+        AZURE_DEV_USER_AGENT=microsoft_foundry_skill \
+            exec azd --cwd "$ROOT" deploy card-orchestrator --environment "$ENVIRONMENT" --no-prompt
         ;;
     full)
-        azd --cwd "$ROOT" deploy web-nat --environment "$ENVIRONMENT" --no-prompt
-        exec azd --cwd "$ROOT" deploy card-orchestrator --environment "$ENVIRONMENT" --no-prompt
+        AZURE_DEV_USER_AGENT=microsoft_foundry_skill \
+            azd --cwd "$ROOT" deploy card-orchestrator --environment "$ENVIRONMENT" --no-prompt
+        AZURE_DEV_USER_AGENT=microsoft_foundry_skill \
+            azd --cwd "$ROOT" provision --environment "$ENVIRONMENT" --no-prompt
+        AZURE_DEV_USER_AGENT=microsoft_foundry_skill \
+            exec azd --cwd "$ROOT" deploy web-nat --environment "$ENVIRONMENT" --no-prompt
         ;;
     provision)
-        exec azd --cwd "$ROOT" provision --environment "$ENVIRONMENT" --no-prompt
+        AZURE_DEV_USER_AGENT=microsoft_foundry_skill \
+            exec azd --cwd "$ROOT" provision --environment "$ENVIRONMENT" --no-prompt
         ;;
 esac

@@ -214,6 +214,8 @@ from `invalid_prompt` (normalized prompt length), photo-input errors, and
 `prompt_rejected` / `generated_text_rejected` / `generated_art_rejected` (policy).
 An upstream agent HTTP 422 is a non-retryable dependency failure surfaced as
 HTTP 502, not a request-validation 422. Agent policy refusals can return 422.
+`generated_art_rejected` covers both a rejected derived art prompt and a
+generated image rejected before publication.
 For diagnostics, share only the HTTP status and the error panel's static
 title/detail/code, not form contents, cookies, tokens, or a HAR export.
 
@@ -233,9 +235,17 @@ The service applies moderation at:
 3. the derived artwork prompt
 4. the generated image payload before publication
 
-Unsafe generated image bytes are discarded. Only a minimal sanitized forensic
-audit record is retained for 30 days; prompts, unsafe outputs, secrets, tokens,
-and SAS URLs are never logged.
+Every policy refusal is deny-wins. The service returns only the bounded response
+status and public error code, stops before later stages, and persists no card,
+artwork blob, or generation-audit record. This includes hosted-agent refusal and
+all four moderation stages. Operational failures that are not content refusals
+may still retain the existing TTL-limited, content-free generation audit.
+
+Refusal-capable processing runs before any durable card or retry-audit
+reservation. Same-instance duplicate requests are coalesced in memory; the
+durable idempotency reservation is acquired only when a safe completed or
+technical-failure partial card is ready to persist. A refused artwork retry
+leaves the existing safe partial card unchanged and creates no retry audit.
 
 Saved-photo persistence uses Azure AI Content Safety image analysis before
 Blob/Cosmos persistence. The backend rejects saves when any of
@@ -244,25 +254,21 @@ for all categories, meaning medium/high severity are rejected).
 
 ## Runtime configuration
 
-### Mock mode
-
-Use deterministic local mode for tests and local UI work:
-
-```dotenv
-AI_MODE=mock
-PERSISTENCE_MODE=memory
-```
-
-### Live mode
-
-Use Azure-backed mode in deployed environments:
+Application construction always uses Azure-backed clients. Automated tests use
+explicit dependency injection for deterministic agent and image clients; no
+environment variable can select a mock implementation.
 
 ```dotenv
-AI_MODE=live
 PERSISTENCE_MODE=azure
 FOUNDRY_ENDPOINT=<https endpoint>
-FOUNDRY_TEXT_DEPLOYMENT=gpt-5-5
 FOUNDRY_IMAGE_DEPLOYMENT=gpt-image-2
+FOUNDRY_PROJECT_ENDPOINT=<https://account.services.ai.azure.com/api/projects/project>
+FOUNDRY_AGENT_NAME=card-orchestrator
+FOUNDRY_AGENT_VERSION=<exact active hosted version>
+FOUNDRY_AGENT_API_VERSION=v1
+FOUNDRY_AGENT_TIMEOUT_SECONDS=70
+TELEMETRY_ENABLED=true
+APPLICATIONINSIGHTS_CONNECTION_STRING=<connection string>
 COSMOS_ENDPOINT=<https endpoint>
 COSMOS_DATABASE_NAME=appdb
 COSMOS_CONTAINER_NAME=cards
@@ -275,7 +281,6 @@ CONTENT_SAFETY_API_VERSION=2024-09-01
 
 Additional operational settings:
 
-- `DEBUG_LOG_AI_PAYLOADS` (optional local-only override; raw Azure Foundry payload logging is auto-enabled only when `APP_ENV=development` and is hard-blocked outside development)
 - `RATE_LIMIT_USER_REQUESTS`, `RATE_LIMIT_USER_WINDOW_SECONDS`
 - `RATE_LIMIT_IP_REQUESTS`, `RATE_LIMIT_IP_WINDOW_SECONDS`
 - `TRUSTED_PROXY_HOPS` (`0` by default; set to `1` behind Azure Container Apps ingress so the app trusts only ACA's rightmost appended `X-Forwarded-For` hop)
@@ -287,3 +292,17 @@ Additional operational settings:
 - `SAVED_PHOTO_MAX_COUNT`
 - `SAVED_PHOTO_MAX_BYTES`
 - `SAVED_PHOTO_THUMBNAIL_SIZE`
+
+Startup validates local settings and mandatory telemetry. Dependency readiness
+then validates the exact agent name/version, active hosted version status,
+the endpoint's single 100% selector for that same version, and managed-identity
+access with bounded content-free `GET /agents/{name}/versions/{version}` and
+`GET /agents/{name}` requests after the server listens. The
+70-second client cap covers
+the hosted runtime's 65-second overall budget while remaining inside the
+application's 225-second request budget. Missing configuration, identity/RBAC
+failure, inactive or absent versions, and telemetry initialization failure
+prevent readiness. Timeout, transient availability/rate limiting,
+authentication/authorization/configuration, invalid output, and policy refusal
+retain distinct structured public errors. Prompts, outputs, response bodies,
+tokens, URLs, and raw exceptions are never logged.

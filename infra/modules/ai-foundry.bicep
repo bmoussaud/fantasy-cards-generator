@@ -36,9 +36,6 @@ param deployerPrincipalId string
 @description('Microsoft Entra principal type running the deployment.')
 param deployerPrincipalType string
 
-@description('Grant hosted-agent invoke-only access to runtime managed identities. Existing direct model access remains separate and always provisioned.')
-param enableFoundryAgentAccess bool = false
-
 @description('Deployment name for the text model used by the backend.')
 param textDeploymentName string
 
@@ -228,7 +225,7 @@ resource deployerFoundryUserRoleAssignment 'Microsoft.Authorization/roleAssignme
   }
 }
 
-resource projectManagedIdentityFoundryUserRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (enableFoundryAgentAccess) {
+resource projectManagedIdentityFoundryUserRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   scope: foundryAccount
   name: guid(foundryAccount.id, aiFoundryProject.id, foundryUserRoleDefinitionId)
   properties: {
@@ -238,7 +235,7 @@ resource projectManagedIdentityFoundryUserRoleAssignment 'Microsoft.Authorizatio
   }
 }
 
-resource containerAppFoundryAgentConsumerRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (enableFoundryAgentAccess) {
+resource containerAppFoundryAgentConsumerRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   scope: aiFoundryProject
   name: guid(aiFoundryProject.id, containerAppPrincipalId, foundryAgentConsumerRoleDefinitionId)
   properties: {

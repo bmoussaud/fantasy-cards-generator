@@ -57,6 +57,9 @@ services:
       predeploy:
         - shell: sh
           run: ./hooks/guard_agent_deploy.sh
+      postdeploy:
+        - shell: sh
+          run: ./hooks/sync_agent_deployment.sh
 resources:
   web-nat:
     type: host.containerapp
@@ -64,7 +67,11 @@ resources:
 infra:
   provider: bicep
   path: infra
-# Default up workflow deploys only web-nat.
+# Agent-only generation requires the hosted agent to exist before the web
+# revision is configured for readiness. The first provision creates shared
+# resources with the public placeholder image, agent deploy stamps its immutable
+# name/version into azd state, and the second provision injects those exact
+# values before the web image is deployed.
 # azd 1.32 bare `deploy` targets all declared services, and no verified root-hook
 # context distinguishes bare from targeted deploys before service hooks run.
 # Bare `azd deploy` is therefore unsupported for this manifest.
@@ -72,10 +79,16 @@ infra:
 workflows:
   up:
     - azd: provision
+    - azd: deploy card-orchestrator
+    - azd: provision
     - azd: package web-nat
     - azd: deploy web-nat
 hooks:
   preprovision:
+    # Preserve an existing deployed web image so repeat provisioning cannot
+    # replace it with the first-deploy bootstrap container.
+    - shell: sh
+      run: ./hooks/preserve_web_image.sh
     # Ensures APP_SESSION_SECRET_KEY is set before provisioning. If absent,
     # the Bicep conditional !empty(appSessionSecretKeyValue) silently omits the
     # ACA secret and env ref, causing a crash-loop on the next deployment.

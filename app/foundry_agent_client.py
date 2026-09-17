@@ -5,6 +5,7 @@ import asyncio
 import inspect
 import json
 import re
+import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
 from math import isfinite
@@ -14,8 +15,14 @@ from urllib.parse import quote, urlsplit, urlunsplit
 import httpx
 from azure.core.exceptions import (
     ClientAuthenticationError,
+    HttpResponseError,
     ServiceRequestError,
     ServiceResponseError,
+)
+from azure.identity import (
+    ChainedTokenCredential,
+    CredentialUnavailableError,
+    DefaultAzureCredential,
 )
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
@@ -23,10 +30,80 @@ from app.generation import GeneratedCardModel
 from app.settings import AppSettings, SettingsError, load_app_settings
 
 FOUNDRY_AGENT_TOKEN_SCOPE = "https://ai.azure.com/.default"
+FOUNDRY_AGENT_ACCESS_API_VERSION = "2025-11-15-preview"
 
 
 class TokenCredential(Protocol):
     def get_token(self, *scopes: str) -> Any: ...
+
+
+class _CredentialAttemptRecorder:
+    def __init__(self) -> None:
+        self.transient_failure = False
+
+
+class _RecordingCredential:
+    def __init__(self, credential: Any, recorder: _CredentialAttemptRecorder) -> None:
+        self._credential = credential
+        self._recorder = recorder
+
+    def get_token(self, *scopes: str, **kwargs: Any) -> Any:
+        try:
+            return self._credential.get_token(*scopes, **kwargs)
+        except CredentialUnavailableError as exc:
+            if _is_transient_credential_failure(exc):
+                self._recorder.transient_failure = True
+            raise CredentialUnavailableError("Credential is unavailable.") from None
+        except (ServiceRequestError, ServiceResponseError):
+            self._recorder.transient_failure = True
+            raise ServiceRequestError("Credential service is temporarily unavailable.") from None
+        except ClientAuthenticationError as exc:
+            if _is_transient_credential_failure(exc):
+                self._recorder.transient_failure = True
+            raise ClientAuthenticationError("Credential authentication failed.") from None
+        except HttpResponseError as exc:
+            if _is_transient_credential_failure(exc):
+                self._recorder.transient_failure = True
+                raise ServiceRequestError(
+                    "Credential service is temporarily unavailable."
+                ) from None
+            raise ClientAuthenticationError("Credential authentication failed.") from None
+
+    def __enter__(self) -> _RecordingCredential:
+        enter = getattr(self._credential, "__enter__", None)
+        if enter is not None:
+            enter()
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        exit_method = getattr(self._credential, "__exit__", None)
+        if exit_method is not None:
+            exit_method(*args)
+
+
+class _TransportAwareChainedCredential:
+    def __init__(self, credential: ChainedTokenCredential) -> None:
+        self._credential = credential
+        self._recorder = _CredentialAttemptRecorder()
+        self._lock = threading.Lock()
+        credential.credentials = tuple(
+            _RecordingCredential(child, self._recorder) for child in credential.credentials
+        )
+
+    def get_token(self, *scopes: str, **kwargs: Any) -> Any:
+        with self._lock:
+            self._recorder.transient_failure = False
+            try:
+                return self._credential.get_token(*scopes, **kwargs)
+            except ClientAuthenticationError:
+                if self._recorder.transient_failure:
+                    raise ServiceRequestError(
+                        "Credential service is temporarily unavailable."
+                    ) from None
+                raise
+
+    def close(self) -> None:
+        self._credential.close()
 
 
 class GenerateCardAgentRequest(BaseModel):
@@ -170,6 +247,97 @@ class FoundryAgentClient:
                 message="Foundry agent invocation timed out.",
             )
 
+    async def check_access(self, timeout_seconds: float) -> str:
+        try:
+            return await asyncio.wait_for(
+                self._check_access_without_outer_timeout(),
+                timeout=timeout_seconds,
+            )
+        except TimeoutError:
+            return "timeout"
+
+    async def _check_access_without_outer_timeout(self) -> str:
+        try:
+            endpoint = _normalize_project_endpoint(self._settings.foundry_project_endpoint)
+            agent_name = _encode_agent_name(self._settings.foundry_agent_name)
+            agent_version = _encode_agent_version(self._settings.foundry_agent_version)
+            token = await self._get_token()
+        except FoundryAgentConfigurationError:
+            return "misconfigured"
+        except ClientAuthenticationError:
+            return "unauthorized"
+        except (ServiceRequestError, ServiceResponseError):
+            return "unavailable"
+
+        try:
+            response = await self._client().get(
+                f"{endpoint}agents/{agent_name}/versions/{agent_version}"
+                f"?api-version={FOUNDRY_AGENT_ACCESS_API_VERSION}",
+                headers={
+                    "Authorization": "Bearer " + token,
+                    "Accept": "application/json",
+                },
+            )
+        except httpx.TimeoutException:
+            return "timeout"
+        except httpx.TransportError:
+            return "unavailable"
+
+        if response.status_code in {401, 403}:
+            return "unauthorized"
+        if response.status_code in {400, 404}:
+            return "misconfigured"
+        if response.status_code >= 400:
+            return "unavailable"
+        try:
+            body = response.json()
+        except ValueError:
+            return "unavailable"
+        if not isinstance(body, dict):
+            return "misconfigured"
+        if body.get("status") != "active":
+            return "unavailable"
+        returned_names = [body[key] for key in ("name", "agent_name") if key in body]
+        returned_versions = [body[key] for key in ("version", "agent_version") if key in body]
+        if not returned_names or any(
+            value != self._settings.foundry_agent_name for value in returned_names
+        ):
+            return "misconfigured"
+        if not returned_versions or any(
+            value != self._settings.foundry_agent_version for value in returned_versions
+        ):
+            return "misconfigured"
+
+        try:
+            endpoint_response = await self._client().get(
+                f"{endpoint}agents/{agent_name}" f"?api-version={FOUNDRY_AGENT_ACCESS_API_VERSION}",
+                headers={
+                    "Authorization": "Bearer " + token,
+                    "Accept": "application/json",
+                },
+            )
+        except httpx.TimeoutException:
+            return "timeout"
+        except httpx.TransportError:
+            return "unavailable"
+
+        if endpoint_response.status_code in {401, 403}:
+            return "unauthorized"
+        if endpoint_response.status_code in {400, 404}:
+            return "misconfigured"
+        if endpoint_response.status_code >= 400:
+            return "unavailable"
+        try:
+            endpoint_body = endpoint_response.json()
+        except ValueError:
+            return "unavailable"
+        if not _endpoint_selects_version(
+            endpoint_body,
+            expected_version=self._settings.foundry_agent_version,
+        ):
+            return "misconfigured"
+        return "ok"
+
     async def _invoke_without_outer_timeout(self, query: str) -> FoundryAgentInvocationResult:
         try:
             url = _build_responses_url(
@@ -187,11 +355,18 @@ class FoundryAgentClient:
 
         try:
             token = await self._get_token()
-        except (ClientAuthenticationError, ServiceRequestError, ServiceResponseError):
+        except ClientAuthenticationError:
             return FoundryAgentInvocationResult(
                 status="auth_error",
                 error_code="credential_unavailable",
                 message="Unable to acquire a Foundry access token.",
+            )
+        except (ServiceRequestError, ServiceResponseError):
+            return FoundryAgentInvocationResult(
+                status="transient_error",
+                retryable=True,
+                error_code="credential_service_unavailable",
+                message="Foundry credential service is temporarily unavailable.",
             )
 
         client = self._client()
@@ -199,7 +374,7 @@ class FoundryAgentClient:
             response = await client.post(
                 url,
                 headers={
-                    "Authorization": f"Bearer {token}",
+                    "Authorization": "Bearer " + token,
                     "Content-Type": "application/json",
                 },
                 json={
@@ -287,9 +462,61 @@ class FoundryAgentClient:
 
 
 def _default_azure_credential() -> TokenCredential:
-    from azure.identity import DefaultAzureCredential
+    credential = DefaultAzureCredential(exclude_interactive_browser_credential=False)
+    return _TransportAwareChainedCredential(credential)
 
-    return DefaultAzureCredential(exclude_interactive_browser_credential=False)
+
+def _is_transient_credential_failure(exc: Exception) -> bool:
+    pending: list[BaseException] = [exc]
+    visited: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in visited:
+            continue
+        visited.add(id(current))
+        if isinstance(current, (ServiceRequestError, ServiceResponseError)):
+            return True
+        if isinstance(current, HttpResponseError):
+            status_code = getattr(current, "status_code", None)
+            if (
+                status_code == 408
+                or status_code == 429
+                or (isinstance(status_code, int) and status_code >= 500)
+            ):
+                return True
+        for nested in (
+            current.__cause__,
+            current.__context__,
+            getattr(current, "inner_exception", None),
+        ):
+            if isinstance(nested, BaseException):
+                pending.append(nested)
+    return False
+
+
+def _endpoint_selects_version(body: Any, *, expected_version: str) -> bool:
+    if not isinstance(body, dict):
+        return False
+    endpoint = body.get("agent_endpoint", body.get("agentEndpoint"))
+    if not isinstance(endpoint, dict):
+        return False
+    selector = endpoint.get("version_selector", endpoint.get("versionSelector"))
+    if not isinstance(selector, dict):
+        return False
+    rules = selector.get("version_selection_rules", selector.get("versionSelectionRules"))
+    if not isinstance(rules, list) or len(rules) != 1:
+        return False
+    rule = rules[0]
+    if not isinstance(rule, dict):
+        return False
+    version = rule.get("agent_version", rule.get("agentVersion"))
+    traffic = rule.get("traffic_percentage", rule.get("trafficPercentage"))
+    rule_type = rule.get("type")
+    return (
+        version == expected_version
+        and traffic == 100
+        and rule_type in {"FixedRatio", "fixed_ratio"}
+    )
 
 
 def _build_responses_url(
@@ -350,6 +577,15 @@ def _encode_agent_name(agent_name: str | None) -> str:
     return quote(stripped, safe="")
 
 
+def _encode_agent_version(agent_version: str | None) -> str:
+    if not agent_version:
+        raise FoundryAgentConfigurationError("FOUNDRY_AGENT_VERSION must be set for validation.")
+    stripped = agent_version.strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", stripped):
+        raise FoundryAgentConfigurationError("FOUNDRY_AGENT_VERSION must be a bounded identifier.")
+    return quote(stripped, safe="")
+
+
 def _http_error_result(
     response: httpx.Response,
     *,
@@ -370,6 +606,14 @@ def _http_error_result(
             error_code=code,
             message="Foundry policy refused the request.",
         )
+    if response.status_code == 408:
+        return FoundryAgentInvocationResult(
+            status="transient_error",
+            retryable=True,
+            request_id=request_id,
+            error_code="timeout",
+            message="Foundry agent request timed out.",
+        )
     if response.status_code == 429 or response.status_code >= 500:
         return FoundryAgentInvocationResult(
             status="transient_error",
@@ -377,6 +621,13 @@ def _http_error_result(
             request_id=request_id,
             error_code=code or f"http_{response.status_code}",
             message="Foundry agent service returned a transient error.",
+        )
+    if response.status_code in {400, 404}:
+        return FoundryAgentInvocationResult(
+            status="configuration_error",
+            request_id=request_id,
+            error_code=code or f"http_{response.status_code}",
+            message="Foundry agent request configuration is invalid.",
         )
     return FoundryAgentInvocationResult(
         status="http_error",
@@ -486,6 +737,17 @@ def _parse_success_envelope(
             request_id=request_id,
             error_code="schema_validation_failed",
             message="Foundry agent output did not match the card schema.",
+        )
+
+    if agent_response.status == "refused":
+        return FoundryAgentInvocationResult(
+            status="policy_refusal",
+            response_id=response_id,
+            request_id=request_id,
+            schema_valid=True,
+            agent_version=_metadata_version(agent_response.metadata),
+            error_code="refusal",
+            message="Foundry agent refused the request.",
         )
 
     if agent_response.status != "completed":

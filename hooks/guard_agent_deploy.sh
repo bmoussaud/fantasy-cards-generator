@@ -12,8 +12,8 @@ if [ "${CARD_ORCHESTRATOR_ENABLE_PREREQUISITES}" != "true" ]; then
     echo "Prerequisites must be enabled before building or deploying the hosted agent." >&2
     echo "Run the following commands, then retry:" >&2
     echo "" >&2
-    echo "  azd env set ENABLE_FOUNDRY_AGENT_ACCESS true" >&2
     echo "  azd env set CARD_ORCHESTRATOR_ENABLE_PREREQUISITES true" >&2
+    echo "  azd env set CARD_ORCHESTRATOR_CREATE_REGISTRY_CONNECTION true" >&2
     echo "  azd provision" >&2
     echo "  azd deploy card-orchestrator" >&2
     echo "" >&2

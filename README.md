@@ -2,13 +2,14 @@
 
 ## Architecture
 
-[![Implemented architecture: FastAPI on Azure Container Apps, optional Foundry
+[![Implemented architecture: FastAPI on Azure Container Apps, Foundry hosted-agent
 orchestration, and private data services](docs/images/architecture.png)](docs/images/architecture.svg)
 
 FastAPI owns authentication, moderation, image generation, and persistence.
-Text generation uses direct Azure OpenAI calls by default, with an opt-in
-Foundry hosted orchestrator. Cosmos DB, Blob Storage, and Key Vault are reached
-through private endpoints; browsers receive artwork through the backend.
+All live card-text generation uses the Foundry hosted `card-orchestrator`;
+there is no direct-model path or automatic fallback. Cosmos DB, Blob Storage,
+and Key Vault are reached through private endpoints; browsers receive artwork
+through the backend.
 
 [Editable draw.io source](docs/architecture.drawio) |
 [Self-contained SVG](docs/images/architecture.svg) |
@@ -60,10 +61,12 @@ The issue qualification and remote Copilot execution process is documented in
 
 ## Card generation configuration
 
-The single synchronous card-generation flow supports two local modes:
-
-- `AI_MODE=mock` + `PERSISTENCE_MODE=memory` for deterministic development/tests
-- `AI_MODE=live` + `PERSISTENCE_MODE=azure` for Azure AI Foundry + Cosmos DB + Blob Storage
+Application construction always uses the live Foundry agent and image clients;
+there is no runtime environment switch for mocks. Automated tests inject their
+deterministic clients explicitly. Startup requires valid local agent and
+image-model configuration plus working Application Insights telemetry.
+Dependency readiness then requires the exact active hosted-agent name/version
+and managed-identity access before the revision receives traffic.
 
 See `docs/card-generation-api.md` for the API contract, moderation policy, and
 runtime settings.
@@ -81,12 +84,30 @@ Provision the application with Azure Developer CLI:
 ```bash
 azd env new dev
 azd env set AZURE_LOCATION eastus2
+azd env set CARD_ORCHESTRATOR_VERSION "$(git rev-parse HEAD)"
+azd env set CARD_ORCHESTRATOR_ENABLE_PREREQUISITES true
+azd env set CARD_ORCHESTRATOR_CREATE_REGISTRY_CONNECTION true
 azd up
 ```
 
-`azd up` provisions Azure Container Registry and Azure Container Apps, builds the
-production Docker image from `Dockerfile`, pushes it to the provisioned registry,
-and deploys the `web-nat` service to Container Apps on port 8000.
+`azd up` performs the clean bootstrap in dependency order: it provisions the
+shared Foundry/ACR/Container Apps resources with the public placeholder image,
+deploys `card-orchestrator`, copies azd's generated
+`AGENT_CARD_ORCHESTRATOR_NAME` and `AGENT_CARD_ORCHESTRATOR_VERSION` values into
+the web deployment inputs together with the validated
+`CARD_ORCHESTRATOR_VERSION` artifact identity, re-provisions the Container App
+with that exact active agent identity and expected application version, and only
+then deploys `web-nat` on port 8000. The postdeploy hook rejects missing or
+malformed platform or artifact versions before changing azd state. Bicep accepts
+only an all-empty bootstrap or the complete
+`FOUNDRY_AGENT_NAME`/`FOUNDRY_AGENT_VERSION`/`FOUNDRY_AGENT_EXPECTED_VERSION`
+triplet. The repeated provision
+preserves the currently deployed web image through `CONTAINER_IMAGE`, so it
+cannot replace a running application with the bootstrap image. On a clean
+environment, the empty value still selects the public placeholder until the
+first web deployment. The repeated provision also does not rotate an existing
+managed Entra client secret; clear that azd value only as part of an explicit
+credential-rotation operation.
 
 The workload-profile Container Apps environment uses the delegated `aca-infra`
 subnet and a NAT Gateway with a static public IP for public-service egress.
@@ -112,8 +133,8 @@ Azure SDK GenAI tracing is experimental; deployed runtimes set
 `AZURE_EXPERIMENTAL_ENABLE_GENAI_TRACING=true`, and local developers can set the
 same value in their ignored `.env` only when exercising telemetry.
 
-The default Foundry deployment aliases remain `gpt-5-5` and `gpt-image-2` for
-application compatibility. In `eastus2`, they target `gpt-5.5`
+The hosted agent uses the `gpt-5-5` deployment and the web backend uses
+`gpt-image-2` for images. In `eastus2`, they target `gpt-5.5`
 (`2026-04-24`, `GlobalStandard`) and `gpt-image-2`
 (`2026-04-21`, `GlobalStandard`), respectively.
 

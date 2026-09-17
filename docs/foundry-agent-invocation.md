@@ -1,25 +1,39 @@
 # Foundry hosted-agent invocation smoke test
 
-This project has an invocation client and an opt-in text-only `card-orchestrator`
-runtime. The web backend now wires the client into card generation when
-`AGENT_GENERATION_ENABLED=true`; direct Azure OpenAI remains the default and the
-bounded fallback for eligible agent failures. Authentication, deterministic
+This project has an invocation client and a required text-only `card-orchestrator`
+runtime. All live card-text generation uses this client; no direct Azure OpenAI
+card-text path or automatic fallback remains. Authentication, deterministic
 moderation, image generation, and persistence remain in the web backend. See the
 [implemented architecture](architecture.md) for the current service boundaries.
 
 ## Configuration
 
-Configure these when smoke-testing an already deployed agent or explicitly
-enabling agent-backed text generation:
+Configure these for every live web runtime and when smoke-testing an already
+deployed agent:
 
 - `FOUNDRY_PROJECT_ENDPOINT`: canonical project endpoint, for example `https://<account>.services.ai.azure.com/api/projects/<project>`
 - `FOUNDRY_AGENT_NAME`: hosted agent name, for example `card-orchestrator`
+- `FOUNDRY_AGENT_VERSION`: exact hosted version that must exist and be `active`
 - `FOUNDRY_AGENT_API_VERSION`: defaults to `v1`
 - `FOUNDRY_AGENT_EXPECTED_VERSION`: optional application metadata check against the agent response `metadata.agentVersion` or `metadata.version`
-- `FOUNDRY_AGENT_TIMEOUT_SECONDS`: defaults to `5.0`
-- `AGENT_GENERATION_ENABLED`: `false` (default, direct model path) or `true` (agentic text generation). When `true`, `FOUNDRY_PROJECT_ENDPOINT` and `FOUNDRY_AGENT_NAME` are required at startup.
+- `FOUNDRY_AGENT_TIMEOUT_SECONDS`: defaults to `70`, covering the hosted runtime's
+  65-second overall budget and bounded to a maximum of 90 seconds. ACA readiness
+  allows 100 seconds so the supported maximum still has 10 seconds of bounded
+  request/handler overhead within the 225-second request budget.
+- `TELEMETRY_ENABLED=true` and `APPLICATIONINSIGHTS_CONNECTION_STRING`: mandatory for live startup.
 
-`FOUNDRY_PROJECT_ENDPOINT` is intentionally separate from `FOUNDRY_ENDPOINT`; there is no fallback to the account/model endpoint.
+`FOUNDRY_PROJECT_ENDPOINT` is intentionally separate from `FOUNDRY_ENDPOINT`;
+there is no fallback to the account/model endpoint or to direct text generation.
+
+At startup, the web app synchronously validates local configuration and mandatory
+telemetry, then begins serving dependency-free `/livez`. Dependency-aware
+`/healthz` readiness acquires an Entra token and performs bounded, content-free
+checks of both `GET /agents/{name}/versions/{version}` and
+`GET /agents/{name}`. The version resource must have the exact configured
+name/version and `active` status, and the endpoint's single 100% fixed-ratio
+selector must route to that same `FOUNDRY_AGENT_VERSION`.
+Only the exact configured version with `status: active` passes. Failure prevents
+traffic routing without blocking ASGI startup or causing liveness restart loops.
 
 ## Manual smoke command
 
@@ -450,7 +464,7 @@ ACA-MI access probe is not an invocation result. The operations runbook records
 the subsequent actual deployment outcome separately. Never substitute developer
 credentials for the authorized ACA invocation.
 
-## Opt-in runtime (offline candidate, issue #109)
+## Hosted runtime (offline candidate, issue #109)
 
 Python 3.12 entrypoint and optional dependency installation:
 
@@ -506,11 +520,9 @@ as `metadata.hostedVersion`; it is not the application-version check.
 Maximum **three model requests**, with model retries and function-invocation loops
 disabled, no repair loops and no automatic fallback. All agents/sessions are fresh
 per stage and clients are owned/closed per invocation, including cancellation.
-The 20-second stage / 65-second orchestration budgets are an **OFFLINE CANDIDATE**:
-they do **not** meet, replace or provide evidence for the proposed production
-8.15-second agent-hop / 30.15-second degraded-direct-path latency budgets. The
-operator's default 5-second timeout is intentionally unchanged; any later approved
-nonproduction live trial needs its own explicit deadline.
+The 20-second stage / 65-second orchestration budgets fit inside the web client's
+bounded 70-second hosted-agent timeout. The complete card-generation request
+remains bounded by the 225-second outer deadline.
 
 Completed domain JSON is returned in the SDK's `TextResponse`, inside a genuine
 Responses API envelope. `refused`, `held` and `routing_defer` always omit content

@@ -17,6 +17,7 @@ from app import photos as photos_module
 from app.generation import (
     AppServices,
     AuthenticatedOwner,
+    MockAgentClient,
     MockAIClient,
     ReferenceImageUpload,
     create_services,
@@ -144,7 +145,12 @@ def csrf_token(client: TestClient) -> str:
 def build_services(monkeypatch: pytest.MonkeyPatch, **env_overrides: str) -> AppServices:
     for key, value in env_overrides.items():
         monkeypatch.setenv(key, value)
-    services = create_services(load_app_settings())
+    settings = load_app_settings()
+    services = create_services(
+        settings,
+        ai_client=MockAIClient(settings),
+        agent_client=MockAgentClient(),
+    )
     services.photo_moderation_service = AllowAllPhotoModerationService()
     return services
 

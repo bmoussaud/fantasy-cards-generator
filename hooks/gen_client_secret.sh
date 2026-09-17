@@ -45,6 +45,14 @@ if [[ -z "${APP_ID}" ]]; then
   exit 0
 fi
 
+EXISTING_CLIENT_SECRET=$(get_azd_value "${CLIENT_SECRET_PROPERTY_NAME}")
+
+if [[ -n "${EXISTING_CLIENT_SECRET}" ]]; then
+  echo "Skipping client secret generation: ${CLIENT_SECRET_PROPERTY_NAME} is already set." >&2
+  unset EXISTING_CLIENT_SECRET
+  exit 0
+fi
+
 end_date=$(date -u -d '+3 months' '+%Y-%m-%dT%H:%M:%SZ')
 
 client_secret=$(az ad app credential reset \

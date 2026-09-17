@@ -63,9 +63,6 @@ param entraRedirectUri string = ''
 @description('Deployed post-logout redirect URI injected as ENTRA_POST_LOGOUT_REDIRECT_URI. Empty when Entra app registration is disabled.')
 param entraPostLogoutRedirectUri string = ''
 
-@description('AI orchestration mode injected as AI_MODE.')
-param aiMode string = 'live'
-
 @description('Persistence mode injected as PERSISTENCE_MODE.')
 param persistenceMode string = 'azure'
 
@@ -78,23 +75,23 @@ param foundryProjectEndpoint string = ''
 @description('Azure AI Foundry API version injected as FOUNDRY_API_VERSION.')
 param foundryApiVersion string = '2025-03-01-preview'
 
-@description('Azure AI Foundry text deployment injected as FOUNDRY_TEXT_DEPLOYMENT.')
-param foundryTextDeployment string = 'gpt-5-5'
-
 @description('Azure AI Foundry image deployment injected as FOUNDRY_IMAGE_DEPLOYMENT.')
 param foundryImageDeployment string = 'gpt-image-2'
 
-@description('Foundry hosted agent name injected as FOUNDRY_AGENT_NAME. Required when agentGenerationEnabled is true.')
+@description('Foundry hosted agent name. May be empty only for the initial public-placeholder provision.')
 param foundryAgentName string = ''
 
-@description('Expected agent version for metadata check injected as FOUNDRY_AGENT_EXPECTED_VERSION. Optional.')
+@description('Exact active hosted agent version. May be empty only for the initial public-placeholder provision.')
+param foundryAgentVersion string = ''
+
+@description('Exact application artifact version deployed inside the active hosted agent. Must be set with the hosted agent name/version, or all three must be empty for initial bootstrap.')
 param foundryAgentExpectedVersion string = ''
 
 @description('Agent API version injected as FOUNDRY_AGENT_API_VERSION.')
 param foundryAgentApiVersion string = 'v1'
 
-@description('Enable agentic text generation path injected as AGENT_GENERATION_ENABLED. Default false (direct model).')
-param agentGenerationEnabled bool = false
+@description('Hosted agent invocation and readiness timeout in seconds.')
+param foundryAgentTimeoutSeconds string = '70'
 
 @description('Cosmos DB endpoint injected as COSMOS_ENDPOINT.')
 param cosmosEndpoint string = ''
@@ -249,6 +246,34 @@ var containerAppSecrets = concat(
     : []
 )
 
+var hasFoundryAgentName = !empty(trim(foundryAgentName))
+var hasFoundryAgentVersion = !empty(trim(foundryAgentVersion))
+var hasFoundryAgentExpectedVersion = !empty(trim(foundryAgentExpectedVersion))
+var foundryAgentConfigurationIsComplete = hasFoundryAgentName && hasFoundryAgentVersion && hasFoundryAgentExpectedVersion
+var validatedFoundryAgentConfiguration = hasFoundryAgentName == hasFoundryAgentVersion && hasFoundryAgentVersion == hasFoundryAgentExpectedVersion
+  ? {
+      name: trim(foundryAgentName)
+      version: trim(foundryAgentVersion)
+      expectedVersion: trim(foundryAgentExpectedVersion)
+    }
+  : fail('FOUNDRY_AGENT_NAME, FOUNDRY_AGENT_VERSION, and FOUNDRY_AGENT_EXPECTED_VERSION must either all be set or all be empty during the initial placeholder provision.')
+var foundryAgentEnv = foundryAgentConfigurationIsComplete
+  ? [
+      {
+        name: 'FOUNDRY_AGENT_NAME'
+        value: validatedFoundryAgentConfiguration.name
+      }
+      {
+        name: 'FOUNDRY_AGENT_VERSION'
+        value: validatedFoundryAgentConfiguration.version
+      }
+      {
+        name: 'FOUNDRY_AGENT_EXPECTED_VERSION'
+        value: validatedFoundryAgentConfiguration.expectedVersion
+      }
+    ]
+  : []
+
 var containerAppEnv = concat(
   [
     {
@@ -288,10 +313,6 @@ var containerAppEnv = concat(
       value: telemetrySamplingRatio
     }
     {
-      name: 'AI_MODE'
-      value: aiMode
-    }
-    {
       name: 'PERSISTENCE_MODE'
       value: persistenceMode
     }
@@ -308,28 +329,16 @@ var containerAppEnv = concat(
       value: foundryApiVersion
     }
     {
-      name: 'FOUNDRY_TEXT_DEPLOYMENT'
-      value: foundryTextDeployment
-    }
-    {
       name: 'FOUNDRY_IMAGE_DEPLOYMENT'
       value: foundryImageDeployment
-    }
-    {
-      name: 'FOUNDRY_AGENT_NAME'
-      value: foundryAgentName
-    }
-    {
-      name: 'FOUNDRY_AGENT_EXPECTED_VERSION'
-      value: foundryAgentExpectedVersion
     }
     {
       name: 'FOUNDRY_AGENT_API_VERSION'
       value: foundryAgentApiVersion
     }
     {
-      name: 'AGENT_GENERATION_ENABLED'
-      value: string(agentGenerationEnabled)
+      name: 'FOUNDRY_AGENT_TIMEOUT_SECONDS'
+      value: foundryAgentTimeoutSeconds
     }
     {
       name: 'COSMOS_ENDPOINT'
@@ -507,7 +516,8 @@ var containerAppEnv = concat(
           value: entraPostLogoutRedirectUri
         }
       ]
-    : []
+    : [    ],
+    foundryAgentEnv
 )
 
 resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
@@ -554,7 +564,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             {
               type: 'Startup'
               httpGet: {
-                path: '/healthz'
+                path: '/livez'
                 port: 8000
                 scheme: 'HTTP'
               }
@@ -567,7 +577,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             {
               type: 'Liveness'
               httpGet: {
-                path: '/healthz'
+                path: '/livez'
                 port: 8000
                 scheme: 'HTTP'
               }
@@ -586,8 +596,8 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
               }
               initialDelaySeconds: 5
               periodSeconds: 10
-              timeoutSeconds: 3
-              failureThreshold: 3
+              timeoutSeconds: 100
+              failureThreshold: 1
               successThreshold: 1
             }
           ]

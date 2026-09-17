@@ -20,6 +20,7 @@ SAFE_ROUTES = {
     "/auth/callback",
     "/auth/logout",
     "/healthz",
+    "/livez",
     "/partials/ping",
     "/api/v1/cards/generate",
     "/api/v1/cards/{card_id}/artwork/retry",
@@ -55,11 +56,10 @@ SAFE_EVENTS = {
     "compensation.completed",
     "compensation.failed",
     "agent.invocation",
-    "agent.fallback",
     "generation.text_path",
 } | PROFILE_PHOTO_IMPORT_EVENTS
 SAFE_OPERATIONS = {"generate", "artwork_retry", "fetch_image", "text", "image"}
-SAFE_GENERATION_PATHS = {"agent", "direct", "agent_fallback"}
+SAFE_GENERATION_PATHS = {"agent", "mock"}
 SAFE_OUTCOMES = {
     "started",
     "completed",
@@ -113,7 +113,15 @@ SAFE_STAGES = {
     "photo_save",
     "import_complete",
 }
-SAFE_DEPENDENCIES = {"foundry_text", "foundry_image", "cosmos", "blob", "entra", "other"}
+SAFE_DEPENDENCIES = {
+    "foundry_agent",
+    "foundry_text",
+    "foundry_image",
+    "cosmos",
+    "blob",
+    "entra",
+    "other",
+}
 SAFE_STORES = {"card", "audit", "blob", "cosmos", "memory"}
 SAFE_PERSISTENCE_OPERATIONS = {
     "reserve",
@@ -243,7 +251,7 @@ _moderation_counter: Any = None
 _persistence_counter: Any = None
 _token_counter: Any = None
 
-# Carries the generation path (agent/direct/agent_fallback) for the current async context
+# Carries the generation path (agent/mock) for the current async context
 # so _record_generation can include it as a bounded metric dimension.
 _generation_path_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "_generation_path_var", default=None
@@ -466,10 +474,10 @@ def add_event(name: str, attributes: dict[str, Any] | None = None) -> None:
 def set_generation_path(path: str) -> None:
     """Record the generation path for the current async context.
 
-    Must be called with one of the bounded values: 'agent', 'direct', 'agent_fallback'.
+    Must be called with one of the bounded values: 'agent' or 'mock'.
     The value is picked up by _record_generation and added to fcg.generation.requests.
     """
-    _generation_path_var.set(_bounded_value(path, SAFE_GENERATION_PATHS, "direct"))
+    _generation_path_var.set(_bounded_value(path, SAFE_GENERATION_PATHS, "agent"))
 
 
 def safe_log(
@@ -817,7 +825,7 @@ def safe_attributes(attributes: dict[str, Any]) -> dict[str, Any]:
         elif key == "fcg.agent_version":
             safe[key] = normalize_agent_version(value)
         elif key == "fcg.generation_path":
-            safe[key] = _bounded_value(value, SAFE_GENERATION_PATHS, "direct")
+            safe[key] = _bounded_value(value, SAFE_GENERATION_PATHS, "agent")
         elif key == "http.route":
             safe[key] = normalize_route(str(value))
         elif key == "http.response.status_code" and isinstance(value, int):

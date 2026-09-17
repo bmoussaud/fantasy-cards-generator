@@ -82,17 +82,17 @@ param aiFoundryProjectName string = 'fantasy-cards'
 @description('Azure AI Foundry project display name for the current environment.')
 param aiFoundryProjectDisplayName string = 'Fantasy Cards'
 
-@description('Grant Foundry hosted-agent invoke access to runtime managed identities. Off by default so existing deployments do not gain new permissions until explicitly opted in.')
-param enableFoundryAgentAccess bool = false
-
-@description('Hosted agent name for the card-orchestrator agent. Injected as FOUNDRY_AGENT_NAME. Required when agentGenerationEnabled is true.')
+@description('Hosted agent name stamped from AGENT_CARD_ORCHESTRATOR_NAME after agent deployment. Empty only during the initial placeholder provision.')
 param foundryAgentName string = ''
 
-@description('Expected agent version for metadata check. Injected as FOUNDRY_AGENT_EXPECTED_VERSION. Optional.')
+@description('Exact active hosted agent version stamped from AGENT_CARD_ORCHESTRATOR_VERSION after agent deployment. Empty only during the initial placeholder provision.')
+param foundryAgentVersion string = ''
+
+@description('Exact application artifact version deployed inside the active hosted agent. Must be set with the hosted agent name/version, or all three must be empty for initial bootstrap.')
 param foundryAgentExpectedVersion string = ''
 
-@description('Enable the agentic text generation path. Injected as AGENT_GENERATION_ENABLED. Default false (direct model path).')
-param agentGenerationEnabled bool = false
+@description('Hosted agent invocation and readiness timeout in seconds.')
+param foundryAgentTimeoutSeconds string = '70'
 
 @allowed([
   'ServicePrincipal'
@@ -141,9 +141,6 @@ param aiFoundryImageDeploymentSkuName string = 'GlobalStandard'
 
 @description('Azure AI Foundry capacity units for the image deployment. Verify against live quota before deployment.')
 param aiFoundryImageDeploymentCapacity int = 1
-
-@description('AI orchestration mode for the app runtime.')
-param aiMode string = 'live'
 
 @description('Persistence mode for the app runtime.')
 param persistenceMode string = 'azure'
@@ -307,7 +304,7 @@ param monitoringContainerRestartThreshold int = 3
 
 // ── card-orchestrator hosted-agent prerequisites ──
 
-@description('Enable card-orchestrator prerequisites: ACR pull for project MI, optional registry connection, and agent monitoring. Off by default so the web-only workflow never deploys agent infrastructure.')
+@description('Enable card-orchestrator prerequisites: ACR pull for project MI, optional registry connection, and agent monitoring. Must be enabled before the agent-first deployment workflow runs.')
 param enableCardOrchestratorPrerequisites bool = false
 
 @description('Create the Foundry project → ACR registry connection. Only effective when enableCardOrchestratorPrerequisites is true. Enable only after confirming no existing registry connection.')
@@ -451,7 +448,6 @@ module containerApps './modules/container-apps.bicep' = {
   params: {
     acrLoginServer: registry.outputs.registryLoginServer
     acrPullIdentityResourceId: registry.outputs.acrPullIdentityResourceId
-    aiMode: aiMode
     appInsightsConnectionString: monitoring.outputs.appInsightsConnectionString
     appSessionSecretKeyValue: appSessionSecretKeyValue
     auditRetentionDays: auditRetentionDays
@@ -481,10 +477,10 @@ module containerApps './modules/container-apps.bicep' = {
     foundryEndpoint: 'https://${aiFoundryAccountName}.cognitiveservices.azure.com/'
     foundryImageDeployment: aiFoundryImageDeploymentName
     foundryProjectEndpoint: aiFoundryProjectEndpoint
-    foundryTextDeployment: aiFoundryTextDeploymentName
     foundryAgentName: foundryAgentName
+    foundryAgentVersion: foundryAgentVersion
     foundryAgentExpectedVersion: foundryAgentExpectedVersion
-    agentGenerationEnabled: agentGenerationEnabled
+    foundryAgentTimeoutSeconds: foundryAgentTimeoutSeconds
     healthzBlobTimeoutMs: healthzBlobTimeoutMs
     healthzCosmosTimeoutMs: healthzCosmosTimeoutMs
     imageMaxRetries: imageMaxRetries
@@ -612,7 +608,6 @@ module aiFoundry './modules/ai-foundry.bicep' = {
     customSubDomainName: aiFoundryAccountName
     deployerPrincipalId: deployerPrincipalId
     deployerPrincipalType: deployerPrincipalType
-    enableFoundryAgentAccess: enableFoundryAgentAccess
     imageDeploymentCapacity: aiFoundryImageDeploymentCapacity
     imageDeploymentName: aiFoundryImageDeploymentName
     imageDeploymentSkuName: aiFoundryImageDeploymentSkuName

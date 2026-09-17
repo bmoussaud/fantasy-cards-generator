@@ -8,6 +8,9 @@
     "location": {
       "value": "${AZURE_LOCATION}"
     },
+    "containerImage": {
+      "value": "${CONTAINER_IMAGE=}"
+    },
     "deployerPrincipalType": {
       "value": "${AZURE_PRINCIPAL_TYPE}"
     },
@@ -35,17 +38,17 @@
     "healthzBlobTimeoutMs": {
       "value": "${HEALTHZ_BLOB_TIMEOUT_MS=1500}"
     },
-    "enableFoundryAgentAccess": {
-      "value": "${ENABLE_FOUNDRY_AGENT_ACCESS=false}"
-    },
     "foundryAgentName": {
       "value": "${FOUNDRY_AGENT_NAME=}"
+    },
+    "foundryAgentVersion": {
+      "value": "${FOUNDRY_AGENT_VERSION=}"
     },
     "foundryAgentExpectedVersion": {
       "value": "${FOUNDRY_AGENT_EXPECTED_VERSION=}"
     },
-    "agentGenerationEnabled": {
-      "value": "${AGENT_GENERATION_ENABLED=false}"
+    "foundryAgentTimeoutSeconds": {
+      "value": "${FOUNDRY_AGENT_TIMEOUT_SECONDS=70}"
     },
     "contentSafetyEndpoint": {
       "value": "${CONTENT_SAFETY_ENDPOINT=}"

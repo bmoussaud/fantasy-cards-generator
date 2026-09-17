@@ -112,6 +112,7 @@ def test_entra_user_provisioning_uses_postprovision_hook_and_is_secret_safe() ->
 
 def test_bicep_exposes_azd_container_outputs_without_helloworld_image() -> None:
     main_bicep = (REPO_ROOT / "infra" / "main.bicep").read_text()
+    main_parameters = json.loads((REPO_ROOT / "infra" / "main.parameters.json").read_text())
     container_apps_bicep = (REPO_ROOT / "infra" / "modules" / "container-apps.bicep").read_text()
 
     # The helloworld image is allowed in main.bicep only as a safe-provision
@@ -129,6 +130,7 @@ def test_bicep_exposes_azd_container_outputs_without_helloworld_image() -> None:
     assert "modules/container-registry.bicep" in main_bicep
     assert "output AZURE_CONTAINER_REGISTRY_ENDPOINT" in main_bicep
     assert "output AZURE_CONTAINER_APP_NAME" in main_bicep
+    assert main_parameters["parameters"]["containerImage"]["value"] == "${CONTAINER_IMAGE=}"
     assert "param serviceName string = 'web-nat'" in main_bicep
     assert "param serviceName string = 'web-nat'" in container_apps_bicep
     assert "targetPort: 8000" in container_apps_bicep
@@ -139,11 +141,21 @@ def test_generation_runtime_env_vars_are_wired_from_bicep_outputs() -> None:
     container_apps_bicep = (REPO_ROOT / "infra" / "modules" / "container-apps.bicep").read_text()
     main_bicep = (REPO_ROOT / "infra" / "main.bicep").read_text()
 
-    assert "name: 'AI_MODE'" in container_apps_bicep
+    assert "name: 'AI_MODE'" not in container_apps_bicep
     assert "name: 'PERSISTENCE_MODE'" in container_apps_bicep
     assert "name: 'FOUNDRY_ENDPOINT'" in container_apps_bicep
     assert "name: 'FOUNDRY_PROJECT_ENDPOINT'" in container_apps_bicep
-    assert "name: 'FOUNDRY_TEXT_DEPLOYMENT'" in container_apps_bicep
+    assert "name: 'FOUNDRY_AGENT_VERSION'" in container_apps_bicep
+    assert "var foundryAgentEnv = foundryAgentConfigurationIsComplete" in container_apps_bicep
+    assert (
+        "FOUNDRY_AGENT_NAME, FOUNDRY_AGENT_VERSION, and "
+        "FOUNDRY_AGENT_EXPECTED_VERSION must either all be set"
+    ) in (container_apps_bicep)
+    assert "foundryAgentEnv" in container_apps_bicep
+    assert "name: 'FOUNDRY_AGENT_TIMEOUT_SECONDS'" in container_apps_bicep
+    assert "param foundryAgentTimeoutSeconds string = '70'" in main_bicep
+    assert "foundryAgentTimeoutSeconds: foundryAgentTimeoutSeconds" in main_bicep
+    assert "name: 'FOUNDRY_TEXT_DEPLOYMENT'" not in container_apps_bicep
     assert "name: 'FOUNDRY_IMAGE_DEPLOYMENT'" in container_apps_bicep
     assert "name: 'COSMOS_ENDPOINT'" in container_apps_bicep
     assert "name: 'COSMOS_DATABASE_NAME'" in container_apps_bicep
@@ -179,7 +191,7 @@ def test_generation_runtime_env_vars_are_wired_from_bicep_outputs() -> None:
     )
     assert "foundryProjectEndpoint: aiFoundryProjectEndpoint" in main_bicep
     assert "contentSafetyEndpoint: resolvedContentSafetyEndpoint" in main_bicep
-    assert "foundryTextDeployment: aiFoundryTextDeploymentName" in main_bicep
+    assert "foundryTextDeployment:" not in main_bicep
     assert "foundryImageDeployment: aiFoundryImageDeploymentName" in main_bicep
     assert "cosmosEndpoint: 'https://${cosmosAccountName}.documents.azure.com:443/'" in main_bicep
     assert (
@@ -189,7 +201,7 @@ def test_generation_runtime_env_vars_are_wired_from_bicep_outputs() -> None:
     assert "trustedProxyHops: trustedProxyHops" in main_bicep
 
 
-def test_foundry_project_endpoint_and_agent_access_gate_are_iac_managed() -> None:
+def test_foundry_project_endpoint_and_agent_access_are_iac_managed() -> None:
     main_bicep = (REPO_ROOT / "infra" / "main.bicep").read_text()
     main_parameters = (REPO_ROOT / "infra" / "main.parameters.json").read_text()
     foundry_bicep = (REPO_ROOT / "infra" / "modules" / "ai-foundry.bicep").read_text()
@@ -209,13 +221,9 @@ def test_foundry_project_endpoint_and_agent_access_gate_are_iac_managed() -> Non
         foundry_bicep, "resource containerAppFoundryAgentConsumerRoleAssignment"
     )
 
-    assert "param enableFoundryAgentAccess bool = false" in main_bicep
-    assert "param enableFoundryAgentAccess bool = false" in foundry_bicep
-    assert (
-        '"enableFoundryAgentAccess": {\n'
-        '      "value": "${ENABLE_FOUNDRY_AGENT_ACCESS=false}"' in main_parameters
-    )
-    assert "enableFoundryAgentAccess: enableFoundryAgentAccess" in foundry_module
+    assert "enableFoundryAgentAccess" not in main_bicep
+    assert "enableFoundryAgentAccess" not in foundry_bicep
+    assert "ENABLE_FOUNDRY_AGENT_ACCESS" not in main_parameters
 
     assert (
         "var resolvedAiFoundryProjectName = "
@@ -247,9 +255,7 @@ def test_foundry_project_endpoint_and_agent_access_gate_are_iac_managed() -> Non
     assert "aiFoundry.outputs.aiFoundryProjectEndpoint" not in container_apps_module
     assert "containerApps.outputs" not in container_apps_module
 
-    # Existing direct model access stays untouched and is not gated by the new
-    # hosted-agent access flag.
-    assert "if (enableFoundryAgentAccess)" not in direct_model_assignment
+    # Image generation retains account-level Cognitive Services access.
     assert "scope: foundryAccount" in direct_model_assignment
     assert "principalId: containerAppPrincipalId" in direct_model_assignment
     assert "cognitiveServicesUserRoleDefinitionId" in direct_model_assignment
@@ -261,7 +267,7 @@ def test_foundry_project_endpoint_and_agent_access_gate_are_iac_managed() -> Non
         "var foundryAgentConsumerRoleDefinitionId = 'eed3b665-ab3a-47b6-8f48-c9382fb1dad6'"
         in foundry_bicep
     )
-    assert "if (enableFoundryAgentAccess)" in project_identity_assignment
+    assert "if (" not in project_identity_assignment.partition("{")[0]
     assert "scope: foundryAccount" in project_identity_assignment
     assert "principalId: aiFoundryProject.identity.principalId" in project_identity_assignment
     assert "containerAppPrincipalId" not in project_identity_assignment
@@ -271,7 +277,7 @@ def test_foundry_project_endpoint_and_agent_access_gate_are_iac_managed() -> Non
         in project_identity_assignment
     )
     assert "foundryUserRoleDefinitionId" in project_identity_assignment
-    assert "if (enableFoundryAgentAccess)" in agent_consumer_assignment
+    assert "if (" not in agent_consumer_assignment.partition("{")[0]
     assert "scope: aiFoundryProject" in agent_consumer_assignment
     assert "principalId: containerAppPrincipalId" in agent_consumer_assignment
     assert "principalType: 'ServicePrincipal'" in agent_consumer_assignment
@@ -282,10 +288,9 @@ def test_foundry_project_endpoint_and_agent_access_gate_are_iac_managed() -> Non
     )
     assert "foundryAgentConsumerRoleDefinitionId" in agent_consumer_assignment
 
-    assert "ENABLE_FOUNDRY_AGENT_ACCESS" in readme
+    assert "ENABLE_FOUNDRY_AGENT_ACCESS" not in readme
     assert "FOUNDRY_PROJECT_ENDPOINT" in readme
-    assert "generation modes" in readme
-    assert "create agents" in readme
+    assert "mandatory" in readme
     assert "Foundry Agent" in readme and "Consumer" in readme
 
 
@@ -971,10 +976,36 @@ def test_telemetry_reuses_single_workspace_app_insights_and_secret_wiring() -> N
     )
 
 
-def test_container_app_has_all_three_dependency_free_health_probes() -> None:
+def test_container_app_liveness_is_dependency_free_and_readiness_is_bounded() -> None:
     container_apps = (REPO_ROOT / "infra" / "modules" / "container-apps.bicep").read_text()
+    generated_arm = (REPO_ROOT / "infra" / "main.json").read_text()
 
-    assert container_apps.count("path: '/healthz'") == 3
+    assert container_apps.count("path: '/healthz'") == 1
+    assert container_apps.count("path: '/livez'") == 2
+    assert container_apps.count("timeoutSeconds: 100") == 1
+    assert generated_arm.count('"timeoutSeconds": 100') == 1
+    assert '"timeoutSeconds": 75' not in generated_arm
+    assert (
+        "type: 'Startup'\n              httpGet: {\n                path: '/livez'"
+        in container_apps
+    )
+    assert (
+        "type: 'Readiness'\n              httpGet: {\n                path: '/healthz'"
+        in container_apps
+    )
+    assert "failureThreshold: 30" in container_apps
+    assert (
+        "type: 'Readiness'\n"
+        "              httpGet: {\n"
+        "                path: '/healthz'\n"
+        "                port: 8000\n"
+        "                scheme: 'HTTP'\n"
+        "              }\n"
+        "              initialDelaySeconds: 5\n"
+        "              periodSeconds: 10\n"
+        "              timeoutSeconds: 100\n"
+        "              failureThreshold: 1"
+    ) in container_apps
     assert container_apps.count("port: 8000") >= 3
     for probe_type in ("Startup", "Liveness", "Readiness"):
         assert f"type: '{probe_type}'" in container_apps
@@ -1109,6 +1140,114 @@ def test_azd_yaml_wires_preprovision_session_secret_hook() -> None:
     assert "ensure_session_secret.sh" in azure_yaml
 
 
+def test_preprovision_hook_preserves_existing_web_image(tmp_path: Path) -> None:
+    script = REPO_ROOT / "hooks" / "preserve_web_image.sh"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    azd_log = tmp_path / "azd.log"
+    fake_azd = fake_bin / "azd"
+    fake_azd.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1 $2 $3" = "env get-value AZURE_RESOURCE_GROUP" ]; then\n'
+        "  printf '%s\\n' rg-fcag-dev\n"
+        'elif [ "$1 $2 $3" = "env get-value AZURE_CONTAINER_APP_NAME" ]; then\n'
+        "  printf '%s\\n' fcag-dev-app\n"
+        'elif [ "$1 $2" = "env set" ]; then\n'
+        f'  printf "%s\\n" "$*" > "{azd_log}"\n'
+        "else\n"
+        "  exit 2\n"
+        "fi\n"
+    )
+    fake_azd.chmod(0o755)
+    fake_az = fake_bin / "az"
+    fake_az.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' "
+        "fcagdev.azurecr.io/fantasy-cards-generator/web-nat-dev@sha256:abc123\n"
+    )
+    fake_az.chmod(0o755)
+
+    result = subprocess.run(
+        ["sh", str(script)],
+        capture_output=True,
+        text=True,
+        env={"PATH": f"{fake_bin}:/usr/bin:/bin"},
+    )
+
+    assert result.returncode == 0
+    assert azd_log.read_text().strip() == (
+        "env set CONTAINER_IMAGE="
+        "fcagdev.azurecr.io/fantasy-cards-generator/web-nat-dev@sha256:abc123"
+    )
+    assert "sha256:abc123" not in result.stdout
+    assert "sha256:abc123" not in result.stderr
+
+
+def test_preprovision_hook_keeps_bootstrap_when_web_app_does_not_exist(
+    tmp_path: Path,
+) -> None:
+    script = REPO_ROOT / "hooks" / "preserve_web_image.sh"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    azd_log = tmp_path / "azd.log"
+    fake_azd = fake_bin / "azd"
+    fake_azd.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1 $2 $3" = "env get-value AZURE_RESOURCE_GROUP" ]; then\n'
+        "  printf '%s\\n' rg-fcag-dev\n"
+        'elif [ "$1 $2 $3" = "env get-value AZURE_CONTAINER_APP_NAME" ]; then\n'
+        "  printf '%s\\n' fcag-dev-app\n"
+        'elif [ "$1 $2" = "env set" ]; then\n'
+        f'  printf "%s\\n" "$*" > "{azd_log}"\n'
+        "fi\n"
+    )
+    fake_azd.chmod(0o755)
+    fake_az = fake_bin / "az"
+    fake_az.write_text("#!/bin/sh\nexit 0\n")
+    fake_az.chmod(0o755)
+
+    result = subprocess.run(
+        ["sh", str(script)],
+        capture_output=True,
+        text=True,
+        env={"PATH": f"{fake_bin}:/usr/bin:/bin"},
+    )
+
+    assert result.returncode == 0
+    assert not azd_log.exists()
+
+
+def test_preprovision_hook_fails_closed_when_live_image_lookup_fails(
+    tmp_path: Path,
+) -> None:
+    script = REPO_ROOT / "hooks" / "preserve_web_image.sh"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_azd = fake_bin / "azd"
+    fake_azd.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1 $2 $3" = "env get-value AZURE_RESOURCE_GROUP" ]; then\n'
+        "  printf '%s\\n' rg-fcag-dev\n"
+        'elif [ "$1 $2 $3" = "env get-value AZURE_CONTAINER_APP_NAME" ]; then\n'
+        "  printf '%s\\n' fcag-dev-app\n"
+        "fi\n"
+    )
+    fake_azd.chmod(0o755)
+    fake_az = fake_bin / "az"
+    fake_az.write_text("#!/bin/sh\nexit 1\n")
+    fake_az.chmod(0o755)
+
+    result = subprocess.run(
+        ["sh", str(script)],
+        capture_output=True,
+        text=True,
+        env={"PATH": f"{fake_bin}:/usr/bin:/bin"},
+    )
+
+    assert result.returncode == 1
+    assert "currently deployed web image" in result.stderr
+
+
 def test_session_secret_flows_into_key_vault_and_container_app_secret() -> None:
     """Verify APP_SESSION_SECRET_KEY is persisted and wired through ACA secretRef."""
     container_apps_bicep = (REPO_ROOT / "infra" / "modules" / "container-apps.bicep").read_text()
@@ -1152,26 +1291,27 @@ def test_root_manifest_requires_azd_version_and_agent_extension() -> None:
     assert "=1.0.0-beta.13" in azure_yaml
 
 
-def test_root_manifest_safe_default_up_workflow_deploys_only_web() -> None:
-    """``azd up`` targets only web-nat via the only supported azd workflow.
-
-    The card-orchestrator hosted agent is never built, pushed, or deployed
-    by ``azd up`` unless an operator removes the default web-only workflow.
-    azd 1.32 supports ``workflows.up`` only; there is no valid
-    ``workflows.deploy`` override for bare ``azd deploy``.
-    """
+def test_root_manifest_up_bootstraps_agent_before_web() -> None:
+    """``azd up`` deploys and stamps the agent before the serving web revision."""
     azure_yaml = (REPO_ROOT / "azure.yaml").read_text()
 
     assert "workflows:" in azure_yaml
-    assert "deploy web-nat" in azure_yaml
     assert "deploy --all" not in azure_yaml
     workflows_start = azure_yaml.index("workflows:")
     hooks_start = azure_yaml.rindex("\nhooks:")
     workflows_section = azure_yaml[workflows_start:hooks_start]
-    assert "card-orchestrator" not in workflows_section
     assert "up:" in workflows_section
     assert "deploy:" not in workflows_section
-    assert "package web-nat" in workflows_section
+    actual_steps = [
+        line.strip() for line in workflows_section.splitlines() if line.strip().startswith("- azd:")
+    ]
+    assert actual_steps == [
+        "- azd: provision",
+        "- azd: deploy card-orchestrator",
+        "- azd: provision",
+        "- azd: package web-nat",
+        "- azd: deploy web-nat",
+    ]
 
 
 def test_root_manifest_marks_bare_azd_deploy_unsupported_and_keeps_service_hooks() -> None:
@@ -1189,22 +1329,133 @@ def test_root_manifest_marks_bare_azd_deploy_unsupported_and_keeps_service_hooks
     assert "Bare `azd deploy` is therefore unsupported for this manifest." in azure_yaml
 
 
-def test_root_manifest_hooks_only_on_provision_not_deploy() -> None:
-    """Root-level hooks run only during provision; deploy-only paths do not
-    rotate credentials. The card-orchestrator service has service-level
-    lifecycle guards that validate prerequisites without credential rotation."""
+def test_root_manifest_hooks_stamp_agent_identity_after_deploy() -> None:
+    """The agent postdeploy hook persists the exact immutable deployment identity."""
     azure_yaml = (REPO_ROOT / "azure.yaml").read_text()
 
     assert "preprovision:" in azure_yaml
+    assert "preserve_web_image.sh" in azure_yaml
     assert "postprovision:" in azure_yaml
-    # No root-level postdeploy hooks anywhere
-    assert "postdeploy:" not in azure_yaml
-    # The only service lifecycle gates are the card-orchestrator prerequisite guards.
+    assert "postdeploy:" in azure_yaml
+    assert "sync_agent_deployment.sh" in azure_yaml
     assert azure_yaml.count("prebuild:") == 1
     assert azure_yaml.count("prepackage:") == 1
     assert azure_yaml.count("prepublish:") == 1
     assert azure_yaml.count("predeploy:") == 1
     assert "guard_agent_deploy" in azure_yaml
+
+
+def test_agent_deployment_sync_hook_atomically_replaces_stale_rollback_version(
+    tmp_path: Path,
+) -> None:
+    script = REPO_ROOT / "hooks" / "sync_agent_deployment.sh"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    state = tmp_path / "azd-state.json"
+    state.write_text(
+        json.dumps(
+            {
+                "AGENT_CARD_ORCHESTRATOR_NAME": "card-orchestrator",
+                "AGENT_CARD_ORCHESTRATOR_VERSION": "18",
+                "CARD_ORCHESTRATOR_VERSION": "approved-rollback-sha",
+                "FOUNDRY_AGENT_NAME": "card-orchestrator",
+                "FOUNDRY_AGENT_VERSION": "17",
+                "FOUNDRY_AGENT_EXPECTED_VERSION": "failed-release-sha",
+            }
+        )
+    )
+    fake_azd = fake_bin / "azd"
+    fake_azd.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "import sys\n"
+        f"state_path = {str(state)!r}\n"
+        "values = json.loads(open(state_path).read())\n"
+        "if sys.argv[1:3] == ['env', 'get-value']:\n"
+        "    value = values.get(sys.argv[3])\n"
+        "    if value is None:\n"
+        "        raise SystemExit(1)\n"
+        "    print(value)\n"
+        "elif sys.argv[1:3] == ['env', 'set']:\n"
+        "    updates = dict(argument.split('=', 1) for argument in sys.argv[3:])\n"
+        "    values.update(updates)\n"
+        "    open(state_path, 'w').write(json.dumps(values))\n"
+        "else:\n"
+        "    raise SystemExit(2)\n"
+    )
+    fake_azd.chmod(0o755)
+
+    result = subprocess.run(
+        ["sh", str(script)],
+        capture_output=True,
+        text=True,
+        env={"PATH": f"{fake_bin}:/usr/bin:/bin"},
+    )
+    assert result.returncode == 0
+    updated_state = json.loads(state.read_text())
+    assert updated_state["FOUNDRY_AGENT_NAME"] == "card-orchestrator"
+    assert updated_state["FOUNDRY_AGENT_VERSION"] == "18"
+    assert updated_state["FOUNDRY_AGENT_EXPECTED_VERSION"] == "approved-rollback-sha"
+    assert "card-orchestrator" not in result.stdout
+    assert "approved-rollback-sha" not in result.stdout
+    assert "failed-release-sha" not in result.stderr
+    assert "approved-rollback-sha" not in result.stderr
+
+
+def test_agent_deployment_sync_hook_rejects_missing_platform_version(tmp_path: Path) -> None:
+    script = REPO_ROOT / "hooks" / "sync_agent_deployment.sh"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_azd = fake_bin / "azd"
+    fake_azd.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1 $2 $3" = "env get-value AGENT_CARD_ORCHESTRATOR_NAME" ]; then\n'
+        "  printf '%s\\n' card-orchestrator\n"
+        "fi\n"
+    )
+    fake_azd.chmod(0o755)
+
+    result = subprocess.run(
+        ["sh", str(script)],
+        capture_output=True,
+        text=True,
+        env={"PATH": f"{fake_bin}:/usr/bin:/bin"},
+    )
+
+    assert result.returncode == 1
+    assert "version" in result.stderr
+
+
+def test_agent_deployment_sync_hook_rejects_missing_artifact_before_env_change(
+    tmp_path: Path,
+) -> None:
+    script = REPO_ROOT / "hooks" / "sync_agent_deployment.sh"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    log = tmp_path / "azd.log"
+    fake_azd = fake_bin / "azd"
+    fake_azd.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1 $2 $3" = "env get-value AGENT_CARD_ORCHESTRATOR_NAME" ]; then\n'
+        "  printf '%s\\n' card-orchestrator\n"
+        'elif [ "$1 $2 $3" = "env get-value AGENT_CARD_ORCHESTRATOR_VERSION" ]; then\n'
+        "  printf '%s\\n' 18\n"
+        'elif [ "$1 $2" = "env set" ]; then\n'
+        f'  printf "%s\\n" "$*" > "{log}"\n'
+        "fi\n"
+    )
+    fake_azd.chmod(0o755)
+
+    result = subprocess.run(
+        ["sh", str(script)],
+        capture_output=True,
+        text=True,
+        env={"PATH": f"{fake_bin}:/usr/bin:/bin"},
+    )
+
+    assert result.returncode == 1
+    assert "CARD_ORCHESTRATOR_VERSION" in result.stderr
+    assert not log.exists()
 
 
 def test_card_orchestrator_lifecycle_guard_validates_prerequisites() -> None:
@@ -1328,6 +1579,12 @@ def test_deploy_script_exists_and_is_executable() -> None:
     script = REPO_ROOT / "deploy.sh"
     assert script.is_file()
     assert script.stat().st_mode & 0o111
+
+
+def test_deploy_script_sets_foundry_user_agent_for_every_azd_execution() -> None:
+    script = (REPO_ROOT / "deploy.sh").read_text()
+
+    assert script.count("AZURE_DEV_USER_AGENT=microsoft_foundry_skill") == 7
 
 
 @pytest.mark.parametrize("action", ["web", "agent", "full", "provision"])

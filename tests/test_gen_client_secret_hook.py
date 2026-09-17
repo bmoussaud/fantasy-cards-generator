@@ -77,6 +77,20 @@ def test_managed_registration_generates_and_stores_secret() -> None:
     assert "az login" not in result.stderr
 
 
+def test_existing_managed_secret_is_not_rotated_during_reprovision() -> None:
+    result = _run_hook(
+        'ENTRA_CLIENT_ID="managed-client-id"\n'
+        'ENTRA_CLIENT_SECRET="existing-secret"\n'
+        'ENTRA_APP_REGISTRATION_MANAGED="true"'
+    )
+
+    assert result.returncode == 0
+    assert "ENTRA_CLIENT_SECRET is already set" in result.stderr
+    assert "AZ_CREDENTIAL_RESET" not in result.stderr
+    assert "AZD_ENV_SET" not in result.stderr
+    assert "existing-secret" not in result.stdout + result.stderr
+
+
 @pytest.mark.parametrize("exit_code", [1, 2])
 def test_credential_failure_displays_login_command_without_storing_secret(exit_code: int) -> None:
     result = _run_hook(

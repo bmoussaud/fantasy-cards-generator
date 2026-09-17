@@ -195,16 +195,23 @@ def test_hosted_telemetry_uses_platform_agent_version(
     assert load_telemetry_settings().service_version == "42"
 
 
-def test_production_startup_fails_open_for_malformed_telemetry_configuration(
+def test_production_startup_fails_closed_for_malformed_telemetry_configuration(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     import runpy
 
-    from fastapi.testclient import TestClient
-
     malformed_value = f"invalid-{SENSITIVE_SENTINEL}"
     monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("AI_MODE", "live")
+    monkeypatch.setenv("PERSISTENCE_MODE", "memory")
+    monkeypatch.setenv("FOUNDRY_ENDPOINT", "https://foundry.example")
+    monkeypatch.setenv("FOUNDRY_IMAGE_DEPLOYMENT", "gpt-image-2")
+    monkeypatch.setenv(
+        "FOUNDRY_PROJECT_ENDPOINT",
+        "https://test.services.ai.azure.com/api/projects/test-project",
+    )
+    monkeypatch.setenv("FOUNDRY_AGENT_NAME", "card-orchestrator")
     monkeypatch.setenv("TELEMETRY_ENABLED", "true")
     monkeypatch.setenv(
         "APPLICATIONINSIGHTS_CONNECTION_STRING",
@@ -227,33 +234,11 @@ def test_production_startup_fails_open_for_malformed_telemetry_configuration(
     )
 
     with caplog.at_level(logging.WARNING, logger=telemetry.LOGGER_NAME):
-        namespace = runpy.run_path(str(REPO_ROOT / "app" / "entrypoint.py"))
+        with pytest.raises((SettingsError, ValueError)):
+            runpy.run_path(str(REPO_ROOT / "app" / "entrypoint.py"))
 
     assert telemetry.telemetry_enabled() is False
-    telemetry_messages = [
-        record.getMessage() for record in caplog.records if record.name == telemetry.LOGGER_NAME
-    ]
-    assert telemetry_messages == ["telemetry.configuration_failed"]
     assert malformed_value not in caplog.text
-    with TestClient(namespace["app"], base_url="https://testserver") as client:
-        response = client.get("/healthz")
-    assert response.status_code == 200
-    assert response.headers["cache-control"] == "no-store"
-    assert response.json() == {
-        "status": "ok",
-        "dependencies": {
-            "cosmos": {
-                "status": "not_applicable",
-                "durationMs": 0,
-                "errorCategory": "none",
-            },
-            "blob": {
-                "status": "not_applicable",
-                "durationMs": 0,
-                "errorCategory": "none",
-            },
-        },
-    }
 
 
 def test_configured_telemetry_passes_bounded_resource_and_sampling_settings(
@@ -744,3 +729,8 @@ def test_attribute_and_metric_dimensions_are_allowlisted_and_bounded(
     assert measurements
     assert all("app.request_id" not in dimensions for _, dimensions in measurements)
     assert all(SENSITIVE_SENTINEL not in repr(dimensions) for _, dimensions in measurements)
+
+
+def test_foundry_agent_dependency_identifier_is_allowlisted() -> None:
+    assert telemetry.normalize_dependency("foundry_agent") == "foundry_agent"
+    assert telemetry.normalize_dependency("foundry-agent") == "foundry_agent"

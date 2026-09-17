@@ -37,9 +37,14 @@ keeps dependency-aware `/healthz` checks bounded through IaC rather than portal 
 
 - `HEALTHZ_COSMOS_TIMEOUT_MS` and `HEALTHZ_BLOB_TIMEOUT_MS` are plain azd/Bicep
   parameters, both defaulting to `1500` ms and both overrideable per environment.
-- ACA probe cadence is already bounded in
-  [`modules/container-apps.bicep`](./modules/container-apps.bicep): startup every
-  5s until healthy, readiness every 10s, and liveness every 30s.
+- ACA startup and liveness call dependency-free `/livez`; startup allows up to
+  150 seconds for local process initialization without waiting on Foundry.
+  Readiness alone calls dependency-aware `/healthz` with a 100-second platform
+  timeout, exceeding the supported 90-second Foundry health-check maximum by
+  10 seconds of bounded request/handler overhead. The normal app default remains
+  70 seconds, and the overall request budget remains 225 seconds. An upstream
+  outage therefore removes the replica from traffic without causing a restart
+  loop. Startup checks every 5s, readiness every 10s, and liveness every 30s.
 - The app response contract keeps `Cache-Control: no-store`; do not add an
   external cache in front of `/healthz`, and do not tighten the probe interval
   below the existing ACA configuration unless RU / transaction impact is
@@ -67,7 +72,7 @@ string, or Cosmos keys.
 
 The root `azure.yaml` is the single operator entry point for both the `web-nat`
 Container App (port 8000) and the `card-orchestrator` Foundry hosted agent
-(port 8088). `azd up` targets **only** `web-nat`. Bare `azd deploy` is
+(port 8088). `azd up` performs the complete agent-first bootstrap. Bare `azd deploy` is
 **unsupported** for this manifest because azd 1.32 deploys all declared
 services by default and no verified root-hook context distinguishes bare from
 targeted deploys before service hooks run.
@@ -76,9 +81,10 @@ targeted deploys before service hooks run.
 
 Three layers keep hosted-agent deployment explicit:
 
-1. **`workflows.up`** — azd 1.32 supports overriding only the `up` workflow, so
-   root `azd up` provisions and deploys `web-nat` only. There is no supported
-   `workflows.deploy` override in azd 1.32.
+1. **`workflows.up`** — azd 1.32 supports overriding only the `up` workflow.
+   Root `azd up` provisions shared resources, deploys the hosted agent, runs a
+   second provision to inject the exact generated agent name/version, and then
+   deploys `web-nat`. There is no supported `workflows.deploy` override.
 2. **Service lifecycle hooks** — `hooks/guard_agent_deploy.sh` is registered as
    `prebuild`, `prepackage`, `prepublish`, and `predeploy` for
    `card-orchestrator`. These azd 1.32 service hooks run before the package →
@@ -87,31 +93,53 @@ Three layers keep hosted-agent deployment explicit:
 3. **Root orchestrator (`deploy.sh`)** — the documented production-safe entry
    point preserving `--approve-change` / `--approve-prod` enforcement gates.
 
-### Web-only workflow (default)
+### Clean environment bootstrap
 
 ```bash
-azd up                        # provision + deploy web-nat only
-azd deploy web-nat            # explicit web redeploy
-./deploy.sh web --approve-change
+azd env new dev
+azd env set AZURE_LOCATION eastus2
+azd env set CARD_ORCHESTRATOR_VERSION "$(git rev-parse HEAD)"
+azd env set CARD_ORCHESTRATOR_ENABLE_PREREQUISITES true
+azd env set CARD_ORCHESTRATOR_CREATE_REGISTRY_CONNECTION true
+azd up
 ```
 
-### Full deployment (explicit opt-in)
+The first provision uses the public placeholder image and omits both hosted-agent
+environment variables. Agent deployment then writes
+`AGENT_CARD_ORCHESTRATOR_NAME` and `AGENT_CARD_ORCHESTRATOR_VERSION`; the
+`postdeploy` hook validates and persists them as `FOUNDRY_AGENT_NAME` and
+`FOUNDRY_AGENT_VERSION` in the same azd transaction as the validated
+`CARD_ORCHESTRATOR_VERSION`, stored as `FOUNDRY_AGENT_EXPECTED_VERSION`. The
+second provision injects the complete triplet before the real web revision can
+become ready. Any partial triplet fails Bicep validation.
+Before every provision, `hooks/preserve_web_image.sh` reads the currently
+deployed Container App image and stores it as `CONTAINER_IMAGE`; the Bicep
+parameter consumes that exact value. Therefore repeat `azd provision` runs
+preserve the running web artifact. A clean environment has no deployed image,
+so the empty value intentionally selects the public bootstrap image until
+`azd deploy web-nat` completes the first deployment.
+The second provision reuses an existing `ENTRA_CLIENT_SECRET`; the
+postprovision hook creates one only when the managed registration has no stored
+secret. Clear that azd value only for an explicit, coordinated rotation.
+
+### Existing environment deployment
 
 ```bash
-# 1. Enable hosted-agent RBAC (if not already)
-azd env set ENABLE_FOUNDRY_AGENT_ACCESS true
-
-# 2. Enable card-orchestrator prerequisites (ACR pull, monitoring)
+# 1. Enable card-orchestrator deployment prerequisites (ACR pull, monitoring)
 azd env set CARD_ORCHESTRATOR_ENABLE_PREREQUISITES true
 
-# 3. Optionally create the registry connection
+# 2. Optionally create the registry connection
 azd env set CARD_ORCHESTRATOR_CREATE_REGISTRY_CONNECTION true
 
-# 4. Provision shared infrastructure
+# 3. Provision shared infrastructure, including mandatory agent RBAC
 azd provision
 
-# 5. Deploy card-orchestrator independently
+# 4. Deploy card-orchestrator; postdeploy stamps its exact name/version
 azd deploy card-orchestrator
+
+# 5. Re-provision the Container App configuration, then deploy web
+azd provision
+azd deploy web-nat
 ```
 
 Or via the root orchestrator with approval gates:
@@ -136,15 +164,14 @@ Do not use bare `azd deploy` with this manifest. Supported entrypoints are
 `./deploy.sh {web|agent|full|provision|preview}` and fully targeted
 `azd deploy <service-name>` commands.
 
-### Agent opt-in variables
+### Agent deployment variables
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `ENABLE_FOUNDRY_AGENT_ACCESS` | `false` | Foundry RBAC: project MI → Foundry User, ACA MI → Agent Consumer |
-| `CARD_ORCHESTRATOR_ENABLE_PREREQUISITES` | `false` | ACR pull for project MI, agent monitoring workbook/alerts; also the predeploy gate |
-| `CARD_ORCHESTRATOR_CREATE_REGISTRY_CONNECTION` | `false` | Foundry project → ACR registry connection |
+| `CARD_ORCHESTRATOR_VERSION` | none | Immutable application build identifier used for the agent image/tag |
+| `CARD_ORCHESTRATOR_ENABLE_PREREQUISITES` | `false` | Must be set to `true` before the first agent deployment |
+| `CARD_ORCHESTRATOR_CREATE_REGISTRY_CONNECTION` | `false` | Set to `true` for a fresh project so Foundry can pull from ACR |
 | `CARD_ORCHESTRATOR_ENABLE_AGENT_ALERTS` | `false` | Enable agent monitoring alert rules |
-| `AGENT_GENERATION_ENABLED` | `false` | Runtime: use agent path vs direct model path |
 
 ### Production approval — `deploy.sh`
 
@@ -195,6 +222,9 @@ Use the normal azd workflow:
 ```bash
 azd env new dev
 azd env set AZURE_LOCATION eastus2
+azd env set CARD_ORCHESTRATOR_VERSION "$(git rev-parse HEAD)"
+azd env set CARD_ORCHESTRATOR_ENABLE_PREREQUISITES true
+azd env set CARD_ORCHESTRATOR_CREATE_REGISTRY_CONNECTION true
 azd env set LEGACY_COSMOS_IP_RULE 20.10.253.231
 azd up
 ```
@@ -232,10 +262,10 @@ No new azd environment variable is required for the deployer principal ID: the
 template derives it directly from the authenticated deployment context via
 `deployer().objectId`.
 
-`FOUNDRY_ENDPOINT` remains the direct Azure AI Services account URL
-(`https://<account>.cognitiveservices.azure.com/`) used by the existing model
-deployment path. `FOUNDRY_PROJECT_ENDPOINT` is also injected into the Container
-App as non-secret configuration for future hosted-agent invocation, using the
+`FOUNDRY_ENDPOINT` remains the Azure AI Services account URL
+(`https://<account>.cognitiveservices.azure.com/`) used by image generation.
+`FOUNDRY_PROJECT_ENDPOINT` is injected into the Container App as required
+non-secret configuration for hosted-agent invocation, using the
 same project name that the Foundry module creates:
 `https://<account>.services.ai.azure.com/api/projects/<project>`. The root
 template resolves that project name once with
@@ -243,23 +273,10 @@ template resolves that project name once with
 value to both the module and the Container App config to avoid module-output
 cycles.
 
-Hosted-agent permissions are gated separately from endpoint injection. Set
-`ENABLE_FOUNDRY_AGENT_ACCESS=true` only when the deployed environment is ready to
-let runtime managed identities invoke hosted agents:
-
-```bash
-azd env set ENABLE_FOUNDRY_AGENT_ACCESS true
-```
-
-The default is `false`, preserving existing dev/prod access until explicit
-opt-in. This gate controls only the new hosted-agent RBAC assignments; it does
-not switch generation modes, create agents, deploy hosted runtimes, or remove
-the existing direct model path.
-
-Setting the gate back to `false` does not revoke assignments already created:
-incremental ARM deployments do not delete resources omitted by a condition.
-Permission revocation requires a separate, explicitly reviewed cleanup; this
-parameter is not a runtime kill switch.
+Hosted-agent permissions are mandatory. Provisioning grants the project
+identity Foundry User at account scope and the Container App identity Foundry
+Agent Consumer at project scope. There is no RBAC opt-in or runtime switch that
+can restore a direct card-text path.
 
 Provisioning grants the deployment caller only:
 
@@ -283,8 +300,7 @@ variables; the runtime identity does not read secret values from Key Vault.
 The deployer cannot create, replace, upload, overwrite, or delete Cosmos items
 or blobs through the reader roles.
 
-When `ENABLE_FOUNDRY_AGENT_ACCESS=true`, provisioning also grants only the
-additional hosted-agent permissions needed for future invoke-only access:
+Provisioning also grants the hosted-agent permissions needed for invoke-only access:
 
 - the Foundry project's system-assigned managed identity receives **Foundry
   User** at the Foundry account scope, matching Microsoft Foundry's project
@@ -326,7 +342,9 @@ before applying it. This avoids unrelated full-provision effects: the current
 `postprovision` hook creates a new Entra client credential only when Bicep
 explicitly reports that the deployment manages the registration, and
 provisioning without `containerImage` selects the bootstrap image. Normal
-full-environment orchestration remains `azd`.
+full-environment orchestration remains `azd`. Ordinary root provisioning runs
+the image-preservation hook first; only direct Bicep deployments that omit
+`containerImage` select the bootstrap image.
 
 Why the extra env var:
 
@@ -429,7 +447,7 @@ If the NAT Gateway public IP resource is ever replaced, Azure will allocate a
 different static address unless the same Public IP resource is preserved.
 Because Cosmos `ipRules` are wired from the NAT Gateway output, a subsequent
 `azd provision` will update the desired firewall rule automatically — but you
-must still smoke-test the app again before removing any fallback rules.
+must still smoke-test the app again before completing the network cutover.
 
 ## Entra redirect verification
 

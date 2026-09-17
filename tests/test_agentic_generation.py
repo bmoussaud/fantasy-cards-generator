@@ -1,43 +1,55 @@
-"""Tests for AGENT_GENERATION_ENABLED feature gate and FoundryAgentClient integration.
-
-Coverage:
-- Feature flag off: agent settings optional, no agent call occurs
-- Feature flag on: validation requires project endpoint and agent name
-- Agent success path: card and art prompt used directly
-- Agent retryable fallback: transient/routing_defer falls back to direct
-- Agent non-retryable failures: auth, policy, schema errors do not silently bypass
-- Fallback telemetry: agent.fallback and agent.invocation events emitted
-- Privacy: no owner ID, session, or tokens sent to agent
-- Post-text moderation still runs on agent card output
-- Image generation and persistence unchanged
-"""
+"""Agent-only card text generation contract tests."""
 
 from __future__ import annotations
 
+import asyncio
+from dataclasses import replace
+from typing import Any
+
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
 from app import generation as generation_module
-from app.foundry_agent_client import FoundryAgentInvocationResult
+from app.foundry_agent_client import FoundryAgentClient, FoundryAgentInvocationResult
 from app.generation import (
     AppServices,
+    AuthenticatedOwner,
+    CardGenerationService,
     GeneratedCardModel,
     InMemoryAssetStore,
     InMemoryAuditRepository,
     InMemoryCardRepository,
+    MockAgentClient,
     MockAIClient,
+    ModerationDecision,
+    StoredCard,
     create_services,
 )
+from app.health import DependencyHealthResult
 from app.main import create_app
+from app.problems import ProblemDetails
 from app.settings import SettingsError, load_app_settings
 from tests.conftest import FakeOAuthClient, begin_login, extract_hidden_value
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+
+class HealthyAgentProbe:
+    name = "agent"
+
+    async def check(self, timeout_seconds: float) -> DependencyHealthResult:
+        del timeout_seconds
+        return DependencyHealthResult("agent", "ok", 1)
 
 
-def _make_card_model() -> GeneratedCardModel:
+class FailingAgentProbe:
+    name = "agent"
+
+    async def check(self, timeout_seconds: float) -> DependencyHealthResult:
+        del timeout_seconds
+        return DependencyHealthResult("agent", "unauthorized", 1, "unauthorized")
+
+
+def _card(*, rules_text: str | None = None) -> GeneratedCardModel:
     return GeneratedCardModel(
         schemaVersion=1,
         name="Frost Warden",
@@ -46,1141 +58,883 @@ def _make_card_model() -> GeneratedCardModel:
         manaCost=4,
         attack=5,
         health=8,
-        rulesText="When played, freeze all enemy creatures until your next turn.",
+        rulesText=rules_text or "When played, freeze all enemy creatures until your next turn.",
         flavorText="Cold logic, colder blade.",
-        artBrief="A heavily armoured knight standing in a blizzard, dramatic lighting.",
+        artBrief="A heavily armoured knight standing in a blizzard.",
     )
 
 
-def _make_agent_success(
-    art_prompt: str = "Epic frost warden illustration in a blizzard, dramatic lighting.",
-) -> FoundryAgentInvocationResult:
+def _success(*, card: GeneratedCardModel | None = None) -> FoundryAgentInvocationResult:
     return FoundryAgentInvocationResult(
         status="completed",
         success=True,
         schema_valid=True,
-        response_id="resp-abc123",
-        request_id="req-xyz789",
+        response_id="response-123",
+        request_id="request-123",
         agent_version="1.0.0",
-        card=_make_card_model(),
-        art_prompt=art_prompt,
+        card=card or _card(),
+        art_prompt="Original frost guardian artwork in a blizzard.",
     )
 
 
-def _make_settings_with_agent_enabled(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("AGENT_GENERATION_ENABLED", "true")
+def _live_settings(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("APP_ENV", "test")
+    monkeypatch.setenv("PERSISTENCE_MODE", "memory")
+    monkeypatch.setenv("FOUNDRY_ENDPOINT", "https://foundry.example")
+    monkeypatch.setenv("FOUNDRY_IMAGE_DEPLOYMENT", "gpt-image-2")
     monkeypatch.setenv(
         "FOUNDRY_PROJECT_ENDPOINT",
         "https://test.services.ai.azure.com/api/projects/my-project",
     )
     monkeypatch.setenv("FOUNDRY_AGENT_NAME", "card-orchestrator")
+    monkeypatch.setenv("FOUNDRY_AGENT_VERSION", "1")
     return load_app_settings()
 
 
-def _build_services_with_agent(agent_client, *, monkeypatch: pytest.MonkeyPatch):
-    settings = _make_settings_with_agent_enabled(monkeypatch)
+def _services(
+    monkeypatch: pytest.MonkeyPatch,
+    agent_client: Any,
+    *,
+    ai_client: Any | None = None,
+    agent_probe: Any | None = None,
+) -> AppServices:
+    settings = _live_settings(monkeypatch)
     defaults = create_services(settings)
     return AppServices(
         settings=settings,
         card_repository=InMemoryCardRepository(),
         audit_repository=InMemoryAuditRepository(),
         asset_store=InMemoryAssetStore(),
-        ai_client=defaults.ai_client,
+        ai_client=ai_client or MockAIClient(settings),
         moderation_service=defaults.moderation_service,
         rate_limiter=defaults.rate_limiter,
         csrf_protector=defaults.csrf_protector,
+        cosmos_health_probe=defaults.cosmos_health_probe,
+        blob_health_probe=defaults.blob_health_probe,
         agent_client=agent_client,
+        agent_health_probe=agent_probe or HealthyAgentProbe(),
+        saved_photo_repository=defaults.saved_photo_repository,
+        profile_photo_import_state_repository=defaults.profile_photo_import_state_repository,
+        photo_asset_store=defaults.photo_asset_store,
+        photo_moderation_service=defaults.photo_moderation_service,
+        deletion_audit_repository=defaults.deletion_audit_repository,
     )
 
 
-def _agent_client(monkeypatch: pytest.MonkeyPatch, services: AppServices) -> TestClient:
-    """Return an authenticated TestClient wired to the given services."""
+def _client(monkeypatch: pytest.MonkeyPatch, services: AppServices) -> TestClient:
     import app.main as main_module
 
-    monkeypatch.setattr(main_module, "create_oauth_client", lambda s: FakeOAuthClient())
+    monkeypatch.setattr(main_module, "create_oauth_client", lambda settings: FakeOAuthClient())
     client = TestClient(create_app(services=services), base_url="https://testserver")
     begin_login(client)
     client.get("/auth/callback?code=valid-code&state=opaque", follow_redirects=False)
     return client
 
 
-# ---------------------------------------------------------------------------
-# Settings validation
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("agent_status", "expected_status", "expected_code"),
-    [
-        ("completed", 200, None),
-        ("policy_refusal", 422, "prompt_rejected"),
-        ("http_error", 502, "internal_error"),
-    ],
-)
-def test_ui_multipart_reaches_agent_and_preserves_error_semantics(
-    monkeypatch: pytest.MonkeyPatch,
-    agent_status: str,
-    expected_status: int,
-    expected_code: str | None,
-) -> None:
-    calls = []
-
-    class StubAgentClient:
-        async def invoke(self, query: str) -> FoundryAgentInvocationResult:
-            calls.append(query)
-            if agent_status == "completed":
-                return _make_agent_success()
-            return FoundryAgentInvocationResult(
-                status=agent_status,
-                error_code="refusal" if agent_status == "policy_refusal" else "http_422",
-            )
-
-    services = _build_services_with_agent(StubAgentClient(), monkeypatch=monkeypatch)
-    client = _agent_client(monkeypatch, services)
+def _generate(client: TestClient, *, key: str = "agent-only-test"):
     csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
-    prompt = "A moonlit guardian of the forest"
-    response = client.post(
-        "/ui/cards/generate",
-        files=[
-            ("prompt", (None, prompt)),
-            ("csrf_token", (None, csrf_token)),
-            ("idempotency_key", (None, "idem-ui-agent-contract")),
-            ("saved_photo_id", (None, "")),
-        ],
-        headers={"HX-Request": "true"},
+    return client.post(
+        "/api/v1/cards/generate",
+        json={
+            "prompt": "A safe original frost guardian hero with a silver shield",
+            "idempotencyKey": key,
+            "csrfToken": csrf_token,
+        },
     )
 
-    assert calls == [prompt]
-    assert response.status_code == expected_status
-    assert response.headers.get("X-Generation-Error") == expected_code
-    if agent_status == "completed":
-        assert "Frost Warden" in response.text
-        assert len(services.card_repository._records) == 1
-    else:
-        assert 'role="alert"' in response.text
-        assert prompt not in response.text
-        assert not services.card_repository._records
-        if agent_status == "policy_refusal":
-            assert "rejected by the generation agent policy" in response.text
-        else:
-            assert "non-retryable error" in response.text
+
+class StageModeration:
+    def __init__(self, refused_stage: str | None = None) -> None:
+        self.refused_stage = refused_stage
+        self.calls: list[str] = []
+
+    async def moderate_text(self, text: str, *, stage: str) -> ModerationDecision:
+        del text
+        self.calls.append(stage)
+        refused = stage == self.refused_stage
+        return ModerationDecision(
+            stage=stage,
+            allowed=not refused,
+            reasonCode="graphic-violence" if refused else "allowed",
+            details="bounded test decision",
+        )
+
+    async def moderate_image(self, image: Any) -> ModerationDecision:
+        del image
+        stage = "post_image"
+        self.calls.append(stage)
+        refused = stage == self.refused_stage
+        return ModerationDecision(
+            stage=stage,
+            allowed=not refused,
+            reasonCode="unsafe-generated-image" if refused else "allowed",
+            details="bounded test decision",
+        )
 
 
-def test_agent_generation_disabled_by_default() -> None:
-    settings = load_app_settings()
-    assert settings.agent_generation_enabled is False
+class RefusalPersistenceBombCardRepository(InMemoryCardRepository):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_on_mutation = True
+
+    async def reserve_document(self, **kwargs: Any):
+        if self.fail_on_mutation:
+            raise AssertionError("refusal must not reserve a card document")
+        return await super().reserve_document(**kwargs)
+
+    async def save(self, record: StoredCard) -> StoredCard:
+        if self.fail_on_mutation:
+            raise AssertionError("refusal must not save a card document")
+        return await super().save(record)
+
+    async def delete(self, owner_id: str, card_id: str) -> None:
+        del owner_id, card_id
+        raise RuntimeError("simulated Cosmos delete failure")
 
 
-def test_agent_generation_enabled_requires_project_endpoint(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("AGENT_GENERATION_ENABLED", "true")
+class RefusalPersistenceBombAuditRepository(InMemoryAuditRepository):
+    async def reserve_audit(self, **kwargs: Any):
+        del kwargs
+        raise AssertionError("refusal must not reserve an audit document")
+
+    async def save_audit(self, record: StoredCard) -> None:
+        del record
+        raise AssertionError("refusal must not save an audit document")
+
+    async def delete_audit(self, owner_id: str, card_id: str) -> None:
+        del owner_id, card_id
+        raise RuntimeError("simulated Cosmos audit delete failure")
+
+
+def test_live_mode_requires_agent_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("APP_ENV", "test")
+    monkeypatch.setenv("AI_MODE", "live")
+    monkeypatch.setenv("PERSISTENCE_MODE", "memory")
+    monkeypatch.setenv("FOUNDRY_ENDPOINT", "https://foundry.example")
+    monkeypatch.setenv("FOUNDRY_IMAGE_DEPLOYMENT", "gpt-image-2")
     monkeypatch.delenv("FOUNDRY_PROJECT_ENDPOINT", raising=False)
     monkeypatch.delenv("FOUNDRY_AGENT_NAME", raising=False)
+
     with pytest.raises(SettingsError, match="FOUNDRY_PROJECT_ENDPOINT"):
         load_app_settings()
 
-
-def test_agent_generation_enabled_requires_agent_name(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("AGENT_GENERATION_ENABLED", "true")
     monkeypatch.setenv(
         "FOUNDRY_PROJECT_ENDPOINT",
         "https://test.services.ai.azure.com/api/projects/my-project",
     )
-    monkeypatch.delenv("FOUNDRY_AGENT_NAME", raising=False)
     with pytest.raises(SettingsError, match="FOUNDRY_AGENT_NAME"):
         load_app_settings()
 
 
-def test_agent_generation_disabled_does_not_require_agent_config(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_agent_flag_cannot_disable_live_agent(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AGENT_GENERATION_ENABLED", "false")
-    monkeypatch.delenv("FOUNDRY_PROJECT_ENDPOINT", raising=False)
-    monkeypatch.delenv("FOUNDRY_AGENT_NAME", raising=False)
-    settings = load_app_settings()
-    assert settings.agent_generation_enabled is False
+    settings = _live_settings(monkeypatch)
 
-
-def test_agent_generation_enabled_with_all_required_config(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    settings = _make_settings_with_agent_enabled(monkeypatch)
-    assert settings.agent_generation_enabled is True
-    assert settings.foundry_project_endpoint is not None
-    assert settings.foundry_agent_name == "card-orchestrator"
-
-
-# ---------------------------------------------------------------------------
-# create_services: agent_client wiring
-# ---------------------------------------------------------------------------
-
-
-def test_create_services_no_agent_client_when_flag_off() -> None:
-    settings = load_app_settings()
     services = create_services(settings)
-    assert services.agent_client is None
+
+    assert services.agent_client is not None
+    assert services.agent_health_probe is not None
+    assert not hasattr(settings, "agent_generation_enabled")
 
 
-def test_create_services_no_agent_client_in_mock_mode(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("app_env", ["test", "development", "production"])
+def test_environment_cannot_select_mock_clients(
+    monkeypatch: pytest.MonkeyPatch, app_env: str
 ) -> None:
-    """Even with flag on, ai_mode=mock means no agent client (no Azure credentials needed)."""
-    monkeypatch.setenv("AGENT_GENERATION_ENABLED", "true")
-    monkeypatch.setenv(
-        "FOUNDRY_PROJECT_ENDPOINT",
-        "https://test.services.ai.azure.com/api/projects/my-project",
-    )
-    monkeypatch.setenv("FOUNDRY_AGENT_NAME", "card-orchestrator")
-    settings = load_app_settings()
-    assert settings.agent_generation_enabled is True
+    monkeypatch.setenv("APP_ENV", app_env)
+    monkeypatch.setenv("AI_MODE", "mock")
+
+    settings = _live_settings(monkeypatch)
     services = create_services(settings)
-    # ai_mode=mock: agent client not created (no credentials available)
-    assert services.agent_client is None
+
+    assert not hasattr(settings, "ai_mode")
+    assert not isinstance(services.ai_client, MockAIClient)
+    assert not isinstance(services.agent_client, MockAgentClient)
 
 
-# ---------------------------------------------------------------------------
-# Flag off: direct path, no agent call
-# ---------------------------------------------------------------------------
+def test_live_mode_requires_mandatory_telemetry(monkeypatch: pytest.MonkeyPatch) -> None:
+    _live_settings(monkeypatch)
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("TELEMETRY_ENABLED", "false")
+    monkeypatch.delenv("APPLICATIONINSIGHTS_CONNECTION_STRING", raising=False)
+
+    with pytest.raises(SettingsError, match="TELEMETRY_ENABLED=true"):
+        load_app_settings()
 
 
-def test_flag_off_does_not_invoke_agent_client(monkeypatch: pytest.MonkeyPatch) -> None:
-    """When AGENT_GENERATION_ENABLED=false, agent.invoke must never be called."""
-
-    class SpyAgentClient:
-        def __init__(self) -> None:
-            self.invoke_called = False
-
-        async def invoke(self, query: str) -> FoundryAgentInvocationResult:
-            self.invoke_called = True
-            raise AssertionError("invoke must not be called when flag is off")
-
-    settings = load_app_settings()
-    assert not settings.agent_generation_enabled
-
-    defaults = create_services(settings)
-    spy = SpyAgentClient()
-    services = AppServices(
-        settings=settings,
-        card_repository=InMemoryCardRepository(),
-        audit_repository=InMemoryAuditRepository(),
-        asset_store=InMemoryAssetStore(),
-        ai_client=defaults.ai_client,
-        moderation_service=defaults.moderation_service,
-        rate_limiter=defaults.rate_limiter,
-        csrf_protector=defaults.csrf_protector,
-        agent_client=spy,  # injected but must not be called
-    )
-    client = _agent_client(monkeypatch, services)
-    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
-
-    response = client.post(
-        "/api/v1/cards/generate",
-        json={
-            "prompt": "a safe fantasy knight with a sword and shield",
-            "idempotencyKey": "idem-flag-off-spy",
-            "csrfToken": csrf_token,
-        },
-    )
-
-    assert response.status_code == 200
-    assert response.json()["status"] == "completed"
-    assert not spy.invoke_called
-
-
-# ---------------------------------------------------------------------------
-# Agent success path
-# ---------------------------------------------------------------------------
-
-
-def test_agent_success_uses_agent_card_name(monkeypatch: pytest.MonkeyPatch) -> None:
-    """When the agent returns success, its card data is used in the response."""
-    agent_result = _make_agent_success()
-
-    class SuccessAgentClient:
-        async def invoke(self, query: str) -> FoundryAgentInvocationResult:
-            return agent_result
-
-    services = _build_services_with_agent(SuccessAgentClient(), monkeypatch=monkeypatch)
-    client = _agent_client(monkeypatch, services)
-    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
-
-    response = client.post(
-        "/api/v1/cards/generate",
-        json={
-            "prompt": "a safe frost warden hero with ice powers and shield",
-            "idempotencyKey": "idem-agent-ok",
-            "csrfToken": csrf_token,
-        },
-    )
-
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["status"] == "completed"
-    assert payload["name"] == "Frost Warden"
-
-
-def test_agent_art_prompt_used_for_image_generation(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The agent's artPrompt must reach image generation, not derive_art_prompt."""
-    specific_art_prompt = "UNIQUE_AGENT_ART_PROMPT_SENTINEL_VALUE_xyz987"
-    agent_result = _make_agent_success(art_prompt=specific_art_prompt)
-
-    received_art_prompts: list[str] = []
-
-    class TrackingMock(MockAIClient):
-        async def generate_image(self, art_prompt: str, **kwargs):
-            received_art_prompts.append(art_prompt)
-            return await super().generate_image(art_prompt, **kwargs)
-
-    class SuccessAgentClient:
-        async def invoke(self, query: str) -> FoundryAgentInvocationResult:
-            return agent_result
-
-    settings = _make_settings_with_agent_enabled(monkeypatch)
-    defaults = create_services(settings)
-    services = AppServices(
-        settings=settings,
-        card_repository=InMemoryCardRepository(),
-        audit_repository=InMemoryAuditRepository(),
-        asset_store=InMemoryAssetStore(),
-        ai_client=TrackingMock(settings),
-        moderation_service=defaults.moderation_service,
-        rate_limiter=defaults.rate_limiter,
-        csrf_protector=defaults.csrf_protector,
-        agent_client=SuccessAgentClient(),
-    )
-    client = _agent_client(monkeypatch, services)
-    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
-
-    response = client.post(
-        "/api/v1/cards/generate",
-        json={
-            "prompt": "a safe frost warden hero with ice powers long enough prompt",
-            "idempotencyKey": "idem-artprompt-pass",
-            "csrfToken": csrf_token,
-        },
-    )
-
-    assert response.status_code == 200
-    assert any(
-        specific_art_prompt in p for p in received_art_prompts
-    ), f"Agent art prompt not passed to image generation; got: {received_art_prompts}"
-
-
-# ---------------------------------------------------------------------------
-# Fallback: retryable and routing_defer
-# ---------------------------------------------------------------------------
-
-
-def test_retryable_agent_result_falls_back_to_direct(
+def test_agent_success_preserves_card_contract_image_and_persistence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A retryable agent failure falls back to the direct model path and succeeds."""
-    fallback_result = FoundryAgentInvocationResult(
-        status="transient_error",
-        retryable=True,
-        error_code="timeout",
-        message="Agent timed out.",
-    )
+    calls: list[str] = []
 
-    class RetryableAgentClient:
+    class Agent:
         async def invoke(self, query: str) -> FoundryAgentInvocationResult:
-            return fallback_result
+            calls.append(query)
+            return _success()
 
-    services = _build_services_with_agent(RetryableAgentClient(), monkeypatch=monkeypatch)
-    client = _agent_client(monkeypatch, services)
-    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
-
-    response = client.post(
-        "/api/v1/cards/generate",
-        json={
-            "prompt": "a safe retryable fallback card hero knight",
-            "idempotencyKey": "idem-retry-fallback",
-            "csrfToken": csrf_token,
-        },
-    )
+    services = _services(monkeypatch, Agent())
+    response = _generate(_client(monkeypatch, services))
 
     assert response.status_code == 200
-    assert response.json()["status"] in ("completed", "awaiting_artwork_retry")
+    assert response.json() == {
+        "schemaVersion": 1,
+        "cardId": response.json()["cardId"],
+        "status": "completed",
+        "requestId": response.json()["requestId"],
+        "idempotencyKey": "agent-only-test",
+        "ownerId": response.json()["ownerId"],
+        "name": "Frost Warden",
+        "cardType": "hero",
+        "rarity": "rare",
+        "manaCost": 4,
+        "attack": 5,
+        "health": 8,
+        "rulesText": "When played, freeze all enemy creatures until your next turn.",
+        "flavorText": "Cold logic, colder blade.",
+        "imageUrl": f"/cards/{response.json()['cardId']}/image",
+        "actions": [],
+    }
+    assert calls == ["A safe original frost guardian hero with a silver shield"]
+    assert len(services.card_repository._records) == 1
+    assert len(services.asset_store._assets) == 1
 
 
-def test_routing_defer_agent_result_falls_back_to_direct(
+@pytest.mark.parametrize(
+    ("result", "status_code", "error_code"),
+    [
+        (
+            FoundryAgentInvocationResult(
+                status="transient_error", retryable=True, error_code="timeout"
+            ),
+            504,
+            "upstream_timeout",
+        ),
+        (
+            FoundryAgentInvocationResult(
+                status="transient_error", retryable=True, error_code="rate_limited"
+            ),
+            503,
+            "agent_unavailable",
+        ),
+        (
+            FoundryAgentInvocationResult(
+                status="routing_defer", schema_valid=True, error_code="agent_routing_defer"
+            ),
+            503,
+            "agent_unavailable",
+        ),
+        (
+            FoundryAgentInvocationResult(status="auth_error", error_code="credential_unavailable"),
+            503,
+            "configuration_error",
+        ),
+        (
+            FoundryAgentInvocationResult(
+                status="configuration_error", error_code="invalid_configuration"
+            ),
+            503,
+            "configuration_error",
+        ),
+        (
+            FoundryAgentInvocationResult(
+                status="invalid_response", error_code="schema_validation_failed"
+            ),
+            502,
+            "invalid_model_output",
+        ),
+        (
+            FoundryAgentInvocationResult(
+                status="failed",
+                error_code="card_runtime_failure",
+                runtime_failure_stage="concept",
+                runtime_failure_reason="timeout",
+                runtime_http_type="api_status",
+                runtime_http_status="http_504",
+            ),
+            504,
+            "upstream_timeout",
+        ),
+        (
+            FoundryAgentInvocationResult(
+                status="failed",
+                error_code="card_runtime_failure",
+                runtime_failure_stage="lore",
+                runtime_failure_reason="rate_limited",
+                runtime_http_type="rate_limit",
+                runtime_http_status="http_429",
+            ),
+            503,
+            "agent_unavailable",
+        ),
+        (
+            FoundryAgentInvocationResult(
+                status="failed",
+                error_code="card_runtime_failure",
+                runtime_failure_stage="specialist_setup",
+                runtime_failure_reason="authorization",
+                runtime_http_type="permission_denied",
+                runtime_http_status="http_403",
+            ),
+            503,
+            "configuration_error",
+        ),
+        (
+            FoundryAgentInvocationResult(
+                status="failed",
+                error_code="card_runtime_failure",
+                runtime_failure_stage="orchestration",
+                runtime_failure_reason="invalid_response",
+                runtime_http_type="none",
+                runtime_http_status="none",
+            ),
+            502,
+            "invalid_model_output",
+        ),
+    ],
+)
+def test_agent_failures_are_structured_and_never_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    result: FoundryAgentInvocationResult,
+    status_code: int,
+    error_code: str,
+) -> None:
+    direct_calls = 0
+
+    class NoDirectTextClient(MockAIClient):
+        async def generate_card(self, prompt: str, *, request_id: str):
+            nonlocal direct_calls
+            direct_calls += 1
+            raise AssertionError("legacy direct text generation must never run")
+
+    class Agent:
+        async def invoke(self, query: str) -> FoundryAgentInvocationResult:
+            return result
+
+    settings = _live_settings(monkeypatch)
+    services = _services(
+        monkeypatch,
+        Agent(),
+        ai_client=NoDirectTextClient(settings),
+    )
+    response = _generate(_client(monkeypatch, services), key=f"failure-{status_code}-{error_code}")
+
+    assert response.status_code == status_code
+    assert response.json()["errorCode"] == error_code
+    assert direct_calls == 0
+    assert not services.card_repository._records
+    assert not services.asset_store._assets
+    assert len(services.audit_repository._records) == 1
+    assert "silver shield" not in response.text
+
+
+def test_hosted_agent_http_408_returns_public_upstream_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    defer_result = FoundryAgentInvocationResult(
-        status="routing_defer",
-        retryable=False,
-        schema_valid=True,
-        error_code="agent_routing_defer",
-        message="Agent deferred routing.",
+    class Credential:
+        def get_token(self, *scopes: str) -> str:
+            del scopes
+            return "fake-token"
+
+    settings = _live_settings(monkeypatch)
+    agent = FoundryAgentClient(
+        settings,
+        credential=Credential(),
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                408,
+                json={"error": {"code": "request_timeout"}},
+                request=request,
+            )
+        ),
     )
+    services = _services(monkeypatch, agent)
 
-    class DeferAgentClient:
+    with _client(monkeypatch, services) as client:
+        response = _generate(client, key="hosted-http-408")
+
+    assert response.status_code == 504
+    assert response.json()["errorCode"] == "upstream_timeout"
+    assert not services.card_repository._records
+    assert not services.asset_store._assets
+
+
+def test_input_moderation_refusal_persists_nothing_and_stops_before_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    class Agent:
         async def invoke(self, query: str) -> FoundryAgentInvocationResult:
-            return defer_result
+            nonlocal calls
+            calls += 1
+            return _success()
 
-    services = _build_services_with_agent(DeferAgentClient(), monkeypatch=monkeypatch)
-    client = _agent_client(monkeypatch, services)
+    services = _services(monkeypatch, Agent())
+    moderation = StageModeration("pre_prompt")
+    services.moderation_service = moderation
+    client = _client(monkeypatch, services)
     csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
-
     response = client.post(
         "/api/v1/cards/generate",
         json={
-            "prompt": "a safe routing defer fallback card wizard hero",
-            "idempotencyKey": "idem-routing-defer",
-            "csrfToken": csrf_token,
-        },
-    )
-
-    assert response.status_code == 200
-    assert response.json()["status"] in ("completed", "awaiting_artwork_retry")
-
-
-# ---------------------------------------------------------------------------
-# Non-retryable failures must not silently bypass the agent
-# ---------------------------------------------------------------------------
-
-
-def test_auth_error_agent_result_returns_503(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Auth error from agent must return 503, not silently fall back to direct."""
-    auth_error = FoundryAgentInvocationResult(
-        status="auth_error",
-        retryable=False,
-        error_code="credential_unavailable",
-        message="No token.",
-    )
-
-    class AuthErrorAgentClient:
-        async def invoke(self, query: str) -> FoundryAgentInvocationResult:
-            return auth_error
-
-    services = _build_services_with_agent(AuthErrorAgentClient(), monkeypatch=monkeypatch)
-    client = _agent_client(monkeypatch, services)
-    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
-
-    response = client.post(
-        "/api/v1/cards/generate",
-        json={
-            "prompt": "a safe auth error card test hero knight",
-            "idempotencyKey": "idem-auth-error",
-            "csrfToken": csrf_token,
-        },
-    )
-
-    assert response.status_code == 503
-    assert response.json()["errorCode"] == "agent_unavailable"
-
-
-def test_policy_refusal_agent_result_returns_422(monkeypatch: pytest.MonkeyPatch) -> None:
-    policy_refusal = FoundryAgentInvocationResult(
-        status="policy_refusal",
-        retryable=False,
-        error_code="refusal",
-        message="Agent refused.",
-    )
-
-    class PolicyRefusalAgentClient:
-        async def invoke(self, query: str) -> FoundryAgentInvocationResult:
-            return policy_refusal
-
-    services = _build_services_with_agent(PolicyRefusalAgentClient(), monkeypatch=monkeypatch)
-    client = _agent_client(monkeypatch, services)
-    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
-
-    response = client.post(
-        "/api/v1/cards/generate",
-        json={
-            "prompt": "a safe policy refusal test hero knight long enough",
-            "idempotencyKey": "idem-policy-refusal",
+            "prompt": "Create graphic gore in the style of a living artist",
+            "idempotencyKey": "input-moderation",
             "csrfToken": csrf_token,
         },
     )
 
     assert response.status_code == 422
     assert response.json()["errorCode"] == "prompt_rejected"
+    assert calls == 0
+    assert moderation.calls == ["pre_prompt"]
+    assert not services.card_repository._records
+    assert not services.audit_repository._records
+    assert not services.asset_store._assets
 
 
-def test_schema_validation_failure_returns_502(monkeypatch: pytest.MonkeyPatch) -> None:
-    schema_fail = FoundryAgentInvocationResult(
-        status="invalid_response",
-        retryable=False,
-        schema_valid=False,
-        error_code="schema_validation_failed",
-        message="Invalid schema.",
-    )
-
-    class SchemaFailAgentClient:
-        async def invoke(self, query: str) -> FoundryAgentInvocationResult:
-            return schema_fail
-
-    services = _build_services_with_agent(SchemaFailAgentClient(), monkeypatch=monkeypatch)
-    client = _agent_client(monkeypatch, services)
-    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
-
-    response = client.post(
-        "/api/v1/cards/generate",
-        json={
-            "prompt": "a safe schema fail test hero card knight",
-            "idempotencyKey": "idem-schema-fail",
-            "csrfToken": csrf_token,
-        },
-    )
-
-    assert response.status_code == 502
-
-
-def test_configuration_error_returns_503(monkeypatch: pytest.MonkeyPatch) -> None:
-    config_error = FoundryAgentInvocationResult(
-        status="configuration_error",
-        retryable=False,
-        error_code="invalid_configuration",
-        message="Config error.",
-    )
-
-    class ConfigErrorAgentClient:
-        async def invoke(self, query: str) -> FoundryAgentInvocationResult:
-            return config_error
-
-    services = _build_services_with_agent(ConfigErrorAgentClient(), monkeypatch=monkeypatch)
-    client = _agent_client(monkeypatch, services)
-    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
-
-    response = client.post(
-        "/api/v1/cards/generate",
-        json={
-            "prompt": "a safe config error test card hero knight",
-            "idempotencyKey": "idem-config-err",
-            "csrfToken": csrf_token,
-        },
-    )
-
-    assert response.status_code == 503
-
-
-# ---------------------------------------------------------------------------
-# Pre-moderation still runs before agent invocation
-# ---------------------------------------------------------------------------
-
-
-def test_pre_moderation_blocks_before_agent_is_called(
+def test_output_moderation_refusal_persists_nothing_and_stops_before_image(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Pre-prompt moderation must fire before the agent; blocked prompts never reach agent."""
+    image_calls = 0
 
-    class UnreachableAgentClient:
+    class ImageSpy(MockAIClient):
+        async def generate_image(self, art_prompt: str, **kwargs: Any):
+            nonlocal image_calls
+            image_calls += 1
+            return await super().generate_image(art_prompt, **kwargs)
+
+    class Agent:
+        async def invoke(self, query: str) -> FoundryAgentInvocationResult:
+            return _success()
+
+    settings = _live_settings(monkeypatch)
+    services = _services(monkeypatch, Agent(), ai_client=ImageSpy(settings))
+    moderation = StageModeration("post_text")
+    services.moderation_service = moderation
+    response = _generate(_client(monkeypatch, services), key="output-moderation")
+
+    assert response.status_code == 422
+    assert response.json()["errorCode"] == "generated_text_rejected"
+    assert image_calls == 0
+    assert moderation.calls == ["pre_prompt", "post_text"]
+    assert not services.card_repository._records
+    assert not services.audit_repository._records
+    assert not services.asset_store._assets
+
+
+def test_art_prompt_moderation_refusal_persists_nothing_and_stops_before_image(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image_calls = 0
+
+    class ImageSpy(MockAIClient):
+        async def generate_image(self, art_prompt: str, **kwargs: Any):
+            nonlocal image_calls
+            image_calls += 1
+            return await super().generate_image(art_prompt, **kwargs)
+
+    class Agent:
+        async def invoke(self, query: str) -> FoundryAgentInvocationResult:
+            return _success()
+
+    settings = _live_settings(monkeypatch)
+    services = _services(monkeypatch, Agent(), ai_client=ImageSpy(settings))
+    moderation = StageModeration("post_art_prompt")
+    services.moderation_service = moderation
+    response = _generate(_client(monkeypatch, services), key="art-prompt-moderation")
+
+    assert response.status_code == 422
+    assert response.json()["errorCode"] == "generated_art_rejected"
+    assert image_calls == 0
+    assert moderation.calls == ["pre_prompt", "post_text", "post_art_prompt"]
+    assert not services.card_repository._records
+    assert not services.audit_repository._records
+    assert not services.asset_store._assets
+
+
+def test_agent_policy_refusal_persists_nothing_and_stops_before_output_moderation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image_calls = 0
+
+    class ImageSpy(MockAIClient):
+        async def generate_image(self, art_prompt: str, **kwargs: Any):
+            nonlocal image_calls
+            image_calls += 1
+            return await super().generate_image(art_prompt, **kwargs)
+
+    class Agent:
+        async def invoke(self, query: str) -> FoundryAgentInvocationResult:
+            return FoundryAgentInvocationResult(
+                status="refused",
+                schema_valid=True,
+                error_code="agent_refused",
+            )
+
+    settings = _live_settings(monkeypatch)
+    services = _services(monkeypatch, Agent(), ai_client=ImageSpy(settings))
+    moderation = StageModeration()
+    services.moderation_service = moderation
+    response = _generate(_client(monkeypatch, services), key="agent-refused")
+
+    assert response.status_code == 422
+    assert response.json()["errorCode"] == "prompt_rejected"
+    assert image_calls == 0
+    assert moderation.calls == ["pre_prompt"]
+    assert not services.card_repository._records
+    assert not services.audit_repository._records
+    assert not services.asset_store._assets
+
+
+def test_image_moderation_refusal_persists_nothing_and_stops_before_persistence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image_calls = 0
+
+    class ImageSpy(MockAIClient):
+        async def generate_image(self, art_prompt: str, **kwargs: Any):
+            nonlocal image_calls
+            image_calls += 1
+            return await super().generate_image(art_prompt, **kwargs)
+
+    class Agent:
+        async def invoke(self, query: str) -> FoundryAgentInvocationResult:
+            return _success()
+
+    settings = _live_settings(monkeypatch)
+    services = _services(monkeypatch, Agent(), ai_client=ImageSpy(settings))
+    moderation = StageModeration("post_image")
+    services.moderation_service = moderation
+    response = _generate(_client(monkeypatch, services), key="image-moderation")
+
+    assert response.status_code == 422
+    assert response.json()["errorCode"] == "generated_art_rejected"
+    assert image_calls == 1
+    assert moderation.calls == [
+        "pre_prompt",
+        "post_text",
+        "post_art_prompt",
+        "post_image",
+    ]
+    assert not services.card_repository._records
+    assert not services.audit_repository._records
+    assert not services.asset_store._assets
+
+
+@pytest.mark.parametrize(
+    ("refusal_point", "expected_error"),
+    [
+        ("pre_prompt", "prompt_rejected"),
+        ("agent", "prompt_rejected"),
+        ("post_text", "generated_text_rejected"),
+        ("post_art_prompt", "generated_art_rejected"),
+        ("post_image", "generated_art_rejected"),
+    ],
+)
+def test_refusal_never_requires_repository_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    refusal_point: str,
+    expected_error: str,
+) -> None:
+    class Agent:
+        async def invoke(self, query: str) -> FoundryAgentInvocationResult:
+            del query
+            if refusal_point == "agent":
+                return FoundryAgentInvocationResult(
+                    status="refused",
+                    schema_valid=True,
+                    error_code="agent_refused",
+                )
+            return _success()
+
+    services = _services(monkeypatch, Agent())
+    services.card_repository = RefusalPersistenceBombCardRepository()
+    services.audit_repository = RefusalPersistenceBombAuditRepository()
+    services.moderation_service = StageModeration(
+        None if refusal_point == "agent" else refusal_point
+    )
+
+    response = _generate(
+        _client(monkeypatch, services),
+        key=f"repository-bomb-{refusal_point}",
+    )
+
+    assert response.status_code == 422
+    assert response.json()["errorCode"] == expected_error
+    assert not services.card_repository._records
+    assert not services.audit_repository._records
+    assert not services.asset_store._assets
+
+
+def test_artwork_retry_moderation_refusal_preserves_safe_partial_without_retry_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Agent:
+        async def invoke(self, query: str) -> FoundryAgentInvocationResult:
+            return _success()
+
+    services = _services(monkeypatch, Agent())
+    card_repository = RefusalPersistenceBombCardRepository()
+    card_repository.fail_on_mutation = False
+    services.card_repository = card_repository
+    services.audit_repository = RefusalPersistenceBombAuditRepository()
+    moderation = StageModeration("post_image")
+    services.moderation_service = moderation
+    owner = AuthenticatedOwner(
+        owner_id="tenant:object",
+        tenant_id="tenant",
+        object_id="object",
+        subject="subject",
+        display_name=None,
+        email=None,
+    )
+    record = StoredCard(
+        id="partial-card",
+        document_type="card",
+        owner_id=owner.owner_id,
+        request_id="initial-request",
+        idempotency_key="initial-key",
+        request_hash="initial-hash",
+        status="awaiting_artwork_retry",
+        validated_payload=_card().model_dump(),
+        derived_art_prompt="Safe original fantasy artwork.",
+        moderation=[],
+        image_quality="low",
+    )
+    asyncio.run(services.card_repository.save(record))
+    card_repository.fail_on_mutation = True
+
+    with pytest.raises(ProblemDetails) as raised:
+        asyncio.run(
+            CardGenerationService(services).retry_artwork(
+                owner=owner,
+                card_id=record.id,
+                idempotency_key="retry-key",
+                request_id="retry-request",
+                client_ip="127.0.0.1",
+            )
+        )
+
+    assert raised.value.status_code == 422
+    assert raised.value.error_code == "generated_art_rejected"
+    assert moderation.calls == ["post_image"]
+    persisted = asyncio.run(services.card_repository.get(owner.owner_id, record.id))
+    assert persisted is record
+    assert persisted.status == "awaiting_artwork_retry"
+    assert not services.audit_repository._records
+    assert not services.asset_store._assets
+
+
+def test_concurrent_duplicate_refusals_share_bounded_in_memory_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class BlockingRefusalAgent:
         def __init__(self) -> None:
-            self.called = False
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+            self.calls = 0
 
         async def invoke(self, query: str) -> FoundryAgentInvocationResult:
-            self.called = True
-            raise AssertionError("invoke must not be called on a moderation-blocked prompt")
+            del query
+            self.calls += 1
+            self.started.set()
+            await self.release.wait()
+            return FoundryAgentInvocationResult(
+                status="refused",
+                schema_valid=True,
+                error_code="agent_refused",
+            )
 
-    spy = UnreachableAgentClient()
-    services = _build_services_with_agent(spy, monkeypatch=monkeypatch)
-    client = _agent_client(monkeypatch, services)
-    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
-
-    response = client.post(
-        "/api/v1/cards/generate",
-        json={
-            # Triggers HeuristicModerationService (living-artist-imitation)
-            "prompt": "create a card in the style of a living artist today",
-            "idempotencyKey": "idem-premod-block",
-            "csrfToken": csrf_token,
-        },
-    )
-
-    assert response.status_code == 422
-    assert not spy.called
-
-
-# ---------------------------------------------------------------------------
-# Post-text moderation still runs on agent card output
-# ---------------------------------------------------------------------------
-
-
-def test_post_text_moderation_applies_to_agent_output(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Post-text moderation must run on the agent-generated card text and can block it."""
-    bad_card = GeneratedCardModel(
-        schemaVersion=1,
-        name="Bad Card",
-        cardType="spell",
-        rarity="common",
-        manaCost=1,
-        attack=1,
-        health=1,
-        # Triggers heuristic moderation: "in the style of" a living artist
-        rulesText="In the style of a living artist with graphic gore effects applied.",
-        flavorText="Flavor text.",
-        artBrief="Art brief with enough characters here to pass length validation properly.",
-    )
-    bad_agent_result = FoundryAgentInvocationResult(
-        status="completed",
-        success=True,
-        schema_valid=True,
-        card=bad_card,
-        art_prompt="Some valid art prompt for the image generation system endpoint.",
-    )
-
-    class BadContentAgentClient:
-        async def invoke(self, query: str) -> FoundryAgentInvocationResult:
-            return bad_agent_result
-
-    services = _build_services_with_agent(BadContentAgentClient(), monkeypatch=monkeypatch)
-    client = _agent_client(monkeypatch, services)
-    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
-
-    response = client.post(
-        "/api/v1/cards/generate",
-        json={
-            "prompt": "a safe post text moderation integration test here",
-            "idempotencyKey": "idem-post-text-mod",
-            "csrfToken": csrf_token,
-        },
-    )
-
-    assert response.status_code == 422
-
-
-# ---------------------------------------------------------------------------
-# Privacy: no owner ID or session data sent to agent
-# ---------------------------------------------------------------------------
-
-
-def test_agent_invoke_receives_only_prompt_no_owner_data(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The agent.invoke call must receive only the prompt text, not owner/session data."""
-    agent_result = _make_agent_success()
-    received_queries: list[str] = []
-
-    class PrivacySpyClient:
-        async def invoke(self, query: str) -> FoundryAgentInvocationResult:
-            received_queries.append(query)
-            return agent_result
-
-    services = _build_services_with_agent(PrivacySpyClient(), monkeypatch=monkeypatch)
-    client = _agent_client(monkeypatch, services)
-    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
-
-    response = client.post(
-        "/api/v1/cards/generate",
-        json={
-            "prompt": "a safe privacy check test card with a frost warden",
-            "idempotencyKey": "idem-privacy-check",
-            "csrfToken": csrf_token,
-        },
-    )
-
-    assert response.status_code == 200
-    assert len(received_queries) == 1
-    query = received_queries[0]
-    # The query must be the prompt and must not include session or owner identifiers
-    assert "privacy check test card" in query
-    # Must not leak internal IDs (owner_id format is "tenant:object")
-    assert ":" not in query or "frost" in query  # colons only from card text, not IDs
-
-
-# ---------------------------------------------------------------------------
-# Fallback telemetry emitted correctly
-# ---------------------------------------------------------------------------
-
-
-def test_agent_fallback_emits_telemetry_events(monkeypatch: pytest.MonkeyPatch) -> None:
-    """On retryable fallback, both agent.invocation and agent.fallback events must be emitted."""
-    retryable = FoundryAgentInvocationResult(
-        status="transient_error",
-        retryable=True,
-        error_code="timeout",
-        message="Timed out.",
-    )
-
-    class FallbackAgentClient:
-        async def invoke(self, query: str) -> FoundryAgentInvocationResult:
-            return retryable
-
-    emitted_events: list[str] = []
-    original_add_event = generation_module.add_event
-
-    def spy_add_event(name: str, attributes=None) -> None:
-        emitted_events.append(name)
-        original_add_event(name, attributes)
-
-    monkeypatch.setattr(generation_module, "add_event", spy_add_event)
-
-    services = _build_services_with_agent(FallbackAgentClient(), monkeypatch=monkeypatch)
-    client = _agent_client(monkeypatch, services)
-    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
-
-    response = client.post(
-        "/api/v1/cards/generate",
-        json={
-            "prompt": "a safe telemetry fallback test card hero knight",
-            "idempotencyKey": "idem-telemetry-fb",
-            "csrfToken": csrf_token,
-        },
-    )
-
-    assert response.status_code == 200
-    assert "agent.invocation" in emitted_events, f"Missing agent.invocation in {emitted_events}"
-    assert "agent.fallback" in emitted_events, f"Missing agent.fallback in {emitted_events}"
-
-
-def test_agent_success_emits_invocation_event_not_fallback(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """On agent success, agent.invocation is emitted but NOT agent.fallback."""
-    agent_result = _make_agent_success()
-
-    class SuccessAgentClient:
-        async def invoke(self, query: str) -> FoundryAgentInvocationResult:
-            return agent_result
-
-    emitted_events: list[str] = []
-    original_add_event = generation_module.add_event
-
-    def spy_add_event(name: str, attributes=None) -> None:
-        emitted_events.append(name)
-        original_add_event(name, attributes)
-
-    monkeypatch.setattr(generation_module, "add_event", spy_add_event)
-
-    services = _build_services_with_agent(SuccessAgentClient(), monkeypatch=monkeypatch)
-    client = _agent_client(monkeypatch, services)
-    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
-
-    response = client.post(
-        "/api/v1/cards/generate",
-        json={
-            "prompt": "a safe agent success telemetry test card hero",
-            "idempotencyKey": "idem-telemetry-ok",
-            "csrfToken": csrf_token,
-        },
-    )
-
-    assert response.status_code == 200
-    assert "agent.invocation" in emitted_events
-    assert "agent.fallback" not in emitted_events
-
-
-# ---------------------------------------------------------------------------
-# fcg.generation.requests path dimension
-# ---------------------------------------------------------------------------
-
-
-def test_set_generation_path_is_exported_from_telemetry() -> None:
-    """set_generation_path must be importable and callable without error."""
-    from app.telemetry import set_generation_path
-
-    # Should not raise; unknown value is normalized to 'direct'
-    set_generation_path("agent")
-    set_generation_path("direct")
-    set_generation_path("agent_fallback")
-    set_generation_path("unknown_value")  # normalized to 'direct'
-
-
-def test_generation_path_dimension_in_metric_on_agent_success(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """When agent succeeds, _record_generation must receive path='agent' dimension."""
-    from app import telemetry as telemetry_module
-
-    agent_result = _make_agent_success()
-
-    class SuccessAgentClient:
-        async def invoke(self, query: str) -> FoundryAgentInvocationResult:
-            return agent_result
-
-    recorded_metric_attributes: list[dict] = []
-    original_record = telemetry_module._record_generation
-
-    def spy_record(operation, outcome, duration_ms, agent_version=None):
-        # Capture what _record_generation sees from the context var
-        path = telemetry_module._generation_path_var.get()
-        recorded_metric_attributes.append(
-            {"operation": operation, "outcome": outcome, "path": path}
+    async def scenario() -> tuple[list[BaseException], int]:
+        agent = BlockingRefusalAgent()
+        services = _services(monkeypatch, agent)
+        services.card_repository = RefusalPersistenceBombCardRepository()
+        services.audit_repository = RefusalPersistenceBombAuditRepository()
+        service = CardGenerationService(services)
+        owner = AuthenticatedOwner(
+            owner_id="tenant:object",
+            tenant_id="tenant",
+            object_id="object",
+            subject="subject",
+            display_name=None,
+            email=None,
         )
-        original_record(operation, outcome, duration_ms, agent_version)
-
-    monkeypatch.setattr(telemetry_module, "_record_generation", spy_record)
-
-    services = _build_services_with_agent(SuccessAgentClient(), monkeypatch=monkeypatch)
-    client = _agent_client(monkeypatch, services)
-    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
-
-    response = client.post(
-        "/api/v1/cards/generate",
-        json={
-            "prompt": "a safe metric dimension test card hero generation",
-            "idempotencyKey": "idem-metric-dim-agent",
-            "csrfToken": csrf_token,
-        },
-    )
-
-    assert response.status_code == 200
-    generate_recordings = [r for r in recorded_metric_attributes if r["operation"] == "generate"]
-    assert generate_recordings, "Expected at least one generate recording"
-    assert any(
-        r["path"] == "agent" for r in generate_recordings
-    ), f"Expected path='agent' in metric dimensions; got: {generate_recordings}"
-
-
-def test_generation_path_dimension_in_metric_on_direct_path(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """When flag is off (direct path), _record_generation must receive path='direct'."""
-    from app import telemetry as telemetry_module
-
-    recorded_metric_attributes: list[dict] = []
-    original_record = telemetry_module._record_generation
-
-    def spy_record(operation, outcome, duration_ms, agent_version=None):
-        path = telemetry_module._generation_path_var.get()
-        recorded_metric_attributes.append(
-            {"operation": operation, "outcome": outcome, "path": path}
+        first = asyncio.create_task(
+            service.generate_card(
+                owner=owner,
+                prompt="A safe original frost guardian hero with a silver shield",
+                idempotency_key="concurrent-refusal",
+                request_id="request-one",
+                client_ip="127.0.0.1",
+            )
         )
-        original_record(operation, outcome, duration_ms, agent_version)
-
-    monkeypatch.setattr(telemetry_module, "_record_generation", spy_record)
-
-    settings = load_app_settings()
-    services = create_services(settings)
-    client = _agent_client(monkeypatch, services)
-    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
-
-    response = client.post(
-        "/api/v1/cards/generate",
-        json={
-            "prompt": "a safe metric dimension test direct path generation",
-            "idempotencyKey": "idem-metric-dim-direct",
-            "csrfToken": csrf_token,
-        },
-    )
-
-    assert response.status_code == 200
-    generate_recordings = [r for r in recorded_metric_attributes if r["operation"] == "generate"]
-    assert generate_recordings, "Expected at least one generate recording"
-    assert any(
-        r["path"] == "direct" for r in generate_recordings
-    ), f"Expected path='direct' in metric dimensions; got: {generate_recordings}"
-
-
-def test_generation_path_dimension_in_metric_on_fallback(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """When agent falls back, _record_generation must receive path='agent_fallback'."""
-    from app import telemetry as telemetry_module
-
-    retryable = FoundryAgentInvocationResult(
-        status="transient_error",
-        retryable=True,
-        error_code="timeout",
-        message="Timed out.",
-    )
-
-    class FallbackAgentClient:
-        async def invoke(self, query: str) -> FoundryAgentInvocationResult:
-            return retryable
-
-    recorded_metric_attributes: list[dict] = []
-    original_record = telemetry_module._record_generation
-
-    def spy_record(operation, outcome, duration_ms, agent_version=None):
-        path = telemetry_module._generation_path_var.get()
-        recorded_metric_attributes.append(
-            {"operation": operation, "outcome": outcome, "path": path}
+        await agent.started.wait()
+        second = asyncio.create_task(
+            service.generate_card(
+                owner=owner,
+                prompt="A safe original frost guardian hero with a silver shield",
+                idempotency_key="concurrent-refusal",
+                request_id="request-two",
+                client_ip="127.0.0.1",
+            )
         )
-        original_record(operation, outcome, duration_ms, agent_version)
+        await asyncio.sleep(0)
+        agent.release.set()
+        results = await asyncio.gather(first, second, return_exceptions=True)
+        return [result for result in results if isinstance(result, BaseException)], agent.calls
 
-    monkeypatch.setattr(telemetry_module, "_record_generation", spy_record)
+    problems, calls = asyncio.run(scenario())
 
-    services = _build_services_with_agent(FallbackAgentClient(), monkeypatch=monkeypatch)
-    client = _agent_client(monkeypatch, services)
-    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
-
-    response = client.post(
-        "/api/v1/cards/generate",
-        json={
-            "prompt": "a safe metric dimension test fallback path generation",
-            "idempotencyKey": "idem-metric-dim-fallback",
-            "csrfToken": csrf_token,
-        },
-    )
-
-    assert response.status_code == 200
-    generate_recordings = [r for r in recorded_metric_attributes if r["operation"] == "generate"]
-    assert generate_recordings, "Expected at least one generate recording"
-    assert any(
-        r["path"] == "agent_fallback" for r in generate_recordings
-    ), f"Expected path='agent_fallback' in metric dimensions; got: {generate_recordings}"
+    assert calls == 1
+    assert len(problems) == 2
+    assert all(isinstance(problem, ProblemDetails) for problem in problems)
+    assert [problem.status_code for problem in problems] == [422, 422]
+    assert [problem.error_code for problem in problems] == [
+        "prompt_rejected",
+        "prompt_rejected",
+    ]
 
 
-# ---------------------------------------------------------------------------
-# Non-regression: flag-off path leaves all existing behavior unchanged
-# ---------------------------------------------------------------------------
-
-
-def test_existing_generation_path_unaffected_with_flag_off(
+def test_startup_does_not_wait_for_remote_agent_preflight(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Regression: when flag is off, no agent_client is set and the direct path runs."""
-    settings = load_app_settings()
-    assert not settings.agent_generation_enabled
-    services = create_services(settings)
-    assert services.agent_client is None
-    assert isinstance(services.ai_client, MockAIClient)
+    class UnexpectedProbe:
+        name = "agent"
+
+        async def check(self, timeout_seconds: float) -> DependencyHealthResult:
+            del timeout_seconds
+            raise AssertionError("startup must not run the remote agent preflight")
+
+    services = _services(monkeypatch, object(), agent_probe=UnexpectedProbe())
+    app = create_app(services=services)
+
+    async def scenario() -> None:
+        async with app.router.lifespan_context(app):
+            pass
+
+    asyncio.run(scenario())
 
 
-# ---------------------------------------------------------------------------
-# fcg.generation_path=agent recorded for every non-retryable agent error
-# ---------------------------------------------------------------------------
-
-
-def _spy_record_path(
+def test_livez_remains_responsive_while_readiness_waits_for_agent_preflight(
     monkeypatch: pytest.MonkeyPatch,
-) -> list[dict]:
-    """Attach a spy to _record_generation that records (operation, outcome, path) tuples."""
-    from app import telemetry as telemetry_module
+) -> None:
+    class DelayedAgentProbe:
+        name = "agent"
 
-    recorded: list[dict] = []
-    original_record = telemetry_module._record_generation
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
 
-    def spy_record(operation, outcome, duration_ms, agent_version=None):
-        path = telemetry_module._generation_path_var.get()
-        recorded.append({"operation": operation, "outcome": outcome, "path": path})
-        original_record(operation, outcome, duration_ms, agent_version)
+        async def check(self, timeout_seconds: float) -> DependencyHealthResult:
+            del timeout_seconds
+            self.started.set()
+            await self.release.wait()
+            return DependencyHealthResult("agent", "ok", 70_000)
 
-    monkeypatch.setattr(telemetry_module, "_record_generation", spy_record)
-    return recorded
+    probe = DelayedAgentProbe()
+    services = _services(monkeypatch, object(), agent_probe=probe)
+    app = create_app(services=services)
+
+    async def scenario() -> None:
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="https://testserver",
+            ) as client:
+                readiness = asyncio.create_task(client.get("/healthz"))
+                await asyncio.wait_for(probe.started.wait(), timeout=0.1)
+
+                live = await asyncio.wait_for(client.get("/livez"), timeout=0.1)
+                assert live.status_code == 200
+                assert live.json() == {"status": "ok"}
+                assert not readiness.done()
+
+                probe.release.set()
+                ready = await readiness
+                assert ready.status_code == 200
+                assert ready.json()["dependencies"]["agent"]["status"] == "ok"
+
+    asyncio.run(scenario())
 
 
-def test_generation_path_is_agent_on_auth_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    """fcg.generation_path must be 'agent' in the metric when auth_error is raised."""
-    recorded = _spy_record_path(monkeypatch)
+def test_readiness_fails_closed_when_agent_preflight_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    services = _services(monkeypatch, object(), agent_probe=FailingAgentProbe())
 
-    auth_error = FoundryAgentInvocationResult(
-        status="auth_error",
-        retryable=False,
-        error_code="credential_unavailable",
-        message="No token.",
-    )
-
-    class AuthErrorClient:
-        async def invoke(self, query: str) -> FoundryAgentInvocationResult:
-            return auth_error
-
-    services = _build_services_with_agent(AuthErrorClient(), monkeypatch=monkeypatch)
-    client = _agent_client(monkeypatch, services)
-    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
-
-    response = client.post(
-        "/api/v1/cards/generate",
-        json={
-            "prompt": "a safe auth error metric path test card hero",
-            "idempotencyKey": "idem-auth-err-path",
-            "csrfToken": csrf_token,
-        },
-    )
+    with TestClient(create_app(services=services), base_url="https://testserver") as client:
+        assert client.get("/livez").status_code == 200
+        response = client.get("/healthz")
 
     assert response.status_code == 503
-    generate_recordings = [r for r in recorded if r["operation"] == "generate"]
-    assert generate_recordings, "Expected at least one generate recording"
-    assert any(
-        r["path"] == "agent" for r in generate_recordings
-    ), f"Expected path='agent' for auth_error; got: {generate_recordings}"
+    assert response.json()["dependencies"]["agent"] == {
+        "status": "unauthorized",
+        "durationMs": 1,
+        "errorCategory": "unauthorized",
+    }
 
 
-def test_generation_path_is_agent_on_configuration_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    """fcg.generation_path must be 'agent' in the metric when configuration_error is raised."""
-    recorded = _spy_record_path(monkeypatch)
+def test_agent_client_is_closed_on_shutdown(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Agent:
+        closed = False
 
-    config_error = FoundryAgentInvocationResult(
-        status="configuration_error",
-        retryable=False,
-        error_code="invalid_configuration",
-        message="Config error.",
-    )
-
-    class ConfigErrorClient:
         async def invoke(self, query: str) -> FoundryAgentInvocationResult:
-            return config_error
-
-    services = _build_services_with_agent(ConfigErrorClient(), monkeypatch=monkeypatch)
-    client = _agent_client(monkeypatch, services)
-    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
-
-    response = client.post(
-        "/api/v1/cards/generate",
-        json={
-            "prompt": "a safe config error metric path test card hero",
-            "idempotencyKey": "idem-config-err-path",
-            "csrfToken": csrf_token,
-        },
-    )
-
-    assert response.status_code == 503
-    generate_recordings = [r for r in recorded if r["operation"] == "generate"]
-    assert generate_recordings, "Expected at least one generate recording"
-    assert any(
-        r["path"] == "agent" for r in generate_recordings
-    ), f"Expected path='agent' for configuration_error; got: {generate_recordings}"
-
-
-def test_generation_path_is_agent_on_policy_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
-    """fcg.generation_path must be 'agent' in the metric when policy_refusal is raised."""
-    recorded = _spy_record_path(monkeypatch)
-
-    policy_refusal = FoundryAgentInvocationResult(
-        status="policy_refusal",
-        retryable=False,
-        error_code="refusal",
-        message="Agent refused.",
-    )
-
-    class PolicyRefusalClient:
-        async def invoke(self, query: str) -> FoundryAgentInvocationResult:
-            return policy_refusal
-
-    services = _build_services_with_agent(PolicyRefusalClient(), monkeypatch=monkeypatch)
-    client = _agent_client(monkeypatch, services)
-    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
-
-    response = client.post(
-        "/api/v1/cards/generate",
-        json={
-            "prompt": "a safe policy refusal metric path test card hero",
-            "idempotencyKey": "idem-policy-ref-path",
-            "csrfToken": csrf_token,
-        },
-    )
-
-    assert response.status_code == 422
-    generate_recordings = [r for r in recorded if r["operation"] == "generate"]
-    assert generate_recordings, "Expected at least one generate recording"
-    assert any(
-        r["path"] == "agent" for r in generate_recordings
-    ), f"Expected path='agent' for policy_refusal; got: {generate_recordings}"
-
-
-def test_generation_path_is_agent_on_schema_fail(monkeypatch: pytest.MonkeyPatch) -> None:
-    """fcg.generation_path must be 'agent' in the metric when schema validation fails."""
-    recorded = _spy_record_path(monkeypatch)
-
-    schema_fail = FoundryAgentInvocationResult(
-        status="invalid_response",
-        retryable=False,
-        schema_valid=False,
-        error_code="schema_validation_failed",
-        message="Invalid schema.",
-    )
-
-    class SchemaFailClient:
-        async def invoke(self, query: str) -> FoundryAgentInvocationResult:
-            return schema_fail
-
-    services = _build_services_with_agent(SchemaFailClient(), monkeypatch=monkeypatch)
-    client = _agent_client(monkeypatch, services)
-    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
-
-    response = client.post(
-        "/api/v1/cards/generate",
-        json={
-            "prompt": "a safe schema fail metric path test card hero",
-            "idempotencyKey": "idem-schema-fail-path",
-            "csrfToken": csrf_token,
-        },
-    )
-
-    assert response.status_code == 502
-    generate_recordings = [r for r in recorded if r["operation"] == "generate"]
-    assert generate_recordings, "Expected at least one generate recording"
-    assert any(
-        r["path"] == "agent" for r in generate_recordings
-    ), f"Expected path='agent' for schema_fail (invalid_response); got: {generate_recordings}"
-
-
-def test_generation_path_is_agent_on_agent_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    """fcg.generation_path must be 'agent' in the metric for generic non-retryable agent_failure."""
-    recorded = _spy_record_path(monkeypatch)
-
-    agent_failure = FoundryAgentInvocationResult(
-        status="failed",
-        retryable=False,
-        error_code="agent_failure",
-        message="Agent failed.",
-    )
-
-    class FailedAgentClient:
-        async def invoke(self, query: str) -> FoundryAgentInvocationResult:
-            return agent_failure
-
-    services = _build_services_with_agent(FailedAgentClient(), monkeypatch=monkeypatch)
-    client = _agent_client(monkeypatch, services)
-    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
-
-    response = client.post(
-        "/api/v1/cards/generate",
-        json={
-            "prompt": "a safe agent failure metric path test card hero",
-            "idempotencyKey": "idem-agent-fail-path",
-            "csrfToken": csrf_token,
-        },
-    )
-
-    assert response.status_code == 502
-    generate_recordings = [r for r in recorded if r["operation"] == "generate"]
-    assert generate_recordings, "Expected at least one generate recording"
-    assert any(
-        r["path"] == "agent" for r in generate_recordings
-    ), f"Expected path='agent' for agent_failure; got: {generate_recordings}"
-
-
-# ---------------------------------------------------------------------------
-# Lifecycle: FoundryAgentClient.aclose() called on app shutdown
-# ---------------------------------------------------------------------------
-
-
-def test_agent_client_aclose_called_on_lifespan_shutdown(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """FoundryAgentClient.aclose() must be called during app lifespan shutdown."""
-    import app.main as main_module
-
-    aclose_called = []
-
-    class TrackingAgentClient:
-        async def invoke(self, query: str) -> FoundryAgentInvocationResult:
-            raise AssertionError("invoke should not be called in this test")
+            return _success()
 
         async def aclose(self) -> None:
-            aclose_called.append(True)
+            self.closed = True
 
-    services = _build_services_with_agent(TrackingAgentClient(), monkeypatch=monkeypatch)
-    monkeypatch.setattr(main_module, "create_oauth_client", lambda s: FakeOAuthClient())
+    agent = Agent()
+    services = _services(monkeypatch, agent)
 
     with TestClient(create_app(services=services), base_url="https://testserver"):
-        # Lifespan startup has run; shutdown runs when context manager exits
         pass
 
-    assert aclose_called, "agent_client.aclose() was not called during lifespan shutdown"
+    assert agent.closed is True
 
 
-def test_lifespan_shutdown_without_agent_client_does_not_error(
+def test_agent_invocation_telemetry_is_content_free(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When agent_client is None, lifespan shutdown must not raise."""
-    import app.main as main_module
+    events: list[tuple[str, dict[str, Any]]] = []
 
+    class Agent:
+        async def invoke(self, query: str) -> FoundryAgentInvocationResult:
+            return _success()
+
+    monkeypatch.setattr(
+        generation_module,
+        "add_event",
+        lambda name, attributes=None: events.append((name, attributes or {})),
+    )
+    response = _generate(_client(monkeypatch, _services(monkeypatch, Agent())), key="telemetry")
+
+    assert response.status_code == 200
+    invocation = next(attributes for name, attributes in events if name == "agent.invocation")
+    assert invocation["fcg.dependency"] == "foundry_agent"
+    assert invocation["fcg.generation_path"] == "agent"
+    assert invocation["fcg.outcome"] == "completed"
+    serialized = repr(invocation)
+    assert "silver shield" not in serialized
+    assert "Frost Warden" not in serialized
+
+
+def test_test_runtime_mock_remains_deterministic(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("APP_ENV", "test")
+    monkeypatch.setenv("AI_MODE", "mock")
     settings = load_app_settings()
-    services = create_services(settings)
-    assert services.agent_client is None
 
-    monkeypatch.setattr(main_module, "create_oauth_client", lambda s: FakeOAuthClient())
+    first = create_services(
+        settings,
+        ai_client=MockAIClient(settings),
+        agent_client=MockAgentClient(),
+    )
+    second = create_services(
+        settings,
+        ai_client=MockAIClient(settings),
+        agent_client=MockAgentClient(),
+    )
 
-    # Should not raise
-    with TestClient(create_app(services=services), base_url="https://testserver"):
-        pass
+    assert isinstance(first.agent_client, MockAgentClient)
+    assert isinstance(second.agent_client, MockAgentClient)
+    assert not hasattr(replace(settings), "ai_mode")

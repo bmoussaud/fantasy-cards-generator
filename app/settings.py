@@ -5,10 +5,11 @@ from dataclasses import dataclass
 from math import isfinite
 from typing import Literal
 
-AI_MODE_VALUES = {"mock", "live"}
 PERSISTENCE_MODE_VALUES = {"memory", "azure"}
 TELEMETRY_ENV_VALUES = {"development", "production", "test"}
 IMAGE_QUALITY_VALUES = {"low", "medium", "high"}
+FOUNDRY_AGENT_RUNTIME_SECONDS = 65.0
+FOUNDRY_AGENT_TIMEOUT_MAX_SECONDS = 90.0
 
 
 @dataclass(frozen=True)
@@ -42,19 +43,16 @@ class TelemetrySettings:
 @dataclass(frozen=True)
 class AppSettings:
     app_env: str
-    debug_log_ai_payloads: bool
-    ai_mode: Literal["mock", "live"]
     persistence_mode: Literal["memory", "azure"]
     foundry_endpoint: str | None
     foundry_api_version: str
-    foundry_text_deployment: str | None
     foundry_image_deployment: str | None
     foundry_project_endpoint: str | None
     foundry_agent_name: str | None
+    foundry_agent_version: str | None
     foundry_agent_api_version: str
     foundry_agent_expected_version: str | None
     foundry_agent_timeout_seconds: float
-    agent_generation_enabled: bool
     cosmos_endpoint: str | None
     cosmos_database_name: str | None
     cosmos_container_name: str | None
@@ -113,13 +111,7 @@ def load_telemetry_settings() -> TelemetrySettings:
 
 def load_app_settings() -> AppSettings:
     app_env = _string_env("APP_ENV", default="development")
-    app_env_normalized = app_env.strip().lower()
-    ai_mode = _string_env("AI_MODE", default="mock")
-    if ai_mode not in AI_MODE_VALUES:
-        raise SettingsError("AI_MODE must be one of: live, mock.")
-
-    default_persistence_mode = "memory" if ai_mode == "mock" else "azure"
-    persistence_mode = _string_env("PERSISTENCE_MODE", default=default_persistence_mode)
+    persistence_mode = _string_env("PERSISTENCE_MODE", default="azure")
     if persistence_mode not in PERSISTENCE_MODE_VALUES:
         raise SettingsError("PERSISTENCE_MODE must be one of: azure, memory.")
 
@@ -129,31 +121,21 @@ def load_app_settings() -> AppSettings:
 
     settings = AppSettings(
         app_env=app_env,
-        # Defense in depth: raw AI prompts/responses are only ever loggable in a
-        # local development app_env. Even an explicit DEBUG_LOG_AI_PAYLOADS=true
-        # is ignored outside development so shared/test/prod deployments cannot
-        # accidentally persist payload bodies.
-        debug_log_ai_payloads=(
-            _bool_env("DEBUG_LOG_AI_PAYLOADS", default=True)
-            if app_env_normalized == "development"
-            else False
-        ),
-        ai_mode=ai_mode,
         persistence_mode=persistence_mode,
         foundry_endpoint=_optional_env("FOUNDRY_ENDPOINT"),
         foundry_api_version=_string_env("FOUNDRY_API_VERSION", default="2025-03-01-preview"),
-        foundry_text_deployment=_optional_env("FOUNDRY_TEXT_DEPLOYMENT"),
         foundry_image_deployment=_optional_env("FOUNDRY_IMAGE_DEPLOYMENT"),
         foundry_project_endpoint=_optional_env("FOUNDRY_PROJECT_ENDPOINT"),
         foundry_agent_name=_optional_env("FOUNDRY_AGENT_NAME"),
+        foundry_agent_version=_optional_env("FOUNDRY_AGENT_VERSION"),
         foundry_agent_api_version=_string_env("FOUNDRY_AGENT_API_VERSION", default="v1"),
         foundry_agent_expected_version=_optional_env("FOUNDRY_AGENT_EXPECTED_VERSION"),
         foundry_agent_timeout_seconds=_finite_float_env(
             "FOUNDRY_AGENT_TIMEOUT_SECONDS",
-            default=5.0,
+            default=70.0,
             minimum=0.1,
+            maximum=FOUNDRY_AGENT_TIMEOUT_MAX_SECONDS,
         ),
-        agent_generation_enabled=_bool_env("AGENT_GENERATION_ENABLED", default=False),
         cosmos_endpoint=_optional_env("COSMOS_ENDPOINT"),
         cosmos_database_name=_optional_env("COSMOS_DATABASE_NAME"),
         cosmos_container_name=_optional_env("COSMOS_CONTAINER_NAME"),
@@ -276,29 +258,22 @@ def _validate_app_settings(settings: AppSettings) -> None:
             "BLOB_CONTAINER_NAME must be set when PERSISTENCE_MODE=azure.",
         )
 
-    if settings.ai_mode == "live":
-        _require(settings.foundry_endpoint, "FOUNDRY_ENDPOINT must be set when AI_MODE=live.")
-        _require(
-            settings.foundry_text_deployment,
-            "FOUNDRY_TEXT_DEPLOYMENT must be set when AI_MODE=live.",
-        )
-        _require(
-            settings.foundry_image_deployment,
-            "FOUNDRY_IMAGE_DEPLOYMENT must be set when AI_MODE=live.",
-        )
+    _require(settings.foundry_endpoint, "FOUNDRY_ENDPOINT must be set.")
+    _require(settings.foundry_image_deployment, "FOUNDRY_IMAGE_DEPLOYMENT must be set.")
+    _require(settings.foundry_project_endpoint, "FOUNDRY_PROJECT_ENDPOINT must be set.")
+    _require(settings.foundry_agent_name, "FOUNDRY_AGENT_NAME must be set.")
+    _require(settings.foundry_agent_version, "FOUNDRY_AGENT_VERSION must be set.")
+    if settings.app_env.strip().lower() != "test":
+        telemetry = load_telemetry_settings()
+        if not telemetry.enabled or not telemetry.connection_string:
+            raise SettingsError(
+                "TELEMETRY_ENABLED=true and APPLICATIONINSIGHTS_CONNECTION_STRING are required."
+            )
 
-    if settings.agent_generation_enabled:
-        _require(
-            settings.foundry_project_endpoint,
-            "FOUNDRY_PROJECT_ENDPOINT must be set when AGENT_GENERATION_ENABLED=true.",
+    if settings.retry.overall_timeout_seconds <= settings.foundry_agent_timeout_seconds:
+        raise SettingsError(
+            "OVERALL_TIMEOUT_SECONDS must be greater than FOUNDRY_AGENT_TIMEOUT_SECONDS."
         )
-        _require(
-            settings.foundry_agent_name,
-            "FOUNDRY_AGENT_NAME must be set when AGENT_GENERATION_ENABLED=true.",
-        )
-
-    if settings.retry.overall_timeout_seconds <= settings.retry.text_timeout_seconds:
-        raise SettingsError("OVERALL_TIMEOUT_SECONDS must be greater than TEXT_TIMEOUT_SECONDS.")
 
     for name, value in (
         ("CONTENT_SAFETY_MAX_HATE_SEVERITY", settings.content_safety_max_hate_severity),
@@ -343,10 +318,18 @@ def _float_env(name: str, *, default: float, minimum: float) -> float:
     return value
 
 
-def _finite_float_env(name: str, *, default: float, minimum: float) -> float:
+def _finite_float_env(
+    name: str,
+    *,
+    default: float,
+    minimum: float,
+    maximum: float | None = None,
+) -> float:
     value = _float_env(name, default=default, minimum=minimum)
     if not isfinite(value):
         raise SettingsError(f"{name} must be finite.")
+    if maximum is not None and value > maximum:
+        raise SettingsError(f"{name} must be <= {maximum:g}.")
     return value
 
 
