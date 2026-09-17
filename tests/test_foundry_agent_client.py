@@ -7,7 +7,11 @@ from typing import Any
 
 import httpx
 import pytest
-from azure.core.exceptions import ClientAuthenticationError, ServiceRequestError
+from azure.core.exceptions import (
+    ClientAuthenticationError,
+    ServiceRequestError,
+    ServiceResponseError,
+)
 
 from app.foundry_agent_client import (
     FOUNDRY_AGENT_TOKEN_SCOPE,
@@ -230,6 +234,15 @@ def test_agent_timeout_default_matches_hosted_runtime_budget(
     monkeypatch.setenv("OVERALL_TIMEOUT_SECONDS", "225")
 
     assert load_app_settings().foundry_agent_timeout_seconds == 70.0
+
+
+def test_agent_timeout_accepts_supported_maximum_within_request_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FOUNDRY_AGENT_TIMEOUT_SECONDS", "90")
+    monkeypatch.setenv("OVERALL_TIMEOUT_SECONDS", "225")
+
+    assert load_app_settings().foundry_agent_timeout_seconds == 90.0
 
 
 @pytest.mark.parametrize("timeout", ["0", "-1", "nan", "inf", "91"])
@@ -641,11 +654,10 @@ def test_invalid_query_diagnostics_do_not_include_input() -> None:
     assert "private-query-marker" not in repr(result)
 
 
-@pytest.mark.parametrize("failure", [ClientAuthenticationError, ServiceRequestError])
-def test_expected_credential_failures_are_sanitized(failure) -> None:
+def test_credential_authentication_failure_is_sanitized_and_not_retryable() -> None:
     class FailingCredential(FakeCredential):
         def get_token(self, *scopes: str) -> FakeAccessToken:
-            raise failure("private-credential-diagnostic")
+            raise ClientAuthenticationError("private-credential-diagnostic")
 
     def unexpected_request(request: httpx.Request) -> httpx.Response:
         pytest.fail("Failed authentication must not trigger an HTTP request")
@@ -657,6 +669,52 @@ def test_expected_credential_failures_are_sanitized(failure) -> None:
     assert result.status == "auth_error"
     assert result.retryable is False
     assert "private-credential-diagnostic" not in repr(result)
+
+
+@pytest.mark.parametrize("failure", [ServiceRequestError, ServiceResponseError])
+def test_credential_transport_failures_are_sanitized_and_retryable(failure) -> None:
+    class FailingCredential(FakeCredential):
+        def get_token(self, *scopes: str) -> FakeAccessToken:
+            raise failure("private-credential-diagnostic")
+
+    def unexpected_request(request: httpx.Request) -> httpx.Response:
+        pytest.fail("Failed token transport must not trigger an HTTP request")
+
+    result, _ = invoke_with_transport(
+        configured_settings(), unexpected_request, credential=FailingCredential()
+    )
+
+    assert result.status == "transient_error"
+    assert result.retryable is True
+    assert result.error_code == "credential_service_unavailable"
+    assert result.message == "Foundry credential service is temporarily unavailable."
+    assert "private-credential-diagnostic" not in repr(result)
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected"),
+    [
+        (ClientAuthenticationError, "unauthorized"),
+        (ServiceRequestError, "unavailable"),
+        (ServiceResponseError, "unavailable"),
+    ],
+)
+def test_agent_access_credential_failures_are_classified_and_sanitized(
+    failure,
+    expected: str,
+) -> None:
+    class FailingCredential(FakeCredential):
+        def get_token(self, *scopes: str) -> FakeAccessToken:
+            raise failure("private-readiness-diagnostic")
+
+    result, _ = check_access_with_transport(
+        configured_settings(),
+        lambda request: pytest.fail("Failed token acquisition must not make an HTTP request"),
+        credential=FailingCredential(),
+    )
+
+    assert result == expected
+    assert "private-readiness-diagnostic" not in result
 
 
 def test_empty_credential_token_is_non_success() -> None:

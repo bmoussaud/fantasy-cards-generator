@@ -970,10 +970,13 @@ def test_telemetry_reuses_single_workspace_app_insights_and_secret_wiring() -> N
 
 def test_container_app_liveness_is_dependency_free_and_readiness_is_bounded() -> None:
     container_apps = (REPO_ROOT / "infra" / "modules" / "container-apps.bicep").read_text()
+    generated_arm = (REPO_ROOT / "infra" / "main.json").read_text()
 
     assert container_apps.count("path: '/healthz'") == 1
     assert container_apps.count("path: '/livez'") == 2
-    assert container_apps.count("timeoutSeconds: 75") == 1
+    assert container_apps.count("timeoutSeconds: 100") == 1
+    assert generated_arm.count('"timeoutSeconds": 100') == 1
+    assert '"timeoutSeconds": 75' not in generated_arm
     assert (
         "type: 'Startup'\n              httpGet: {\n                path: '/livez'"
         in container_apps
@@ -992,7 +995,7 @@ def test_container_app_liveness_is_dependency_free_and_readiness_is_bounded() ->
         "              }\n"
         "              initialDelaySeconds: 5\n"
         "              periodSeconds: 10\n"
-        "              timeoutSeconds: 75\n"
+        "              timeoutSeconds: 100\n"
         "              failureThreshold: 1"
     ) in container_apps
     assert container_apps.count("port: 8000") >= 3

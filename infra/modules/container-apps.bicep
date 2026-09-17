@@ -579,7 +579,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
               }
               initialDelaySeconds: 5
               periodSeconds: 10
-              timeoutSeconds: 75
+              timeoutSeconds: 100
               failureThreshold: 1
               successThreshold: 1
             }

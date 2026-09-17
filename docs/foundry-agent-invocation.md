@@ -16,7 +16,10 @@ deployed agent:
 - `FOUNDRY_AGENT_VERSION`: exact hosted version that must exist and be `active`
 - `FOUNDRY_AGENT_API_VERSION`: defaults to `v1`
 - `FOUNDRY_AGENT_EXPECTED_VERSION`: optional application metadata check against the agent response `metadata.agentVersion` or `metadata.version`
-- `FOUNDRY_AGENT_TIMEOUT_SECONDS`: defaults to `70`, covering the hosted runtime's 65-second overall budget and bounded to a maximum of 90 seconds
+- `FOUNDRY_AGENT_TIMEOUT_SECONDS`: defaults to `70`, covering the hosted runtime's
+  65-second overall budget and bounded to a maximum of 90 seconds. ACA readiness
+  allows 100 seconds so the supported maximum still has 10 seconds of bounded
+  request/handler overhead within the 225-second request budget.
 - `TELEMETRY_ENABLED=true` and `APPLICATIONINSIGHTS_CONNECTION_STRING`: mandatory for live startup.
 
 `FOUNDRY_PROJECT_ENDPOINT` is intentionally separate from `FOUNDRY_ENDPOINT`;

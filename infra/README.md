@@ -39,8 +39,10 @@ keeps dependency-aware `/healthz` checks bounded through IaC rather than portal 
   parameters, both defaulting to `1500` ms and both overrideable per environment.
 - ACA startup and liveness call dependency-free `/livez`; startup allows up to
   150 seconds for local process initialization without waiting on Foundry.
-  Readiness alone calls dependency-aware `/healthz` with a 75-second platform
-  timeout, exceeding the app's 70-second Foundry health-check budget. An upstream
+  Readiness alone calls dependency-aware `/healthz` with a 100-second platform
+  timeout, exceeding the supported 90-second Foundry health-check maximum by
+  10 seconds of bounded request/handler overhead. The normal app default remains
+  70 seconds, and the overall request budget remains 225 seconds. An upstream
   outage therefore removes the replica from traffic without causing a restart
   loop. Startup checks every 5s, readiness every 10s, and liveness every 30s.
 - The app response contract keeps `Cache-Control: no-store`; do not add an

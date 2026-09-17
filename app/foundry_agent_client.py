@@ -188,8 +188,10 @@ class FoundryAgentClient:
             token = await self._get_token()
         except FoundryAgentConfigurationError:
             return "misconfigured"
-        except (ClientAuthenticationError, ServiceRequestError, ServiceResponseError):
+        except ClientAuthenticationError:
             return "unauthorized"
+        except (ServiceRequestError, ServiceResponseError):
+            return "unavailable"
 
         try:
             response = await self._client().get(
@@ -248,11 +250,18 @@ class FoundryAgentClient:
 
         try:
             token = await self._get_token()
-        except (ClientAuthenticationError, ServiceRequestError, ServiceResponseError):
+        except ClientAuthenticationError:
             return FoundryAgentInvocationResult(
                 status="auth_error",
                 error_code="credential_unavailable",
                 message="Unable to acquire a Foundry access token.",
+            )
+        except (ServiceRequestError, ServiceResponseError):
+            return FoundryAgentInvocationResult(
+                status="transient_error",
+                retryable=True,
+                error_code="credential_service_unavailable",
+                message="Foundry credential service is temporarily unavailable.",
             )
 
         client = self._client()
