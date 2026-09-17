@@ -95,22 +95,19 @@ azd deploy web-nat            # explicit web redeploy
 ./deploy.sh web --approve-change
 ```
 
-### Full deployment (explicit opt-in)
+### Full deployment
 
 ```bash
-# 1. Enable hosted-agent RBAC (if not already)
-azd env set ENABLE_FOUNDRY_AGENT_ACCESS true
-
-# 2. Enable card-orchestrator prerequisites (ACR pull, monitoring)
+# 1. Enable card-orchestrator deployment prerequisites (ACR pull, monitoring)
 azd env set CARD_ORCHESTRATOR_ENABLE_PREREQUISITES true
 
-# 3. Optionally create the registry connection
+# 2. Optionally create the registry connection
 azd env set CARD_ORCHESTRATOR_CREATE_REGISTRY_CONNECTION true
 
-# 4. Provision shared infrastructure
+# 3. Provision shared infrastructure, including mandatory agent RBAC
 azd provision
 
-# 5. Deploy card-orchestrator independently
+# 4. Deploy card-orchestrator independently
 azd deploy card-orchestrator
 ```
 
@@ -136,15 +133,13 @@ Do not use bare `azd deploy` with this manifest. Supported entrypoints are
 `./deploy.sh {web|agent|full|provision|preview}` and fully targeted
 `azd deploy <service-name>` commands.
 
-### Agent opt-in variables
+### Agent deployment variables
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `ENABLE_FOUNDRY_AGENT_ACCESS` | `false` | Foundry RBAC: project MI → Foundry User, ACA MI → Agent Consumer |
 | `CARD_ORCHESTRATOR_ENABLE_PREREQUISITES` | `false` | ACR pull for project MI, agent monitoring workbook/alerts; also the predeploy gate |
 | `CARD_ORCHESTRATOR_CREATE_REGISTRY_CONNECTION` | `false` | Foundry project → ACR registry connection |
 | `CARD_ORCHESTRATOR_ENABLE_AGENT_ALERTS` | `false` | Enable agent monitoring alert rules |
-| `AGENT_GENERATION_ENABLED` | `false` | Runtime: use agent path vs direct model path |
 
 ### Production approval — `deploy.sh`
 
@@ -232,10 +227,10 @@ No new azd environment variable is required for the deployer principal ID: the
 template derives it directly from the authenticated deployment context via
 `deployer().objectId`.
 
-`FOUNDRY_ENDPOINT` remains the direct Azure AI Services account URL
-(`https://<account>.cognitiveservices.azure.com/`) used by the existing model
-deployment path. `FOUNDRY_PROJECT_ENDPOINT` is also injected into the Container
-App as non-secret configuration for future hosted-agent invocation, using the
+`FOUNDRY_ENDPOINT` remains the Azure AI Services account URL
+(`https://<account>.cognitiveservices.azure.com/`) used by image generation.
+`FOUNDRY_PROJECT_ENDPOINT` is injected into the Container App as required
+non-secret configuration for hosted-agent invocation, using the
 same project name that the Foundry module creates:
 `https://<account>.services.ai.azure.com/api/projects/<project>`. The root
 template resolves that project name once with
@@ -243,23 +238,10 @@ template resolves that project name once with
 value to both the module and the Container App config to avoid module-output
 cycles.
 
-Hosted-agent permissions are gated separately from endpoint injection. Set
-`ENABLE_FOUNDRY_AGENT_ACCESS=true` only when the deployed environment is ready to
-let runtime managed identities invoke hosted agents:
-
-```bash
-azd env set ENABLE_FOUNDRY_AGENT_ACCESS true
-```
-
-The default is `false`, preserving existing dev/prod access until explicit
-opt-in. This gate controls only the new hosted-agent RBAC assignments; it does
-not switch generation modes, create agents, deploy hosted runtimes, or remove
-the existing direct model path.
-
-Setting the gate back to `false` does not revoke assignments already created:
-incremental ARM deployments do not delete resources omitted by a condition.
-Permission revocation requires a separate, explicitly reviewed cleanup; this
-parameter is not a runtime kill switch.
+Hosted-agent permissions are mandatory. Provisioning grants the project
+identity Foundry User at account scope and the Container App identity Foundry
+Agent Consumer at project scope. There is no RBAC opt-in or runtime switch that
+can restore a direct card-text path.
 
 Provisioning grants the deployment caller only:
 
@@ -283,8 +265,7 @@ variables; the runtime identity does not read secret values from Key Vault.
 The deployer cannot create, replace, upload, overwrite, or delete Cosmos items
 or blobs through the reader roles.
 
-When `ENABLE_FOUNDRY_AGENT_ACCESS=true`, provisioning also grants only the
-additional hosted-agent permissions needed for future invoke-only access:
+Provisioning also grants the hosted-agent permissions needed for invoke-only access:
 
 - the Foundry project's system-assigned managed identity receives **Foundry
   User** at the Foundry account scope, matching Microsoft Foundry's project
@@ -429,7 +410,7 @@ If the NAT Gateway public IP resource is ever replaced, Azure will allocate a
 different static address unless the same Public IP resource is preserved.
 Because Cosmos `ipRules` are wired from the NAT Gateway output, a subsequent
 `azd provision` will update the desired firewall rule automatically — but you
-must still smoke-test the app again before removing any fallback rules.
+must still smoke-test the app again before completing the network cutover.
 
 ## Entra redirect verification
 

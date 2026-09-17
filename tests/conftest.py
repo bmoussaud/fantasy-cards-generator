@@ -20,6 +20,11 @@ os.environ.setdefault("ENTRA_REDIRECT_URI", "https://testserver/auth/callback")
 os.environ.setdefault("ENTRA_POST_LOGOUT_REDIRECT_URI", "https://testserver/")
 os.environ.setdefault("AI_MODE", "mock")
 os.environ.setdefault("PERSISTENCE_MODE", "memory")
+os.environ.setdefault(
+    "FOUNDRY_PROJECT_ENDPOINT",
+    "https://test.services.ai.azure.com/api/projects/test-project",
+)
+os.environ.setdefault("FOUNDRY_AGENT_NAME", "card-orchestrator")
 os.environ.setdefault("RATE_LIMIT_USER_REQUESTS", "6")
 os.environ.setdefault("RATE_LIMIT_USER_WINDOW_SECONDS", "60")
 os.environ.setdefault("RATE_LIMIT_IP_REQUESTS", "12")
@@ -111,6 +116,11 @@ def base_environment(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, N
     monkeypatch.setenv("ENTRA_POST_LOGOUT_REDIRECT_URI", "https://testserver/")
     monkeypatch.setenv("AI_MODE", "mock")
     monkeypatch.setenv("PERSISTENCE_MODE", "memory")
+    monkeypatch.setenv(
+        "FOUNDRY_PROJECT_ENDPOINT",
+        "https://test.services.ai.azure.com/api/projects/test-project",
+    )
+    monkeypatch.setenv("FOUNDRY_AGENT_NAME", "card-orchestrator")
     monkeypatch.setenv("RATE_LIMIT_USER_REQUESTS", "6")
     monkeypatch.setenv("RATE_LIMIT_USER_WINDOW_SECONDS", "60")
     monkeypatch.setenv("RATE_LIMIT_IP_REQUESTS", "12")

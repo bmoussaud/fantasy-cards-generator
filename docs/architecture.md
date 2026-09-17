@@ -19,18 +19,16 @@ the signed session, and enforces CSRF and owner-scoped access.
 
 `CardGenerationService` keeps rate limiting, idempotency, deterministic moderation,
 image calls, artwork retry semantics, and persistence in the web application.
-Its default text path calls the `gpt-5-5` deployment (model `gpt-5.5`) directly.
-When `AGENT_GENERATION_ENABLED=true`, it invokes a separately deployed
-`card-orchestrator` through the Foundry project's Responses endpoint. The hosted
-runtime executes three sequential Microsoft Agent Framework specialists:
+Every live text request invokes the separately deployed `card-orchestrator`
+through the Foundry project's Responses endpoint. The hosted runtime executes
+three sequential Microsoft Agent Framework specialists:
 concept, lore, and art direction. These are internal specialists, not three
 separate hosted services.
 
 The agent receives text, not uploaded photos, user/session credentials, or
-data-store access tools. Retryable/transient failures and `routing_defer` can
-fall back once to the direct text path within the existing overall budget.
-Authentication, configuration, policy, and schema failures do not bypass the
-agent through fallback. Images still use the web backend's `gpt-image-2`
+data-store access tools. There is no direct card-text implementation or
+automatic fallback: all agent failures use bounded, content-free structured
+errors. Images still use the web backend's `gpt-image-2`
 generation or reference-photo edit calls. Saved-photo uploads additionally use
 Azure AI Content Safety; this is distinct from the generation pipeline's
 heuristic moderation and model-side content filtering.
@@ -68,10 +66,11 @@ secrets are stored as ACA-native secrets and exposed to the application through
 `secretRef` environment variables.
 
 Foundry's AI Services account and project use public endpoints and Entra tokens
-with local key authentication disabled. `enableFoundryAgentAccess` independently
-gates the app's project-scoped Foundry Agent Consumer role and the project's
-managed-identity Foundry User role on the account. Both that infrastructure gate
-and the application generation flag default to false. The root `azure.yaml`
+with local key authentication disabled. The app receives project-scoped Foundry
+Agent Consumer and the project identity receives Foundry User access as mandatory
+agent-only prerequisites. Application startup and `/healthz` perform a bounded
+agent access probe; mandatory telemetry must initialize before the runtime starts.
+The root `azure.yaml`
 deploys the web service only; hosted-agent build/deployment tooling is separate
 under `deployments/card-orchestrator/`.
 
@@ -86,7 +85,7 @@ The drawing omits individual RBAC resources and alert objects for readability.
 | Diagram surface | Authoritative repository inputs |
 | --- | --- |
 | Web, UI, auth, image proxy | `azure.yaml`, `Dockerfile`, `app/main.py`, `app/auth.py`, `app/library.py` |
-| Generation, fallback, models | `app/generation.py`, `app/foundry_agent_client.py`, `app/settings.py` |
+| Agent-only generation and image models | `app/generation.py`, `app/foundry_agent_client.py`, `app/settings.py` |
 | Hosted Responses boundary and specialists | `hosted_agents/card_orchestrator/server.py`, `orchestrator.py`, `specialists.py`, `settings.py` in that same directory |
 | Saved photos and deletion | `app/photos.py`, `app/deletion.py` |
 | VNet, NAT, ACA environment | `infra/modules/network.bicep`, `container-apps-environment.bicep`, `container-apps.bicep` |

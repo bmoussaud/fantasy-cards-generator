@@ -276,7 +276,7 @@ record all outputs. Report:
 
 Do not assert latency from static fixtures. Latency measurements require a live deployment
 and must use the [architecture timeout budgets](./architecture-agents-foundry.md):
-225 s overall, 150 s image, 8.15 s proposed hosted agent, 30.15 s legacy fallback.
+225 s overall, 150 s image, and the configured hosted-agent timeout.
 
 ---
 
@@ -457,7 +457,7 @@ deployment to production.
    layer evidence does. This fixture tests the evaluator contract, not runtime behaviour.
 
 6. **Latency budgets are not testable offline.** The architecture defines a 225 s overall
-   budget, 150 s image budget, 8.15 s hosted agent budget, and 30.15 s legacy fallback budget.
+   budget, 150 s image budget, and a bounded hosted-agent timeout with no direct fallback.
    These cannot be asserted from static fixtures. Measure them only against a live deployment.
 
 7. **This evaluation is independent of issue #101.** This document covers evaluation

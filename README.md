@@ -2,13 +2,14 @@
 
 ## Architecture
 
-[![Implemented architecture: FastAPI on Azure Container Apps, optional Foundry
+[![Implemented architecture: FastAPI on Azure Container Apps, Foundry hosted-agent
 orchestration, and private data services](docs/images/architecture.png)](docs/images/architecture.svg)
 
 FastAPI owns authentication, moderation, image generation, and persistence.
-Text generation uses direct Azure OpenAI calls by default, with an opt-in
-Foundry hosted orchestrator. Cosmos DB, Blob Storage, and Key Vault are reached
-through private endpoints; browsers receive artwork through the backend.
+All live card-text generation uses the Foundry hosted `card-orchestrator`;
+there is no direct-model path or automatic fallback. Cosmos DB, Blob Storage,
+and Key Vault are reached through private endpoints; browsers receive artwork
+through the backend.
 
 [Editable draw.io source](docs/architecture.drawio) |
 [Self-contained SVG](docs/images/architecture.svg) |
@@ -60,10 +61,10 @@ The issue qualification and remote Copilot execution process is documented in
 
 ## Card generation configuration
 
-The single synchronous card-generation flow supports two local modes:
-
-- `AI_MODE=mock` + `PERSISTENCE_MODE=memory` for deterministic development/tests
-- `AI_MODE=live` + `PERSISTENCE_MODE=azure` for Azure AI Foundry + Cosmos DB + Blob Storage
+The application runtime uses `AI_MODE=live`. `AI_MODE=mock` is reserved for
+automated tests with `APP_ENV=test` and is rejected in development and production.
+Live startup requires the hosted-agent project endpoint/name, managed-identity
+access, image-model configuration, and working Application Insights telemetry.
 
 See `docs/card-generation-api.md` for the API contract, moderation policy, and
 runtime settings.
@@ -112,8 +113,8 @@ Azure SDK GenAI tracing is experimental; deployed runtimes set
 `AZURE_EXPERIMENTAL_ENABLE_GENAI_TRACING=true`, and local developers can set the
 same value in their ignored `.env` only when exercising telemetry.
 
-The default Foundry deployment aliases remain `gpt-5-5` and `gpt-image-2` for
-application compatibility. In `eastus2`, they target `gpt-5.5`
+The hosted agent uses the `gpt-5-5` deployment and the web backend uses
+`gpt-image-2` for images. In `eastus2`, they target `gpt-5.5`
 (`2026-04-24`, `GlobalStandard`) and `gpt-image-2`
 (`2026-04-21`, `GlobalStandard`), respectively.
 

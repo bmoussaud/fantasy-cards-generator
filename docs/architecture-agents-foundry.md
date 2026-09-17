@@ -4,10 +4,10 @@ This document proposes how `fantasy-cards-generator` can introduce agent-based c
 
 The direction is intentionally conservative: keep authentication, rate limiting, persistence, and HTTP/UI behavior in the existing web application, and add a Foundry-hosted agent layer only where agent reasoning adds value.
 
-> **Current implementation:** the optional `hosted_agents/card_orchestrator`
+> **Current implementation:** the required `hosted_agents/card_orchestrator`
 > runtime implements three sequential MAF specialists under one Responses host.
-> The web backend now integrates it behind `AGENT_GENERATION_ENABLED` (default
-> `false`), with bounded fallback to direct text generation for eligible failures.
+> The web backend uses it for every live card-text request. The legacy direct
+> text implementation, feature gate, and automatic fallback have been removed.
 > See the [implemented architecture and diagram](architecture.md) and
 > [invocation contract](foundry-agent-invocation.md). Deployment observations are
 > recorded separately in the [operations runbook](foundry-agent-operations.md);
@@ -91,7 +91,8 @@ The deployment topology is currently centered on a single Python web service in 
 - Azure AI Foundry account, project, and model deployments
 - network resources and private endpoints
 
-Important observation: the current app is wired to the **Foundry account endpoint** for direct model deployments (`FOUNDRY_ENDPOINT`), not to a **Foundry project endpoint** for agent operations. That distinction matters for the proposed design.
+The app uses the **Foundry account endpoint** (`FOUNDRY_ENDPOINT`) for images
+and the **Foundry project endpoint** for required hosted-agent operations.
 
 ### Documentation style and conventions already present
 
@@ -424,29 +425,28 @@ The repo already provisions a Foundry account, project, and model deployments, s
 ## Changes to `infra/main.bicep`
 
 1. **Expose a Foundry project endpoint for the app runtime**
-   - current runtime wiring focuses on the account endpoint used for direct model calls
-   - add an output and env-var path for the **project endpoint** required by agent/project SDKs
-   - example runtime variable: `FOUNDRY_PROJECT_ENDPOINT`
+   - the account endpoint remains for image generation
+   - the **project endpoint** is required for all live card-text generation
+   - runtime variable: `FOUNDRY_PROJECT_ENDPOINT`
 
 2. **Grant the Container App managed identity project-scope access**
    - current infra gives the deployer `Foundry User` on the project
    - the application runtime will also need a project-scope role assignment to invoke agents
-   - keep existing account-scope model access if direct image generation remains in the app
+   - keep existing account-scope model access for image generation
 
 3. **Add configuration for agent invocation**
-   - inject non-secret settings for the agent name/version and rollout mode
+   - inject non-secret settings for the agent name/version
    - examples:
      - `FOUNDRY_PROJECT_ENDPOINT`
      - `FOUNDRY_AGENT_NAME`
      - `FOUNDRY_AGENT_API_VERSION` (defaults to `v1`)
      - `FOUNDRY_AGENT_EXPECTED_VERSION` (optional; metadata check against agent response version)
-     - `AGENT_GENERATION_ENABLED=false|true` (boolean; default `false` = direct model path)
 
 4. **Optionally provision Foundry guardrail resources**
    - if the team wants managed RAI policies beyond the current heuristic/content-safety gates, define them in the Foundry account and reference them from the agent/model configuration
 
 5. **Preserve the current account endpoint variables**
-   - the app still needs direct model access for image generation/editing unless that path is redesigned later
+   - the app still needs account-endpoint model access for image generation/editing
 
 ## Changes to `infra/modules/ai-foundry.bicep`
 
@@ -460,13 +460,12 @@ Recommended additions:
 
 Add env vars for the application-to-agent integration while keeping the current Foundry/OpenAI env vars intact.
 
-Implemented additions (as of PR #126):
+Implemented settings:
 
 - `FOUNDRY_PROJECT_ENDPOINT` (already present)
 - `FOUNDRY_AGENT_NAME`
 - `FOUNDRY_AGENT_EXPECTED_VERSION`
 - `FOUNDRY_AGENT_API_VERSION`
-- `AGENT_GENERATION_ENABLED`
 
 ## Changes to `azure.yaml`
 
@@ -592,13 +591,11 @@ Recommendations:
 
 This phase is where Samwise should define golden test prompts and evaluation fixtures.
 
-### Phase 2 — switch text/card design to the agent, keep image generation in app
+### Phase 2 — agent-only text/card design, image generation in app
 
-- replace the current direct text-generation call with the agent call
+- route every live text-generation request through the agent
 - keep image generation/edit, moderation, persistence, and retry behavior in `app/generation.py`
-- enable runtime fallback to the current non-agent text path through config if the agent is degraded
-
-This is the recommended first live rollout because it captures most of the product value with the least disruption.
+- surface structured agent failures without a direct text fallback
 
 ### Phase 3 — deepen agent specialization
 
@@ -682,55 +679,34 @@ Any implementation should preserve:
 - The public card-generation request is wrapped in `asyncio.wait_for(..., timeout=OVERALL_TIMEOUT_SECONDS)`, so the whole backend flow has a hard **225 second** ceiling (`app/generation.py:1722-1737`).
 - The text/card-design hop runs first, before any image generation, via `_retry_upstream(... service_name="foundry-text" ...)` (`app/generation.py:1972-1979`).
 - `_retry_upstream()` applies the **text timeout + generic retry count** to every non-image dependency and the **image timeout + image retry count** only to `foundry-image` (`app/generation.py:2635-2778`).
-- That means the current direct text path can consume at most **60.45 seconds** before failing:
+- The removed direct text path previously could consume **60.45 seconds** before failing:
   - three `20.0s` attempts (`UPSTREAM_MAX_RETRIES=2` means initial try + 2 retries)
   - plus `0.15s + 0.30s = 0.45s` exponential backoff
 - The normal image path then gets **one 150.0 second attempt** (`IMAGE_MAX_RETRIES=0`) (`app/settings.py:188-205`, `app/generation.py:2078-2103`, `app/generation.py:2774-2778`).
 - In the worst case, the current text + image envelope is therefore **210.45 seconds**, leaving only about **14.55 seconds** inside the existing 225-second request budget for local moderation, persistence, and response serialization.
 - If image generation times out or fails **after** validated text/art prompt exist, the backend persists a partial record with `status="awaiting_artwork_retry"` instead of failing the whole request (`app/generation.py:1740-1761`, `app/generation.py:2103-2129`, `app/generation.py:2293-2310`). The retry endpoint then reuses the persisted validated payload and derived art prompt and retries **only** artwork generation (`app/generation.py:1793-1879`, `app/generation.py:2183-2232`). The public API contract documents that `200 OK` partial-response behavior (`docs/card-generation-api.md:99-100`).
 
-**Decision: max acceptable added latency for the agent hop**
+**Current agent-only latency and failure decision**
 
-- Keep the external request ceiling at **225.0 seconds**. Do **not** grow the public timeout just to accommodate the hosted-agent hop.
-- Keep the existing **150.0 second image budget** and the existing `awaiting_artwork_retry` semantics unchanged.
-- Therefore the hosted `card-orchestrator` hop must fit inside the current card-design envelope instead of being added on top of it.
-- **Max acceptable added latency for the agent hop: 8.15 seconds total**
-  - first agent attempt: **5.0s**
-  - one retry only for retryable outcomes (timeout, `429`, or `5xx`): **3.0s**
-  - existing backoff between those attempts: **0.15s**
-- Rationale: 8.15 seconds is only ~13.5% of the current 60.45-second text budget, so it is small enough to fail fast when the agent runtime is degraded while still allowing a short transient retry before falling back.
-
-**Decision: fallback behavior**
-
-1. **Try the hosted agent first** for card design only (no image bytes, no persistence side effects) with the 5.0-second timeout.
-2. If the agent times out or returns a retryable `429`/`5xx`, **retry once** with the 3.0-second timeout.
-3. If the agent still does not produce a valid structured card payload, **degrade in-process to the current legacy non-agent text path** instead of surfacing an agent-specific error immediately.
-4. That degraded direct-text fallback should run with a **reduced emergency budget** so the request still preserves headroom for image generation and persistence:
-   - per-attempt timeout: **15.0s**
-   - retry count: **1 retry** (2 total attempts)
-   - existing `0.15s` backoff
-   - total degraded text fallback budget: **30.15s**
-5. If the fallback text path succeeds, continue with the existing moderation, image generation, persistence, and response logic unchanged.
-6. If image generation then times out/fails on the normal non-reference-image path, keep today's behavior: persist the partial card and return `status="awaiting_artwork_retry"` with the `retry_artwork` action.
-7. If neither the agent nor the degraded legacy text path produces validated card text before the request budget is exhausted, return the existing upstream `ProblemDetails` error (`502`/`504`). `awaiting_artwork_retry` is **not** used before validated card text and derived art prompt exist.
-8. For the **reference-image edit** flow, keep phase 2 on the legacy path only for now. That path already has its own tighter semantics (for example the 30.0-second Content Safety HTTP timeout and hard timeout/error behavior for image edit failures) and does not currently degrade to `awaiting_artwork_retry` on image-edit failure (`app/photos.py:436-443`, `app/generation.py:2090-2120`, `app/generation.py:2685-2724`).
-
-**Why this fits the current budget**
-
-- Agent hop worst case before fallback: **8.15s**
-- Degraded legacy text fallback worst case: **30.15s**
-- Existing image call worst case: **150.0s**
-- Combined worst case before local persistence overhead: **188.30s**
-
-That leaves roughly **36.70 seconds** inside the current 225-second request ceiling for moderation, Blob/Cosmos persistence, audit writes, and response serialization, which is materially safer than trying to bolt the agent hop onto the current 210.45-second text+image envelope.
+- Keep the external request ceiling at **225.0 seconds**, the hosted-agent
+  timeout at **5.0 seconds**, and the image timeout at **150.0 seconds**.
+- Do not retry or replace a failed agent response with direct card-text
+  generation. Timeout, transient service failure, `routing_defer`,
+  authentication/authorization, configuration, parse/contract failure, and
+  policy refusal map to bounded structured errors.
+- Preserve `awaiting_artwork_retry` only after safe, validated agent text exists
+  and the non-reference image stage fails or times out.
+- Reference-image edit failure remains a hard structured error.
 
 ### Project-endpoint and RBAC findings (issue #98)
 
 **Repo-verified current configuration**
 
-- The current runtime is still wired for **account-scoped direct model inference**, not project-scoped agent access:
+- Historical baseline before #146:
   - `infra/main.bicep` injects `FOUNDRY_ENDPOINT` as `https://${aiFoundryAccountName}.cognitiveservices.azure.com/` plus the text/image deployment aliases into the Container App (`infra/main.bicep:441-444`, `infra/modules/container-apps.bicep:279-292`).
-  - The app only loads those account-oriented settings today: `FOUNDRY_ENDPOINT`, `FOUNDRY_TEXT_DEPLOYMENT`, and `FOUNDRY_IMAGE_DEPLOYMENT` (`app/settings.py:132-146`, `.env.example:19-22`).
+  - The historical app loaded account-oriented text and image deployment settings.
+    The current web runtime retains only the account endpoint/image deployment
+    and adds required project-endpoint/agent settings.
   - Runtime calls use `DefaultAzureCredential` against the **Cognitive Services** audience (`https://cognitiveservices.azure.com/.default`) and then post straight to `/openai/deployments/...` on `self.settings.foundry_endpoint` (`app/generation.py:1271-1275`, `app/generation.py:1306-1310`, `app/generation.py:1369-1377`, `app/generation.py:1501-1508`, `app/generation.py:1548-1556`).
 - The IaC does already provision a **Foundry project** resource, but it currently exposes only the project name/resource ID and only grants:
   - `Cognitive Services User` at **Foundry account scope** to the Container App identity for direct account access (`infra/modules/ai-foundry.bicep:62-64`, `infra/modules/ai-foundry.bicep:137-145`)
@@ -784,7 +760,8 @@ That leaves roughly **36.70 seconds** inside the current 225-second request ceil
    Hosted-agent support, model availability, and quota must be checked against the actual deployment region strategy before implementation.
 
 2. **Latency budget**  
-   **Resolved in issue #97 for phase 2 rollout:** cap the hosted-agent hop at **8.15s total** (5.0s + one 3.0s retry + 0.15s backoff), then degrade to the legacy text path with a **30.15s** emergency budget (15.0s + one retry + 0.15s backoff), while preserving the existing **150.0s** image budget and `awaiting_artwork_retry` behavior.
+   The hosted-agent request has a 5.0-second bound and no direct text fallback;
+   the 150.0-second image budget and `awaiting_artwork_retry` behavior remain.
 
 3. **Project endpoint vs account endpoint confusion**  
    The current app uses the account endpoint for model inference. Agent operations need project-aware configuration and RBAC.
@@ -849,13 +826,11 @@ Azure Content Safety is not used for card text or generated images today, and
 - **Hosted-orchestrator structured refusal/failure is not optional advice.**
   The original architecture already requires the app to map a structured
   refusal/failure payload into `ProblemDetails`; that outcome must not be
-  bypassed by direct fallback as though it were merely advisory.
+  bypassed by another generation path as though it were merely advisory.
 - **Managed guardrail denial is likewise authoritative if guardrails are later
   adopted/configured as required.**
-- **The future 8.15 s agent budget and 30.15 s degraded direct-path budget do
-  not authorize a safety bypass.** Direct fallback is a technical-failure
-  policy only and must still run every required active safety layer that
-  applies to the replacement output.
+- **Agent failures do not authorize a safety bypass.** They surface as bounded
+  structured errors and do not invoke a replacement text generator.
 - **Required-layer outage or missing required evidence is not allow.** Inactive
   means “not applicable”; unavailable or indeterminate required safety means
   fail/hold.
@@ -869,10 +844,10 @@ Azure Content Safety is not used for card text or generated images today, and
 | Saved-photo Content Safety threshold exceedance | `422 saved_photo_rejected` | Same |
 | Saved-photo Content Safety endpoint missing or Azure HTTP error | `503`; upload blocked | Same |
 | Saved-photo Content Safety missing category evidence | **Current gap:** parser may still allow | Treat as INDETERMINATE / block if that layer is required |
-| Hosted orchestrator structured refusal/failure + heuristic ALLOW | N/A | Backend maps refusal/failure to `ProblemDetails`; no fail-open direct fallback |
+| Hosted orchestrator structured refusal/failure + heuristic ALLOW | N/A | Backend maps refusal/failure to `ProblemDetails`; no fail-open replacement path |
 | Optional advisory safety-skill concern + no authoritative deny | N/A | Advisory only; backend/managed authoritative layers still decide |
 | Managed guardrail denial + heuristic ALLOW | N/A | Deny; no fallback around the guardrail |
-| Agent technical failure with no authoritative deny | N/A | Eligible for direct fallback only if the replacement path still runs all required active safety layers |
+| Agent technical failure with no authoritative deny | N/A | Bounded structured error; no replacement text path |
 | Upstream image-edit failure on reference-image path | Hard error (`502`/`504`) | Same unless future policy explicitly changes it |
 | Successful reference-image edit followed by `post_image` heuristic BLOCK | `200` + `awaiting_artwork_retry` | Same |
 | Idempotency replay of current `audit_failed` record | Replays stored structured failure fields first; legacy reason-code fallback is secondary | Same |

@@ -30,7 +30,7 @@ HEALTHY_DEPENDENCY_STATUSES = {"ok", "not_applicable"}
 
 @dataclass(frozen=True, slots=True)
 class DependencyHealthResult:
-    name: Literal["cosmos", "blob"]
+    name: Literal["cosmos", "blob", "agent"]
     status: DependencyStatus
     duration_ms: int
     error_category: DependencyErrorCategory = "none"
@@ -44,14 +44,14 @@ class DependencyHealthResult:
 
 
 class HealthDependencyProbe(Protocol):
-    name: Literal["cosmos", "blob"]
+    name: Literal["cosmos", "blob", "agent"]
 
     async def check(self, timeout_seconds: float) -> DependencyHealthResult: ...
 
 
 @dataclass(frozen=True, slots=True)
 class NotApplicableHealthProbe:
-    name: Literal["cosmos", "blob"]
+    name: Literal["cosmos", "blob", "agent"]
 
     async def check(self, timeout_seconds: float) -> DependencyHealthResult:
         del timeout_seconds
@@ -131,6 +131,29 @@ class AzureBlobHealthProbe:
         await container.get_container_properties()
 
 
+@dataclass(frozen=True, slots=True)
+class FoundryAgentHealthProbe:
+    client: Any
+    name: Literal["agent"] = "agent"
+
+    async def check(self, timeout_seconds: float) -> DependencyHealthResult:
+        start = time.perf_counter()
+        try:
+            status = await self.client.check_access(timeout_seconds)
+        except Exception:
+            status = "unavailable"
+        if status == "ok":
+            return _result(name=self.name, status="ok", start=start)
+        if status not in {"unavailable", "unauthorized", "misconfigured", "timeout"}:
+            status = "unavailable"
+        return _result(
+            name=self.name,
+            status=status,
+            start=start,
+            error_category=status,
+        )
+
+
 async def run_dependency_probes(
     *,
     probes: Sequence[tuple[HealthDependencyProbe, float]],
@@ -152,7 +175,7 @@ async def run_dependency_probes(
 def build_healthz_payload(
     results: dict[str, DependencyHealthResult],
 ) -> dict[str, str | dict[str, dict[str, str | int]]]:
-    ordered_names = ("cosmos", "blob")
+    ordered_names = ("cosmos", "blob", "agent")
     ordered_results = {name: results[name].as_dict() for name in ordered_names if name in results}
     status = (
         "ok"
@@ -252,7 +275,7 @@ def _classify_error_category(
 
 def _result(
     *,
-    name: Literal["cosmos", "blob"],
+    name: Literal["cosmos", "blob", "agent"],
     status: DependencyStatus,
     start: float,
     error_category: DependencyErrorCategory = "none",

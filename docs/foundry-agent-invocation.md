@@ -1,25 +1,29 @@
 # Foundry hosted-agent invocation smoke test
 
-This project has an invocation client and an opt-in text-only `card-orchestrator`
-runtime. The web backend now wires the client into card generation when
-`AGENT_GENERATION_ENABLED=true`; direct Azure OpenAI remains the default and the
-bounded fallback for eligible agent failures. Authentication, deterministic
+This project has an invocation client and a required text-only `card-orchestrator`
+runtime. All live card-text generation uses this client; no direct Azure OpenAI
+card-text path or automatic fallback remains. Authentication, deterministic
 moderation, image generation, and persistence remain in the web backend. See the
 [implemented architecture](architecture.md) for the current service boundaries.
 
 ## Configuration
 
-Configure these when smoke-testing an already deployed agent or explicitly
-enabling agent-backed text generation:
+Configure these for every live web runtime and when smoke-testing an already
+deployed agent:
 
 - `FOUNDRY_PROJECT_ENDPOINT`: canonical project endpoint, for example `https://<account>.services.ai.azure.com/api/projects/<project>`
 - `FOUNDRY_AGENT_NAME`: hosted agent name, for example `card-orchestrator`
 - `FOUNDRY_AGENT_API_VERSION`: defaults to `v1`
 - `FOUNDRY_AGENT_EXPECTED_VERSION`: optional application metadata check against the agent response `metadata.agentVersion` or `metadata.version`
 - `FOUNDRY_AGENT_TIMEOUT_SECONDS`: defaults to `5.0`
-- `AGENT_GENERATION_ENABLED`: `false` (default, direct model path) or `true` (agentic text generation). When `true`, `FOUNDRY_PROJECT_ENDPOINT` and `FOUNDRY_AGENT_NAME` are required at startup.
+- `TELEMETRY_ENABLED=true` and `APPLICATIONINSIGHTS_CONNECTION_STRING`: mandatory for live startup.
 
-`FOUNDRY_PROJECT_ENDPOINT` is intentionally separate from `FOUNDRY_ENDPOINT`; there is no fallback to the account/model endpoint.
+`FOUNDRY_PROJECT_ENDPOINT` is intentionally separate from `FOUNDRY_ENDPOINT`;
+there is no fallback to the account/model endpoint or to direct text generation.
+
+At startup, the web app validates configuration, acquires an Entra token, and
+performs the same bounded, content-free `/agents` access check described below.
+Failure prevents readiness rather than accepting traffic in a degraded mode.
 
 ## Manual smoke command
 
@@ -450,7 +454,7 @@ ACA-MI access probe is not an invocation result. The operations runbook records
 the subsequent actual deployment outcome separately. Never substitute developer
 credentials for the authorized ACA invocation.
 
-## Opt-in runtime (offline candidate, issue #109)
+## Hosted runtime (offline candidate, issue #109)
 
 Python 3.12 entrypoint and optional dependency installation:
 
@@ -507,10 +511,9 @@ Maximum **three model requests**, with model retries and function-invocation loo
 disabled, no repair loops and no automatic fallback. All agents/sessions are fresh
 per stage and clients are owned/closed per invocation, including cancellation.
 The 20-second stage / 65-second orchestration budgets are an **OFFLINE CANDIDATE**:
-they do **not** meet, replace or provide evidence for the proposed production
-8.15-second agent-hop / 30.15-second degraded-direct-path latency budgets. The
-operator's default 5-second timeout is intentionally unchanged; any later approved
-nonproduction live trial needs its own explicit deadline.
+they do **not** replace or provide evidence for the web client's bounded
+5-second hosted-agent timeout. Any later approved nonproduction live trial
+needs its own explicit deadline.
 
 Completed domain JSON is returned in the SDK's `TextResponse`, inside a genuine
 Responses API envelope. `refused`, `held` and `routing_defer` always omit content

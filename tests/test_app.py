@@ -27,6 +27,11 @@ def test_healthz() -> None:
                 "durationMs": 0,
                 "errorCategory": "none",
             },
+            "agent": {
+                "status": "not_applicable",
+                "durationMs": 0,
+                "errorCategory": "none",
+            },
         },
     }
     assert response.headers["cache-control"] == "no-store"

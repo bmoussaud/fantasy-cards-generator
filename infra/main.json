@@ -6,7 +6,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.46.1.21595",
-      "templateHash": "7593874166618454161"
+      "templateHash": "8381686641741755056"
     }
   },
   "parameters": {
@@ -187,18 +187,11 @@
         "description": "Azure AI Foundry project display name for the current environment."
       }
     },
-    "enableFoundryAgentAccess": {
-      "type": "bool",
-      "defaultValue": false,
-      "metadata": {
-        "description": "Grant Foundry hosted-agent invoke access to runtime managed identities. Off by default so existing deployments do not gain new permissions until explicitly opted in."
-      }
-    },
     "foundryAgentName": {
       "type": "string",
       "defaultValue": "",
       "metadata": {
-        "description": "Hosted agent name for the card-orchestrator agent. Injected as FOUNDRY_AGENT_NAME. Required when agentGenerationEnabled is true."
+        "description": "Hosted agent name for the card-orchestrator agent. Injected as FOUNDRY_AGENT_NAME."
       }
     },
     "foundryAgentExpectedVersion": {
@@ -206,13 +199,6 @@
       "defaultValue": "",
       "metadata": {
         "description": "Expected agent version for metadata check. Injected as FOUNDRY_AGENT_EXPECTED_VERSION. Optional."
-      }
-    },
-    "agentGenerationEnabled": {
-      "type": "bool",
-      "defaultValue": false,
-      "metadata": {
-        "description": "Enable the agentic text generation path. Injected as AGENT_GENERATION_ENABLED. Default false (direct model path)."
       }
     },
     "deployerPrincipalType": {
@@ -1809,17 +1795,11 @@
           "foundryProjectEndpoint": {
             "value": "[variables('aiFoundryProjectEndpoint')]"
           },
-          "foundryTextDeployment": {
-            "value": "[parameters('aiFoundryTextDeploymentName')]"
-          },
           "foundryAgentName": {
             "value": "[parameters('foundryAgentName')]"
           },
           "foundryAgentExpectedVersion": {
             "value": "[parameters('foundryAgentExpectedVersion')]"
-          },
-          "agentGenerationEnabled": {
-            "value": "[parameters('agentGenerationEnabled')]"
           },
           "healthzBlobTimeoutMs": {
             "value": "[parameters('healthzBlobTimeoutMs')]"
@@ -1916,7 +1896,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.46.1.21595",
-              "templateHash": "9486241533455283285"
+              "templateHash": "10414481190912057112"
             }
           },
           "parameters": {
@@ -2079,13 +2059,6 @@
                 "description": "Azure AI Foundry API version injected as FOUNDRY_API_VERSION."
               }
             },
-            "foundryTextDeployment": {
-              "type": "string",
-              "defaultValue": "gpt-5-5",
-              "metadata": {
-                "description": "Azure AI Foundry text deployment injected as FOUNDRY_TEXT_DEPLOYMENT."
-              }
-            },
             "foundryImageDeployment": {
               "type": "string",
               "defaultValue": "gpt-image-2",
@@ -2097,7 +2070,7 @@
               "type": "string",
               "defaultValue": "",
               "metadata": {
-                "description": "Foundry hosted agent name injected as FOUNDRY_AGENT_NAME. Required when agentGenerationEnabled is true."
+                "description": "Foundry hosted agent name injected as FOUNDRY_AGENT_NAME."
               }
             },
             "foundryAgentExpectedVersion": {
@@ -2112,13 +2085,6 @@
               "defaultValue": "v1",
               "metadata": {
                 "description": "Agent API version injected as FOUNDRY_AGENT_API_VERSION."
-              }
-            },
-            "agentGenerationEnabled": {
-              "type": "bool",
-              "defaultValue": false,
-              "metadata": {
-                "description": "Enable agentic text generation path injected as AGENT_GENERATION_ENABLED. Default false (direct model)."
               }
             },
             "cosmosEndpoint": {
@@ -2388,7 +2354,7 @@
           },
           "variables": {
             "containerAppSecrets": "[concat(createArray(createObject('name', 'applicationinsights-connection-string', 'value', parameters('appInsightsConnectionString'))), if(not(empty(parameters('appSessionSecretKeyValue'))), createArray(createObject('name', 'app-session-secret-key', 'value', parameters('appSessionSecretKeyValue'))), createArray()), if(not(empty(parameters('entraClientSecretValue'))), createArray(createObject('name', 'entra-client-secret', 'value', parameters('entraClientSecretValue'))), createArray()))]",
-            "containerAppEnv": "[concat(createArray(createObject('name', 'APPLICATIONINSIGHTS_CONNECTION_STRING', 'secretRef', 'applicationinsights-connection-string'), createObject('name', 'TELEMETRY_ENABLED', 'value', 'true'), createObject('name', 'AZURE_EXPERIMENTAL_ENABLE_GENAI_TRACING', 'value', 'true'), createObject('name', 'APP_ENV', 'value', parameters('deploymentEnvironment')), createObject('name', 'TELEMETRY_SAMPLING_RATIO', 'value', parameters('telemetrySamplingRatio')), createObject('name', 'OTEL_SERVICE_NAME', 'value', parameters('telemetryServiceName')), createObject('name', 'OTEL_RESOURCE_ATTRIBUTES', 'value', format('deployment.environment.name={0},cloud.platform=azure_container_apps', parameters('telemetryEnvironmentName'))), createObject('name', 'OTEL_TRACES_SAMPLER', 'value', 'parentbased_trace_id_ratio'), createObject('name', 'OTEL_TRACES_SAMPLER_ARG', 'value', parameters('telemetrySamplingRatio')), createObject('name', 'AI_MODE', 'value', parameters('aiMode')), createObject('name', 'PERSISTENCE_MODE', 'value', parameters('persistenceMode')), createObject('name', 'FOUNDRY_ENDPOINT', 'value', parameters('foundryEndpoint')), createObject('name', 'FOUNDRY_PROJECT_ENDPOINT', 'value', parameters('foundryProjectEndpoint')), createObject('name', 'FOUNDRY_API_VERSION', 'value', parameters('foundryApiVersion')), createObject('name', 'FOUNDRY_TEXT_DEPLOYMENT', 'value', parameters('foundryTextDeployment')), createObject('name', 'FOUNDRY_IMAGE_DEPLOYMENT', 'value', parameters('foundryImageDeployment')), createObject('name', 'FOUNDRY_AGENT_NAME', 'value', parameters('foundryAgentName')), createObject('name', 'FOUNDRY_AGENT_EXPECTED_VERSION', 'value', parameters('foundryAgentExpectedVersion')), createObject('name', 'FOUNDRY_AGENT_API_VERSION', 'value', parameters('foundryAgentApiVersion')), createObject('name', 'AGENT_GENERATION_ENABLED', 'value', string(parameters('agentGenerationEnabled'))), createObject('name', 'COSMOS_ENDPOINT', 'value', parameters('cosmosEndpoint')), createObject('name', 'COSMOS_DATABASE_NAME', 'value', parameters('cosmosDatabaseName')), createObject('name', 'COSMOS_CONTAINER_NAME', 'value', parameters('cosmosContainerName')), createObject('name', 'BLOB_ENDPOINT', 'value', parameters('blobEndpoint')), createObject('name', 'BLOB_CONTAINER_NAME', 'value', parameters('blobContainerName')), createObject('name', 'PROFILE_PHOTOS_CONTAINER_NAME', 'value', parameters('profilePhotosContainerName')), createObject('name', 'CONTENT_SAFETY_ENDPOINT', 'value', parameters('contentSafetyEndpoint')), createObject('name', 'CONTENT_SAFETY_API_VERSION', 'value', parameters('contentSafetyApiVersion')), createObject('name', 'CONTENT_SAFETY_MAX_HATE_SEVERITY', 'value', string(parameters('contentSafetyMaxHateSeverity'))), createObject('name', 'CONTENT_SAFETY_MAX_SELF_HARM_SEVERITY', 'value', string(parameters('contentSafetyMaxSelfHarmSeverity'))), createObject('name', 'CONTENT_SAFETY_MAX_SEXUAL_SEVERITY', 'value', string(parameters('contentSafetyMaxSexualSeverity'))), createObject('name', 'CONTENT_SAFETY_MAX_VIOLENCE_SEVERITY', 'value', string(parameters('contentSafetyMaxViolenceSeverity'))), createObject('name', 'HEALTHZ_COSMOS_TIMEOUT_MS', 'value', string(parameters('healthzCosmosTimeoutMs'))), createObject('name', 'HEALTHZ_BLOB_TIMEOUT_MS', 'value', string(parameters('healthzBlobTimeoutMs'))), createObject('name', 'MODERATION_SERVICE', 'value', parameters('moderationService')), createObject('name', 'MODERATION_POLICY_NAME', 'value', parameters('moderationPolicyName')), createObject('name', 'RATE_LIMIT_USER_REQUESTS', 'value', string(parameters('rateLimitUserRequests'))), createObject('name', 'RATE_LIMIT_USER_WINDOW_SECONDS', 'value', string(parameters('rateLimitUserWindowSeconds'))), createObject('name', 'RATE_LIMIT_IP_REQUESTS', 'value', string(parameters('rateLimitIpRequests'))), createObject('name', 'RATE_LIMIT_IP_WINDOW_SECONDS', 'value', string(parameters('rateLimitIpWindowSeconds'))), createObject('name', 'TRUSTED_PROXY_HOPS', 'value', string(parameters('trustedProxyHops'))), createObject('name', 'UPSTREAM_MAX_RETRIES', 'value', string(parameters('upstreamMaxRetries'))), createObject('name', 'IMAGE_MAX_RETRIES', 'value', string(parameters('imageMaxRetries'))), createObject('name', 'UPSTREAM_BASE_BACKOFF_SECONDS', 'value', parameters('upstreamBaseBackoffSeconds')), createObject('name', 'TEXT_TIMEOUT_SECONDS', 'value', parameters('textTimeoutSeconds')), createObject('name', 'IMAGE_TIMEOUT_SECONDS', 'value', parameters('imageTimeoutSeconds')), createObject('name', 'OVERALL_TIMEOUT_SECONDS', 'value', parameters('overallTimeoutSeconds')), createObject('name', 'AUDIT_RETENTION_DAYS', 'value', string(parameters('auditRetentionDays'))), createObject('name', 'IMAGE_SIZE', 'value', parameters('imageSize')), createObject('name', 'IMAGE_QUALITY', 'value', parameters('imageQuality')), createObject('name', 'SAVED_PHOTO_MAX_COUNT', 'value', string(parameters('savedPhotoMaxCount'))), createObject('name', 'SAVED_PHOTO_MAX_BYTES', 'value', parameters('savedPhotoMaxBytes')), createObject('name', 'SAVED_PHOTO_THUMBNAIL_SIZE', 'value', string(parameters('savedPhotoThumbnailSize'))), createObject('name', 'KEY_VAULT_URI', 'value', parameters('keyVaultUri'))), if(not(empty(parameters('appSessionSecretKeyValue'))), createArray(createObject('name', 'APP_SESSION_SECRET_KEY', 'secretRef', 'app-session-secret-key')), createArray()), if(not(empty(parameters('entraClientId'))), createArray(createObject('name', 'ENTRA_CLIENT_ID', 'value', parameters('entraClientId'))), createArray()), if(not(empty(parameters('entraClientSecretValue'))), createArray(createObject('name', 'ENTRA_CLIENT_SECRET', 'secretRef', 'entra-client-secret')), createArray()), if(not(empty(parameters('entraRedirectUri'))), createArray(createObject('name', 'ENTRA_REDIRECT_URI', 'value', parameters('entraRedirectUri'))), createArray()), if(not(empty(parameters('entraPostLogoutRedirectUri'))), createArray(createObject('name', 'ENTRA_POST_LOGOUT_REDIRECT_URI', 'value', parameters('entraPostLogoutRedirectUri'))), createArray()))]"
+            "containerAppEnv": "[concat(createArray(createObject('name', 'APPLICATIONINSIGHTS_CONNECTION_STRING', 'secretRef', 'applicationinsights-connection-string'), createObject('name', 'TELEMETRY_ENABLED', 'value', 'true'), createObject('name', 'AZURE_EXPERIMENTAL_ENABLE_GENAI_TRACING', 'value', 'true'), createObject('name', 'APP_ENV', 'value', parameters('deploymentEnvironment')), createObject('name', 'TELEMETRY_SAMPLING_RATIO', 'value', parameters('telemetrySamplingRatio')), createObject('name', 'OTEL_SERVICE_NAME', 'value', parameters('telemetryServiceName')), createObject('name', 'OTEL_RESOURCE_ATTRIBUTES', 'value', format('deployment.environment.name={0},cloud.platform=azure_container_apps', parameters('telemetryEnvironmentName'))), createObject('name', 'OTEL_TRACES_SAMPLER', 'value', 'parentbased_trace_id_ratio'), createObject('name', 'OTEL_TRACES_SAMPLER_ARG', 'value', parameters('telemetrySamplingRatio')), createObject('name', 'AI_MODE', 'value', parameters('aiMode')), createObject('name', 'PERSISTENCE_MODE', 'value', parameters('persistenceMode')), createObject('name', 'FOUNDRY_ENDPOINT', 'value', parameters('foundryEndpoint')), createObject('name', 'FOUNDRY_PROJECT_ENDPOINT', 'value', parameters('foundryProjectEndpoint')), createObject('name', 'FOUNDRY_API_VERSION', 'value', parameters('foundryApiVersion')), createObject('name', 'FOUNDRY_IMAGE_DEPLOYMENT', 'value', parameters('foundryImageDeployment')), createObject('name', 'FOUNDRY_AGENT_NAME', 'value', parameters('foundryAgentName')), createObject('name', 'FOUNDRY_AGENT_EXPECTED_VERSION', 'value', parameters('foundryAgentExpectedVersion')), createObject('name', 'FOUNDRY_AGENT_API_VERSION', 'value', parameters('foundryAgentApiVersion')), createObject('name', 'COSMOS_ENDPOINT', 'value', parameters('cosmosEndpoint')), createObject('name', 'COSMOS_DATABASE_NAME', 'value', parameters('cosmosDatabaseName')), createObject('name', 'COSMOS_CONTAINER_NAME', 'value', parameters('cosmosContainerName')), createObject('name', 'BLOB_ENDPOINT', 'value', parameters('blobEndpoint')), createObject('name', 'BLOB_CONTAINER_NAME', 'value', parameters('blobContainerName')), createObject('name', 'PROFILE_PHOTOS_CONTAINER_NAME', 'value', parameters('profilePhotosContainerName')), createObject('name', 'CONTENT_SAFETY_ENDPOINT', 'value', parameters('contentSafetyEndpoint')), createObject('name', 'CONTENT_SAFETY_API_VERSION', 'value', parameters('contentSafetyApiVersion')), createObject('name', 'CONTENT_SAFETY_MAX_HATE_SEVERITY', 'value', string(parameters('contentSafetyMaxHateSeverity'))), createObject('name', 'CONTENT_SAFETY_MAX_SELF_HARM_SEVERITY', 'value', string(parameters('contentSafetyMaxSelfHarmSeverity'))), createObject('name', 'CONTENT_SAFETY_MAX_SEXUAL_SEVERITY', 'value', string(parameters('contentSafetyMaxSexualSeverity'))), createObject('name', 'CONTENT_SAFETY_MAX_VIOLENCE_SEVERITY', 'value', string(parameters('contentSafetyMaxViolenceSeverity'))), createObject('name', 'HEALTHZ_COSMOS_TIMEOUT_MS', 'value', string(parameters('healthzCosmosTimeoutMs'))), createObject('name', 'HEALTHZ_BLOB_TIMEOUT_MS', 'value', string(parameters('healthzBlobTimeoutMs'))), createObject('name', 'MODERATION_SERVICE', 'value', parameters('moderationService')), createObject('name', 'MODERATION_POLICY_NAME', 'value', parameters('moderationPolicyName')), createObject('name', 'RATE_LIMIT_USER_REQUESTS', 'value', string(parameters('rateLimitUserRequests'))), createObject('name', 'RATE_LIMIT_USER_WINDOW_SECONDS', 'value', string(parameters('rateLimitUserWindowSeconds'))), createObject('name', 'RATE_LIMIT_IP_REQUESTS', 'value', string(parameters('rateLimitIpRequests'))), createObject('name', 'RATE_LIMIT_IP_WINDOW_SECONDS', 'value', string(parameters('rateLimitIpWindowSeconds'))), createObject('name', 'TRUSTED_PROXY_HOPS', 'value', string(parameters('trustedProxyHops'))), createObject('name', 'UPSTREAM_MAX_RETRIES', 'value', string(parameters('upstreamMaxRetries'))), createObject('name', 'IMAGE_MAX_RETRIES', 'value', string(parameters('imageMaxRetries'))), createObject('name', 'UPSTREAM_BASE_BACKOFF_SECONDS', 'value', parameters('upstreamBaseBackoffSeconds')), createObject('name', 'TEXT_TIMEOUT_SECONDS', 'value', parameters('textTimeoutSeconds')), createObject('name', 'IMAGE_TIMEOUT_SECONDS', 'value', parameters('imageTimeoutSeconds')), createObject('name', 'OVERALL_TIMEOUT_SECONDS', 'value', parameters('overallTimeoutSeconds')), createObject('name', 'AUDIT_RETENTION_DAYS', 'value', string(parameters('auditRetentionDays'))), createObject('name', 'IMAGE_SIZE', 'value', parameters('imageSize')), createObject('name', 'IMAGE_QUALITY', 'value', parameters('imageQuality')), createObject('name', 'SAVED_PHOTO_MAX_COUNT', 'value', string(parameters('savedPhotoMaxCount'))), createObject('name', 'SAVED_PHOTO_MAX_BYTES', 'value', parameters('savedPhotoMaxBytes')), createObject('name', 'SAVED_PHOTO_THUMBNAIL_SIZE', 'value', string(parameters('savedPhotoThumbnailSize'))), createObject('name', 'KEY_VAULT_URI', 'value', parameters('keyVaultUri'))), if(not(empty(parameters('appSessionSecretKeyValue'))), createArray(createObject('name', 'APP_SESSION_SECRET_KEY', 'secretRef', 'app-session-secret-key')), createArray()), if(not(empty(parameters('entraClientId'))), createArray(createObject('name', 'ENTRA_CLIENT_ID', 'value', parameters('entraClientId'))), createArray()), if(not(empty(parameters('entraClientSecretValue'))), createArray(createObject('name', 'ENTRA_CLIENT_SECRET', 'secretRef', 'entra-client-secret')), createArray()), if(not(empty(parameters('entraRedirectUri'))), createArray(createObject('name', 'ENTRA_REDIRECT_URI', 'value', parameters('entraRedirectUri'))), createArray()), if(not(empty(parameters('entraPostLogoutRedirectUri'))), createArray(createObject('name', 'ENTRA_POST_LOGOUT_REDIRECT_URI', 'value', parameters('entraPostLogoutRedirectUri'))), createArray()))]"
           },
           "resources": [
             {
@@ -8078,9 +8044,6 @@
           "deployerPrincipalType": {
             "value": "[parameters('deployerPrincipalType')]"
           },
-          "enableFoundryAgentAccess": {
-            "value": "[parameters('enableFoundryAgentAccess')]"
-          },
           "imageDeploymentCapacity": {
             "value": "[parameters('aiFoundryImageDeploymentCapacity')]"
           },
@@ -8137,7 +8100,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.46.1.21595",
-              "templateHash": "16765409313379569992"
+              "templateHash": "2772271098075052018"
             }
           },
           "parameters": {
@@ -8209,13 +8172,6 @@
               ],
               "metadata": {
                 "description": "Microsoft Entra principal type running the deployment."
-              }
-            },
-            "enableFoundryAgentAccess": {
-              "type": "bool",
-              "defaultValue": false,
-              "metadata": {
-                "description": "Grant hosted-agent invoke-only access to runtime managed identities. Existing direct model access remains separate and always provisioned."
               }
             },
             "textDeploymentName": {
@@ -8478,7 +8434,6 @@
               ]
             },
             {
-              "condition": "[parameters('enableFoundryAgentAccess')]",
               "type": "Microsoft.Authorization/roleAssignments",
               "apiVersion": "2022-04-01",
               "scope": "[resourceId('Microsoft.CognitiveServices/accounts', parameters('accountName'))]",
@@ -8494,7 +8449,6 @@
               ]
             },
             {
-              "condition": "[parameters('enableFoundryAgentAccess')]",
               "type": "Microsoft.Authorization/roleAssignments",
               "apiVersion": "2022-04-01",
               "scope": "[resourceId('Microsoft.CognitiveServices/accounts/projects', parameters('accountName'), parameters('projectName'))]",

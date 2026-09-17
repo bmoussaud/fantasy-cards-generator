@@ -120,6 +120,72 @@ def invoke_with_transport(
     return result, fake_credential
 
 
+def check_access_with_transport(
+    settings,
+    handler,
+    *,
+    credential=None,
+) -> tuple[str, FakeCredential]:
+    fake_credential = credential or FakeCredential()
+    client = FoundryAgentClient(
+        settings,
+        credential=fake_credential,
+        transport=httpx.MockTransport(handler),
+    )
+    result = asyncio.run(client.check_access(1.0))
+    asyncio.run(client.aclose())
+    return result, fake_credential
+
+
+def test_agent_access_probe_validates_identity_rbac_and_response_shape() -> None:
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["authorization"] = request.headers["Authorization"]
+        return httpx.Response(200, json={"data": []})
+
+    result, credential = check_access_with_transport(configured_settings(), handler)
+
+    assert result == "ok"
+    assert credential.scopes == [(FOUNDRY_AGENT_TOKEN_SCOPE,)]
+    assert captured["url"] == (f"{PROJECT_ENDPOINT}/agents?api-version=2025-11-15-preview")
+    assert captured["authorization"].startswith("Bearer ")
+    assert captured["authorization"].endswith("fake-token")
+
+
+@pytest.mark.parametrize(
+    ("status_code", "expected"),
+    [
+        (400, "misconfigured"),
+        (401, "unauthorized"),
+        (403, "unauthorized"),
+        (404, "misconfigured"),
+        (429, "unavailable"),
+        (503, "unavailable"),
+    ],
+)
+def test_agent_access_probe_classifies_bounded_failures(
+    status_code: int,
+    expected: str,
+) -> None:
+    result, _ = check_access_with_transport(
+        configured_settings(),
+        lambda request: httpx.Response(status_code, json={}, request=request),
+    )
+
+    assert result == expected
+
+
+def test_agent_access_probe_rejects_malformed_success() -> None:
+    result, _ = check_access_with_transport(
+        configured_settings(),
+        lambda request: httpx.Response(200, json={"data": "not-a-list"}, request=request),
+    )
+
+    assert result == "unavailable"
+
+
 def test_agent_settings_are_optional_at_startup(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("FOUNDRY_PROJECT_ENDPOINT", raising=False)
     monkeypatch.delenv("FOUNDRY_AGENT_NAME", raising=False)

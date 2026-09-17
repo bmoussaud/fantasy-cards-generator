@@ -133,6 +133,11 @@ def test_healthy_dependencies_return_200() -> None:
         "dependencies": {
             "cosmos": {"status": "ok", "durationMs": 3, "errorCategory": "none"},
             "blob": {"status": "ok", "durationMs": 4, "errorCategory": "none"},
+            "agent": {
+                "status": "not_applicable",
+                "durationMs": 0,
+                "errorCategory": "none",
+            },
         },
     }
 
@@ -312,6 +317,11 @@ def test_memory_mode_reports_not_applicable_without_instantiating_azure_clients(
             "errorCategory": "none",
         },
         "blob": {
+            "status": "not_applicable",
+            "durationMs": 0,
+            "errorCategory": "none",
+        },
+        "agent": {
             "status": "not_applicable",
             "durationMs": 0,
             "errorCategory": "none",

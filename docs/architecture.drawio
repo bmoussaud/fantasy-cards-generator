@@ -7,7 +7,7 @@
         <mxCell id="title" value="Fantasy Cards Generator | implemented architecture" style="text;html=0;align=left;fontSize=32;fontStyle=1;fontColor=#172B4D;" vertex="1" parent="1">
           <mxGeometry x="40" y="35" width="2000" height="50" as="geometry"/>
         </mxCell>
-        <mxCell id="subtitle" value="Repository topology, not a live Azure inventory | direct models by default; hosted text orchestration is opt-in" style="text;html=0;align=left;fontSize=20;fontColor=#42526E;" vertex="1" parent="1">
+        <mxCell id="subtitle" value="Repository topology, not a live Azure inventory | hosted agent is the only live card-text path" style="text;html=0;align=left;fontSize=20;fontColor=#42526E;" vertex="1" parent="1">
           <mxGeometry x="40" y="92" width="2000" height="36" as="geometry"/>
         </mxCell>
         <mxCell id="clients" value="CLIENT &amp; IDENTITY" style="rounded=0;dashed=1;fillColor=#F0F5FA;strokeColor=#61758A;fontColor=#263B50;align=left;verticalAlign=top;spacing=16;fontSize=20;fontStyle=1;container=1;collapsible=0;" vertex="1" parent="1">
@@ -49,10 +49,10 @@
         <mxCell id="foundry" value="MICROSOFT FOUNDRY | AI Services account + project" style="rounded=0;dashed=1;fillColor=#F6F0FC;strokeColor=#8651B0;fontColor=#592C7A;align=left;verticalAlign=top;spacing=16;fontSize=20;fontStyle=1;container=1;collapsible=0;" vertex="1" parent="1">
           <mxGeometry x="1280" y="250" width="760" height="750" as="geometry"/>
         </mxCell>
-        <mxCell id="agent" value="Hosted card-orchestrator&#10;Opt-in, text-only Responses&#10;MAF: concept &gt; lore &gt; art&#10;No image or data-store tools" style="shape=label;rounded=0;fillColor=#E7D3F7;strokeColor=#8651B0;fontColor=#38214B;fontSize=17;align=center;verticalAlign=top;spacingTop=52;imageAlign=center;imageVerticalAlign=top;imageWidth=34;imageHeight=34;image=https://tomkiljo.github.io/ms-icons/icons/Azure_Public_Service_Icons/Icons/ai%20+%20machine%20learning/10165-icon-service-Bot-Services.svg;" vertex="1" parent="foundry">
+        <mxCell id="agent" value="Hosted card-orchestrator&#10;Required live text Responses&#10;MAF: concept &gt; lore &gt; art&#10;No image or data-store tools" style="shape=label;rounded=0;fillColor=#E7D3F7;strokeColor=#8651B0;fontColor=#38214B;fontSize=17;align=center;verticalAlign=top;spacingTop=52;imageAlign=center;imageVerticalAlign=top;imageWidth=34;imageHeight=34;image=https://tomkiljo.github.io/ms-icons/icons/Azure_Public_Service_Icons/Icons/ai%20+%20machine%20learning/10165-icon-service-Bot-Services.svg;" vertex="1" parent="foundry">
           <mxGeometry x="30" y="90" width="320" height="150" as="geometry"/>
         </mxCell>
-        <mxCell id="text-model" value="Azure OpenAI text&#10;gpt-5.5 / alias gpt-5-5&#10;Direct: chat completions&#10;Agent: FoundryChatClient" style="shape=label;rounded=0;fillColor=#E4D9F5;strokeColor=#8651B0;fontColor=#38214B;fontSize=17;align=center;verticalAlign=top;spacingTop=52;imageAlign=center;imageVerticalAlign=top;imageWidth=34;imageHeight=34;image=https://tomkiljo.github.io/ms-icons/icons/Azure_Public_Service_Icons/Icons/ai%20+%20machine%20learning/03438-icon-service-Azure-OpenAI.svg;" vertex="1" parent="foundry">
+        <mxCell id="text-model" value="Azure OpenAI text&#10;gpt-5.5 / alias gpt-5-5&#10;Hosted-agent model deployment&#10;No direct web invocation" style="shape=label;rounded=0;fillColor=#E4D9F5;strokeColor=#8651B0;fontColor=#38214B;fontSize=17;align=center;verticalAlign=top;spacingTop=52;imageAlign=center;imageVerticalAlign=top;imageWidth=34;imageHeight=34;image=https://tomkiljo.github.io/ms-icons/icons/Azure_Public_Service_Icons/Icons/ai%20+%20machine%20learning/03438-icon-service-Azure-OpenAI.svg;" vertex="1" parent="foundry">
           <mxGeometry x="430" y="90" width="300" height="150" as="geometry"/>
         </mxCell>
         <mxCell id="image-model" value="Azure OpenAI images&#10;gpt-image-2&#10;Generations / photo edits" style="shape=label;rounded=0;fillColor=#EEDDF7;strokeColor=#8651B0;fontColor=#38214B;fontSize=17;align=center;verticalAlign=top;spacingTop=52;imageAlign=center;imageVerticalAlign=top;imageWidth=34;imageHeight=34;image=https://tomkiljo.github.io/ms-icons/icons/Azure_Public_Service_Icons/Icons/ai%20+%20machine%20learning/03438-icon-service-Azure-OpenAI.svg;" vertex="1" parent="foundry">
@@ -61,7 +61,7 @@
         <mxCell id="content-safety" value="Azure AI Content Safety&#10;Saved-photo moderation" style="shape=label;rounded=0;fillColor=#F0E4FA;strokeColor=#8651B0;fontColor=#38214B;fontSize=17;align=center;verticalAlign=top;spacingTop=52;imageAlign=center;imageVerticalAlign=top;imageWidth=34;imageHeight=34;image=https://tomkiljo.github.io/ms-icons/icons/Azure_Public_Service_Icons/Icons/ai%20+%20machine%20learning/10162-icon-service-Cognitive-Services.svg;" vertex="1" parent="foundry">
           <mxGeometry x="430" y="580" width="300" height="110" as="geometry"/>
         </mxCell>
-        <mxCell id="foundry-note" value="Public AI endpoints&#10;Entra tokens; no keys&#10;Agent: separate opt-ins" style="text;html=0;align=left;fontSize=17;fontColor=#592C7A;" vertex="1" parent="foundry">
+        <mxCell id="foundry-note" value="Public AI endpoints&#10;Entra tokens; no keys&#10;Agent RBAC is required" style="text;html=0;align=left;fontSize=17;fontColor=#592C7A;" vertex="1" parent="foundry">
           <mxGeometry x="30" y="680" width="220" height="65" as="geometry"/>
         </mxCell>
         <mxCell id="delivery" value="AZURE / DELIVERY" style="rounded=0;dashed=1;fillColor=#F0F5FA;strokeColor=#61758A;fontColor=#263B50;align=left;verticalAlign=bottom;spacing=16;fontSize=20;fontStyle=1;container=1;collapsible=0;" vertex="1" parent="1">
@@ -91,10 +91,10 @@
         <mxCell id="logs" value="Log Analytics workspace&#10;ACA environment logs&#10;Workbooks / availability&#10;Alerts off by default" style="shape=label;rounded=0;fillColor=#FBECD0;strokeColor=#B38736;fontColor=#59421C;fontSize=17;align=center;verticalAlign=top;spacingTop=52;imageAlign=center;imageVerticalAlign=top;imageWidth=34;imageHeight=34;image=https://tomkiljo.github.io/ms-icons/icons/Azure_Public_Service_Icons/Icons/analytics/00009-icon-service-Log-Analytics-Workspaces.svg;" vertex="1" parent="monitoring">
           <mxGeometry x="430" y="70" width="300" height="140" as="geometry"/>
         </mxCell>
-        <mxCell id="legend" value="Solid: runtime / data access    Purple dashed: opt-in agent    Grey dashed: identity, deployment or telemetry    Grey dotted (no arrow): network association. Responses omitted." style="text;html=0;align=left;fontSize=18;fontColor=#42526E;" vertex="1" parent="1">
+        <mxCell id="legend" value="Solid: runtime / data access    Purple: required agent flow    Grey dashed: identity, deployment or telemetry    Grey dotted (no arrow): network association. Responses omitted." style="text;html=0;align=left;fontSize=18;fontColor=#42526E;" vertex="1" parent="1">
           <mxGeometry x="40" y="1435" width="2000" height="36" as="geometry"/>
         </mxCell>
-        <mxCell id="footer" value="Generation safety and persistence stay in FastAPI. Retryable agent errors / routing_defer can fall back once to direct text; auth, policy and schema failures do not." style="text;html=0;align=left;fontSize=18;fontColor=#42526E;" vertex="1" parent="1">
+        <mxCell id="footer" value="Generation safety and persistence stay in FastAPI. Agent failures are fail-closed structured errors; no direct text fallback exists." style="text;html=0;align=left;fontSize=18;fontColor=#42526E;" vertex="1" parent="1">
           <mxGeometry x="40" y="1480" width="2000" height="36" as="geometry"/>
         </mxCell>
         <mxCell id="e-login" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#40699A;strokeWidth=2;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="1" source="browser" target="entra">
@@ -115,11 +115,8 @@
         <mxCell id="e-dns" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#377CB6;strokeWidth=2;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="1" source="pe" target="dns">
           <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="980" y="475"/></Array></mxGeometry>
         </mxCell>
-        <mxCell id="e-agent" value="Opt-in text orchestration" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#8651B0;strokeWidth=2;dashed=1;exitX=1;exitY=0.15;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontSize=16;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="web" target="agent">
+        <mxCell id="e-agent" value="Required card-text orchestration" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#8651B0;strokeWidth=2;exitX=1;exitY=0.15;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontSize=16;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="web" target="agent">
           <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="770" y="520"/><mxPoint x="770" y="210"/><mxPoint x="1250" y="210"/><mxPoint x="1250" y="415"/></Array><mxPoint y="20" as="offset"/></mxGeometry>
-        </mxCell>
-        <mxCell id="e-direct" value="Default text path / bounded fallback" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#8651B0;strokeWidth=2;exitX=1;exitY=0.3;exitDx=0;exitDy=0;entryX=0.9;entryY=0;entryDx=0;entryDy=0;fontSize=16;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="web" target="text-model">
-          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="790" y="550"/><mxPoint x="790" y="170"/><mxPoint x="1980" y="170"/></Array><mxPoint y="-18" as="offset"/></mxGeometry>
         </mxCell>
         <mxCell id="e-specialists" value="3 calls" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#8651B0;strokeWidth=2;dashed=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontSize=15;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="agent" target="text-model">
           <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="1670" y="415"/></Array><mxPoint y="-15" as="offset"/></mxGeometry>

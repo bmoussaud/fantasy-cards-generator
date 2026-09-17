@@ -327,10 +327,10 @@ Content Safety today.
 |------|------------------------|--------------------------|
 | **Authoritative deny wins** | Heuristic text denials abort; saved-photo Content Safety denials reject the save; post-image heuristic denial preserves safe text and marks artwork retryable. | Any authoritative deny — including a managed guardrail denial — must stop the protected path. No later allow may reverse it. |
 | **Optional advisory signals are not authoritative** | No advisory agent layer exists today. | An optional safety-review skill may advise only. That does **not** apply to the orchestrator's own structured refusal/failure payload or to managed guardrail denials. |
-| **Structured refusal/failure is not permission** | N/A today. | If the hosted orchestrator cannot safely continue and returns a structured refusal/failure payload, the backend must map that outcome to an error response. Ambiguous or unclassified refusal is not an allow and must not trigger a fail-open retry/direct path. |
+| **Structured refusal/failure is not permission** | The hosted orchestrator response is mapped to bounded `ProblemDetails`; it never activates a replacement text path. | Ambiguous or unclassified refusal is not an allow. |
 | **Required layer unavailable or indeterminate → not pass** | Saved-photo Content Safety unconfigured/HTTP-error cases block. But missing category evidence is a current gap that can still allow. | Required active layers must either return sufficient evidence or block/hold as INDETERMINATE. Missing evidence must not be treated as allow. |
 | **Inactive is not outage** | Foundry guardrails are not integrated, so they are simply not applicable today. | A layer intentionally not adopted/configured as required is inactive; a layer configured as required but unreachable is an outage. |
-| **Fallback cannot weaken safety** | Current code does not fall back from saved-photo moderation to a lighter path, but unsaved inline reference images already bypass Content Safety as a known gap. | Any future direct fallback may run only after an eligible technical failure and must rerun every required active safety layer on the replacement output, or fail/hold if that cannot be done. |
+| **No replacement path can weaken safety** | Card text has one live producer; saved-photo moderation also has no lighter fallback. Unsaved inline reference images remain a known Content Safety gap. | Any future producer change requires a new safety review and explicit approval. |
 
 ---
 
@@ -349,18 +349,19 @@ yet exist.
 | Content Safety HTTP `4xx`/`5xx` from Azure | Technical failure (BLOCK) | `_post()` → `assert_allowed()` | `503 photo_moderation_unavailable` |
 | Content Safety transport/credential/malformed-success-response exception | Unhandled service exception | `_post()` / `assert_allowed()` | Not normalized here; outer exception handling decides (typically generic `500` if uncaught) |
 | Content Safety missing/empty category evidence | **Current gap** | `assert_allowed()` parsing defaults | May incorrectly allow |
-| Text model timeout/5xx (retries exhausted) | Transient technical failure | `_retry_upstream` | `504` |
-| Text model non-retryable error or invalid structured output | Upstream / technical failure | `_retry_upstream` / model validation | `502` |
+| Hosted-agent timeout/transient/routing-defer | Transient technical failure | `FoundryAgentClient` | `503` or `504` |
+| Hosted-agent invalid structured output | Upstream / technical failure | agent response validation | `502` |
+| Hosted-agent policy refusal | Authoritative refusal | agent response mapping | `422` |
 | Image model timeout/failure (no reference image) | Transient technical failure (partial) | `_retry_upstream` | `200` + `awaiting_artwork_retry` |
 | Image edit timeout/failure (reference image) before any image exists | Upstream / technical failure | `_retry_upstream` / `_reference_image_problem()` | `502` or `504` |
 | Successful image/edit followed by post-image heuristic BLOCK | Content denial on artwork only | `HeuristicModerationService` | `200` + `awaiting_artwork_retry` on both reference and non-reference paths |
 | **[FUTURE]** Managed guardrail denial | Authoritative denial | Foundry runtime + backend mapping | Backend-mapped `ProblemDetails`; no fallback around the deny |
-| **[FUTURE]** Hosted orchestrator structured refusal/failure payload | Authoritative refusal/failure input for backend | Hosted orchestrator + backend mapping | Backend-mapped `ProblemDetails`; no fail-open continuation |
+| Hosted orchestrator structured refusal/failure payload | Authoritative refusal/failure input for backend | Hosted orchestrator + backend mapping | Backend-mapped `ProblemDetails`; no fail-open continuation |
 | **[FUTURE]** Optional advisory safety-skill flag | Advisory signal only | Safety Review Specialist | Agent-internal/advisory only |
 
 ---
 
-## 7. Retry and fallback rules by layer
+## 7. Retry and failure rules by layer
 
 ### 7.1 Heuristic moderation retries
 
@@ -398,26 +399,12 @@ prompt, persists `awaiting_artwork_retry`, and returns `200`. `BLOCK wins` at
 that stage applies to the generated image output; it does not require deleting
 otherwise safe validated text.
 
-### 7.4 [FUTURE] Agent hop retries
+### 7.4 Agent hop failures
 
-Per the latency budget decision in
-[the Foundry architecture doc](architecture-agents-foundry.md#latency-budget-findings-issue-97),
-the agent hop keeps its agreed budgets unchanged: one 5 s attempt, one 3 s
-retry, and 0.15 s backoff (**8.15 s total**). The degraded legacy direct-text
-path likewise keeps its emergency budget unchanged (**30.15 s total**).
-
-That future direct fallback is eligible **only for technical failure modes**
-(such as timeout, retryable overload, transport failure, or invalid technical
-output) where no authoritative deny has already occurred. It must **not** run
-after a managed guardrail denial, after an orchestrator structured
-refusal/failure that the backend interprets as a safety/policy stop, or when a
-required active safety layer is unavailable/indeterminate for the replacement
-path.
-
-If fallback is used, the replacement path must still run every required active
-safety layer that applies to its own output. If a required active layer cannot
-run or does not return sufficient evidence, the result is fail/hold — not a
-heuristic-only escape hatch.
+The web client makes one bounded hosted-agent request. Timeout, retryable
+overload, transport failure, `routing_defer`, authentication/authorization,
+configuration, and invalid technical output return structured errors. Policy
+refusal returns `422`. None invokes a direct or weaker card-text generator.
 
 ---
 
@@ -468,7 +455,7 @@ art-prompt output.
 
 Managed guardrail denials are authoritative. A denial from an adopted required
 guardrail must stop the protected path, and the request must not continue via
-a weaker retry/direct fallback. The backend still owns interpretation and
+a weaker replacement path. The backend still owns interpretation and
 client error mapping; this document does not define a concrete shipped agent
 status schema.
 

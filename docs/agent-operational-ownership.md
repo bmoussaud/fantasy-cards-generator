@@ -193,6 +193,11 @@ selects the prior known-good active version first, verifies service restoration,
 only then considers deleting the bad version. Never delete the serving version before
 restoration.
 
+The web runtime has no legacy/direct text path to enable during an incident.
+Rollback means selecting the previous approved hosted-agent version, or rolling
+the web deployment back to its previous application revision. Do not add or set
+an application flag that bypasses the hosted agent.
+
 Set the data-plane variables:
 
 ```bash

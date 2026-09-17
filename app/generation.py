@@ -1197,9 +1197,9 @@ class MockAIClient:
         return AITextResult(
             payload=payload,
             metadata=ModelMetadata(
-                provider="azure-openai",
-                deployment=self.settings.foundry_text_deployment or "mock-gpt-5-5",
-                model="gpt-5.5",
+                provider="deterministic-test",
+                deployment="mock-card-generator",
+                model="deterministic",
                 mode="mock",
             ),
             usage=usage,
@@ -1278,76 +1278,6 @@ class AzureFoundryAIClient:
             "https://cognitiveservices.azure.com/.default",
         )
         return token.token
-
-    async def generate_card(self, prompt: str, *, request_id: str) -> AITextResult:
-        schema = GeneratedCardModel.model_json_schema()
-        payload = {
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "You generate a safe fantasy trading card as strict JSON only. "
-                        "Respect schemaVersion 1 and never add extra fields."
-                    ),
-                },
-                {"role": "user", "content": prompt},
-            ],
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "fantasy_card",
-                    "strict": True,
-                    "schema": schema,
-                },
-            },
-        }
-        self._debug_log(
-            "generate_card.request",
-            request_id=request_id,
-            payload=payload,
-        )
-        started_at = time.perf_counter()
-        response = await self._post(
-            f"/openai/deployments/{self.settings.foundry_text_deployment}/chat/completions",
-            payload,
-            api_version=self.settings.foundry_api_version,
-            service_name="foundry-text",
-        )
-        self._debug_log(
-            "generate_card.response",
-            request_id=request_id,
-            response=response,
-        )
-        choices = response.get("choices") or []
-        if not choices:
-            raise UpstreamServiceError("foundry-text", "Text generation returned no choices.")
-        message = choices[0].get("message") or {}
-        content = message.get("content")
-        if isinstance(content, list):
-            content = "".join(
-                part.get("text", "") if isinstance(part, dict) else str(part) for part in content
-            )
-        if not isinstance(content, str):
-            raise UpstreamServiceError("foundry-text", "Text generation returned invalid content.")
-        import json
-
-        usage_payload = response.get("usage") or {}
-        usage = UsageAudit(
-            inputTokens=int(usage_payload.get("prompt_tokens", 0)),
-            outputTokens=int(usage_payload.get("completion_tokens", 0)),
-            totalTokens=int(usage_payload.get("total_tokens", 0)),
-            latencyMs=int((time.perf_counter() - started_at) * 1000),
-        )
-        return AITextResult(
-            payload=json.loads(content),
-            metadata=ModelMetadata(
-                provider="azure-openai",
-                deployment=self.settings.foundry_text_deployment or "",
-                model="gpt-5.5",
-                mode="live",
-            ),
-            usage=usage,
-        )
 
     async def generate_image(
         self,
@@ -1659,6 +1589,7 @@ class AppServices:
     csrf_protector: CsrfProtector
     cosmos_health_probe: HealthDependencyProbe | None = None
     blob_health_probe: HealthDependencyProbe | None = None
+    agent_health_probe: HealthDependencyProbe | None = None
     saved_photo_repository: Any | None = None
     profile_photo_import_state_repository: Any | None = None
     photo_asset_store: AbstractAssetStore | None = None
@@ -2167,15 +2098,15 @@ class CardGenerationService:
         idempotency_key: str,
         request_id: str,
     ) -> tuple[str, AITextResult, GeneratedCardModel, str | None]:
-        """Generate card text via agent (if enabled) or direct model path.
+        """Generate card text through the only supported path for the configured runtime.
 
         Returns (generation_path, text_result, validated_payload, agent_art_prompt) where
-        generation_path is one of "agent", "agent_fallback", or "direct" and
+        generation_path is either "agent" or "mock" and
         agent_art_prompt is the pre-crafted art prompt from the agent (or None).
         """
         settings = self.services.settings
-        if settings.agent_generation_enabled and self.services.agent_client is not None:
-            return await self._generate_text_via_agent(
+        if settings.ai_mode == "mock":
+            return await self._generate_text_mock(
                 owner_id=owner_id,
                 card_id=card_id,
                 prompt=prompt,
@@ -2183,14 +2114,33 @@ class CardGenerationService:
                 idempotency_key=idempotency_key,
                 request_id=request_id,
             )
-        return await self._generate_text_direct(
+        if self.services.agent_client is None:
+            problem = ProblemDetails(
+                status_code=503,
+                title="Service Unavailable",
+                detail="The card generation agent is unavailable.",
+                type="/problems/agent-unavailable",
+                error_code="agent_unavailable",
+            )
+            await self.services.card_repository.delete(owner_id, card_id)
+            await self._save_audit_failure(
+                owner_id,
+                card_id,
+                request_id,
+                idempotency_key,
+                request_hash,
+                problem.error_code,
+                problem=problem,
+            )
+            set_generation_path("agent")
+            raise problem
+        return await self._generate_text_via_agent(
             owner_id=owner_id,
             card_id=card_id,
             prompt=prompt,
             request_hash=request_hash,
             idempotency_key=idempotency_key,
             request_id=request_id,
-            generation_path="direct",
         )
 
     async def _generate_text_via_agent(
@@ -2205,8 +2155,7 @@ class CardGenerationService:
     ) -> tuple[str, AITextResult, GeneratedCardModel, str | None]:
         """Invoke the Foundry hosted agent for card text generation.
 
-        On retryable/routing_defer outcomes, falls back once to the direct path.
-        On non-retryable failures (auth, policy, config, schema), raises ProblemDetails.
+        Every failure is surfaced through the structured public error contract.
         """
         from app.foundry_agent_client import FoundryAgentInvocationResult  # noqa: F401
 
@@ -2250,73 +2199,65 @@ class CardGenerationService:
             )
             return "agent", text_result, agent_result.card, agent_result.art_prompt
 
-        # Determine whether to fall back or hard-fail.
-        is_fallback_eligible = agent_result.retryable or agent_result.status in (
+        if agent_result.status == "policy_refusal":
+            problem = ProblemDetails(
+                status_code=422,
+                title="Prompt Rejected",
+                detail="The prompt was rejected by the generation agent policy.",
+                type="/problems/prompt-rejected",
+                error_code="prompt_rejected",
+            )
+        elif agent_result.status in {
+            "auth_error",
+            "configuration_error",
             "routing_defer",
             "transient_error",
-        )
-
-        if not is_fallback_eligible:
-            # Non-retryable: do not silently bypass the agent.
-            error_code = agent_result.error_code or "agent_failure"
-            if agent_result.status in ("auth_error", "configuration_error"):
-                problem = ProblemDetails(
-                    status_code=503,
-                    title="Service Unavailable",
-                    detail="The card generation agent is temporarily unavailable.",
-                    type="/problems/agent-unavailable",
-                    error_code="agent_unavailable",
-                )
-            elif agent_result.status == "policy_refusal":
-                problem = ProblemDetails(
-                    status_code=422,
-                    title="Prompt Rejected",
-                    detail="The prompt was rejected by the generation agent policy.",
-                    type="/problems/prompt-rejected",
-                    error_code="prompt_rejected",
-                )
-            else:
-                problem = ProblemDetails(
-                    status_code=502,
-                    title="Bad Gateway",
-                    detail="The card generation agent returned a non-retryable error.",
-                    type="/problems/agent-failure",
-                    error_code=error_code,
-                )
-            await self.services.card_repository.delete(owner_id, card_id)
-            await self._save_audit_failure(
-                owner_id,
-                card_id,
-                request_id,
-                idempotency_key,
-                request_hash,
-                error_code,
-                problem=problem,
+        }:
+            problem = ProblemDetails(
+                status_code=504 if agent_result.error_code == "timeout" else 503,
+                title=(
+                    "Gateway Timeout"
+                    if agent_result.error_code == "timeout"
+                    else "Service Unavailable"
+                ),
+                detail=(
+                    "The card generation agent timed out."
+                    if agent_result.error_code == "timeout"
+                    else "The card generation agent is unavailable."
+                ),
+                type=(
+                    "/problems/upstream-timeout"
+                    if agent_result.error_code == "timeout"
+                    else "/problems/agent-unavailable"
+                ),
+                error_code=(
+                    "upstream_timeout"
+                    if agent_result.error_code == "timeout"
+                    else "agent_unavailable"
+                ),
             )
-            set_generation_path("agent")
-            raise problem
-
-        # Retryable/routing_defer: fall back to direct path once.
-        add_event(
-            "agent.fallback",
-            {
-                "fcg.dependency": "foundry-agent",
-                "fcg.outcome": agent_result.status,
-                "fcg.error_code": agent_result.error_code or "none",
-                "fcg.generation_path": "agent_fallback",
-            },
+        else:
+            problem = ProblemDetails(
+                status_code=502,
+                title="Bad Gateway",
+                detail="The card generation agent returned invalid output.",
+                type="/problems/invalid-model-output",
+                error_code="invalid_model_output",
+            )
+        await self.services.card_repository.delete(owner_id, card_id)
+        await self._save_audit_failure(
+            owner_id,
+            card_id,
+            request_id,
+            idempotency_key,
+            request_hash,
+            problem.error_code,
+            problem=problem,
         )
-        return await self._generate_text_direct(
-            owner_id=owner_id,
-            card_id=card_id,
-            prompt=prompt,
-            request_hash=request_hash,
-            idempotency_key=idempotency_key,
-            request_id=request_id,
-            generation_path="agent_fallback",
-        )
+        set_generation_path("agent")
+        raise problem
 
-    async def _generate_text_direct(
+    async def _generate_text_mock(
         self,
         *,
         owner_id: str,
@@ -2325,9 +2266,8 @@ class CardGenerationService:
         request_hash: str,
         idempotency_key: str,
         request_id: str,
-        generation_path: str,
     ) -> tuple[str, AITextResult, GeneratedCardModel, str | None]:
-        """Generate card text via the direct AzureFoundryAI model call."""
+        """Generate deterministic card text for automated tests only."""
         try:
             text_result = await self._retry_upstream(
                 lambda: self.services.ai_client.generate_card(prompt, request_id=request_id),
@@ -2370,9 +2310,9 @@ class CardGenerationService:
             raise problem from exc
         add_event(
             "generation.text_path",
-            {"fcg.generation_path": generation_path},
+            {"fcg.generation_path": "mock"},
         )
-        return generation_path, text_result, validated_payload, None
+        return "mock", text_result, validated_payload, None
 
     async def _complete_artwork(
         self,
@@ -3070,10 +3010,13 @@ def create_services(settings: AppSettings) -> AppServices:
         MockAIClient(settings) if settings.ai_mode == "mock" else AzureFoundryAIClient(settings)
     )
     agent_client = None
-    if settings.agent_generation_enabled and settings.ai_mode == "live":
+    agent_health_probe: HealthDependencyProbe = NotApplicableHealthProbe("agent")
+    if settings.ai_mode == "live":
         from app.foundry_agent_client import FoundryAgentClient
+        from app.health import FoundryAgentHealthProbe
 
         agent_client = FoundryAgentClient(settings)
+        agent_health_probe = FoundryAgentHealthProbe(agent_client)
     return AppServices(
         settings=settings,
         card_repository=card_repository,
@@ -3091,6 +3034,7 @@ def create_services(settings: AppSettings) -> AppServices:
         photo_moderation_service=ContentSafetyPhotoModerationService(settings),
         deletion_audit_repository=deletion_audit_repository,
         agent_client=agent_client,
+        agent_health_probe=agent_health_probe,
     )
 
 

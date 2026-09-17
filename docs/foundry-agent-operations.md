@@ -34,12 +34,11 @@ signal in root hooks before service hooks run. Use targeted `azd deploy
 | Full provision | `azd provision` | Deploys all infra including agent prereqs if enabled |
 | Approved deploy | `./deploy.sh agent --approve-change` | Plan-only by default |
 
-### Agent prerequisite opt-in
+### Agent deployment prerequisites
 
 Before deploying the card-orchestrator for the first time:
 
 ```bash
-azd env set ENABLE_FOUNDRY_AGENT_ACCESS true
 azd env set CARD_ORCHESTRATOR_ENABLE_PREREQUISITES true
 azd env set CARD_ORCHESTRATOR_CREATE_REGISTRY_CONNECTION true
 azd provision
@@ -55,16 +54,15 @@ Or via the root orchestrator:
 
 ### Rollback
 
-To disable agent infrastructure after a failed deployment:
+To disable optional agent deployment prerequisites after a failed deployment:
 
 ```bash
 azd env set CARD_ORCHESTRATOR_ENABLE_PREREQUISITES false
-azd env set ENABLE_FOUNDRY_AGENT_ACCESS false
 azd provision
 ```
 
-Note: Setting flags to `false` does not revoke already-created RBAC assignments.
-Manual cleanup is required for existing Azure role assignments.
+Mandatory web-to-agent RBAC remains provisioned because live card-text
+generation has no alternate path.
 
 ### Deprecated launcher equivalents
 
@@ -976,7 +974,7 @@ integration rather than adding guessed SDK settings here.
 
 The implemented defaults/maxima are 20 seconds per specialist and 65 seconds
 overall. These are **offline candidate budgets**, not compliance with the
-proposed production budgets of 8.15 seconds per stage and 30.15 seconds overall.
+web client's bounded 5-second hosted-agent timeout.
 Narrow local safety heuristics are not comprehensive safety or prompt-injection
 protection; unobserved hosted guardrails remain unavailable and post-image checks
 are not applicable. Application nonpersistence does not guarantee zero platform
@@ -1167,8 +1165,8 @@ The first two assignments are a **repair facade**, not new ownership:
 principals and role IDs exactly match main; offline tests enforce parity.
 Do not run root and isolated provisioning concurrently. Use incremental
 deployment only, never complete mode or `azd down` on this shared-resource
-package. At the next independently approved root rollout keep its existing
-`ENABLE_FOUNDRY_AGENT_ACCESS=true` setting aligned.
+package. At the next independently approved root rollout keep the mandatory hosted-agent
+RBAC assignments aligned.
 
 A same-scope/principal/role assignment under another GUID must be reconciled
 before apply: do not delete/recreate or silently invent a second assignment.

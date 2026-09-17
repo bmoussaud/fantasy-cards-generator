@@ -244,14 +244,17 @@ for all categories, meaning medium/high severity are rejected).
 
 ## Runtime configuration
 
-### Mock mode
+### Automated-test mock mode
 
-Use deterministic local mode for tests and local UI work:
+The deterministic mock is accepted only when the automated test runtime sets
+`APP_ENV=test`:
 
 ```dotenv
 AI_MODE=mock
 PERSISTENCE_MODE=memory
 ```
+
+The application rejects this configuration in development and production.
 
 ### Live mode
 
@@ -261,8 +264,12 @@ Use Azure-backed mode in deployed environments:
 AI_MODE=live
 PERSISTENCE_MODE=azure
 FOUNDRY_ENDPOINT=<https endpoint>
-FOUNDRY_TEXT_DEPLOYMENT=gpt-5-5
 FOUNDRY_IMAGE_DEPLOYMENT=gpt-image-2
+FOUNDRY_PROJECT_ENDPOINT=<https://account.services.ai.azure.com/api/projects/project>
+FOUNDRY_AGENT_NAME=card-orchestrator
+FOUNDRY_AGENT_API_VERSION=v1
+TELEMETRY_ENABLED=true
+APPLICATIONINSIGHTS_CONNECTION_STRING=<connection string>
 COSMOS_ENDPOINT=<https endpoint>
 COSMOS_DATABASE_NAME=appdb
 COSMOS_CONTAINER_NAME=cards
@@ -287,3 +294,12 @@ Additional operational settings:
 - `SAVED_PHOTO_MAX_COUNT`
 - `SAVED_PHOTO_MAX_BYTES`
 - `SAVED_PHOTO_THUMBNAIL_SIZE`
+
+Live startup validates the agent endpoint/name, acquires an Entra token for
+`https://ai.azure.com/.default`, and performs a bounded content-free
+`GET /agents` access probe. Missing configuration, identity failure, missing
+Foundry Agent Consumer access, or telemetry initialization failure prevents the
+application from becoming ready. Agent timeout, transient, routing-defer,
+authentication, configuration, parse, and policy-refusal outcomes are returned
+through the existing structured problem-details contract; none invokes a direct
+text-generation fallback.

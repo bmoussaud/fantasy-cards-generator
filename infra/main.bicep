@@ -82,17 +82,11 @@ param aiFoundryProjectName string = 'fantasy-cards'
 @description('Azure AI Foundry project display name for the current environment.')
 param aiFoundryProjectDisplayName string = 'Fantasy Cards'
 
-@description('Grant Foundry hosted-agent invoke access to runtime managed identities. Off by default so existing deployments do not gain new permissions until explicitly opted in.')
-param enableFoundryAgentAccess bool = false
-
-@description('Hosted agent name for the card-orchestrator agent. Injected as FOUNDRY_AGENT_NAME. Required when agentGenerationEnabled is true.')
+@description('Hosted agent name for the card-orchestrator agent. Injected as FOUNDRY_AGENT_NAME.')
 param foundryAgentName string = ''
 
 @description('Expected agent version for metadata check. Injected as FOUNDRY_AGENT_EXPECTED_VERSION. Optional.')
 param foundryAgentExpectedVersion string = ''
-
-@description('Enable the agentic text generation path. Injected as AGENT_GENERATION_ENABLED. Default false (direct model path).')
-param agentGenerationEnabled bool = false
 
 @allowed([
   'ServicePrincipal'
@@ -481,10 +475,8 @@ module containerApps './modules/container-apps.bicep' = {
     foundryEndpoint: 'https://${aiFoundryAccountName}.cognitiveservices.azure.com/'
     foundryImageDeployment: aiFoundryImageDeploymentName
     foundryProjectEndpoint: aiFoundryProjectEndpoint
-    foundryTextDeployment: aiFoundryTextDeploymentName
     foundryAgentName: foundryAgentName
     foundryAgentExpectedVersion: foundryAgentExpectedVersion
-    agentGenerationEnabled: agentGenerationEnabled
     healthzBlobTimeoutMs: healthzBlobTimeoutMs
     healthzCosmosTimeoutMs: healthzCosmosTimeoutMs
     imageMaxRetries: imageMaxRetries
@@ -612,7 +604,6 @@ module aiFoundry './modules/ai-foundry.bicep' = {
     customSubDomainName: aiFoundryAccountName
     deployerPrincipalId: deployerPrincipalId
     deployerPrincipalType: deployerPrincipalType
-    enableFoundryAgentAccess: enableFoundryAgentAccess
     imageDeploymentCapacity: aiFoundryImageDeploymentCapacity
     imageDeploymentName: aiFoundryImageDeploymentName
     imageDeploymentSkuName: aiFoundryImageDeploymentSkuName

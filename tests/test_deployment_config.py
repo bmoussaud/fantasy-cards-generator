@@ -143,7 +143,7 @@ def test_generation_runtime_env_vars_are_wired_from_bicep_outputs() -> None:
     assert "name: 'PERSISTENCE_MODE'" in container_apps_bicep
     assert "name: 'FOUNDRY_ENDPOINT'" in container_apps_bicep
     assert "name: 'FOUNDRY_PROJECT_ENDPOINT'" in container_apps_bicep
-    assert "name: 'FOUNDRY_TEXT_DEPLOYMENT'" in container_apps_bicep
+    assert "name: 'FOUNDRY_TEXT_DEPLOYMENT'" not in container_apps_bicep
     assert "name: 'FOUNDRY_IMAGE_DEPLOYMENT'" in container_apps_bicep
     assert "name: 'COSMOS_ENDPOINT'" in container_apps_bicep
     assert "name: 'COSMOS_DATABASE_NAME'" in container_apps_bicep
@@ -179,7 +179,7 @@ def test_generation_runtime_env_vars_are_wired_from_bicep_outputs() -> None:
     )
     assert "foundryProjectEndpoint: aiFoundryProjectEndpoint" in main_bicep
     assert "contentSafetyEndpoint: resolvedContentSafetyEndpoint" in main_bicep
-    assert "foundryTextDeployment: aiFoundryTextDeploymentName" in main_bicep
+    assert "foundryTextDeployment:" not in main_bicep
     assert "foundryImageDeployment: aiFoundryImageDeploymentName" in main_bicep
     assert "cosmosEndpoint: 'https://${cosmosAccountName}.documents.azure.com:443/'" in main_bicep
     assert (
@@ -189,7 +189,7 @@ def test_generation_runtime_env_vars_are_wired_from_bicep_outputs() -> None:
     assert "trustedProxyHops: trustedProxyHops" in main_bicep
 
 
-def test_foundry_project_endpoint_and_agent_access_gate_are_iac_managed() -> None:
+def test_foundry_project_endpoint_and_agent_access_are_iac_managed() -> None:
     main_bicep = (REPO_ROOT / "infra" / "main.bicep").read_text()
     main_parameters = (REPO_ROOT / "infra" / "main.parameters.json").read_text()
     foundry_bicep = (REPO_ROOT / "infra" / "modules" / "ai-foundry.bicep").read_text()
@@ -209,13 +209,9 @@ def test_foundry_project_endpoint_and_agent_access_gate_are_iac_managed() -> Non
         foundry_bicep, "resource containerAppFoundryAgentConsumerRoleAssignment"
     )
 
-    assert "param enableFoundryAgentAccess bool = false" in main_bicep
-    assert "param enableFoundryAgentAccess bool = false" in foundry_bicep
-    assert (
-        '"enableFoundryAgentAccess": {\n'
-        '      "value": "${ENABLE_FOUNDRY_AGENT_ACCESS=false}"' in main_parameters
-    )
-    assert "enableFoundryAgentAccess: enableFoundryAgentAccess" in foundry_module
+    assert "enableFoundryAgentAccess" not in main_bicep
+    assert "enableFoundryAgentAccess" not in foundry_bicep
+    assert "ENABLE_FOUNDRY_AGENT_ACCESS" not in main_parameters
 
     assert (
         "var resolvedAiFoundryProjectName = "
@@ -247,9 +243,7 @@ def test_foundry_project_endpoint_and_agent_access_gate_are_iac_managed() -> Non
     assert "aiFoundry.outputs.aiFoundryProjectEndpoint" not in container_apps_module
     assert "containerApps.outputs" not in container_apps_module
 
-    # Existing direct model access stays untouched and is not gated by the new
-    # hosted-agent access flag.
-    assert "if (enableFoundryAgentAccess)" not in direct_model_assignment
+    # Image generation retains account-level Cognitive Services access.
     assert "scope: foundryAccount" in direct_model_assignment
     assert "principalId: containerAppPrincipalId" in direct_model_assignment
     assert "cognitiveServicesUserRoleDefinitionId" in direct_model_assignment
@@ -261,7 +255,7 @@ def test_foundry_project_endpoint_and_agent_access_gate_are_iac_managed() -> Non
         "var foundryAgentConsumerRoleDefinitionId = 'eed3b665-ab3a-47b6-8f48-c9382fb1dad6'"
         in foundry_bicep
     )
-    assert "if (enableFoundryAgentAccess)" in project_identity_assignment
+    assert "if (" not in project_identity_assignment.partition("{")[0]
     assert "scope: foundryAccount" in project_identity_assignment
     assert "principalId: aiFoundryProject.identity.principalId" in project_identity_assignment
     assert "containerAppPrincipalId" not in project_identity_assignment
@@ -271,7 +265,7 @@ def test_foundry_project_endpoint_and_agent_access_gate_are_iac_managed() -> Non
         in project_identity_assignment
     )
     assert "foundryUserRoleDefinitionId" in project_identity_assignment
-    assert "if (enableFoundryAgentAccess)" in agent_consumer_assignment
+    assert "if (" not in agent_consumer_assignment.partition("{")[0]
     assert "scope: aiFoundryProject" in agent_consumer_assignment
     assert "principalId: containerAppPrincipalId" in agent_consumer_assignment
     assert "principalType: 'ServicePrincipal'" in agent_consumer_assignment
@@ -282,10 +276,9 @@ def test_foundry_project_endpoint_and_agent_access_gate_are_iac_managed() -> Non
     )
     assert "foundryAgentConsumerRoleDefinitionId" in agent_consumer_assignment
 
-    assert "ENABLE_FOUNDRY_AGENT_ACCESS" in readme
+    assert "ENABLE_FOUNDRY_AGENT_ACCESS" not in readme
     assert "FOUNDRY_PROJECT_ENDPOINT" in readme
-    assert "generation modes" in readme
-    assert "create agents" in readme
+    assert "mandatory" in readme
     assert "Foundry Agent" in readme and "Consumer" in readme
 
 

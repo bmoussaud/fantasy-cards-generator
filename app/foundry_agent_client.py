@@ -23,6 +23,7 @@ from app.generation import GeneratedCardModel
 from app.settings import AppSettings, SettingsError, load_app_settings
 
 FOUNDRY_AGENT_TOKEN_SCOPE = "https://ai.azure.com/.default"
+FOUNDRY_AGENT_ACCESS_API_VERSION = "2025-11-15-preview"
 
 
 class TokenCredential(Protocol):
@@ -170,6 +171,51 @@ class FoundryAgentClient:
                 message="Foundry agent invocation timed out.",
             )
 
+    async def check_access(self, timeout_seconds: float) -> str:
+        try:
+            return await asyncio.wait_for(
+                self._check_access_without_outer_timeout(),
+                timeout=timeout_seconds,
+            )
+        except TimeoutError:
+            return "timeout"
+
+    async def _check_access_without_outer_timeout(self) -> str:
+        try:
+            endpoint = _normalize_project_endpoint(self._settings.foundry_project_endpoint)
+            token = await self._get_token()
+        except FoundryAgentConfigurationError:
+            return "misconfigured"
+        except (ClientAuthenticationError, ServiceRequestError, ServiceResponseError):
+            return "unauthorized"
+
+        try:
+            response = await self._client().get(
+                f"{endpoint}agents?api-version={FOUNDRY_AGENT_ACCESS_API_VERSION}",
+                headers={
+                    "Authorization": "Bearer " + token,
+                    "Accept": "application/json",
+                },
+            )
+        except httpx.TimeoutException:
+            return "timeout"
+        except httpx.TransportError:
+            return "unavailable"
+
+        if response.status_code in {401, 403}:
+            return "unauthorized"
+        if response.status_code in {400, 404}:
+            return "misconfigured"
+        if response.status_code >= 400:
+            return "unavailable"
+        try:
+            body = response.json()
+        except ValueError:
+            return "unavailable"
+        if not isinstance(body, dict) or not isinstance(body.get("data"), list):
+            return "unavailable"
+        return "ok"
+
     async def _invoke_without_outer_timeout(self, query: str) -> FoundryAgentInvocationResult:
         try:
             url = _build_responses_url(
@@ -199,7 +245,7 @@ class FoundryAgentClient:
             response = await client.post(
                 url,
                 headers={
-                    "Authorization": f"Bearer {token}",
+                    "Authorization": "Bearer " + token,
                     "Content-Type": "application/json",
                 },
                 json={
