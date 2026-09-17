@@ -84,7 +84,7 @@ param foundryAgentName string = ''
 @description('Exact active hosted agent version. May be empty only for the initial public-placeholder provision.')
 param foundryAgentVersion string = ''
 
-@description('Expected agent version for metadata check injected as FOUNDRY_AGENT_EXPECTED_VERSION. Optional.')
+@description('Exact application artifact version deployed inside the active hosted agent. Must be set with the hosted agent name/version, or all three must be empty for initial bootstrap.')
 param foundryAgentExpectedVersion string = ''
 
 @description('Agent API version injected as FOUNDRY_AGENT_API_VERSION.')
@@ -248,13 +248,15 @@ var containerAppSecrets = concat(
 
 var hasFoundryAgentName = !empty(trim(foundryAgentName))
 var hasFoundryAgentVersion = !empty(trim(foundryAgentVersion))
-var foundryAgentConfigurationIsComplete = hasFoundryAgentName && hasFoundryAgentVersion
-var validatedFoundryAgentConfiguration = hasFoundryAgentName == hasFoundryAgentVersion
+var hasFoundryAgentExpectedVersion = !empty(trim(foundryAgentExpectedVersion))
+var foundryAgentConfigurationIsComplete = hasFoundryAgentName && hasFoundryAgentVersion && hasFoundryAgentExpectedVersion
+var validatedFoundryAgentConfiguration = hasFoundryAgentName == hasFoundryAgentVersion && hasFoundryAgentVersion == hasFoundryAgentExpectedVersion
   ? {
       name: trim(foundryAgentName)
       version: trim(foundryAgentVersion)
+      expectedVersion: trim(foundryAgentExpectedVersion)
     }
-  : fail('FOUNDRY_AGENT_NAME and FOUNDRY_AGENT_VERSION must either both be set or both be empty during the initial placeholder provision.')
+  : fail('FOUNDRY_AGENT_NAME, FOUNDRY_AGENT_VERSION, and FOUNDRY_AGENT_EXPECTED_VERSION must either all be set or all be empty during the initial placeholder provision.')
 var foundryAgentEnv = foundryAgentConfigurationIsComplete
   ? [
       {
@@ -264,6 +266,10 @@ var foundryAgentEnv = foundryAgentConfigurationIsComplete
       {
         name: 'FOUNDRY_AGENT_VERSION'
         value: validatedFoundryAgentConfiguration.version
+      }
+      {
+        name: 'FOUNDRY_AGENT_EXPECTED_VERSION'
+        value: validatedFoundryAgentConfiguration.expectedVersion
       }
     ]
   : []
@@ -325,10 +331,6 @@ var containerAppEnv = concat(
     {
       name: 'FOUNDRY_IMAGE_DEPLOYMENT'
       value: foundryImageDeployment
-    }
-    {
-      name: 'FOUNDRY_AGENT_EXPECTED_VERSION'
-      value: foundryAgentExpectedVersion
     }
     {
       name: 'FOUNDRY_AGENT_API_VERSION'

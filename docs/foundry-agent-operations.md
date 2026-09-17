@@ -75,10 +75,15 @@ path.
 
 The agent `postdeploy` hook reads azd's generated
 `AGENT_CARD_ORCHESTRATOR_NAME` and `AGENT_CARD_ORCHESTRATOR_VERSION`, validates
-their bounded shapes, and persists the corresponding web inputs. It never
-derives a version from logs or exception text. The following provision injects
-the pair atomically; Bicep omits both during initial placeholder provisioning
-and rejects a partial pair.
+their bounded shapes, and reads the explicitly selected
+`CARD_ORCHESTRATOR_VERSION` artifact identity. It validates all three before one
+`azd env set` transaction persists `FOUNDRY_AGENT_NAME`,
+`FOUNDRY_AGENT_VERSION`, and `FOUNDRY_AGENT_EXPECTED_VERSION`. It never derives
+a version from logs or exception text. The following provision injects the
+triplet atomically; Bicep omits all three during initial placeholder
+provisioning and rejects a partial triplet. Agent deploy and rollback therefore
+fail before changing web configuration state when the artifact identity is
+missing or malformed.
 The second provision does not rotate an existing managed Entra client secret:
 the credential hook now creates a secret only when the azd environment has none.
 Clear `ENTRA_CLIENT_SECRET` only for an explicit, coordinated rotation.

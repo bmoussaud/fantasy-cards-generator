@@ -108,8 +108,10 @@ The first provision uses the public placeholder image and omits both hosted-agen
 environment variables. Agent deployment then writes
 `AGENT_CARD_ORCHESTRATOR_NAME` and `AGENT_CARD_ORCHESTRATOR_VERSION`; the
 `postdeploy` hook validates and persists them as `FOUNDRY_AGENT_NAME` and
-`FOUNDRY_AGENT_VERSION`. The second provision injects the pair before the real
-web revision can become ready. A partial pair fails Bicep validation.
+`FOUNDRY_AGENT_VERSION` in the same azd transaction as the validated
+`CARD_ORCHESTRATOR_VERSION`, stored as `FOUNDRY_AGENT_EXPECTED_VERSION`. The
+second provision injects the complete triplet before the real web revision can
+become ready. Any partial triplet fails Bicep validation.
 Before every provision, `hooks/preserve_web_image.sh` reads the currently
 deployed Container App image and stores it as `CONTAINER_IMAGE`; the Bicep
 parameter consumes that exact value. Therefore repeat `azd provision` runs

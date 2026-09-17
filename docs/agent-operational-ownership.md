@@ -197,6 +197,9 @@ immutable Foundry version**, then stamp and provision that new platform version:
    configuration. Abort if the approved artifact cannot be proven.
 2. In a separate clean checkout of the approved commit, select the same azd
    environment and set `CARD_ORCHESTRATOR_VERSION` to that approved commit.
+   This explicit, bounded value is required because Foundry's platform outputs
+   expose the immutable hosted version but not the application metadata inside
+   the artifact.
 3. Run the guarded targeted deployment:
 
    ```bash
@@ -205,8 +208,11 @@ immutable Foundry version**, then stamp and provision that new platform version:
    ```
 
    Foundry creates and activates a new immutable platform version. The
-   `postdeploy` hook writes its exact name/version to `FOUNDRY_AGENT_NAME` and
-   `FOUNDRY_AGENT_VERSION`.
+   `postdeploy` hook validates the new platform outputs and the selected
+   rollback artifact before atomically writing `FOUNDRY_AGENT_NAME`,
+   `FOUNDRY_AGENT_VERSION`, and `FOUNDRY_AGENT_EXPECTED_VERSION`. If the
+   artifact value is absent or malformed, the hook fails before changing any of
+   those three azd values.
 4. From the repository root, run:
 
    ```bash
@@ -220,9 +226,10 @@ immutable Foundry version**, then stamp and provision that new platform version:
    pushing, or replacing the web image.
 5. Verify `azd ai agent show --output json` reports the newly created version
    active and the endpoint selector routes 100% to it. Verify the azd
-   `FOUNDRY_AGENT_VERSION` value matches, `/healthz` returns 200, and one bounded
-   ACA managed-identity smoke reports `invocation_verified` with the approved
-   application build SHA.
+   `FOUNDRY_AGENT_VERSION` value matches and
+   `FOUNDRY_AGENT_EXPECTED_VERSION` equals the approved application build SHA.
+   Then verify `/healthz` returns 200 and one bounded ACA managed-identity smoke
+   reports `invocation_verified` with that same approved SHA.
 6. Confirm the web image digest is unchanged. The Container App revision may
    change because its `FOUNDRY_AGENT_VERSION` environment value changed; the
    web image is not rebuilt or redeployed, model deployments are not changed,

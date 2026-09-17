@@ -678,6 +678,31 @@ def test_agent_version_mismatch_is_non_success() -> None:
     assert result.agent_version == "actual"
 
 
+def test_rollback_expected_version_replaces_stale_sha_and_invocation_succeeds() -> None:
+    def response(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=responses_envelope(
+                completed_agent_payload(metadata={"agentVersion": "approved-rollback-sha"})
+            ),
+        )
+
+    stale_result, _ = invoke_with_transport(
+        configured_settings(foundry_agent_expected_version="failed-release-sha"),
+        response,
+    )
+    rollback_result, _ = invoke_with_transport(
+        configured_settings(foundry_agent_expected_version="approved-rollback-sha"),
+        response,
+    )
+
+    assert stale_result.status == "version_mismatch"
+    assert stale_result.error_code == "agent_version_mismatch"
+    assert rollback_result.status == "completed"
+    assert rollback_result.success is True
+    assert rollback_result.agent_version == "approved-rollback-sha"
+
+
 def test_non_completed_agent_status_is_valid_but_non_success() -> None:
     result, _ = invoke_with_transport(
         configured_settings(),

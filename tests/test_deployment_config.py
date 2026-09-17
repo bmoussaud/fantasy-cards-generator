@@ -147,9 +147,10 @@ def test_generation_runtime_env_vars_are_wired_from_bicep_outputs() -> None:
     assert "name: 'FOUNDRY_PROJECT_ENDPOINT'" in container_apps_bicep
     assert "name: 'FOUNDRY_AGENT_VERSION'" in container_apps_bicep
     assert "var foundryAgentEnv = foundryAgentConfigurationIsComplete" in container_apps_bicep
-    assert "FOUNDRY_AGENT_NAME and FOUNDRY_AGENT_VERSION must either both be set" in (
-        container_apps_bicep
-    )
+    assert (
+        "FOUNDRY_AGENT_NAME, FOUNDRY_AGENT_VERSION, and "
+        "FOUNDRY_AGENT_EXPECTED_VERSION must either all be set"
+    ) in (container_apps_bicep)
     assert "foundryAgentEnv" in container_apps_bicep
     assert "name: 'FOUNDRY_AGENT_TIMEOUT_SECONDS'" in container_apps_bicep
     assert "param foundryAgentTimeoutSeconds string = '70'" in main_bicep
@@ -1344,25 +1345,43 @@ def test_root_manifest_hooks_stamp_agent_identity_after_deploy() -> None:
     assert "guard_agent_deploy" in azure_yaml
 
 
-def test_agent_deployment_sync_hook_validates_and_persists_platform_outputs(
+def test_agent_deployment_sync_hook_atomically_replaces_stale_rollback_version(
     tmp_path: Path,
 ) -> None:
     script = REPO_ROOT / "hooks" / "sync_agent_deployment.sh"
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
-    log = tmp_path / "azd.log"
+    state = tmp_path / "azd-state.json"
+    state.write_text(
+        json.dumps(
+            {
+                "AGENT_CARD_ORCHESTRATOR_NAME": "card-orchestrator",
+                "AGENT_CARD_ORCHESTRATOR_VERSION": "18",
+                "CARD_ORCHESTRATOR_VERSION": "approved-rollback-sha",
+                "FOUNDRY_AGENT_NAME": "card-orchestrator",
+                "FOUNDRY_AGENT_VERSION": "17",
+                "FOUNDRY_AGENT_EXPECTED_VERSION": "failed-release-sha",
+            }
+        )
+    )
     fake_azd = fake_bin / "azd"
     fake_azd.write_text(
-        "#!/bin/sh\n"
-        'if [ "$1 $2 $3" = "env get-value AGENT_CARD_ORCHESTRATOR_NAME" ]; then\n'
-        "  printf '%s\\n' card-orchestrator\n"
-        'elif [ "$1 $2 $3" = "env get-value AGENT_CARD_ORCHESTRATOR_VERSION" ]; then\n'
-        "  printf '%s\\n' 17\n"
-        'elif [ "$1 $2" = "env set" ]; then\n'
-        f'  printf "%s\\n" "$*" > "{log}"\n'
-        "else\n"
-        "  exit 2\n"
-        "fi\n"
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "import sys\n"
+        f"state_path = {str(state)!r}\n"
+        "values = json.loads(open(state_path).read())\n"
+        "if sys.argv[1:3] == ['env', 'get-value']:\n"
+        "    value = values.get(sys.argv[3])\n"
+        "    if value is None:\n"
+        "        raise SystemExit(1)\n"
+        "    print(value)\n"
+        "elif sys.argv[1:3] == ['env', 'set']:\n"
+        "    updates = dict(argument.split('=', 1) for argument in sys.argv[3:])\n"
+        "    values.update(updates)\n"
+        "    open(state_path, 'w').write(json.dumps(values))\n"
+        "else:\n"
+        "    raise SystemExit(2)\n"
     )
     fake_azd.chmod(0o755)
 
@@ -1372,13 +1391,15 @@ def test_agent_deployment_sync_hook_validates_and_persists_platform_outputs(
         text=True,
         env={"PATH": f"{fake_bin}:/usr/bin:/bin"},
     )
-
     assert result.returncode == 0
-    assert log.read_text().strip() == (
-        "env set FOUNDRY_AGENT_NAME=card-orchestrator FOUNDRY_AGENT_VERSION=17"
-    )
+    updated_state = json.loads(state.read_text())
+    assert updated_state["FOUNDRY_AGENT_NAME"] == "card-orchestrator"
+    assert updated_state["FOUNDRY_AGENT_VERSION"] == "18"
+    assert updated_state["FOUNDRY_AGENT_EXPECTED_VERSION"] == "approved-rollback-sha"
     assert "card-orchestrator" not in result.stdout
-    assert "17" not in result.stdout
+    assert "approved-rollback-sha" not in result.stdout
+    assert "failed-release-sha" not in result.stderr
+    assert "approved-rollback-sha" not in result.stderr
 
 
 def test_agent_deployment_sync_hook_rejects_missing_platform_version(tmp_path: Path) -> None:
@@ -1403,6 +1424,38 @@ def test_agent_deployment_sync_hook_rejects_missing_platform_version(tmp_path: P
 
     assert result.returncode == 1
     assert "version" in result.stderr
+
+
+def test_agent_deployment_sync_hook_rejects_missing_artifact_before_env_change(
+    tmp_path: Path,
+) -> None:
+    script = REPO_ROOT / "hooks" / "sync_agent_deployment.sh"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    log = tmp_path / "azd.log"
+    fake_azd = fake_bin / "azd"
+    fake_azd.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1 $2 $3" = "env get-value AGENT_CARD_ORCHESTRATOR_NAME" ]; then\n'
+        "  printf '%s\\n' card-orchestrator\n"
+        'elif [ "$1 $2 $3" = "env get-value AGENT_CARD_ORCHESTRATOR_VERSION" ]; then\n'
+        "  printf '%s\\n' 18\n"
+        'elif [ "$1 $2" = "env set" ]; then\n'
+        f'  printf "%s\\n" "$*" > "{log}"\n'
+        "fi\n"
+    )
+    fake_azd.chmod(0o755)
+
+    result = subprocess.run(
+        ["sh", str(script)],
+        capture_output=True,
+        text=True,
+        env={"PATH": f"{fake_bin}:/usr/bin:/bin"},
+    )
+
+    assert result.returncode == 1
+    assert "CARD_ORCHESTRATOR_VERSION" in result.stderr
+    assert not log.exists()
 
 
 def test_card_orchestrator_lifecycle_guard_validates_prerequisites() -> None:

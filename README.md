@@ -94,10 +94,14 @@ azd up
 shared Foundry/ACR/Container Apps resources with the public placeholder image,
 deploys `card-orchestrator`, copies azd's generated
 `AGENT_CARD_ORCHESTRATOR_NAME` and `AGENT_CARD_ORCHESTRATOR_VERSION` values into
-the web deployment inputs, re-provisions the Container App with that exact
-active agent identity, and only then deploys `web-nat` on port 8000. The
-postdeploy hook rejects missing or malformed agent output instead of allowing an
-empty `FOUNDRY_AGENT_NAME` or `FOUNDRY_AGENT_VERSION`. The repeated provision
+the web deployment inputs together with the validated
+`CARD_ORCHESTRATOR_VERSION` artifact identity, re-provisions the Container App
+with that exact active agent identity and expected application version, and only
+then deploys `web-nat` on port 8000. The postdeploy hook rejects missing or
+malformed platform or artifact versions before changing azd state. Bicep accepts
+only an all-empty bootstrap or the complete
+`FOUNDRY_AGENT_NAME`/`FOUNDRY_AGENT_VERSION`/`FOUNDRY_AGENT_EXPECTED_VERSION`
+triplet. The repeated provision
 preserves the currently deployed web image through `CONTAINER_IMAGE`, so it
 cannot replace a running application with the bootstrap image. On a clean
 environment, the empty value still selects the public placeholder until the

@@ -88,7 +88,7 @@ param foundryAgentName string = ''
 @description('Exact active hosted agent version stamped from AGENT_CARD_ORCHESTRATOR_VERSION after agent deployment. Empty only during the initial placeholder provision.')
 param foundryAgentVersion string = ''
 
-@description('Expected agent version for metadata check. Injected as FOUNDRY_AGENT_EXPECTED_VERSION. Optional.')
+@description('Exact application artifact version deployed inside the active hosted agent. Must be set with the hosted agent name/version, or all three must be empty for initial bootstrap.')
 param foundryAgentExpectedVersion string = ''
 
 @description('Hosted agent invocation and readiness timeout in seconds.')
