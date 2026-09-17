@@ -758,9 +758,27 @@ def create_app(services: AppServices | None = None) -> FastAPI:
                 raise RuntimeError("Authentication response did not include validated userinfo.")
         except OAuthError as exc:
             if import_flow:
+                if exc.error == "access_denied":
+                    safe_log(
+                        "auth.profile_photo_import_result",
+                        request_id=request.state.request_id,
+                        attributes={
+                            "fcg.stage": "oauth_token",
+                            "fcg.outcome": "consent_denied",
+                            "fcg.error_code": "oauth_error",
+                        },
+                    )
+                    fallback_nonce = secrets.token_urlsafe(32)
+                    request.session[AUTH_NONCE_SESSION_KEY] = fallback_nonce
+                    fallback_client = create_oauth_client(auth_settings)
+                    return await fallback_client.authorize_redirect(
+                        request,
+                        auth_settings.redirect_uri,
+                        nonce=fallback_nonce,
+                    )
                 return profile_import_redirect(
                     request,
-                    "consent_denied" if exc.error == "access_denied" else "failed",
+                    "failed",
                     stage="oauth_token",
                     error_code="oauth_error",
                 )

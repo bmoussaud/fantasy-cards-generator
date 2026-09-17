@@ -207,7 +207,7 @@ def test_callback_persists_owner_claims_in_session(monkeypatch: pytest.MonkeyPat
     assert "aragorn@example.com" in app_shell_response.text
 
 
-def test_profile_photo_import_is_an_explicit_sign_in_choice(
+def test_profile_photo_import_is_checked_by_default_but_can_be_unchecked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured_scopes: list[tuple[str, ...] | None] = []
@@ -226,7 +226,10 @@ def test_profile_photo_import_is_an_explicit_sign_in_choice(
     page = client.get("/auth/login")
     assert page.status_code == 200
     assert 'name="import_profile_photo"' in page.text
-    assert "checked" not in page.text.split('name="import_profile_photo"')[0].rsplit("<input", 1)[1]
+    checkbox = page.text.split('name="import_profile_photo"')[1].split(">", 1)[0]
+    assert "checked" in checkbox
+    assert "User.Read" in page.text
+    assert "Uncheck to sign in without importing" in page.text
     assert not captured_scopes
     begin_login(client)
     callback = client.get("/auth/callback?code=valid-code&state=opaque", follow_redirects=False)
@@ -321,19 +324,25 @@ def test_sign_in_does_not_duplicate_or_restore_profile_photo(
     assert state.status == prior_status
 
 
-def test_profile_photo_import_consent_denial_returns_to_sign_in_without_authenticating(
+def test_profile_photo_import_consent_denial_retries_sign_in_without_photo_scope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    captured_scopes: list[tuple[str, ...] | None] = []
+
     class ImportConsentDeniedClient(FakeOAuthClient):
         async def authorize_access_token(self, request, **_: object) -> dict[str, Any]:
             if request.query_params.get("error") == "access_denied":
                 raise OAuthError(error="access_denied")
             return await super().authorize_access_token(request)
 
+    def oauth_client(settings, *, scopes=None):
+        captured_scopes.append(scopes)
+        return ImportConsentDeniedClient()
+
     monkeypatch.setattr(
         main_module,
         "create_oauth_client",
-        lambda settings, **_: ImportConsentDeniedClient(),
+        oauth_client,
     )
     client = TestClient(create_app(), base_url="https://testserver")
     start = begin_login(client, import_profile_photo=True)
@@ -343,18 +352,28 @@ def test_profile_photo_import_consent_denial_returns_to_sign_in_without_authenti
         follow_redirects=False,
     )
 
-    assert callback.status_code == 303
-    assert callback.headers["location"] == "/auth/login"
-    shell = client.get("/auth/login")
-    assert shell.status_code == 200
-    assert "Microsoft photo access was not granted" in shell.text
-    assert 'role="alert"' in shell.text
-    assert client.get("/app", follow_redirects=False).status_code == 307
+    assert callback.status_code == 307
+    assert callback.headers["location"].startswith(
+        "https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize?"
+    )
+    assert captured_scopes[0] is not None
+    assert "User.Read" in captured_scopes[0]
+    assert captured_scopes[-1] is None
+
     session = decode_session_cookie(
         client.cookies.get("fantasy_cards_session"), "test-session-secret"
     )
     assert "user" not in session
     assert "profile_photo_import" not in session
+    assert "auth_nonce" in session
+
+    completed = client.get(
+        "/auth/callback?code=valid-code&state=opaque",
+        follow_redirects=False,
+    )
+    assert completed.status_code == 303
+    assert completed.headers["location"] == "/app"
+    assert client.get("/app", follow_redirects=False).status_code == 200
 
 
 @pytest.mark.parametrize(
