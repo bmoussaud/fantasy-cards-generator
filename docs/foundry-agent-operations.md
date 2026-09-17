@@ -9,8 +9,10 @@ only.
 
 ### Deploy guards
 
-1. **`workflows.up`** — azd 1.32 supports only the `up` workflow override, so
-   root `azd up` provisions and deploys web-nat only.
+1. **`workflows.up`** — azd 1.32 supports only the `up` workflow override.
+   Root `azd up` provisions shared resources, deploys and stamps the immutable
+   hosted-agent identity, re-provisions the web configuration, then deploys
+   web-nat.
 2. **Service lifecycle hooks** — `hooks/guard_agent_deploy.sh` is registered on
    `prebuild`, `prepackage`, `prepublish`, and `predeploy` to block
    build/package/push/deploy unless `CARD_ORCHESTRATOR_ENABLE_PREREQUISITES=true`.
@@ -27,7 +29,7 @@ signal in root hooks before service hooks run. Use targeted `azd deploy
 
 | Workflow | Command | Notes |
 |---|---|---|
-| Web-only (default) | `azd up` | Provisions and deploys only web-nat |
+| Clean full bootstrap | `azd up` | Provisions, deploys agent, stamps exact version, then deploys web |
 | Bare deploy | `azd deploy` | **Unsupported**: azd targets both declared services |
 | Web redeploy | `azd deploy web-nat` | Does not trigger provision hooks or the agent guard |
 | Agent deploy | `azd deploy card-orchestrator` | Requires prerequisites enabled via lifecycle hooks |
@@ -43,6 +45,8 @@ azd env set CARD_ORCHESTRATOR_ENABLE_PREREQUISITES true
 azd env set CARD_ORCHESTRATOR_CREATE_REGISTRY_CONNECTION true
 azd provision
 azd deploy card-orchestrator
+azd provision
+azd deploy web-nat
 ```
 
 Or via the root orchestrator:
@@ -72,6 +76,16 @@ generation has no alternate path.
 | `cd deployments/card-orchestrator && python deploy.py provision --execute --approve-change` | `./deploy.sh provision --approve-change` |
 | `cd deployments/card-orchestrator && python deploy.py deploy --execute --approve-change` | `./deploy.sh agent --approve-change` |
 | `cd ... && python deploy.py deploy --environment prod --execute --approve-change --approve-prod` | `./deploy.sh agent --environment prod --approve-change --approve-prod` |
+
+The agent `postdeploy` hook reads azd's generated
+`AGENT_CARD_ORCHESTRATOR_NAME` and `AGENT_CARD_ORCHESTRATOR_VERSION`, validates
+their bounded shapes, and persists the corresponding web inputs. It never
+derives a version from logs or exception text. The following provision injects
+the pair atomically; Bicep omits both during initial placeholder provisioning
+and rejects a partial pair.
+The second provision does not rotate an existing managed Entra client secret:
+the credential hook now creates a secret only when the azd environment has none.
+Clear `ENTRA_CLIENT_SECRET` only for an explicit, coordinated rotation.
 
 The root `deploy.sh` enforces approval gates natively. Raw targeted
 `azd deploy card-orchestrator` is still available, but the service-level
@@ -1536,12 +1550,13 @@ alert rules, recurring evaluations, billable synthetic model probes, ingestion
 budget or production SLO have been provisioned by this change.
 
 Keep a release record of commit, digest, Foundry version, configuration and the
-last approved version. A rollback is **agent-only**: route an approved caller to
-the recorded immutable Foundry version when version pinning is supported, or
-deploy the recorded image/configuration as a new agent version through this
-isolated azd service. Preserve the original image and app build SHA; record the
-new Foundry version separately. Confirm the current extension's version/image
-selection interface before executing—do not guess an `azd rollback` command.
+last approved version. A rollback is **agent-only**: redeploy the recorded
+image/configuration through the isolated agent service so Foundry creates and
+activates a new immutable version, let the postdeploy hook stamp that new
+platform version, then run `azd provision` before redeploying web-nat. Preserve
+the original image and app build SHA; record the new Foundry version separately.
+Do not guess an `azd rollback` command or manually point readiness at an
+inactive version.
 The hosted agent endpoint serves one version with 100% traffic; agent-version
 traffic splitting is not supported and is not a rollback strategy.
 Stop idle/candidate sessions using the supported agent session lifecycle after

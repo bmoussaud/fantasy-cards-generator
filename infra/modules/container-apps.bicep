@@ -78,10 +78,10 @@ param foundryApiVersion string = '2025-03-01-preview'
 @description('Azure AI Foundry image deployment injected as FOUNDRY_IMAGE_DEPLOYMENT.')
 param foundryImageDeployment string = 'gpt-image-2'
 
-@description('Foundry hosted agent name injected as FOUNDRY_AGENT_NAME.')
+@description('Foundry hosted agent name. May be empty only for the initial public-placeholder provision.')
 param foundryAgentName string = ''
 
-@description('Exact active hosted agent version injected as FOUNDRY_AGENT_VERSION.')
+@description('Exact active hosted agent version. May be empty only for the initial public-placeholder provision.')
 param foundryAgentVersion string = ''
 
 @description('Expected agent version for metadata check injected as FOUNDRY_AGENT_EXPECTED_VERSION. Optional.')
@@ -246,6 +246,28 @@ var containerAppSecrets = concat(
     : []
 )
 
+var hasFoundryAgentName = !empty(trim(foundryAgentName))
+var hasFoundryAgentVersion = !empty(trim(foundryAgentVersion))
+var foundryAgentConfigurationIsComplete = hasFoundryAgentName && hasFoundryAgentVersion
+var validatedFoundryAgentConfiguration = hasFoundryAgentName == hasFoundryAgentVersion
+  ? {
+      name: trim(foundryAgentName)
+      version: trim(foundryAgentVersion)
+    }
+  : fail('FOUNDRY_AGENT_NAME and FOUNDRY_AGENT_VERSION must either both be set or both be empty during the initial placeholder provision.')
+var foundryAgentEnv = foundryAgentConfigurationIsComplete
+  ? [
+      {
+        name: 'FOUNDRY_AGENT_NAME'
+        value: validatedFoundryAgentConfiguration.name
+      }
+      {
+        name: 'FOUNDRY_AGENT_VERSION'
+        value: validatedFoundryAgentConfiguration.version
+      }
+    ]
+  : []
+
 var containerAppEnv = concat(
   [
     {
@@ -303,14 +325,6 @@ var containerAppEnv = concat(
     {
       name: 'FOUNDRY_IMAGE_DEPLOYMENT'
       value: foundryImageDeployment
-    }
-    {
-      name: 'FOUNDRY_AGENT_NAME'
-      value: foundryAgentName
-    }
-    {
-      name: 'FOUNDRY_AGENT_VERSION'
-      value: foundryAgentVersion
     }
     {
       name: 'FOUNDRY_AGENT_EXPECTED_VERSION'
@@ -500,7 +514,8 @@ var containerAppEnv = concat(
           value: entraPostLogoutRedirectUri
         }
       ]
-    : []
+    : [    ],
+    foundryAgentEnv
 )
 
 resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {

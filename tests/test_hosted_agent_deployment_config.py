@@ -419,9 +419,8 @@ def test_root_agent_prerequisites_reuses_card_orchestrator_canonical_patterns() 
 # ── Deploy guard and orchestration (reviewer findings) ───────────────
 
 
-def test_root_workflow_uses_only_supported_up_override() -> None:
-    """azd 1.32 supports ``workflows.up`` only; the root manifest must not
-    claim an unsupported bare ``azd deploy`` override."""
+def test_root_workflow_bootstraps_agent_before_web() -> None:
+    """The supported up override deploys and stamps the agent before web."""
     azure_yaml = (ROOT / "azure.yaml").read_text()
     workflows_start = azure_yaml.index("workflows:")
     hooks_start = azure_yaml.rindex("\nhooks:")
@@ -429,9 +428,16 @@ def test_root_workflow_uses_only_supported_up_override() -> None:
 
     assert "up:" in workflows_section
     assert "deploy:" not in workflows_section
-    assert "card-orchestrator" not in workflows_section
-    assert "package web-nat" in workflows_section
-    assert "deploy web-nat" in workflows_section
+    actual_steps = [
+        line.strip() for line in workflows_section.splitlines() if line.strip().startswith("- azd:")
+    ]
+    assert actual_steps == [
+        "- azd: provision",
+        "- azd: deploy card-orchestrator",
+        "- azd: provision",
+        "- azd: package web-nat",
+        "- azd: deploy web-nat",
+    ]
 
 
 def test_card_orchestrator_service_lifecycle_guards_exist_without_fake_condition_gate() -> None:
@@ -529,5 +535,31 @@ def test_root_orchestrator_plan_is_root_relative_from_other_cwd(tmp_path: Path) 
 
     assert result.returncode == 0
     assert f"Project: {ROOT}" in result.stdout
-    assert f"azd --cwd {ROOT} deploy web-nat" in result.stdout
-    assert f"azd --cwd {ROOT} deploy card-orchestrator" in result.stdout
+    agent = f"azd --cwd {ROOT} deploy card-orchestrator"
+    provision = f"azd --cwd {ROOT} provision"
+    web = f"azd --cwd {ROOT} deploy web-nat"
+    assert result.stdout.index(agent) < result.stdout.index(provision) < result.stdout.index(web)
+
+
+def test_root_orchestrator_executes_full_deployment_agent_first(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    log = tmp_path / "azd.log"
+    fake_azd = fake_bin / "azd"
+    fake_azd.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{log}"\n')
+    fake_azd.chmod(0o755)
+
+    result = subprocess.run(
+        ["bash", str(ROOT / "deploy.sh"), "full", "--approve-change"],
+        cwd=tmp_path,
+        env={"PATH": f"{fake_bin}:/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert log.read_text().splitlines() == [
+        f"--cwd {ROOT} deploy card-orchestrator --environment dev --no-prompt",
+        f"--cwd {ROOT} provision --environment dev --no-prompt",
+        f"--cwd {ROOT} deploy web-nat --environment dev --no-prompt",
+    ]

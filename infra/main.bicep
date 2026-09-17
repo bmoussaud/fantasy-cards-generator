@@ -82,10 +82,10 @@ param aiFoundryProjectName string = 'fantasy-cards'
 @description('Azure AI Foundry project display name for the current environment.')
 param aiFoundryProjectDisplayName string = 'Fantasy Cards'
 
-@description('Hosted agent name for the card-orchestrator agent. Injected as FOUNDRY_AGENT_NAME.')
+@description('Hosted agent name stamped from AGENT_CARD_ORCHESTRATOR_NAME after agent deployment. Empty only during the initial placeholder provision.')
 param foundryAgentName string = ''
 
-@description('Exact active hosted agent version. Injected as FOUNDRY_AGENT_VERSION.')
+@description('Exact active hosted agent version stamped from AGENT_CARD_ORCHESTRATOR_VERSION after agent deployment. Empty only during the initial placeholder provision.')
 param foundryAgentVersion string = ''
 
 @description('Expected agent version for metadata check. Injected as FOUNDRY_AGENT_EXPECTED_VERSION. Optional.')
@@ -304,7 +304,7 @@ param monitoringContainerRestartThreshold int = 3
 
 // ── card-orchestrator hosted-agent prerequisites ──
 
-@description('Enable card-orchestrator prerequisites: ACR pull for project MI, optional registry connection, and agent monitoring. Off by default so the web-only workflow never deploys agent infrastructure.')
+@description('Enable card-orchestrator prerequisites: ACR pull for project MI, optional registry connection, and agent monitoring. Must be enabled before the agent-first deployment workflow runs.')
 param enableCardOrchestratorPrerequisites bool = false
 
 @description('Create the Foundry project → ACR registry connection. Only effective when enableCardOrchestratorPrerequisites is true. Enable only after confirming no existing registry connection.')

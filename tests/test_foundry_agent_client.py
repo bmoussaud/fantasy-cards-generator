@@ -12,11 +12,13 @@ from azure.core.exceptions import (
     ServiceRequestError,
     ServiceResponseError,
 )
+from azure.identity import ChainedTokenCredential
 
 from app.foundry_agent_client import (
     FOUNDRY_AGENT_TOKEN_SCOPE,
     FoundryAgentClient,
     _build_responses_url,
+    _TransportAwareChainedCredential,
 )
 from app.settings import SettingsError, load_app_settings
 
@@ -672,16 +674,20 @@ def test_credential_authentication_failure_is_sanitized_and_not_retryable() -> N
 
 
 @pytest.mark.parametrize("failure", [ServiceRequestError, ServiceResponseError])
-def test_credential_transport_failures_are_sanitized_and_retryable(failure) -> None:
+def test_chained_credential_transport_failures_are_sanitized_and_retryable(
+    failure,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     class FailingCredential(FakeCredential):
-        def get_token(self, *scopes: str) -> FakeAccessToken:
+        def get_token(self, *scopes: str, **kwargs: Any) -> FakeAccessToken:
             raise failure("private-credential-diagnostic")
 
     def unexpected_request(request: httpx.Request) -> httpx.Response:
         pytest.fail("Failed token transport must not trigger an HTTP request")
 
+    credential = _TransportAwareChainedCredential(ChainedTokenCredential(FailingCredential()))
     result, _ = invoke_with_transport(
-        configured_settings(), unexpected_request, credential=FailingCredential()
+        configured_settings(), unexpected_request, credential=credential
     )
 
     assert result.status == "transient_error"
@@ -689,6 +695,7 @@ def test_credential_transport_failures_are_sanitized_and_retryable(failure) -> N
     assert result.error_code == "credential_service_unavailable"
     assert result.message == "Foundry credential service is temporarily unavailable."
     assert "private-credential-diagnostic" not in repr(result)
+    assert "private-credential-diagnostic" not in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -702,19 +709,22 @@ def test_credential_transport_failures_are_sanitized_and_retryable(failure) -> N
 def test_agent_access_credential_failures_are_classified_and_sanitized(
     failure,
     expected: str,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     class FailingCredential(FakeCredential):
-        def get_token(self, *scopes: str) -> FakeAccessToken:
+        def get_token(self, *scopes: str, **kwargs: Any) -> FakeAccessToken:
             raise failure("private-readiness-diagnostic")
 
+    credential = _TransportAwareChainedCredential(ChainedTokenCredential(FailingCredential()))
     result, _ = check_access_with_transport(
         configured_settings(),
         lambda request: pytest.fail("Failed token acquisition must not make an HTTP request"),
-        credential=FailingCredential(),
+        credential=credential,
     )
 
     assert result == expected
     assert "private-readiness-diagnostic" not in result
+    assert "private-readiness-diagnostic" not in caplog.text
 
 
 def test_empty_credential_token_is_non_success() -> None:

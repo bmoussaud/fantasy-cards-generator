@@ -144,6 +144,11 @@ def test_generation_runtime_env_vars_are_wired_from_bicep_outputs() -> None:
     assert "name: 'FOUNDRY_ENDPOINT'" in container_apps_bicep
     assert "name: 'FOUNDRY_PROJECT_ENDPOINT'" in container_apps_bicep
     assert "name: 'FOUNDRY_AGENT_VERSION'" in container_apps_bicep
+    assert "var foundryAgentEnv = foundryAgentConfigurationIsComplete" in container_apps_bicep
+    assert "FOUNDRY_AGENT_NAME and FOUNDRY_AGENT_VERSION must either both be set" in (
+        container_apps_bicep
+    )
+    assert "foundryAgentEnv" in container_apps_bicep
     assert "name: 'FOUNDRY_AGENT_TIMEOUT_SECONDS'" in container_apps_bicep
     assert "param foundryAgentTimeoutSeconds string = '70'" in main_bicep
     assert "foundryAgentTimeoutSeconds: foundryAgentTimeoutSeconds" in main_bicep
@@ -1175,26 +1180,27 @@ def test_root_manifest_requires_azd_version_and_agent_extension() -> None:
     assert "=1.0.0-beta.13" in azure_yaml
 
 
-def test_root_manifest_safe_default_up_workflow_deploys_only_web() -> None:
-    """``azd up`` targets only web-nat via the only supported azd workflow.
-
-    The card-orchestrator hosted agent is never built, pushed, or deployed
-    by ``azd up`` unless an operator removes the default web-only workflow.
-    azd 1.32 supports ``workflows.up`` only; there is no valid
-    ``workflows.deploy`` override for bare ``azd deploy``.
-    """
+def test_root_manifest_up_bootstraps_agent_before_web() -> None:
+    """``azd up`` deploys and stamps the agent before the serving web revision."""
     azure_yaml = (REPO_ROOT / "azure.yaml").read_text()
 
     assert "workflows:" in azure_yaml
-    assert "deploy web-nat" in azure_yaml
     assert "deploy --all" not in azure_yaml
     workflows_start = azure_yaml.index("workflows:")
     hooks_start = azure_yaml.rindex("\nhooks:")
     workflows_section = azure_yaml[workflows_start:hooks_start]
-    assert "card-orchestrator" not in workflows_section
     assert "up:" in workflows_section
     assert "deploy:" not in workflows_section
-    assert "package web-nat" in workflows_section
+    actual_steps = [
+        line.strip() for line in workflows_section.splitlines() if line.strip().startswith("- azd:")
+    ]
+    assert actual_steps == [
+        "- azd: provision",
+        "- azd: deploy card-orchestrator",
+        "- azd: provision",
+        "- azd: package web-nat",
+        "- azd: deploy web-nat",
+    ]
 
 
 def test_root_manifest_marks_bare_azd_deploy_unsupported_and_keeps_service_hooks() -> None:
@@ -1212,22 +1218,80 @@ def test_root_manifest_marks_bare_azd_deploy_unsupported_and_keeps_service_hooks
     assert "Bare `azd deploy` is therefore unsupported for this manifest." in azure_yaml
 
 
-def test_root_manifest_hooks_only_on_provision_not_deploy() -> None:
-    """Root-level hooks run only during provision; deploy-only paths do not
-    rotate credentials. The card-orchestrator service has service-level
-    lifecycle guards that validate prerequisites without credential rotation."""
+def test_root_manifest_hooks_stamp_agent_identity_after_deploy() -> None:
+    """The agent postdeploy hook persists the exact immutable deployment identity."""
     azure_yaml = (REPO_ROOT / "azure.yaml").read_text()
 
     assert "preprovision:" in azure_yaml
     assert "postprovision:" in azure_yaml
-    # No root-level postdeploy hooks anywhere
-    assert "postdeploy:" not in azure_yaml
-    # The only service lifecycle gates are the card-orchestrator prerequisite guards.
+    assert "postdeploy:" in azure_yaml
+    assert "sync_agent_deployment.sh" in azure_yaml
     assert azure_yaml.count("prebuild:") == 1
     assert azure_yaml.count("prepackage:") == 1
     assert azure_yaml.count("prepublish:") == 1
     assert azure_yaml.count("predeploy:") == 1
     assert "guard_agent_deploy" in azure_yaml
+
+
+def test_agent_deployment_sync_hook_validates_and_persists_platform_outputs(
+    tmp_path: Path,
+) -> None:
+    script = REPO_ROOT / "hooks" / "sync_agent_deployment.sh"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    log = tmp_path / "azd.log"
+    fake_azd = fake_bin / "azd"
+    fake_azd.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1 $2 $3" = "env get-value AGENT_CARD_ORCHESTRATOR_NAME" ]; then\n'
+        "  printf '%s\\n' card-orchestrator\n"
+        'elif [ "$1 $2 $3" = "env get-value AGENT_CARD_ORCHESTRATOR_VERSION" ]; then\n'
+        "  printf '%s\\n' 17\n"
+        'elif [ "$1 $2" = "env set" ]; then\n'
+        f'  printf "%s\\n" "$*" > "{log}"\n'
+        "else\n"
+        "  exit 2\n"
+        "fi\n"
+    )
+    fake_azd.chmod(0o755)
+
+    result = subprocess.run(
+        ["sh", str(script)],
+        capture_output=True,
+        text=True,
+        env={"PATH": f"{fake_bin}:/usr/bin:/bin"},
+    )
+
+    assert result.returncode == 0
+    assert log.read_text().strip() == (
+        "env set FOUNDRY_AGENT_NAME=card-orchestrator FOUNDRY_AGENT_VERSION=17"
+    )
+    assert "card-orchestrator" not in result.stdout
+    assert "17" not in result.stdout
+
+
+def test_agent_deployment_sync_hook_rejects_missing_platform_version(tmp_path: Path) -> None:
+    script = REPO_ROOT / "hooks" / "sync_agent_deployment.sh"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_azd = fake_bin / "azd"
+    fake_azd.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1 $2 $3" = "env get-value AGENT_CARD_ORCHESTRATOR_NAME" ]; then\n'
+        "  printf '%s\\n' card-orchestrator\n"
+        "fi\n"
+    )
+    fake_azd.chmod(0o755)
+
+    result = subprocess.run(
+        ["sh", str(script)],
+        capture_output=True,
+        text=True,
+        env={"PATH": f"{fake_bin}:/usr/bin:/bin"},
+    )
+
+    assert result.returncode == 1
+    assert "version" in result.stderr
 
 
 def test_card_orchestrator_lifecycle_guard_validates_prerequisites() -> None:

@@ -88,8 +88,9 @@ if [[ "$ACTION" != "preview" && "$APPROVE_CHANGE" != "true" ]]; then
             echo "Command: azd --cwd $ROOT deploy card-orchestrator --environment $ENVIRONMENT --no-prompt"
             ;;
         full)
-            echo "Command: azd --cwd $ROOT deploy web-nat --environment $ENVIRONMENT --no-prompt"
             echo "Command: azd --cwd $ROOT deploy card-orchestrator --environment $ENVIRONMENT --no-prompt"
+            echo "Command: azd --cwd $ROOT provision --environment $ENVIRONMENT --no-prompt"
+            echo "Command: azd --cwd $ROOT deploy web-nat --environment $ENVIRONMENT --no-prompt"
             ;;
         provision)
             echo "Command: azd --cwd $ROOT provision --environment $ENVIRONMENT --no-prompt"
@@ -111,8 +112,9 @@ case "$ACTION" in
         exec azd --cwd "$ROOT" deploy card-orchestrator --environment "$ENVIRONMENT" --no-prompt
         ;;
     full)
-        azd --cwd "$ROOT" deploy web-nat --environment "$ENVIRONMENT" --no-prompt
-        exec azd --cwd "$ROOT" deploy card-orchestrator --environment "$ENVIRONMENT" --no-prompt
+        azd --cwd "$ROOT" deploy card-orchestrator --environment "$ENVIRONMENT" --no-prompt
+        azd --cwd "$ROOT" provision --environment "$ENVIRONMENT" --no-prompt
+        exec azd --cwd "$ROOT" deploy web-nat --environment "$ENVIRONMENT" --no-prompt
         ;;
     provision)
         exec azd --cwd "$ROOT" provision --environment "$ENVIRONMENT" --no-prompt

@@ -72,7 +72,7 @@ string, or Cosmos keys.
 
 The root `azure.yaml` is the single operator entry point for both the `web-nat`
 Container App (port 8000) and the `card-orchestrator` Foundry hosted agent
-(port 8088). `azd up` targets **only** `web-nat`. Bare `azd deploy` is
+(port 8088). `azd up` performs the complete agent-first bootstrap. Bare `azd deploy` is
 **unsupported** for this manifest because azd 1.32 deploys all declared
 services by default and no verified root-hook context distinguishes bare from
 targeted deploys before service hooks run.
@@ -81,9 +81,10 @@ targeted deploys before service hooks run.
 
 Three layers keep hosted-agent deployment explicit:
 
-1. **`workflows.up`** — azd 1.32 supports overriding only the `up` workflow, so
-   root `azd up` provisions and deploys `web-nat` only. There is no supported
-   `workflows.deploy` override in azd 1.32.
+1. **`workflows.up`** — azd 1.32 supports overriding only the `up` workflow.
+   Root `azd up` provisions shared resources, deploys the hosted agent, runs a
+   second provision to inject the exact generated agent name/version, and then
+   deploys `web-nat`. There is no supported `workflows.deploy` override.
 2. **Service lifecycle hooks** — `hooks/guard_agent_deploy.sh` is registered as
    `prebuild`, `prepackage`, `prepublish`, and `predeploy` for
    `card-orchestrator`. These azd 1.32 service hooks run before the package →
@@ -92,15 +93,28 @@ Three layers keep hosted-agent deployment explicit:
 3. **Root orchestrator (`deploy.sh`)** — the documented production-safe entry
    point preserving `--approve-change` / `--approve-prod` enforcement gates.
 
-### Web-only workflow (default)
+### Clean environment bootstrap
 
 ```bash
-azd up                        # provision + deploy web-nat only
-azd deploy web-nat            # explicit web redeploy
-./deploy.sh web --approve-change
+azd env new dev
+azd env set AZURE_LOCATION eastus2
+azd env set CARD_ORCHESTRATOR_VERSION "$(git rev-parse HEAD)"
+azd env set CARD_ORCHESTRATOR_ENABLE_PREREQUISITES true
+azd env set CARD_ORCHESTRATOR_CREATE_REGISTRY_CONNECTION true
+azd up
 ```
 
-### Full deployment
+The first provision uses the public placeholder image and omits both hosted-agent
+environment variables. Agent deployment then writes
+`AGENT_CARD_ORCHESTRATOR_NAME` and `AGENT_CARD_ORCHESTRATOR_VERSION`; the
+`postdeploy` hook validates and persists them as `FOUNDRY_AGENT_NAME` and
+`FOUNDRY_AGENT_VERSION`. The second provision injects the pair before the real
+web revision can become ready. A partial pair fails Bicep validation.
+The second provision reuses an existing `ENTRA_CLIENT_SECRET`; the
+postprovision hook creates one only when the managed registration has no stored
+secret. Clear that azd value only for an explicit, coordinated rotation.
+
+### Existing environment deployment
 
 ```bash
 # 1. Enable card-orchestrator deployment prerequisites (ACR pull, monitoring)
@@ -112,8 +126,12 @@ azd env set CARD_ORCHESTRATOR_CREATE_REGISTRY_CONNECTION true
 # 3. Provision shared infrastructure, including mandatory agent RBAC
 azd provision
 
-# 4. Deploy card-orchestrator independently
+# 4. Deploy card-orchestrator; postdeploy stamps its exact name/version
 azd deploy card-orchestrator
+
+# 5. Re-provision the Container App configuration, then deploy web
+azd provision
+azd deploy web-nat
 ```
 
 Or via the root orchestrator with approval gates:
@@ -142,8 +160,9 @@ Do not use bare `azd deploy` with this manifest. Supported entrypoints are
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `CARD_ORCHESTRATOR_ENABLE_PREREQUISITES` | `false` | ACR pull for project MI, agent monitoring workbook/alerts; also the predeploy gate |
-| `CARD_ORCHESTRATOR_CREATE_REGISTRY_CONNECTION` | `false` | Foundry project → ACR registry connection |
+| `CARD_ORCHESTRATOR_VERSION` | none | Immutable application build identifier used for the agent image/tag |
+| `CARD_ORCHESTRATOR_ENABLE_PREREQUISITES` | `false` | Must be set to `true` before the first agent deployment |
+| `CARD_ORCHESTRATOR_CREATE_REGISTRY_CONNECTION` | `false` | Set to `true` for a fresh project so Foundry can pull from ACR |
 | `CARD_ORCHESTRATOR_ENABLE_AGENT_ALERTS` | `false` | Enable agent monitoring alert rules |
 
 ### Production approval — `deploy.sh`
@@ -195,6 +214,9 @@ Use the normal azd workflow:
 ```bash
 azd env new dev
 azd env set AZURE_LOCATION eastus2
+azd env set CARD_ORCHESTRATOR_VERSION "$(git rev-parse HEAD)"
+azd env set CARD_ORCHESTRATOR_ENABLE_PREREQUISITES true
+azd env set CARD_ORCHESTRATOR_CREATE_REGISTRY_CONNECTION true
 azd env set LEGACY_COSMOS_IP_RULE 20.10.253.231
 azd up
 ```

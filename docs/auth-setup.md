@@ -164,7 +164,9 @@ To use it:
    `ENTRA_APP_REGISTRATION_MANAGED` must be `true` before the hook uses
    `az ad app credential reset` to mint a short-lived client secret (3-month
    expiry) and stores it in the active azd environment as
-   `ENTRA_CLIENT_SECRET`.
+   `ENTRA_CLIENT_SECRET`. If that value is already present, the hook reuses it
+   and does not rotate the credential during routine or multi-phase
+   provisioning. Clear it only as part of an explicit, coordinated rotation.
 6. If `deployEntraAppRegistration=false`, Bicep exports
    `ENTRA_APP_REGISTRATION_MANAGED=false` and the hook exits without error,
    even when `ENTRA_CLIENT_ID` contains an external registration ID. An unset

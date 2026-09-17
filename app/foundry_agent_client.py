@@ -5,6 +5,7 @@ import asyncio
 import inspect
 import json
 import re
+import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
 from math import isfinite
@@ -14,8 +15,14 @@ from urllib.parse import quote, urlsplit, urlunsplit
 import httpx
 from azure.core.exceptions import (
     ClientAuthenticationError,
+    HttpResponseError,
     ServiceRequestError,
     ServiceResponseError,
+)
+from azure.identity import (
+    ChainedTokenCredential,
+    CredentialUnavailableError,
+    DefaultAzureCredential,
 )
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
@@ -28,6 +35,72 @@ FOUNDRY_AGENT_ACCESS_API_VERSION = "2025-11-15-preview"
 
 class TokenCredential(Protocol):
     def get_token(self, *scopes: str) -> Any: ...
+
+
+class _CredentialAttemptRecorder:
+    def __init__(self) -> None:
+        self.transient_failure = False
+
+
+class _RecordingCredential:
+    def __init__(self, credential: Any, recorder: _CredentialAttemptRecorder) -> None:
+        self._credential = credential
+        self._recorder = recorder
+
+    def get_token(self, *scopes: str, **kwargs: Any) -> Any:
+        try:
+            return self._credential.get_token(*scopes, **kwargs)
+        except CredentialUnavailableError:
+            raise CredentialUnavailableError("Credential is unavailable.") from None
+        except (ServiceRequestError, ServiceResponseError):
+            self._recorder.transient_failure = True
+            raise ServiceRequestError("Credential service is temporarily unavailable.") from None
+        except ClientAuthenticationError as exc:
+            self._recorder.transient_failure = _is_transient_credential_failure(exc)
+            raise ClientAuthenticationError("Credential authentication failed.") from None
+        except HttpResponseError as exc:
+            if _is_transient_credential_failure(exc):
+                self._recorder.transient_failure = True
+                raise ServiceRequestError(
+                    "Credential service is temporarily unavailable."
+                ) from None
+            raise ClientAuthenticationError("Credential authentication failed.") from None
+
+    def __enter__(self) -> _RecordingCredential:
+        enter = getattr(self._credential, "__enter__", None)
+        if enter is not None:
+            enter()
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        exit_method = getattr(self._credential, "__exit__", None)
+        if exit_method is not None:
+            exit_method(*args)
+
+
+class _TransportAwareChainedCredential:
+    def __init__(self, credential: ChainedTokenCredential) -> None:
+        self._credential = credential
+        self._recorder = _CredentialAttemptRecorder()
+        self._lock = threading.Lock()
+        credential.credentials = tuple(
+            _RecordingCredential(child, self._recorder) for child in credential.credentials
+        )
+
+    def get_token(self, *scopes: str, **kwargs: Any) -> Any:
+        with self._lock:
+            self._recorder.transient_failure = False
+            try:
+                return self._credential.get_token(*scopes, **kwargs)
+            except ClientAuthenticationError:
+                if self._recorder.transient_failure:
+                    raise ServiceRequestError(
+                        "Credential service is temporarily unavailable."
+                    ) from None
+                raise
+
+    def close(self) -> None:
+        self._credential.close()
 
 
 class GenerateCardAgentRequest(BaseModel):
@@ -357,9 +430,21 @@ class FoundryAgentClient:
 
 
 def _default_azure_credential() -> TokenCredential:
-    from azure.identity import DefaultAzureCredential
+    credential = DefaultAzureCredential(exclude_interactive_browser_credential=False)
+    return _TransportAwareChainedCredential(credential)
 
-    return DefaultAzureCredential(exclude_interactive_browser_credential=False)
+
+def _is_transient_credential_failure(exc: Exception) -> bool:
+    if isinstance(exc, (ServiceRequestError, ServiceResponseError)):
+        return True
+    if isinstance(exc, HttpResponseError):
+        status_code = getattr(exc, "status_code", None)
+        return (
+            status_code == 408
+            or status_code == 429
+            or (isinstance(status_code, int) and status_code >= 500)
+        )
+    return False
 
 
 def _build_responses_url(
