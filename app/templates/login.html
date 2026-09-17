@@ -9,13 +9,14 @@
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
             <div class="field">
                 <label>
-                    <input type="checkbox" name="import_profile_photo" value="true" aria-describedby="profile-import-hint" />
+                    <input type="checkbox" name="import_profile_photo" value="true" aria-describedby="profile-import-hint" checked />
                     Import my Microsoft profile photo into My Photos
                 </label>
                 <p class="field__hint" id="profile-import-hint">
-                    Optional. Allow profile access during this sign-in to save a private,
-                    safety-checked copy for card generation. The photo will not sync automatically.
-                    Previously imported or deleted photos will not be imported again.
+                    Optional. Leave checked to request Microsoft profile access (User.Read)
+                    and save a private, safety-checked copy in My Photos for card generation.
+                    Uncheck to sign in without importing. The photo will not sync automatically,
+                    and previously imported or deleted photos will not be imported again.
                 </p>
             </div>
             <button class="btn btn-primary" type="submit">Continue with Microsoft</button>
