@@ -19,6 +19,10 @@ the signed session, and enforces CSRF and owner-scoped access.
 
 `CardGenerationService` keeps rate limiting, idempotency, deterministic moderation,
 image calls, artwork retry semantics, and persistence in the web application.
+Same-instance duplicate generation is coalesced in memory while refusal-capable
+processing runs without durable request metadata. Cosmos card/retry reservations
+are acquired only after applicable moderation allows, immediately before safe
+completed/partial persistence.
 Every live text request invokes the separately deployed `card-orchestrator`
 through the Foundry project's Responses endpoint. The hosted runtime executes
 three sequential Microsoft Agent Framework specialists:

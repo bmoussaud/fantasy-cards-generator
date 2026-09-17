@@ -172,6 +172,40 @@ class StageModeration:
         )
 
 
+class RefusalPersistenceBombCardRepository(InMemoryCardRepository):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_on_mutation = True
+
+    async def reserve_document(self, **kwargs: Any):
+        if self.fail_on_mutation:
+            raise AssertionError("refusal must not reserve a card document")
+        return await super().reserve_document(**kwargs)
+
+    async def save(self, record: StoredCard) -> StoredCard:
+        if self.fail_on_mutation:
+            raise AssertionError("refusal must not save a card document")
+        return await super().save(record)
+
+    async def delete(self, owner_id: str, card_id: str) -> None:
+        del owner_id, card_id
+        raise RuntimeError("simulated Cosmos delete failure")
+
+
+class RefusalPersistenceBombAuditRepository(InMemoryAuditRepository):
+    async def reserve_audit(self, **kwargs: Any):
+        del kwargs
+        raise AssertionError("refusal must not reserve an audit document")
+
+    async def save_audit(self, record: StoredCard) -> None:
+        del record
+        raise AssertionError("refusal must not save an audit document")
+
+    async def delete_audit(self, owner_id: str, card_id: str) -> None:
+        del owner_id, card_id
+        raise RuntimeError("simulated Cosmos audit delete failure")
+
+
 def test_live_mode_requires_agent_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("APP_ENV", "test")
     monkeypatch.setenv("AI_MODE", "live")
@@ -587,7 +621,52 @@ def test_image_moderation_refusal_persists_nothing_and_stops_before_persistence(
     assert not services.asset_store._assets
 
 
-def test_artwork_retry_moderation_refusal_removes_partial_card_and_retry_audit(
+@pytest.mark.parametrize(
+    ("refusal_point", "expected_error"),
+    [
+        ("pre_prompt", "prompt_rejected"),
+        ("agent", "prompt_rejected"),
+        ("post_text", "generated_text_rejected"),
+        ("post_art_prompt", "generated_art_rejected"),
+        ("post_image", "generated_art_rejected"),
+    ],
+)
+def test_refusal_never_requires_repository_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    refusal_point: str,
+    expected_error: str,
+) -> None:
+    class Agent:
+        async def invoke(self, query: str) -> FoundryAgentInvocationResult:
+            del query
+            if refusal_point == "agent":
+                return FoundryAgentInvocationResult(
+                    status="refused",
+                    schema_valid=True,
+                    error_code="agent_refused",
+                )
+            return _success()
+
+    services = _services(monkeypatch, Agent())
+    services.card_repository = RefusalPersistenceBombCardRepository()
+    services.audit_repository = RefusalPersistenceBombAuditRepository()
+    services.moderation_service = StageModeration(
+        None if refusal_point == "agent" else refusal_point
+    )
+
+    response = _generate(
+        _client(monkeypatch, services),
+        key=f"repository-bomb-{refusal_point}",
+    )
+
+    assert response.status_code == 422
+    assert response.json()["errorCode"] == expected_error
+    assert not services.card_repository._records
+    assert not services.audit_repository._records
+    assert not services.asset_store._assets
+
+
+def test_artwork_retry_moderation_refusal_preserves_safe_partial_without_retry_audit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class Agent:
@@ -595,6 +674,10 @@ def test_artwork_retry_moderation_refusal_removes_partial_card_and_retry_audit(
             return _success()
 
     services = _services(monkeypatch, Agent())
+    card_repository = RefusalPersistenceBombCardRepository()
+    card_repository.fail_on_mutation = False
+    services.card_repository = card_repository
+    services.audit_repository = RefusalPersistenceBombAuditRepository()
     moderation = StageModeration("post_image")
     services.moderation_service = moderation
     owner = AuthenticatedOwner(
@@ -619,6 +702,7 @@ def test_artwork_retry_moderation_refusal_removes_partial_card_and_retry_audit(
         image_quality="low",
     )
     asyncio.run(services.card_repository.save(record))
+    card_repository.fail_on_mutation = True
 
     with pytest.raises(ProblemDetails) as raised:
         asyncio.run(
@@ -634,9 +718,81 @@ def test_artwork_retry_moderation_refusal_removes_partial_card_and_retry_audit(
     assert raised.value.status_code == 422
     assert raised.value.error_code == "generated_art_rejected"
     assert moderation.calls == ["post_image"]
-    assert not services.card_repository._records
+    persisted = asyncio.run(services.card_repository.get(owner.owner_id, record.id))
+    assert persisted is record
+    assert persisted.status == "awaiting_artwork_retry"
     assert not services.audit_repository._records
     assert not services.asset_store._assets
+
+
+def test_concurrent_duplicate_refusals_share_bounded_in_memory_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class BlockingRefusalAgent:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+            self.calls = 0
+
+        async def invoke(self, query: str) -> FoundryAgentInvocationResult:
+            del query
+            self.calls += 1
+            self.started.set()
+            await self.release.wait()
+            return FoundryAgentInvocationResult(
+                status="refused",
+                schema_valid=True,
+                error_code="agent_refused",
+            )
+
+    async def scenario() -> tuple[list[BaseException], int]:
+        agent = BlockingRefusalAgent()
+        services = _services(monkeypatch, agent)
+        services.card_repository = RefusalPersistenceBombCardRepository()
+        services.audit_repository = RefusalPersistenceBombAuditRepository()
+        service = CardGenerationService(services)
+        owner = AuthenticatedOwner(
+            owner_id="tenant:object",
+            tenant_id="tenant",
+            object_id="object",
+            subject="subject",
+            display_name=None,
+            email=None,
+        )
+        first = asyncio.create_task(
+            service.generate_card(
+                owner=owner,
+                prompt="A safe original frost guardian hero with a silver shield",
+                idempotency_key="concurrent-refusal",
+                request_id="request-one",
+                client_ip="127.0.0.1",
+            )
+        )
+        await agent.started.wait()
+        second = asyncio.create_task(
+            service.generate_card(
+                owner=owner,
+                prompt="A safe original frost guardian hero with a silver shield",
+                idempotency_key="concurrent-refusal",
+                request_id="request-two",
+                client_ip="127.0.0.1",
+            )
+        )
+        await asyncio.sleep(0)
+        agent.release.set()
+        results = await asyncio.gather(first, second, return_exceptions=True)
+        return [result for result in results if isinstance(result, BaseException)], agent.calls
+
+    problems, calls = asyncio.run(scenario())
+
+    assert calls == 1
+    assert len(problems) == 2
+    assert all(isinstance(problem, ProblemDetails) for problem in problems)
+    assert [problem.status_code for problem in problems] == [422, 422]
+    assert [problem.error_code for problem in problems] == [
+        "prompt_rejected",
+        "prompt_rejected",
+    ]
 
 
 def test_startup_does_not_wait_for_remote_agent_preflight(

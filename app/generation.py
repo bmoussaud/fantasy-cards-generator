@@ -49,6 +49,14 @@ class _GenerationRefusal(ProblemDetails):
     pass
 
 
+@dataclass(slots=True)
+class _GenerationFlight:
+    request_hash: str
+    completed: asyncio.Event = field(default_factory=asyncio.Event)
+    response: CardResponseModel | None = None
+    error: BaseException | None = None
+
+
 def _exception_diagnostic(exc: Exception) -> tuple[str, int | None, str | None]:
     status_code = getattr(exc, "status_code", None)
     error_code = getattr(exc, "error_code", None)
@@ -1507,6 +1515,8 @@ class AppServices:
 class CardGenerationService:
     def __init__(self, services: AppServices) -> None:
         self.services = services
+        self._flight_lock = asyncio.Lock()
+        self._flights: dict[str, _GenerationFlight] = {}
 
     @instrument_generation("generate")
     async def generate_card(
@@ -1526,27 +1536,60 @@ class CardGenerationService:
         normalized_prompt = normalize_prompt(prompt)
         request_hash = digest_generation_request(normalized_prompt, reference_image)
         card_id = deterministic_card_id(owner.owner_id, idempotency_key)
-        reservation, created = await self.services.card_repository.reserve_document(
-            owner_id=owner.owner_id,
-            card_id=card_id,
-            request_hash=request_hash,
-            idempotency_key=idempotency_key,
-            request_id=request_id,
-        )
-        if reservation and not created:
-            if reservation.request_hash != request_hash:
-                raise ProblemDetails(
-                    status_code=409,
-                    title="Conflict",
-                    detail=(
-                        "The idempotency key has already been used with "
-                        "different request content."
-                    ),
-                    type="/problems/idempotency-conflict",
-                    error_code="idempotency_conflict",
-                )
-            return await self._replay_existing_or_wait(owner.owner_id, card_id)
+        existing = await self.services.card_repository.get(owner.owner_id, card_id)
+        if existing is not None:
+            return await self._response_for_existing_generation(
+                existing=existing,
+                request_hash=request_hash,
+                owner_id=owner.owner_id,
+                card_id=card_id,
+            )
 
+        flight_key = f"generation:{owner.owner_id}:{card_id}"
+        flight, leader = await self._join_flight(flight_key, request_hash)
+        if not leader:
+            return await self._await_flight(flight)
+
+        try:
+            existing = await self.services.card_repository.get(owner.owner_id, card_id)
+            if existing is not None:
+                result = await self._response_for_existing_generation(
+                    existing=existing,
+                    request_hash=request_hash,
+                    owner_id=owner.owner_id,
+                    card_id=card_id,
+                )
+            else:
+                result = await self._generate_card_once(
+                    owner=owner,
+                    prompt=normalized_prompt,
+                    idempotency_key=idempotency_key,
+                    request_id=request_id,
+                    client_ip=client_ip,
+                    image_quality=resolved_quality,
+                    reference_image=reference_image,
+                    request_hash=request_hash,
+                    card_id=card_id,
+                )
+        except BaseException as exc:
+            await self._finish_flight(flight_key, flight, error=exc)
+            raise
+        await self._finish_flight(flight_key, flight, response=result)
+        return result
+
+    async def _generate_card_once(
+        self,
+        *,
+        owner: AuthenticatedOwner,
+        prompt: str,
+        idempotency_key: str,
+        request_id: str,
+        client_ip: str,
+        image_quality: Literal["low", "medium", "high"],
+        reference_image: ReferenceImageUpload | None,
+        request_hash: str,
+        card_id: str,
+    ) -> CardResponseModel:
         try:
             await self._enforce_rate_limits(owner.owner_id, client_ip)
         except ProblemDetails as exc:
@@ -1559,7 +1602,6 @@ class CardGenerationService:
                 exc.error_code,
                 problem=exc,
             )
-            await self.services.card_repository.delete(owner.owner_id, card_id)
             raise
 
         try:
@@ -1568,12 +1610,12 @@ class CardGenerationService:
                 self._run_generation(
                     owner=owner,
                     card_id=card_id,
-                    prompt=normalized_prompt,
+                    prompt=prompt,
                     request_hash=request_hash,
                     idempotency_key=idempotency_key,
                     request_id=request_id,
                     progress=progress,
-                    image_quality=resolved_quality,
+                    image_quality=image_quality,
                     reference_image=reference_image,
                 ),
                 timeout=self.services.settings.retry.overall_timeout_seconds,
@@ -1593,12 +1635,12 @@ class CardGenerationService:
                     request_id=request_id,
                     idempotency_key=idempotency_key,
                     request_hash=request_hash,
-                    prompt=normalized_prompt,
+                    prompt=prompt,
                     validated_payload=progress.validated_payload,
                     derived_art_prompt=progress.derived_art_prompt,
                     moderation=progress.moderation,
                     text_result=progress.text_result,
-                    image_quality=resolved_quality,
+                    image_quality=image_quality,
                     partial_reason="image_timeout",
                 )
                 return self._as_response(partial)
@@ -1621,7 +1663,6 @@ class CardGenerationService:
                     error_code="upstream_timeout",
                 )
             )
-            await self.services.card_repository.delete(owner.owner_id, card_id)
             await self._save_audit_failure(
                 owner.owner_id,
                 card_id,
@@ -1654,22 +1695,11 @@ class CardGenerationService:
             )
         request_hash = digest_text(f"retry:{card_id}")
         retry_card_id = deterministic_card_id(owner.owner_id, idempotency_key)
-        reservation, created = await self.services.audit_repository.reserve_audit(
-            owner_id=owner.owner_id,
-            card_id=retry_card_id,
-            request_hash=request_hash,
-            idempotency_key=idempotency_key,
-            request_id=request_id,
+        existing_audit = await self.services.audit_repository.get_audit(
+            owner.owner_id, retry_card_id
         )
-        if reservation is not None and not created:
-            if reservation.request_hash != request_hash:
-                raise ProblemDetails(
-                    status_code=409,
-                    title="Conflict",
-                    detail="The artwork retry idempotency key has already been used differently.",
-                    type="/problems/idempotency-conflict",
-                    error_code="idempotency_conflict",
-                )
+        if existing_audit is not None:
+            self._assert_matching_request_hash(existing_audit.request_hash, request_hash)
             return await self._replay_artwork_retry_or_wait(
                 owner_id=owner.owner_id,
                 card_id=card_id,
@@ -1677,60 +1707,83 @@ class CardGenerationService:
                 fallback_record=record,
             )
 
-        try:
-            await self._enforce_rate_limits(owner.owner_id, client_ip)
-        except ProblemDetails as exc:
-            await self._save_audit_failure(
-                owner.owner_id,
-                retry_card_id,
-                request_id,
-                idempotency_key,
-                request_hash,
-                exc.error_code,
-                problem=exc,
-            )
-            raise
+        flight_key = f"artwork-retry:{owner.owner_id}:{retry_card_id}"
+        flight, leader = await self._join_flight(flight_key, request_hash)
+        if not leader:
+            return await self._await_flight(flight)
 
         try:
-            return await asyncio.wait_for(
-                self._complete_artwork(
-                    record,
-                    request_id=request_id,
-                    retry_idempotency_key=idempotency_key,
-                ),
-                timeout=self.services.settings.retry.overall_timeout_seconds,
+            existing_audit = await self.services.audit_repository.get_audit(
+                owner.owner_id, retry_card_id
             )
-        except _GenerationRefusal:
+            if existing_audit is not None:
+                self._assert_matching_request_hash(existing_audit.request_hash, request_hash)
+                result = await self._replay_artwork_retry_or_wait(
+                    owner_id=owner.owner_id,
+                    card_id=card_id,
+                    retry_card_id=retry_card_id,
+                    fallback_record=record,
+                )
+            else:
+                try:
+                    await self._enforce_rate_limits(owner.owner_id, client_ip)
+                except ProblemDetails as exc:
+                    await self._save_audit_failure(
+                        owner.owner_id,
+                        retry_card_id,
+                        request_id,
+                        idempotency_key,
+                        request_hash,
+                        exc.error_code,
+                        problem=exc,
+                    )
+                    raise
+
+                try:
+                    result = await asyncio.wait_for(
+                        self._complete_artwork(
+                            record,
+                            request_id=request_id,
+                            retry_idempotency_key=idempotency_key,
+                        ),
+                        timeout=self.services.settings.retry.overall_timeout_seconds,
+                    )
+                except _GenerationRefusal:
+                    raise
+                except ProblemDetails as exc:
+                    await self._save_audit_failure(
+                        owner.owner_id,
+                        retry_card_id,
+                        request_id,
+                        idempotency_key,
+                        request_hash,
+                        exc.error_code,
+                        problem=exc,
+                    )
+                    raise
+                except asyncio.TimeoutError:
+                    problem = ProblemDetails(
+                        status_code=200,
+                        title="Artwork Pending",
+                        detail="Artwork generation timed out and can be retried.",
+                        type="/problems/artwork-pending",
+                        error_code="artwork_retry_available",
+                    )
+                    await self._save_audit_failure(
+                        owner.owner_id,
+                        retry_card_id,
+                        request_id,
+                        idempotency_key,
+                        request_hash,
+                        problem.error_code,
+                        problem=problem,
+                    )
+                    result = self._as_response(record)
+        except BaseException as exc:
+            await self._finish_flight(flight_key, flight, error=exc)
             raise
-        except ProblemDetails as exc:
-            await self._save_audit_failure(
-                owner.owner_id,
-                retry_card_id,
-                request_id,
-                idempotency_key,
-                request_hash,
-                exc.error_code,
-                problem=exc,
-            )
-            raise
-        except asyncio.TimeoutError:
-            problem = ProblemDetails(
-                status_code=200,
-                title="Artwork Pending",
-                detail="Artwork generation timed out and can be retried.",
-                type="/problems/artwork-pending",
-                error_code="artwork_retry_available",
-            )
-            await self._save_audit_failure(
-                owner.owner_id,
-                retry_card_id,
-                request_id,
-                idempotency_key,
-                request_hash,
-                problem.error_code,
-                problem=problem,
-            )
-            return self._as_response(record)
+        await self._finish_flight(flight_key, flight, response=result)
+        return result
 
     async def fetch_image(self, owner: AuthenticatedOwner, card_id: str) -> tuple[bytes, str]:
         record = await self.services.card_repository.get(owner.owner_id, card_id)
@@ -1795,17 +1848,12 @@ class CardGenerationService:
         )
         moderation.append(pre_decision)
         if not pre_decision.allowed:
-            problem = _GenerationRefusal(
+            raise _GenerationRefusal(
                 status_code=422,
                 title="Prompt Rejected",
                 detail="The prompt was rejected by the moderation policy.",
                 type="/problems/prompt-rejected",
                 error_code="prompt_rejected",
-            )
-            await self._raise_refusal(
-                owner_id=owner.owner_id,
-                card_id=card_id,
-                problem=problem,
             )
 
         progress.stage = "foundry-text"
@@ -1838,17 +1886,12 @@ class CardGenerationService:
         )
         moderation.append(post_text)
         if not post_text.allowed:
-            problem = _GenerationRefusal(
+            raise _GenerationRefusal(
                 status_code=422,
                 title="Generated Content Rejected",
                 detail="The generated card text was rejected by moderation.",
                 type="/problems/generated-text-rejected",
                 error_code="generated_text_rejected",
-            )
-            await self._raise_refusal(
-                owner_id=owner.owner_id,
-                card_id=card_id,
-                problem=problem,
             )
 
         derived_art_prompt = (
@@ -1863,17 +1906,12 @@ class CardGenerationService:
         )
         moderation.append(post_art_prompt)
         if not post_art_prompt.allowed:
-            problem = _GenerationRefusal(
+            raise _GenerationRefusal(
                 status_code=422,
                 title="Artwork Prompt Rejected",
                 detail="The derived artwork prompt was rejected by moderation.",
                 type="/problems/generated-art-rejected",
                 error_code="generated_art_rejected",
-            )
-            await self._raise_refusal(
-                owner_id=owner.owner_id,
-                card_id=card_id,
-                problem=problem,
             )
 
         progress.validated_payload = validated_payload
@@ -1907,7 +1945,6 @@ class CardGenerationService:
             record_token_usage("image", image_result.usage)
         except ProblemDetails as exc:
             if reference_image is not None:
-                await self.services.card_repository.delete(owner.owner_id, card_id)
                 await self._save_audit_failure(
                     owner.owner_id,
                     card_id,
@@ -1938,17 +1975,12 @@ class CardGenerationService:
         post_image = await self.services.moderation_service.moderate_image(image_result.image)
         moderation.append(post_image)
         if not post_image.allowed:
-            problem = _GenerationRefusal(
+            raise _GenerationRefusal(
                 status_code=422,
                 title="Generated Artwork Rejected",
                 detail="The generated artwork was rejected by moderation.",
                 type="/problems/generated-art-rejected",
                 error_code="generated_art_rejected",
-            )
-            await self._raise_refusal(
-                owner_id=owner.owner_id,
-                card_id=card_id,
-                problem=problem,
             )
 
         progress.stage = "persistence"
@@ -2001,7 +2033,6 @@ class CardGenerationService:
                 type="/problems/agent-unavailable",
                 error_code="agent_unavailable",
             )
-            await self.services.card_repository.delete(owner_id, card_id)
             await self._save_audit_failure(
                 owner_id,
                 card_id,
@@ -2079,17 +2110,12 @@ class CardGenerationService:
             return "agent", text_result, agent_result.card, agent_result.art_prompt
 
         if agent_result.status in {"policy_refusal", "refused"}:
-            problem = _GenerationRefusal(
+            raise _GenerationRefusal(
                 status_code=422,
                 title="Prompt Rejected",
                 detail="The prompt was rejected by the generation agent policy.",
                 type="/problems/prompt-rejected",
                 error_code="prompt_rejected",
-            )
-            await self._raise_refusal(
-                owner_id=owner_id,
-                card_id=card_id,
-                problem=problem,
             )
         elif _agent_failure_class(agent_result) == "timeout":
             problem = ProblemDetails(
@@ -2123,7 +2149,6 @@ class CardGenerationService:
                 type="/problems/invalid-model-output",
                 error_code="invalid_model_output",
             )
-        await self.services.card_repository.delete(owner_id, card_id)
         await self._save_audit_failure(
             owner_id,
             card_id,
@@ -2134,19 +2159,6 @@ class CardGenerationService:
             problem=problem,
         )
         set_generation_path("agent")
-        raise problem
-
-    async def _raise_refusal(
-        self,
-        *,
-        owner_id: str,
-        card_id: str,
-        problem: ProblemDetails,
-        audit_card_id: str | None = None,
-    ) -> None:
-        await self.services.card_repository.delete(owner_id, card_id)
-        if audit_card_id is not None:
-            await self.services.audit_repository.delete_audit(owner_id, audit_card_id)
         raise problem
 
     async def _generate_text_mock(
@@ -2168,7 +2180,6 @@ class CardGenerationService:
             )
             record_token_usage("text", text_result.usage)
         except ProblemDetails as exc:
-            await self.services.card_repository.delete(owner_id, card_id)
             await self._save_audit_failure(
                 owner_id,
                 card_id,
@@ -2189,7 +2200,6 @@ class CardGenerationService:
                 type="/problems/invalid-model-output",
                 error_code="invalid_model_output",
             )
-            await self.services.card_repository.delete(owner_id, card_id)
             await self._save_audit_failure(
                 owner_id,
                 card_id,
@@ -2252,18 +2262,27 @@ class CardGenerationService:
         moderation = [ModerationDecision.model_validate(item) for item in record.moderation]
         moderation.append(post_image)
         if not post_image.allowed:
-            problem = _GenerationRefusal(
+            raise _GenerationRefusal(
                 status_code=422,
                 title="Generated Artwork Rejected",
                 detail="The generated artwork was rejected by moderation.",
                 type="/problems/generated-art-rejected",
                 error_code="generated_art_rejected",
             )
-            await self._raise_refusal(
+        reservation, created = await self.services.audit_repository.reserve_audit(
+            owner_id=record.owner_id,
+            card_id=retry_card_id,
+            request_hash=request_hash,
+            idempotency_key=retry_idempotency_key,
+            request_id=request_id,
+        )
+        if reservation is not None and not created:
+            self._assert_matching_request_hash(reservation.request_hash, request_hash)
+            return await self._replay_artwork_retry_or_wait(
                 owner_id=record.owner_id,
                 card_id=record.id,
-                problem=problem,
-                audit_card_id=retry_card_id,
+                retry_card_id=retry_card_id,
+                fallback_record=record,
             )
         payload = GeneratedCardModel.model_validate(record.validated_payload)
         completed = await self._persist_completed(
@@ -2289,6 +2308,7 @@ class CardGenerationService:
                 usage=UsageAudit.model_validate((record.usage or {}).get("text", {})),
             ),
             image_result=image_result,
+            claim_persistence=False,
         )
         await self.services.audit_repository.save_audit(
             StoredCard(
@@ -2320,6 +2340,15 @@ class CardGenerationService:
         image_quality: Literal["low", "medium", "high"],
         partial_reason: str,
     ) -> StoredCard:
+        replay = await self._claim_card_persistence(
+            owner_id=owner.owner_id,
+            card_id=card_id,
+            request_hash=request_hash,
+            idempotency_key=idempotency_key,
+            request_id=request_id,
+        )
+        if replay is not None:
+            return replay
         record = StoredCard(
             id=card_id,
             document_type="card",
@@ -2380,7 +2409,18 @@ class CardGenerationService:
         moderation: list[ModerationDecision],
         text_result: AITextResult,
         image_result: AIImageResult,
+        claim_persistence: bool = True,
     ) -> StoredCard:
+        if claim_persistence:
+            replay = await self._claim_card_persistence(
+                owner_id=owner.owner_id,
+                card_id=card_id,
+                request_hash=request_hash,
+                idempotency_key=idempotency_key,
+                request_id=request_id,
+            )
+            if replay is not None:
+                return replay
         blob_name = build_blob_name(owner.owner_id, card_id)
         blob_uploaded = False
         blob_metadata: dict[str, Any] | None = None
@@ -2522,6 +2562,91 @@ class CardGenerationService:
                     exc=audit_exc,
                 )
             raise problem from exc
+
+    async def _claim_card_persistence(
+        self,
+        *,
+        owner_id: str,
+        card_id: str,
+        request_hash: str,
+        idempotency_key: str,
+        request_id: str,
+    ) -> StoredCard | None:
+        reservation, created = await self.services.card_repository.reserve_document(
+            owner_id=owner_id,
+            card_id=card_id,
+            request_hash=request_hash,
+            idempotency_key=idempotency_key,
+            request_id=request_id,
+        )
+        if created:
+            return None
+        if reservation is None:
+            raise RuntimeError("Card persistence reservation returned no record.")
+        self._assert_matching_request_hash(reservation.request_hash, request_hash)
+        response = await self._replay_existing_or_wait(owner_id, card_id)
+        replay = await self.services.card_repository.get(owner_id, response.cardId)
+        if replay is None:
+            raise RuntimeError("Persisted card disappeared during idempotency replay.")
+        return replay
+
+    async def _response_for_existing_generation(
+        self,
+        *,
+        existing: StoredCard,
+        request_hash: str,
+        owner_id: str,
+        card_id: str,
+    ) -> CardResponseModel:
+        self._assert_matching_request_hash(existing.request_hash, request_hash)
+        if existing.status in {"completed", "awaiting_artwork_retry"}:
+            return self._as_response(existing)
+        return await self._replay_existing_or_wait(owner_id, card_id)
+
+    def _assert_matching_request_hash(self, existing_hash: str, request_hash: str) -> None:
+        if existing_hash != request_hash:
+            raise ProblemDetails(
+                status_code=409,
+                title="Conflict",
+                detail="The idempotency key has already been used with different request content.",
+                type="/problems/idempotency-conflict",
+                error_code="idempotency_conflict",
+            )
+
+    async def _join_flight(
+        self, flight_key: str, request_hash: str
+    ) -> tuple[_GenerationFlight, bool]:
+        async with self._flight_lock:
+            existing = self._flights.get(flight_key)
+            if existing is not None:
+                self._assert_matching_request_hash(existing.request_hash, request_hash)
+                return existing, False
+            flight = _GenerationFlight(request_hash=request_hash)
+            self._flights[flight_key] = flight
+            return flight, True
+
+    async def _finish_flight(
+        self,
+        flight_key: str,
+        flight: _GenerationFlight,
+        *,
+        response: CardResponseModel | None = None,
+        error: BaseException | None = None,
+    ) -> None:
+        async with self._flight_lock:
+            flight.response = response
+            flight.error = error
+            flight.completed.set()
+            if self._flights.get(flight_key) is flight:
+                self._flights.pop(flight_key, None)
+
+    async def _await_flight(self, flight: _GenerationFlight) -> CardResponseModel:
+        await flight.completed.wait()
+        if flight.error is not None:
+            raise flight.error
+        if flight.response is None:
+            raise RuntimeError("Generation flight completed without a response.")
+        return flight.response
 
     async def _save_audit_failure(
         self,

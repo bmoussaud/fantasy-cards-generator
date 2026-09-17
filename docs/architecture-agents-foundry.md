@@ -853,6 +853,13 @@ Azure Content Safety is not used for card text or generated images today, and
 | Successful reference-image edit followed by `post_image` heuristic BLOCK | `422 generated_art_rejected`; no persistence | Same |
 | Idempotency replay of an operational `audit_failed` record | Replays stored structured failure fields first; legacy reason-code fallback is secondary | Same |
 
+Refusal safety does not use compensating Cosmos deletion. Same-instance
+duplicates share an in-memory single flight, and the durable card or retry-audit
+reservation is delayed until every applicable moderation stage has allowed.
+Cross-replica duplicates may repeat upstream work before the deterministic
+reservation winner persists the single card result; this bounded cost tradeoff
+prevents failed cleanup from retaining refusal metadata.
+
 ### Open gaps relevant to agent integration
 
 1. **Unsaved inline reference photos still bypass Content Safety.** See

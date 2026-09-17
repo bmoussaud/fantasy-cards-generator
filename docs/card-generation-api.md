@@ -241,6 +241,12 @@ artwork blob, or generation-audit record. This includes hosted-agent refusal and
 all four moderation stages. Operational failures that are not content refusals
 may still retain the existing TTL-limited, content-free generation audit.
 
+Refusal-capable processing runs before any durable card or retry-audit
+reservation. Same-instance duplicate requests are coalesced in memory; the
+durable idempotency reservation is acquired only when a safe completed or
+technical-failure partial card is ready to persist. A refused artwork retry
+leaves the existing safe partial card unchanged and creates no retry audit.
+
 Saved-photo persistence uses Azure AI Content Safety image analysis before
 Blob/Cosmos persistence. The backend rejects saves when any of
 `Hate/Sexual/Violence/SelfHarm` exceeds the configured threshold (defaults: `2`
