@@ -769,7 +769,7 @@ Any implementation should preserve:
 4. **Operational ownership**  
    The team operates two independently deployed runtimes: the public web app and the
    hosted agent runtime. The implemented monitoring contract, project-level
-   Application Insights linkage, and restore-first version-selector rollback are
+   Application Insights linkage, and immutable-version redeployment rollback are
    defined in
    [agent-operational-ownership.md](agent-operational-ownership.md).
 

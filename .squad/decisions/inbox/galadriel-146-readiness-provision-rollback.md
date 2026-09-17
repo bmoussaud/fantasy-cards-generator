@@ -1,0 +1,4 @@
+### 2026-09-17: Align agent readiness, provisioning, and rollback
+**By:** Galadriel
+**What:** Readiness verifies both the exact active hosted-agent version resource and the endpoint's single 100% selector. Ordinary azd provisioning captures and reuses the deployed web image, retaining the public placeholder only for first bootstrap. Agent rollback redeploys the last approved artifact as a new immutable Foundry version, stamps that version into azd state, and provisions the web configuration without rebuilding or replacing its image; endpoint-selector-only rollback is unsupported.
+**Why:** These boundaries keep the configured version, actual endpoint routing, Container App readiness, and repeat provisioning consistent while preserving immutable Foundry versions and preventing a provision operation from replacing a live application with the bootstrap image.

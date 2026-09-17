@@ -16,10 +16,6 @@ while implementing this runbook.
 | Privacy boundary | Backend and RAI reviewers | Metric schema review and content-exclusion tests |
 | Cross-runtime incident decision | Lead / Architect | Incident timeline and rollback decision |
 
-This revision is independently owned by Gandalf after reviewer rejection. The normal
-operational role assignment does not permit a rejected revision author to change this
-artifact during the active review cycle.
-
 ## Implemented telemetry contract
 
 Foundry project monitoring injects the reserved
@@ -188,158 +184,54 @@ configuration, identity, or traffic changed.
 
 ## Restore-first rollback
 
-The stable agent endpoint supports one 100% version-selection rule. Rollback therefore
-selects the prior known-good active version first, verifies service restoration, and
-only then considers deleting the bad version. Never delete the serving version before
-restoration.
-
 The web runtime has no legacy/direct text path to enable during an incident.
-Rollback means selecting the previous approved hosted-agent version, or rolling
-the web deployment back to its previous application revision. Do not add or set
-an application flag that bypasses the hosted agent.
+Because readiness requires the configured `FOUNDRY_AGENT_VERSION` to equal the
+endpoint's active 100% selector, changing only the endpoint selector is not a
+valid rollback: it deliberately makes the web revision unready.
 
-Set the data-plane variables:
+Restore service by deploying the last approved agent artifact as a **new
+immutable Foundry version**, then stamp and provision that new platform version:
 
-```bash
-ACCOUNT_NAME="<foundry-account>"
-PROJECT_NAME="<foundry-project>"
-AGENT_NAME="card-orchestrator"
-BASE_URL="https://${ACCOUNT_NAME}.services.ai.azure.com/api/projects/${PROJECT_NAME}"
-API_VERSION="v1"
-RESOURCE="https://ai.azure.com"
-PRIOR_VERSION="<known-good-hosted-version>"
-PRIOR_CANDIDATE="<known-good-git-sha>"
-BAD_VERSION="<failed-hosted-version>"
-```
+1. Record the current web revision/image, current endpoint selector, failed
+   Foundry version, and the last approved agent commit, image digest, and
+   configuration. Abort if the approved artifact cannot be proven.
+2. In a separate clean checkout of the approved commit, select the same azd
+   environment and set `CARD_ORCHESTRATOR_VERSION` to that approved commit.
+3. Run the guarded targeted deployment:
 
-### Abort and no-op gates
+   ```bash
+   AZURE_DEV_USER_AGENT=microsoft_foundry_skill \
+     azd deploy card-orchestrator --environment "<environment>" --no-prompt
+   ```
 
-```bash
-test -n "$PRIOR_VERSION" && test -n "$BAD_VERSION"
-test "$PRIOR_VERSION" != "$BAD_VERSION"
+   Foundry creates and activates a new immutable platform version. The
+   `postdeploy` hook writes its exact name/version to `FOUNDRY_AGENT_NAME` and
+   `FOUNDRY_AGENT_VERSION`.
+4. From the repository root, run:
 
-az rest --method GET \
-  --url "${BASE_URL}/agents/${AGENT_NAME}/versions/${PRIOR_VERSION}?api-version=${API_VERSION}" \
-  --resource "$RESOURCE" --output json \
-  > "<evidence-directory>/prior-version.json"
+   ```bash
+   AZURE_DEV_USER_AGENT=microsoft_foundry_skill \
+     azd provision --environment "<environment>" --no-prompt
+   ```
 
-az rest --method GET \
-  --url "${BASE_URL}/agents/${AGENT_NAME}?api-version=${API_VERSION}" \
-  --resource "$RESOURCE" --output json \
-  > "<evidence-directory>/agent-before-rollback.json"
-```
+   The preprovision hook reads the currently deployed `web-nat` image and
+   passes it as `CONTAINER_IMAGE`. Bicep updates the stamped agent version and
+   creates the necessary Container App configuration revision without building,
+   pushing, or replacing the web image.
+5. Verify `azd ai agent show --output json` reports the newly created version
+   active and the endpoint selector routes 100% to it. Verify the azd
+   `FOUNDRY_AGENT_VERSION` value matches, `/healthz` returns 200, and one bounded
+   ACA managed-identity smoke reports `invocation_verified` with the approved
+   application build SHA.
+6. Confirm the web image digest is unchanged. The Container App revision may
+   change because its `FOUNDRY_AGENT_VERSION` environment value changed; the
+   web image is not rebuilt or redeployed, model deployments are not changed,
+   and the old Foundry platform version is not reactivated in place.
 
-Abort if the prior version is not `active`, if its immutable candidate cannot be
-matched to approved evidence, or if the endpoint already selects the prior version.
-The last case is a no-op: verify health and do not issue another selector update.
-
-### Select the prior version
-
-```bash
-az rest --method PATCH \
-  --url "${BASE_URL}/agents/${AGENT_NAME}?api-version=${API_VERSION}" \
-  --resource "$RESOURCE" \
-  --headers "Content-Type=application/merge-patch+json" \
-  --body "{
-    \"agent_endpoint\": {
-      \"version_selector\": {
-        \"version_selection_rules\": [
-          {
-            \"type\": \"FixedRatio\",
-            \"agent_version\": \"${PRIOR_VERSION}\",
-            \"traffic_percentage\": 100
-          }
-        ]
-      }
-    }
-  }"
-```
-
-Equivalent Python SDK operation for `azure-ai-projects>=2.3.0`:
-
-```python
-from azure.ai.projects import AIProjectClient
-from azure.ai.projects.models import (
-    AgentEndpointConfig,
-    FixedRatioVersionSelectionRule,
-    VersionSelector,
-)
-from azure.identity import DefaultAzureCredential
-
-project_client = AIProjectClient(
-    endpoint=BASE_URL,
-    credential=DefaultAzureCredential(),
-)
-project_client.agents.update_details(
-    agent_name=AGENT_NAME,
-    agent_endpoint=AgentEndpointConfig(
-        version_selector=VersionSelector(
-            version_selection_rules=[
-                FixedRatioVersionSelectionRule(
-                    agent_version=PRIOR_VERSION,
-                    traffic_percentage=100,
-                )
-            ]
-        )
-    ),
-)
-```
-
-### Verify restoration before cleanup
-
-```bash
-az rest --method GET \
-  --url "${BASE_URL}/agents/${AGENT_NAME}?api-version=${API_VERSION}" \
-  --resource "$RESOURCE" --output json \
-  > "<evidence-directory>/agent-after-selector.json"
-
-AZURE_DEV_USER_AGENT=microsoft_foundry_skill \
-  azd ai agent endpoint show --output json \
-  > "<evidence-directory>/endpoint-after-selector.json"
-```
-
-Verify exactly one `FixedRatio` rule selects `PRIOR_VERSION` at 100%, then run the
-same one-invocation ACA managed-identity smoke with:
-
-```text
---hosted-version "$PRIOR_VERSION"
---expected-version "$PRIOR_CANDIDATE"
-```
-
-Confirm the smoke reports `invocation_verified`, clean up only its owned session, and
-prove the web ACA state still matches `web-before.json`.
-
-### Optional bad-version deletion
-
-Deletion is not rollback and is never required for service restoration. Perform it
-only after the selector, managed-identity smoke, telemetry, and web immutability gates
-all pass and the change owner approves cleanup:
-
-```bash
-az rest --method DELETE \
-  --url "${BASE_URL}/agents/${AGENT_NAME}/versions/${BAD_VERSION}?api-version=${API_VERSION}" \
-  --resource "$RESOURCE"
-```
-
-Correct Python SDK method:
-
-```python
-project_client.agents.delete_version(
-    agent_name=AGENT_NAME,
-    agent_version=BAD_VERSION,
-)
-```
-
-The repository-pinned `azure.ai.agents` extension also exposes:
-
-```bash
-AZURE_DEV_USER_AGENT=microsoft_foundry_skill \
-  azd ai agent delete "$AGENT_NAME" --version "$BAD_VERSION" --no-prompt
-```
-
-Before deletion, re-read the agent selector and abort if `BAD_VERSION` is serving.
-After deletion, GET only that version and expect not found; do not delete the agent
-object or any unowned session/version.
+Do not use an endpoint-selector-only patch, invent an `azd rollback` command,
+or restore a direct text fallback. Retain failed and prior versions until the
+new version, readiness, telemetry, and smoke checks pass. Version deletion is
+optional cleanup after approval and is never part of service restoration.
 
 ## Residual limitations
 

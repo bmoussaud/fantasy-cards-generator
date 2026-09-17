@@ -33,7 +33,7 @@ signal in root hooks before service hooks run. Use targeted `azd deploy
 | Bare deploy | `azd deploy` | **Unsupported**: azd targets both declared services |
 | Web redeploy | `azd deploy web-nat` | Does not trigger provision hooks or the agent guard |
 | Agent deploy | `azd deploy card-orchestrator` | Requires prerequisites enabled via lifecycle hooks |
-| Full provision | `azd provision` | Deploys all infra including agent prereqs if enabled |
+| Full provision | `azd provision` | Deploys all infra and preserves the current web image |
 | Approved deploy | `./deploy.sh agent --approve-change` | Plan-only by default |
 
 ### Agent deployment prerequisites
@@ -58,15 +58,11 @@ Or via the root orchestrator:
 
 ### Rollback
 
-To disable optional agent deployment prerequisites after a failed deployment:
-
-```bash
-azd env set CARD_ORCHESTRATOR_ENABLE_PREREQUISITES false
-azd provision
-```
-
-Mandatory web-to-agent RBAC remains provisioned because live card-text
-generation has no alternate path.
+Use the immutable-version redeployment procedure in
+[Agent operational ownership](agent-operational-ownership.md#restore-first-rollback).
+Disabling optional prerequisites is cleanup, not rollback; mandatory
+web-to-agent RBAC remains because live card-text generation has no alternate
+path.
 
 ### Deprecated launcher equivalents
 
@@ -1553,8 +1549,12 @@ Keep a release record of commit, digest, Foundry version, configuration and the
 last approved version. A rollback is **agent-only**: redeploy the recorded
 image/configuration through the isolated agent service so Foundry creates and
 activates a new immutable version, let the postdeploy hook stamp that new
-platform version, then run `azd provision` before redeploying web-nat. Preserve
-the original image and app build SHA; record the new Foundry version separately.
+platform version, then run `azd provision`. The preprovision hook captures and
+reuses the currently deployed `web-nat` image while Bicep updates
+`FOUNDRY_AGENT_VERSION`, so provisioning creates only the required web
+configuration revision; it does not rebuild or push the web image. Preserve the
+original agent image and application build SHA, and record the new Foundry
+platform version separately.
 Do not guess an `azd rollback` command or manually point readiness at an
 inactive version.
 The hosted agent endpoint serves one version with 100% traffic; agent-version
