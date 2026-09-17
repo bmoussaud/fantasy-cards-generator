@@ -13,17 +13,20 @@ deployed agent:
 
 - `FOUNDRY_PROJECT_ENDPOINT`: canonical project endpoint, for example `https://<account>.services.ai.azure.com/api/projects/<project>`
 - `FOUNDRY_AGENT_NAME`: hosted agent name, for example `card-orchestrator`
+- `FOUNDRY_AGENT_VERSION`: exact hosted version that must exist and be `active`
 - `FOUNDRY_AGENT_API_VERSION`: defaults to `v1`
 - `FOUNDRY_AGENT_EXPECTED_VERSION`: optional application metadata check against the agent response `metadata.agentVersion` or `metadata.version`
-- `FOUNDRY_AGENT_TIMEOUT_SECONDS`: defaults to `5.0`
+- `FOUNDRY_AGENT_TIMEOUT_SECONDS`: defaults to `70`, covering the hosted runtime's 65-second overall budget and bounded to a maximum of 90 seconds
 - `TELEMETRY_ENABLED=true` and `APPLICATIONINSIGHTS_CONNECTION_STRING`: mandatory for live startup.
 
 `FOUNDRY_PROJECT_ENDPOINT` is intentionally separate from `FOUNDRY_ENDPOINT`;
 there is no fallback to the account/model endpoint or to direct text generation.
 
 At startup, the web app validates configuration, acquires an Entra token, and
-performs the same bounded, content-free `/agents` access check described below.
-Failure prevents readiness rather than accepting traffic in a degraded mode.
+performs a bounded, content-free
+`GET /agents/{name}/versions/{version}?api-version=2025-11-15-preview` check.
+Only the exact configured version with `status: active` passes. Failure prevents
+readiness rather than accepting traffic in a degraded mode.
 
 ## Manual smoke command
 

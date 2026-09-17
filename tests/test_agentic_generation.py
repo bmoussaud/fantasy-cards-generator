@@ -16,6 +16,7 @@ from app.generation import (
     InMemoryAssetStore,
     InMemoryAuditRepository,
     InMemoryCardRepository,
+    MockAgentClient,
     MockAIClient,
     create_services,
 )
@@ -71,7 +72,6 @@ def _success(*, card: GeneratedCardModel | None = None) -> FoundryAgentInvocatio
 
 def _live_settings(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("APP_ENV", "test")
-    monkeypatch.setenv("AI_MODE", "live")
     monkeypatch.setenv("PERSISTENCE_MODE", "memory")
     monkeypatch.setenv("FOUNDRY_ENDPOINT", "https://foundry.example")
     monkeypatch.setenv("FOUNDRY_IMAGE_DEPLOYMENT", "gpt-image-2")
@@ -80,6 +80,7 @@ def _live_settings(monkeypatch: pytest.MonkeyPatch):
         "https://test.services.ai.azure.com/api/projects/my-project",
     )
     monkeypatch.setenv("FOUNDRY_AGENT_NAME", "card-orchestrator")
+    monkeypatch.setenv("FOUNDRY_AGENT_VERSION", "1")
     return load_app_settings()
 
 
@@ -166,16 +167,19 @@ def test_agent_flag_cannot_disable_live_agent(monkeypatch: pytest.MonkeyPatch) -
     assert not hasattr(settings, "agent_generation_enabled")
 
 
-@pytest.mark.parametrize("app_env", ["development", "production"])
-def test_mock_mode_is_rejected_outside_automated_tests(
-    monkeypatch: pytest.MonkeyPatch,
-    app_env: str,
+@pytest.mark.parametrize("app_env", ["test", "development", "production"])
+def test_environment_cannot_select_mock_clients(
+    monkeypatch: pytest.MonkeyPatch, app_env: str
 ) -> None:
     monkeypatch.setenv("APP_ENV", app_env)
     monkeypatch.setenv("AI_MODE", "mock")
 
-    with pytest.raises(SettingsError, match="restricted to automated tests"):
-        load_app_settings()
+    settings = _live_settings(monkeypatch)
+    services = create_services(settings)
+
+    assert not hasattr(settings, "ai_mode")
+    assert not isinstance(services.ai_client, MockAIClient)
+    assert not isinstance(services.agent_client, MockAgentClient)
 
 
 def test_live_mode_requires_mandatory_telemetry(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -252,18 +256,66 @@ def test_agent_success_preserves_card_contract_image_and_persistence(
         (
             FoundryAgentInvocationResult(status="auth_error", error_code="credential_unavailable"),
             503,
-            "agent_unavailable",
+            "configuration_error",
         ),
         (
             FoundryAgentInvocationResult(
                 status="configuration_error", error_code="invalid_configuration"
             ),
             503,
-            "agent_unavailable",
+            "configuration_error",
         ),
         (
             FoundryAgentInvocationResult(
                 status="invalid_response", error_code="schema_validation_failed"
+            ),
+            502,
+            "invalid_model_output",
+        ),
+        (
+            FoundryAgentInvocationResult(
+                status="failed",
+                error_code="card_runtime_failure",
+                runtime_failure_stage="concept",
+                runtime_failure_reason="timeout",
+                runtime_http_type="api_status",
+                runtime_http_status="http_504",
+            ),
+            504,
+            "upstream_timeout",
+        ),
+        (
+            FoundryAgentInvocationResult(
+                status="failed",
+                error_code="card_runtime_failure",
+                runtime_failure_stage="lore",
+                runtime_failure_reason="rate_limited",
+                runtime_http_type="rate_limit",
+                runtime_http_status="http_429",
+            ),
+            503,
+            "agent_unavailable",
+        ),
+        (
+            FoundryAgentInvocationResult(
+                status="failed",
+                error_code="card_runtime_failure",
+                runtime_failure_stage="specialist_setup",
+                runtime_failure_reason="authorization",
+                runtime_http_type="permission_denied",
+                runtime_http_status="http_403",
+            ),
+            503,
+            "configuration_error",
+        ),
+        (
+            FoundryAgentInvocationResult(
+                status="failed",
+                error_code="card_runtime_failure",
+                runtime_failure_stage="orchestration",
+                runtime_failure_reason="invalid_response",
+                runtime_http_type="none",
+                runtime_http_status="none",
             ),
             502,
             "invalid_model_output",
@@ -360,6 +412,36 @@ def test_output_moderation_blocks_before_image_and_persistence(
     assert not services.card_repository._records
 
 
+def test_valid_refused_status_blocks_image_and_persistence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image_calls = 0
+
+    class ImageSpy(MockAIClient):
+        async def generate_image(self, art_prompt: str, **kwargs: Any):
+            nonlocal image_calls
+            image_calls += 1
+            return await super().generate_image(art_prompt, **kwargs)
+
+    class Agent:
+        async def invoke(self, query: str) -> FoundryAgentInvocationResult:
+            return FoundryAgentInvocationResult(
+                status="refused",
+                schema_valid=True,
+                error_code="agent_refused",
+            )
+
+    settings = _live_settings(monkeypatch)
+    services = _services(monkeypatch, Agent(), ai_client=ImageSpy(settings))
+    response = _generate(_client(monkeypatch, services), key="agent-refused")
+
+    assert response.status_code == 422
+    assert response.json()["errorCode"] == "prompt_rejected"
+    assert image_calls == 0
+    assert not services.card_repository._records
+    assert not services.asset_store._assets
+
+
 def test_startup_rejects_failed_agent_identity_or_rbac_probe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -407,6 +489,7 @@ def test_agent_invocation_telemetry_is_content_free(
 
     assert response.status_code == 200
     invocation = next(attributes for name, attributes in events if name == "agent.invocation")
+    assert invocation["fcg.dependency"] == "foundry_agent"
     assert invocation["fcg.generation_path"] == "agent"
     assert invocation["fcg.outcome"] == "completed"
     serialized = repr(invocation)
@@ -419,9 +502,17 @@ def test_test_runtime_mock_remains_deterministic(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setenv("AI_MODE", "mock")
     settings = load_app_settings()
 
-    first = create_services(settings)
-    second = create_services(settings)
+    first = create_services(
+        settings,
+        ai_client=MockAIClient(settings),
+        agent_client=MockAgentClient(),
+    )
+    second = create_services(
+        settings,
+        ai_client=MockAIClient(settings),
+        agent_client=MockAgentClient(),
+    )
 
-    assert first.agent_client is None
-    assert second.agent_client is None
-    assert replace(settings).ai_mode == "mock"
+    assert isinstance(first.agent_client, MockAgentClient)
+    assert isinstance(second.agent_client, MockAgentClient)
+    assert not hasattr(replace(settings), "ai_mode")

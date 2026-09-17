@@ -183,6 +183,8 @@ class FoundryAgentClient:
     async def _check_access_without_outer_timeout(self) -> str:
         try:
             endpoint = _normalize_project_endpoint(self._settings.foundry_project_endpoint)
+            agent_name = _encode_agent_name(self._settings.foundry_agent_name)
+            agent_version = _encode_agent_version(self._settings.foundry_agent_version)
             token = await self._get_token()
         except FoundryAgentConfigurationError:
             return "misconfigured"
@@ -191,7 +193,8 @@ class FoundryAgentClient:
 
         try:
             response = await self._client().get(
-                f"{endpoint}agents?api-version={FOUNDRY_AGENT_ACCESS_API_VERSION}",
+                f"{endpoint}agents/{agent_name}/versions/{agent_version}"
+                f"?api-version={FOUNDRY_AGENT_ACCESS_API_VERSION}",
                 headers={
                     "Authorization": "Bearer " + token,
                     "Accept": "application/json",
@@ -212,8 +215,19 @@ class FoundryAgentClient:
             body = response.json()
         except ValueError:
             return "unavailable"
-        if not isinstance(body, dict) or not isinstance(body.get("data"), list):
+        if not isinstance(body, dict):
+            return "misconfigured"
+        if body.get("status") != "active":
             return "unavailable"
+        returned_name = body.get("name") or body.get("agent_name")
+        returned_version = body.get("version") or body.get("agent_version")
+        if returned_name is not None and returned_name != self._settings.foundry_agent_name:
+            return "misconfigured"
+        if (
+            returned_version is not None
+            and str(returned_version) != self._settings.foundry_agent_version
+        ):
+            return "misconfigured"
         return "ok"
 
     async def _invoke_without_outer_timeout(self, query: str) -> FoundryAgentInvocationResult:
@@ -396,6 +410,15 @@ def _encode_agent_name(agent_name: str | None) -> str:
     return quote(stripped, safe="")
 
 
+def _encode_agent_version(agent_version: str | None) -> str:
+    if not agent_version:
+        raise FoundryAgentConfigurationError("FOUNDRY_AGENT_VERSION must be set for validation.")
+    stripped = agent_version.strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", stripped):
+        raise FoundryAgentConfigurationError("FOUNDRY_AGENT_VERSION must be a bounded identifier.")
+    return quote(stripped, safe="")
+
+
 def _http_error_result(
     response: httpx.Response,
     *,
@@ -423,6 +446,13 @@ def _http_error_result(
             request_id=request_id,
             error_code=code or f"http_{response.status_code}",
             message="Foundry agent service returned a transient error.",
+        )
+    if response.status_code in {400, 404}:
+        return FoundryAgentInvocationResult(
+            status="configuration_error",
+            request_id=request_id,
+            error_code=code or f"http_{response.status_code}",
+            message="Foundry agent request configuration is invalid.",
         )
     return FoundryAgentInvocationResult(
         status="http_error",
@@ -532,6 +562,17 @@ def _parse_success_envelope(
             request_id=request_id,
             error_code="schema_validation_failed",
             message="Foundry agent output did not match the card schema.",
+        )
+
+    if agent_response.status == "refused":
+        return FoundryAgentInvocationResult(
+            status="policy_refusal",
+            response_id=response_id,
+            request_id=request_id,
+            schema_valid=True,
+            agent_version=_metadata_version(agent_response.metadata),
+            error_code="refusal",
+            message="Foundry agent refused the request.",
         )
 
     if agent_response.status != "completed":

@@ -208,7 +208,8 @@ No deployment was performed for this implementation. During an authorized rollou
 
 1. Record the active ACA revision and image.
 2. Provision the monitoring resources and deploy the telemetry-first image.
-3. Verify `/healthz`, all three probes, Application Insights role/environment/revision
+3. Verify dependency readiness on `/healthz`, process liveness on `/livez`, all
+   three platform probes, Application Insights role/environment/revision
    dimensions, W3C correlation, workbook queries, availability results, and Action
    Group routing.
 4. Exercise successful, rejected, retried/throttled, timed-out, partial-result, and

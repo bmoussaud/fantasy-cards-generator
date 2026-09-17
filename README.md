@@ -61,10 +61,11 @@ The issue qualification and remote Copilot execution process is documented in
 
 ## Card generation configuration
 
-The application runtime uses `AI_MODE=live`. `AI_MODE=mock` is reserved for
-automated tests with `APP_ENV=test` and is rejected in development and production.
-Live startup requires the hosted-agent project endpoint/name, managed-identity
-access, image-model configuration, and working Application Insights telemetry.
+Application construction always uses the live Foundry agent and image clients;
+there is no runtime environment switch for mocks. Automated tests inject their
+deterministic clients explicitly. Startup requires the hosted-agent project
+endpoint, exact active name/version, managed-identity access, image-model
+configuration, and working Application Insights telemetry.
 
 See `docs/card-generation-api.md` for the API contract, moderation policy, and
 runtime settings.

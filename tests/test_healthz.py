@@ -15,6 +15,8 @@ from app.generation import (
     AppServices,
     AzureBlobAssetStore,
     AzureCosmosCardRepository,
+    MockAgentClient,
+    MockAIClient,
     create_services,
 )
 from app.health import AzureBlobHealthProbe, AzureCosmosHealthProbe, DependencyHealthResult
@@ -95,7 +97,11 @@ def make_client(
     blob_timeout_ms: int = 25,
 ) -> TestClient:
     base_settings = load_app_settings()
-    defaults = create_services(base_settings)
+    defaults = create_services(
+        base_settings,
+        ai_client=MockAIClient(base_settings),
+        agent_client=MockAgentClient(),
+    )
     settings = replace(
         base_settings,
         persistence_mode=persistence_mode,  # type: ignore[arg-type]
@@ -113,6 +119,8 @@ def make_client(
         csrf_protector=defaults.csrf_protector,
         cosmos_health_probe=cosmos_probe,
         blob_health_probe=blob_probe,
+        agent_client=MockAgentClient(),
+        agent_health_probe=StaticProbe(DependencyHealthResult("agent", "ok", 1)),
     )
     return TestClient(create_app(services=services), base_url="https://testserver")
 
@@ -134,8 +142,8 @@ def test_healthy_dependencies_return_200() -> None:
             "cosmos": {"status": "ok", "durationMs": 3, "errorCategory": "none"},
             "blob": {"status": "ok", "durationMs": 4, "errorCategory": "none"},
             "agent": {
-                "status": "not_applicable",
-                "durationMs": 0,
+                "status": "ok",
+                "durationMs": 1,
                 "errorCategory": "none",
             },
         },
@@ -303,7 +311,11 @@ def test_memory_mode_reports_not_applicable_without_instantiating_azure_clients(
     monkeypatch.setattr(AzureCosmosCardRepository, "__init__", fail_cosmos_init)
     monkeypatch.setattr(AzureBlobAssetStore, "__init__", fail_blob_init)
     settings = replace(load_app_settings(), persistence_mode="memory")
-    services = create_services(settings)
+    services = create_services(
+        settings,
+        ai_client=MockAIClient(settings),
+        agent_client=MockAgentClient(),
+    )
     client = TestClient(create_app(services=services), base_url="https://testserver")
 
     response = client.get("/healthz")
@@ -322,7 +334,7 @@ def test_memory_mode_reports_not_applicable_without_instantiating_azure_clients(
             "errorCategory": "none",
         },
         "agent": {
-            "status": "not_applicable",
+            "status": "ok",
             "durationMs": 0,
             "errorCategory": "none",
         },
@@ -375,6 +387,7 @@ def test_only_existing_healthz_route_is_registered() -> None:
 
     assert paths.count("/healthz") == 1
     assert client.get("/health").status_code == 404
+    assert client.get("/livez").json() == {"status": "ok"}
 
 
 def test_cosmos_probe_classifies_service_request_error_as_unavailable() -> None:

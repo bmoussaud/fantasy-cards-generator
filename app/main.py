@@ -166,24 +166,23 @@ def create_app(services: AppServices | None = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         del app
         try:
-            if app_services.settings.ai_mode == "live":
-                probe = app_services.agent_health_probe
-                if probe is None:
-                    raise SettingsError("Foundry agent readiness probe is not configured.")
-                result = await probe.check(app_services.settings.foundry_agent_timeout_seconds)
-                if result.status != "ok":
-                    safe_log(
-                        "dependency.failed",
-                        attributes={
-                            "fcg.dependency": "foundry_agent",
-                            "fcg.outcome": "failed",
-                            "fcg.error_code": result.error_category,
-                            "fcg.duration_ms": result.duration_ms,
-                        },
-                    )
-                    raise SettingsError(
-                        f"Foundry agent startup validation failed: {result.error_category}."
-                    )
+            probe = app_services.agent_health_probe
+            if probe is None:
+                raise SettingsError("Foundry agent readiness probe is not configured.")
+            result = await probe.check(app_services.settings.foundry_agent_timeout_seconds)
+            if result.status != "ok":
+                safe_log(
+                    "dependency.failed",
+                    attributes={
+                        "fcg.dependency": "foundry_agent",
+                        "fcg.outcome": "failed",
+                        "fcg.error_code": result.error_category,
+                        "fcg.duration_ms": result.duration_ms,
+                    },
+                )
+                raise SettingsError(
+                    f"Foundry agent startup validation failed: {result.error_category}."
+                )
             yield
         finally:
             if app_services.agent_client is not None and hasattr(
@@ -933,6 +932,10 @@ def create_app(services: AppServices | None = None) -> FastAPI:
             status_code=200 if payload["status"] == "ok" else 503,
             headers={"Cache-Control": "no-store"},
         )
+
+    @app.get("/livez")
+    async def livez() -> JSONResponse:
+        return JSONResponse({"status": "ok"}, headers={"Cache-Control": "no-store"})
 
     @app.get("/partials/ping", response_class=HTMLResponse)
     async def ping_partial(request: Request) -> HTMLResponse:

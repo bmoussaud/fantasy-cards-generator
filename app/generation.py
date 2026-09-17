@@ -4,7 +4,6 @@ import asyncio
 import base64
 import hashlib
 import hmac
-import logging
 import time
 from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable
@@ -44,8 +43,6 @@ PNG_1X1_BASE64 = (
 )
 CARD_DOCUMENT_ID_PREFIX = "card:"
 AUDIT_DOCUMENT_ID_PREFIX = "audit:"
-AI_DEBUG_LOGGER_NAME = "app.ai_debug"
-_ai_debug_logger = logging.getLogger(AI_DEBUG_LOGGER_NAME)
 
 
 def _exception_diagnostic(exc: Exception) -> tuple[str, int | None, str | None]:
@@ -1266,11 +1263,18 @@ class MockAIClient:
         )
 
 
+class MockAgentClient:
+    """Explicit test-only marker selecting deterministic text generation."""
+
+    async def check_access(self, timeout_seconds: float) -> str:
+        del timeout_seconds
+        return "ok"
+
+
 class AzureFoundryAIClient:
     def __init__(self, settings: AppSettings) -> None:
         self.settings = settings
         self._credential = _default_azure_credential()
-        self._debug_log_ai_payloads = settings.debug_log_ai_payloads
 
     async def _access_token(self) -> str:
         token = await asyncio.to_thread(
@@ -1289,16 +1293,6 @@ class AzureFoundryAIClient:
         quality = image_quality if image_quality is not None else self.settings.image_quality
         if quality not in {"low", "medium", "high"}:
             raise ValueError(f"image_quality must be low, medium, or high; got {quality!r}")
-        self._debug_log(
-            "generate_image.request",
-            request_id=request_id,
-            payload={
-                "deployment": self.settings.foundry_image_deployment,
-                "prompt": art_prompt,
-                "size": self.settings.image_size,
-                "quality": quality,
-            },
-        )
         started_at = time.perf_counter()
         response = await self._post(
             f"/openai/deployments/{self.settings.foundry_image_deployment}/images/generations",
@@ -1311,11 +1305,6 @@ class AzureFoundryAIClient:
             service_name="foundry-image",
         )
         data = response.get("data") or []
-        self._debug_log(
-            "generate_image.response",
-            request_id=request_id,
-            response=_image_debug_response_metadata(data),
-        )
         if not data:
             raise UpstreamServiceError("foundry-image", "Image generation returned no data.")
         first = data[0]
@@ -1355,18 +1344,6 @@ class AzureFoundryAIClient:
         quality = image_quality if image_quality is not None else self.settings.image_quality
         if quality not in {"low", "medium", "high"}:
             raise ValueError(f"image_quality must be low, medium, or high; got {quality!r}")
-        self._debug_log(
-            "generate_image_edit.request",
-            request_id=request_id,
-            payload={
-                "deployment": self.settings.foundry_image_deployment,
-                "prompt": art_prompt,
-                "size": self.settings.image_size,
-                "quality": quality,
-                "reference_image_content_type": reference_image.content_type,
-                "reference_image_bytes": len(reference_image.content),
-            },
-        )
         started_at = time.perf_counter()
         response = await self._post_multipart(
             f"/openai/deployments/{self.settings.foundry_image_deployment}/images/edits",
@@ -1386,11 +1363,6 @@ class AzureFoundryAIClient:
             service_name="foundry-image",
         )
         data = response.get("data") or []
-        self._debug_log(
-            "generate_image_edit.response",
-            request_id=request_id,
-            response=_image_debug_response_metadata(data),
-        )
         if not data:
             raise UpstreamServiceError("foundry-image", "Image edit returned no data.")
         first = data[0]
@@ -1442,29 +1414,15 @@ class AzureFoundryAIClient:
                 json=payload,
             )
         if response.is_error:
-            error_code, diagnostic_message = _azure_error_diagnostic(response, payload)
+            error_code = _azure_error_code(response)
             raise UpstreamServiceError(
                 service_name,
-                (
-                    f"{service_name} request failed with Azure error "
-                    f"{error_code}: {diagnostic_message}"
-                ),
+                f"{service_name} request failed.",
                 status_code=response.status_code,
                 retryable=response.status_code == 429 or response.status_code >= 500,
                 error_code=error_code,
-                diagnostic_message=diagnostic_message,
             )
         return response.json()
-
-    def _debug_log(self, event: str, *, request_id: str, **fields: object) -> None:
-        if not self._debug_log_ai_payloads:
-            return
-        _ai_debug_logger.error(
-            "azure_foundry.%s request_id=%s %s",
-            event,
-            request_id,
-            " ".join(f"{name}={value!r}" for name, value in fields.items()),
-        )
 
     async def _post_multipart(
         self,
@@ -1490,91 +1448,35 @@ class AzureFoundryAIClient:
                 files=files,
             )
         if response.is_error:
-            error_code, diagnostic_message = _azure_error_diagnostic(response, dict(data))
+            error_code = _azure_error_code(response)
             raise UpstreamServiceError(
                 service_name,
-                (
-                    f"{service_name} request failed with Azure error "
-                    f"{error_code}: {diagnostic_message}"
-                ),
+                f"{service_name} request failed.",
                 status_code=response.status_code,
                 retryable=response.status_code == 429 or response.status_code >= 500,
                 error_code=error_code,
-                diagnostic_message=diagnostic_message,
             )
         return response.json()
 
 
-def _image_debug_response_metadata(data: object) -> dict[str, object]:
-    if not isinstance(data, list) or not data:
-        return {
-            "data_count": len(data) if isinstance(data, list) else 0,
-            "b64_json_present": False,
-            "decoded_image_bytes": None,
-            "revised_prompt": None,
-        }
-    first = data[0] if isinstance(data[0], dict) else {}
-    b64_image = first.get("b64_json") if isinstance(first, dict) else None
-    decoded_length = None
-    if isinstance(b64_image, str):
-        try:
-            decoded_length = len(base64.b64decode(b64_image))
-        except (ValueError, TypeError):
-            decoded_length = None
-    return {
-        "data_count": len(data),
-        "b64_json_present": isinstance(b64_image, str),
-        "decoded_image_bytes": decoded_length,
-        "revised_prompt": first.get("revised_prompt") if isinstance(first, dict) else None,
-    }
-
-
-def _azure_error_diagnostic(
-    response: httpx.Response,
-    request_payload: dict[str, Any],
-) -> tuple[str, str]:
+def _azure_error_code(response: httpx.Response) -> str:
     error_code = "unknown_error"
-    diagnostic_message = "No Azure error message was returned."
     try:
         payload = response.json()
     except ValueError:
-        return error_code, diagnostic_message
+        return error_code
     if not isinstance(payload, dict):
-        return error_code, diagnostic_message
+        return error_code
     error = payload.get("error")
     if not isinstance(error, dict):
-        return error_code, diagnostic_message
+        return error_code
     if isinstance(error.get("code"), str) and error["code"].strip():
         error_code = _sanitize_diagnostic(error["code"], limit=100)
-    if isinstance(error.get("message"), str) and error["message"].strip():
-        diagnostic_message = _sanitize_diagnostic(
-            _redact_request_content(error["message"], request_payload),
-            limit=500,
-        )
-    return error_code, diagnostic_message
+    return error_code
 
 
 def _sanitize_diagnostic(value: str, *, limit: int) -> str:
     return " ".join(value.split())[:limit]
-
-
-def _redact_request_content(message: str, payload: dict[str, Any]) -> str:
-    sensitive_values: list[str] = []
-    prompt = payload.get("prompt")
-    if isinstance(prompt, str):
-        sensitive_values.append(prompt)
-    input_value = payload.get("input")
-    if isinstance(input_value, str):
-        sensitive_values.append(input_value)
-    messages = payload.get("messages")
-    if isinstance(messages, list):
-        for item in messages:
-            if isinstance(item, dict) and isinstance(item.get("content"), str):
-                sensitive_values.append(item["content"])
-    for value in sensitive_values:
-        if len(value) >= 8:
-            message = message.replace(value, "<redacted>")
-    return message
 
 
 @dataclass(slots=True)
@@ -2101,11 +2003,11 @@ class CardGenerationService:
         """Generate card text through the only supported path for the configured runtime.
 
         Returns (generation_path, text_result, validated_payload, agent_art_prompt) where
-        generation_path is either "agent" or "mock" and
+        generation_path is "agent" in application construction. Automated tests
+        may explicitly inject MockAgentClient to select deterministic text.
         agent_art_prompt is the pre-crafted art prompt from the agent (or None).
         """
-        settings = self.services.settings
-        if settings.ai_mode == "mock":
+        if isinstance(self.services.agent_client, MockAgentClient):
             return await self._generate_text_mock(
                 owner_id=owner_id,
                 card_id=card_id,
@@ -2168,7 +2070,7 @@ class CardGenerationService:
         add_event(
             "agent.invocation",
             {
-                "fcg.dependency": "foundry-agent",
+                "fcg.dependency": "foundry_agent",
                 "fcg.outcome": agent_result.status,
                 "fcg.error_code": agent_result.error_code or "none",
                 "fcg.duration_ms": int(duration_ms),
@@ -2199,7 +2101,7 @@ class CardGenerationService:
             )
             return "agent", text_result, agent_result.card, agent_result.art_prompt
 
-        if agent_result.status == "policy_refusal":
+        if agent_result.status in {"policy_refusal", "refused"}:
             problem = ProblemDetails(
                 status_code=422,
                 title="Prompt Rejected",
@@ -2207,34 +2109,29 @@ class CardGenerationService:
                 type="/problems/prompt-rejected",
                 error_code="prompt_rejected",
             )
-        elif agent_result.status in {
-            "auth_error",
-            "configuration_error",
-            "routing_defer",
-            "transient_error",
-        }:
+        elif _agent_failure_class(agent_result) == "timeout":
             problem = ProblemDetails(
-                status_code=504 if agent_result.error_code == "timeout" else 503,
-                title=(
-                    "Gateway Timeout"
-                    if agent_result.error_code == "timeout"
-                    else "Service Unavailable"
-                ),
-                detail=(
-                    "The card generation agent timed out."
-                    if agent_result.error_code == "timeout"
-                    else "The card generation agent is unavailable."
-                ),
-                type=(
-                    "/problems/upstream-timeout"
-                    if agent_result.error_code == "timeout"
-                    else "/problems/agent-unavailable"
-                ),
-                error_code=(
-                    "upstream_timeout"
-                    if agent_result.error_code == "timeout"
-                    else "agent_unavailable"
-                ),
+                status_code=504,
+                title="Gateway Timeout",
+                detail="The card generation agent timed out.",
+                type="/problems/upstream-timeout",
+                error_code="upstream_timeout",
+            )
+        elif _agent_failure_class(agent_result) == "configuration":
+            problem = ProblemDetails(
+                status_code=503,
+                title="Service Unavailable",
+                detail="The card generation agent is not configured or authorized.",
+                type="/problems/configuration-error",
+                error_code="configuration_error",
+            )
+        elif _agent_failure_class(agent_result) == "unavailable":
+            problem = ProblemDetails(
+                status_code=503,
+                title="Service Unavailable",
+                detail="The card generation agent is temporarily unavailable.",
+                type="/problems/agent-unavailable",
+                error_code="agent_unavailable",
             )
         else:
             problem = ProblemDetails(
@@ -2959,7 +2856,13 @@ class CardGenerationService:
         )
 
 
-def create_services(settings: AppSettings) -> AppServices:
+def create_services(
+    settings: AppSettings,
+    *,
+    ai_client: Any | None = None,
+    agent_client: Any | None = None,
+    agent_health_probe: HealthDependencyProbe | None = None,
+) -> AppServices:
     from app.deletion import AzureCosmosDeletionAuditRepository, InMemoryDeletionAuditRepository
     from app.photos import (
         AzureCosmosProfilePhotoImportStateRepository,
@@ -3006,23 +2909,23 @@ def create_services(settings: AppSettings) -> AppServices:
         cosmos_health_probe = NotApplicableHealthProbe("cosmos")
         blob_health_probe = NotApplicableHealthProbe("blob")
 
-    ai_client = (
-        MockAIClient(settings) if settings.ai_mode == "mock" else AzureFoundryAIClient(settings)
-    )
-    agent_client = None
-    agent_health_probe: HealthDependencyProbe = NotApplicableHealthProbe("agent")
-    if settings.ai_mode == "live":
+    resolved_ai_client = ai_client or AzureFoundryAIClient(settings)
+    resolved_agent_client = agent_client
+    resolved_agent_health_probe = agent_health_probe
+    if resolved_agent_client is None:
         from app.foundry_agent_client import FoundryAgentClient
+
+        resolved_agent_client = FoundryAgentClient(settings)
+    if resolved_agent_health_probe is None:
         from app.health import FoundryAgentHealthProbe
 
-        agent_client = FoundryAgentClient(settings)
-        agent_health_probe = FoundryAgentHealthProbe(agent_client)
+        resolved_agent_health_probe = FoundryAgentHealthProbe(resolved_agent_client)
     return AppServices(
         settings=settings,
         card_repository=card_repository,
         audit_repository=audit_repository,
         asset_store=asset_store,
-        ai_client=ai_client,
+        ai_client=resolved_ai_client,
         moderation_service=HeuristicModerationService(settings.moderation_policy_name),
         rate_limiter=RateLimiter(),
         csrf_protector=CsrfProtector(),
@@ -3033,9 +2936,36 @@ def create_services(settings: AppSettings) -> AppServices:
         photo_asset_store=photo_asset_store,
         photo_moderation_service=ContentSafetyPhotoModerationService(settings),
         deletion_audit_repository=deletion_audit_repository,
-        agent_client=agent_client,
-        agent_health_probe=agent_health_probe,
+        agent_client=resolved_agent_client,
+        agent_health_probe=resolved_agent_health_probe,
     )
+
+
+def _agent_failure_class(
+    agent_result: Any,
+) -> Literal["timeout", "configuration", "unavailable", "invalid_output"]:
+    reason = agent_result.runtime_failure_reason
+    if agent_result.error_code == "timeout" or reason == "timeout":
+        return "timeout"
+    if agent_result.status in {
+        "auth_error",
+        "configuration_error",
+        "version_mismatch",
+    } or reason in {
+        "authentication",
+        "authorization",
+        "resource_not_found",
+        "invalid_request",
+    }:
+        return "configuration"
+    if agent_result.status in {"routing_defer", "transient_error"} or reason in {
+        "rate_limited",
+        "service_error",
+        "transport_error",
+        "dependency_error",
+    }:
+        return "unavailable"
+    return "invalid_output"
 
 
 def derive_art_prompt(payload: GeneratedCardModel) -> str:

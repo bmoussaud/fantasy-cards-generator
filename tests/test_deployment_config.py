@@ -139,10 +139,14 @@ def test_generation_runtime_env_vars_are_wired_from_bicep_outputs() -> None:
     container_apps_bicep = (REPO_ROOT / "infra" / "modules" / "container-apps.bicep").read_text()
     main_bicep = (REPO_ROOT / "infra" / "main.bicep").read_text()
 
-    assert "name: 'AI_MODE'" in container_apps_bicep
+    assert "name: 'AI_MODE'" not in container_apps_bicep
     assert "name: 'PERSISTENCE_MODE'" in container_apps_bicep
     assert "name: 'FOUNDRY_ENDPOINT'" in container_apps_bicep
     assert "name: 'FOUNDRY_PROJECT_ENDPOINT'" in container_apps_bicep
+    assert "name: 'FOUNDRY_AGENT_VERSION'" in container_apps_bicep
+    assert "name: 'FOUNDRY_AGENT_TIMEOUT_SECONDS'" in container_apps_bicep
+    assert "param foundryAgentTimeoutSeconds string = '70'" in main_bicep
+    assert "foundryAgentTimeoutSeconds: foundryAgentTimeoutSeconds" in main_bicep
     assert "name: 'FOUNDRY_TEXT_DEPLOYMENT'" not in container_apps_bicep
     assert "name: 'FOUNDRY_IMAGE_DEPLOYMENT'" in container_apps_bicep
     assert "name: 'COSMOS_ENDPOINT'" in container_apps_bicep
@@ -964,10 +968,12 @@ def test_telemetry_reuses_single_workspace_app_insights_and_secret_wiring() -> N
     )
 
 
-def test_container_app_has_all_three_dependency_free_health_probes() -> None:
+def test_container_app_liveness_is_dependency_free_and_readiness_is_bounded() -> None:
     container_apps = (REPO_ROOT / "infra" / "modules" / "container-apps.bicep").read_text()
 
-    assert container_apps.count("path: '/healthz'") == 3
+    assert container_apps.count("path: '/healthz'") == 2
+    assert container_apps.count("path: '/livez'") == 1
+    assert container_apps.count("timeoutSeconds: 75") == 2
     assert container_apps.count("port: 8000") >= 3
     for probe_type in ("Startup", "Liveness", "Readiness"):
         assert f"type: '{probe_type}'" in container_apps

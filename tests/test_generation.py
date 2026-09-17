@@ -23,6 +23,7 @@ from app.generation import (
     InMemoryAuditRepository,
     InMemoryCardRepository,
     InMemorySharedCardAuditRepository,
+    MockAgentClient,
     MockAIClient,
     ReferenceImageUpload,
     StoredCard,
@@ -72,7 +73,12 @@ class RejectingPhotoModerationService:
 def build_services(monkeypatch: pytest.MonkeyPatch, **env_overrides: str) -> AppServices:
     for key, value in env_overrides.items():
         monkeypatch.setenv(key, value)
-    services = create_services(load_app_settings())
+    settings = load_app_settings()
+    services = create_services(
+        settings,
+        ai_client=MockAIClient(settings),
+        agent_client=MockAgentClient(),
+    )
     services.photo_moderation_service = AllowAllPhotoModerationService()
     return services
 
@@ -295,6 +301,7 @@ def test_generation_with_photo_uses_reference_image_edit_path(
         audit_repository=InMemoryAuditRepository(),
         asset_store=InMemoryAssetStore(),
         ai_client=ai_client,
+        agent_client=MockAgentClient(),
         moderation_service=defaults.moderation_service,
         rate_limiter=defaults.rate_limiter,
         csrf_protector=defaults.csrf_protector,
@@ -355,6 +362,7 @@ def test_generation_with_photo_returns_clear_error_when_edits_are_unsupported(
         audit_repository=InMemoryAuditRepository(),
         asset_store=InMemoryAssetStore(),
         ai_client=UnsupportedEditAIClient(settings),
+        agent_client=MockAgentClient(),
         moderation_service=defaults.moderation_service,
         rate_limiter=defaults.rate_limiter,
         csrf_protector=defaults.csrf_protector,
@@ -435,6 +443,7 @@ def test_generation_without_photo_keeps_text_only_image_generation_path(
         audit_repository=InMemoryAuditRepository(),
         asset_store=InMemoryAssetStore(),
         ai_client=ai_client,
+        agent_client=MockAgentClient(),
         moderation_service=defaults.moderation_service,
         rate_limiter=defaults.rate_limiter,
         csrf_protector=defaults.csrf_protector,
@@ -1326,6 +1335,7 @@ def test_persistence_cleanup_deletes_orphaned_blob(
         audit_repository=InMemoryAuditRepository(),
         asset_store=TrackingAssetStore(),
         ai_client=MockAIClient(settings),
+        agent_client=MockAgentClient(),
         moderation_service=defaults.moderation_service,
         rate_limiter=defaults.rate_limiter,
         csrf_protector=defaults.csrf_protector,
@@ -1381,6 +1391,7 @@ def test_blob_upload_failure_logs_safe_azure_diagnostic(
         audit_repository=InMemoryAuditRepository(),
         asset_store=FailingAssetStore(),
         ai_client=MockAIClient(settings),
+        agent_client=MockAgentClient(),
         moderation_service=defaults.moderation_service,
         rate_limiter=defaults.rate_limiter,
         csrf_protector=defaults.csrf_protector,
@@ -1437,6 +1448,7 @@ def test_failed_blob_compensation_does_not_mask_persistence_problem(
         audit_repository=InMemoryAuditRepository(),
         asset_store=FailingCleanupAssetStore(),
         ai_client=MockAIClient(settings),
+        agent_client=MockAgentClient(),
         moderation_service=defaults.moderation_service,
         rate_limiter=defaults.rate_limiter,
         csrf_protector=defaults.csrf_protector,
@@ -1509,6 +1521,7 @@ def test_concurrent_duplicates_do_not_duplicate_model_calls(
             audit_repository=InMemoryAuditRepository(),
             asset_store=InMemoryAssetStore(),
             ai_client=ai_client,
+            agent_client=MockAgentClient(),
             moderation_service=defaults.moderation_service,
             rate_limiter=defaults.rate_limiter,
             csrf_protector=defaults.csrf_protector,
@@ -1778,6 +1791,7 @@ def test_concurrent_artwork_retries_do_not_duplicate_image_calls(
             audit_repository=InMemoryAuditRepository(),
             asset_store=InMemoryAssetStore(),
             ai_client=ai_client,
+            agent_client=MockAgentClient(),
             moderation_service=defaults.moderation_service,
             rate_limiter=defaults.rate_limiter,
             csrf_protector=defaults.csrf_protector,
@@ -1867,7 +1881,6 @@ def test_image_quality_rejects_invalid_value(
 
 
 def _configure_live_settings_test(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AI_MODE", "live")
     monkeypatch.setenv("PERSISTENCE_MODE", "memory")
     monkeypatch.setenv("FOUNDRY_ENDPOINT", "https://foundry.example")
     monkeypatch.setenv("FOUNDRY_IMAGE_DEPLOYMENT", "gpt-image-2")
@@ -1876,6 +1889,7 @@ def _configure_live_settings_test(monkeypatch: pytest.MonkeyPatch) -> None:
         "https://test.services.ai.azure.com/api/projects/test-project",
     )
     monkeypatch.setenv("FOUNDRY_AGENT_NAME", "card-orchestrator")
+    monkeypatch.setenv("FOUNDRY_AGENT_VERSION", "1")
     monkeypatch.setenv("TELEMETRY_ENABLED", "true")
     monkeypatch.setenv(
         "APPLICATIONINSIGHTS_CONNECTION_STRING",
@@ -1883,52 +1897,17 @@ def _configure_live_settings_test(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def test_debug_log_ai_payloads_defaults_to_enabled_when_app_env_is_unset(
+def test_raw_ai_logging_environment_variables_are_ignored(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _configure_live_settings_test(monkeypatch)
     monkeypatch.delenv("APP_ENV", raising=False)
-    monkeypatch.delenv("DEBUG_LOG_AI_PAYLOADS", raising=False)
+    monkeypatch.setenv("DEBUG_LOG_AI_PAYLOADS", "true")
 
     settings = load_app_settings()
 
     assert settings.app_env == "development"
-    assert settings.debug_log_ai_payloads is True
-
-
-def test_debug_log_ai_payloads_defaults_to_disabled_in_production(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _configure_live_settings_test(monkeypatch)
-    monkeypatch.setenv("APP_ENV", "production")
-    monkeypatch.delenv("DEBUG_LOG_AI_PAYLOADS", raising=False)
-
-    settings = load_app_settings()
-
-    assert settings.debug_log_ai_payloads is False
-
-
-@pytest.mark.parametrize(
-    ("app_env", "override", "expected"),
-    [
-        ("development", "false", False),
-        ("development", "true", True),
-        ("production", "true", False),
-    ],
-)
-def test_debug_log_ai_payloads_env_override(
-    monkeypatch: pytest.MonkeyPatch,
-    app_env: str,
-    override: str,
-    expected: bool,
-) -> None:
-    _configure_live_settings_test(monkeypatch)
-    monkeypatch.setenv("APP_ENV", app_env)
-    monkeypatch.setenv("DEBUG_LOG_AI_PAYLOADS", override)
-
-    settings = load_app_settings()
-
-    assert settings.debug_log_ai_payloads is expected
+    assert not hasattr(settings, "debug_log_ai_payloads")
 
 
 # ---------------------------------------------------------------------------
@@ -2132,6 +2111,7 @@ def test_partial_card_persists_selected_image_quality(
             audit_repository=InMemoryAuditRepository(),
             asset_store=InMemoryAssetStore(),
             ai_client=MockAIClient(settings),
+            agent_client=MockAgentClient(),
             moderation_service=defaults.moderation_service,
             rate_limiter=defaults.rate_limiter,
             csrf_protector=defaults.csrf_protector,
@@ -2198,6 +2178,7 @@ def test_retry_artwork_uses_original_image_quality(
             audit_repository=InMemoryAuditRepository(),
             asset_store=InMemoryAssetStore(),
             ai_client=ai_client,
+            agent_client=MockAgentClient(),
             moderation_service=defaults.moderation_service,
             rate_limiter=defaults.rate_limiter,
             csrf_protector=defaults.csrf_protector,
@@ -2278,6 +2259,7 @@ def test_retry_artwork_legacy_record_without_quality_falls_back_to_settings(
             audit_repository=InMemoryAuditRepository(),
             asset_store=InMemoryAssetStore(),
             ai_client=MockAIClient(settings),
+            agent_client=MockAgentClient(),
             moderation_service=defaults.moderation_service,
             rate_limiter=defaults.rate_limiter,
             csrf_protector=defaults.csrf_protector,

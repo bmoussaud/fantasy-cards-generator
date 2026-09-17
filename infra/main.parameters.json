@@ -38,8 +38,14 @@
     "foundryAgentName": {
       "value": "${FOUNDRY_AGENT_NAME=}"
     },
+    "foundryAgentVersion": {
+      "value": "${FOUNDRY_AGENT_VERSION=}"
+    },
     "foundryAgentExpectedVersion": {
       "value": "${FOUNDRY_AGENT_EXPECTED_VERSION=}"
+    },
+    "foundryAgentTimeoutSeconds": {
+      "value": "${FOUNDRY_AGENT_TIMEOUT_SECONDS=70}"
     },
     "contentSafetyEndpoint": {
       "value": "${CONTENT_SAFETY_ENDPOINT=}"

@@ -11,50 +11,67 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.responses import RedirectResponse
 
-os.environ.setdefault("APP_ENV", "test")
-os.environ.setdefault("APP_SESSION_SECRET_KEY", "test-session-secret")
-os.environ.setdefault("ENTRA_CLIENT_ID", "client-id")
-os.environ.setdefault("ENTRA_CLIENT_SECRET", "client-secret")
-os.environ.setdefault("ENTRA_AUTHORITY", "https://login.microsoftonline.com/organizations/v2.0")
-os.environ.setdefault("ENTRA_REDIRECT_URI", "https://testserver/auth/callback")
-os.environ.setdefault("ENTRA_POST_LOGOUT_REDIRECT_URI", "https://testserver/")
-os.environ.setdefault("AI_MODE", "mock")
-os.environ.setdefault("PERSISTENCE_MODE", "memory")
-os.environ.setdefault(
-    "FOUNDRY_PROJECT_ENDPOINT",
-    "https://test.services.ai.azure.com/api/projects/test-project",
+os.environ.update(
+    {
+        "APP_ENV": "test",
+        "APP_SESSION_SECRET_KEY": "test-session-secret",
+        "ENTRA_CLIENT_ID": "client-id",
+        "ENTRA_CLIENT_SECRET": "client-secret",
+        "ENTRA_AUTHORITY": "https://login.microsoftonline.com/organizations/v2.0",
+        "ENTRA_REDIRECT_URI": "https://testserver/auth/callback",
+        "ENTRA_POST_LOGOUT_REDIRECT_URI": "https://testserver/",
+        "PERSISTENCE_MODE": "memory",
+        "FOUNDRY_ENDPOINT": "https://foundry.example",
+        "FOUNDRY_IMAGE_DEPLOYMENT": "gpt-image-2",
+        "FOUNDRY_PROJECT_ENDPOINT": (
+            "https://test.services.ai.azure.com/api/projects/test-project"
+        ),
+        "FOUNDRY_AGENT_NAME": "card-orchestrator",
+        "FOUNDRY_AGENT_VERSION": "1",
+        "FOUNDRY_AGENT_TIMEOUT_SECONDS": "0.2",
+        "RATE_LIMIT_USER_REQUESTS": "6",
+        "RATE_LIMIT_USER_WINDOW_SECONDS": "60",
+        "RATE_LIMIT_IP_REQUESTS": "12",
+        "RATE_LIMIT_IP_WINDOW_SECONDS": "60",
+        "TRUSTED_PROXY_HOPS": "0",
+        "UPSTREAM_MAX_RETRIES": "2",
+        "IMAGE_MAX_RETRIES": "0",
+        "UPSTREAM_BASE_BACKOFF_SECONDS": "0.01",
+        "TEXT_TIMEOUT_SECONDS": "0.2",
+        "IMAGE_TIMEOUT_SECONDS": "0.2",
+        "OVERALL_TIMEOUT_SECONDS": "0.6",
+        "AUDIT_RETENTION_DAYS": "30",
+        "PROFILE_PHOTOS_CONTAINER_NAME": "profile-photos",
+        "CONTENT_SAFETY_ENDPOINT": "https://content-safety.example",
+        "CONTENT_SAFETY_API_VERSION": "2024-09-01",
+        "CONTENT_SAFETY_MAX_HATE_SEVERITY": "2",
+        "CONTENT_SAFETY_MAX_SELF_HARM_SEVERITY": "2",
+        "CONTENT_SAFETY_MAX_SEXUAL_SEVERITY": "2",
+        "CONTENT_SAFETY_MAX_VIOLENCE_SEVERITY": "2",
+        "SAVED_PHOTO_MAX_COUNT": "10",
+        "SAVED_PHOTO_MAX_BYTES": "4194304",
+        "SAVED_PHOTO_THUMBNAIL_SIZE": "200",
+        "TELEMETRY_ENABLED": "false",
+        "APPLICATIONINSIGHTS_CONNECTION_STRING": "",
+        "OTEL_SDK_DISABLED": "true",
+    }
 )
-os.environ.setdefault("FOUNDRY_AGENT_NAME", "card-orchestrator")
-os.environ.setdefault("RATE_LIMIT_USER_REQUESTS", "6")
-os.environ.setdefault("RATE_LIMIT_USER_WINDOW_SECONDS", "60")
-os.environ.setdefault("RATE_LIMIT_IP_REQUESTS", "12")
-os.environ.setdefault("RATE_LIMIT_IP_WINDOW_SECONDS", "60")
-os.environ.setdefault("TRUSTED_PROXY_HOPS", "0")
-os.environ.setdefault("UPSTREAM_MAX_RETRIES", "2")
-os.environ.setdefault("IMAGE_MAX_RETRIES", "0")
-os.environ.setdefault("UPSTREAM_BASE_BACKOFF_SECONDS", "0.01")
-os.environ.setdefault("TEXT_TIMEOUT_SECONDS", "0.2")
-os.environ.setdefault("IMAGE_TIMEOUT_SECONDS", "0.2")
-os.environ.setdefault("OVERALL_TIMEOUT_SECONDS", "0.6")
-os.environ.setdefault("AUDIT_RETENTION_DAYS", "30")
-os.environ.setdefault("PROFILE_PHOTOS_CONTAINER_NAME", "profile-photos")
-os.environ.setdefault("CONTENT_SAFETY_ENDPOINT", "https://content-safety.example")
-os.environ.setdefault("CONTENT_SAFETY_API_VERSION", "2024-09-01")
-os.environ.setdefault("CONTENT_SAFETY_MAX_HATE_SEVERITY", "2")
-os.environ.setdefault("CONTENT_SAFETY_MAX_SELF_HARM_SEVERITY", "2")
-os.environ.setdefault("CONTENT_SAFETY_MAX_SEXUAL_SEVERITY", "2")
-os.environ.setdefault("CONTENT_SAFETY_MAX_VIOLENCE_SEVERITY", "2")
-os.environ.setdefault("SAVED_PHOTO_MAX_COUNT", "10")
-os.environ.setdefault("SAVED_PHOTO_MAX_BYTES", "4194304")
-os.environ.setdefault("SAVED_PHOTO_THUMBNAIL_SIZE", "200")
-os.environ.setdefault("TELEMETRY_ENABLED", "false")
-os.environ.setdefault("APPLICATIONINSIGHTS_CONNECTION_STRING", "")
-os.environ.setdefault("OTEL_SDK_DISABLED", "true")
 
 # The application settings are read when `app.main` is imported, so the test
 # environment must be populated before importing it.
 from app import main as main_module  # noqa: E402
+from app.generation import MockAgentClient, MockAIClient, create_services  # noqa: E402
 from app.main import create_app  # noqa: E402
+from app.settings import load_app_settings  # noqa: E402
+
+_test_settings = load_app_settings()
+main_module.app = create_app(
+    services=create_services(
+        _test_settings,
+        ai_client=MockAIClient(_test_settings),
+        agent_client=MockAgentClient(),
+    )
+)
 
 TEST_TENANT_ID = str(uuid4())
 TEST_OBJECT_ID = str(uuid4())
@@ -114,13 +131,16 @@ def base_environment(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, N
     monkeypatch.setenv("ENTRA_AUTHORITY", "https://login.microsoftonline.com/organizations/v2.0")
     monkeypatch.setenv("ENTRA_REDIRECT_URI", "https://testserver/auth/callback")
     monkeypatch.setenv("ENTRA_POST_LOGOUT_REDIRECT_URI", "https://testserver/")
-    monkeypatch.setenv("AI_MODE", "mock")
     monkeypatch.setenv("PERSISTENCE_MODE", "memory")
+    monkeypatch.setenv("FOUNDRY_ENDPOINT", "https://foundry.example")
+    monkeypatch.setenv("FOUNDRY_IMAGE_DEPLOYMENT", "gpt-image-2")
     monkeypatch.setenv(
         "FOUNDRY_PROJECT_ENDPOINT",
         "https://test.services.ai.azure.com/api/projects/test-project",
     )
     monkeypatch.setenv("FOUNDRY_AGENT_NAME", "card-orchestrator")
+    monkeypatch.setenv("FOUNDRY_AGENT_VERSION", "1")
+    monkeypatch.setenv("FOUNDRY_AGENT_TIMEOUT_SECONDS", "0.2")
     monkeypatch.setenv("RATE_LIMIT_USER_REQUESTS", "6")
     monkeypatch.setenv("RATE_LIMIT_USER_WINDOW_SECONDS", "60")
     monkeypatch.setenv("RATE_LIMIT_IP_REQUESTS", "12")
@@ -146,6 +166,16 @@ def base_environment(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, N
     monkeypatch.setenv("TELEMETRY_ENABLED", "false")
     monkeypatch.setenv("APPLICATIONINSIGHTS_CONNECTION_STRING", "")
     monkeypatch.setenv("OTEL_SDK_DISABLED", "true")
+    real_create_services = create_services
+
+    def create_test_services(settings):
+        return real_create_services(
+            settings,
+            ai_client=MockAIClient(settings),
+            agent_client=MockAgentClient(),
+        )
+
+    monkeypatch.setattr(main_module, "create_services", create_test_services)
     yield
 
 

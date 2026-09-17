@@ -44,6 +44,7 @@ def configured_settings(**overrides: Any):
     values = {
         "foundry_project_endpoint": PROJECT_ENDPOINT,
         "foundry_agent_name": AGENT_NAME,
+        "foundry_agent_version": "7",
         "foundry_agent_timeout_seconds": 1.0,
     } | overrides
     return replace(settings, **values)
@@ -143,13 +144,18 @@ def test_agent_access_probe_validates_identity_rbac_and_response_shape() -> None
     def handler(request: httpx.Request) -> httpx.Response:
         captured["url"] = str(request.url)
         captured["authorization"] = request.headers["Authorization"]
-        return httpx.Response(200, json={"data": []})
+        return httpx.Response(
+            200,
+            json={"name": AGENT_NAME, "version": "7", "status": "active"},
+        )
 
     result, credential = check_access_with_transport(configured_settings(), handler)
 
     assert result == "ok"
     assert credential.scopes == [(FOUNDRY_AGENT_TOKEN_SCOPE,)]
-    assert captured["url"] == (f"{PROJECT_ENDPOINT}/agents?api-version=2025-11-15-preview")
+    assert captured["url"] == (
+        f"{PROJECT_ENDPOINT}/agents/{AGENT_NAME}/versions/7" "?api-version=2025-11-15-preview"
+    )
     assert captured["authorization"].startswith("Bearer ")
     assert captured["authorization"].endswith("fake-token")
 
@@ -177,29 +183,45 @@ def test_agent_access_probe_classifies_bounded_failures(
     assert result == expected
 
 
-def test_agent_access_probe_rejects_malformed_success() -> None:
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"data": "not-a-list"},
+        {"name": AGENT_NAME, "version": "7", "status": "creating"},
+        {"name": "another-agent", "version": "7", "status": "active"},
+        {"name": AGENT_NAME, "version": "8", "status": "active"},
+    ],
+)
+def test_agent_access_probe_rejects_malformed_or_wrong_version(
+    body: dict[str, Any],
+) -> None:
     result, _ = check_access_with_transport(
         configured_settings(),
-        lambda request: httpx.Response(200, json={"data": "not-a-list"}, request=request),
+        lambda request: httpx.Response(200, json=body, request=request),
     )
 
-    assert result == "unavailable"
+    assert result != "ok"
 
 
-def test_agent_settings_are_optional_at_startup(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_agent_settings_are_required_at_startup(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("FOUNDRY_PROJECT_ENDPOINT", raising=False)
     monkeypatch.delenv("FOUNDRY_AGENT_NAME", raising=False)
+    monkeypatch.delenv("FOUNDRY_AGENT_VERSION", raising=False)
 
-    settings = load_app_settings()
-
-    assert settings.foundry_project_endpoint is None
-    assert settings.foundry_agent_name is None
-    assert settings.foundry_agent_api_version == "v1"
-    assert settings.foundry_agent_timeout_seconds == 5.0
-    assert settings.foundry_endpoint is None
+    with pytest.raises(SettingsError, match="FOUNDRY_PROJECT_ENDPOINT"):
+        load_app_settings()
 
 
-@pytest.mark.parametrize("timeout", ["0", "-1", "nan", "inf"])
+def test_agent_timeout_default_matches_hosted_runtime_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("FOUNDRY_AGENT_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.setenv("OVERALL_TIMEOUT_SECONDS", "225")
+
+    assert load_app_settings().foundry_agent_timeout_seconds == 70.0
+
+
+@pytest.mark.parametrize("timeout", ["0", "-1", "nan", "inf", "91"])
 def test_agent_timeout_must_be_positive_and_finite(
     monkeypatch: pytest.MonkeyPatch,
     timeout: str,
@@ -389,6 +411,28 @@ def test_http_content_filter_is_policy_refusal() -> None:
 
     assert result.status == "policy_refusal"
     assert result.retryable is False
+
+
+def test_valid_agent_refused_status_is_policy_refusal() -> None:
+    result, _ = invoke_with_transport(
+        configured_settings(),
+        lambda request: httpx.Response(
+            200,
+            json=responses_envelope(
+                {
+                    "schemaVersion": 1,
+                    "status": "refused",
+                    "card": None,
+                    "artPrompt": None,
+                    "metadata": {"agentVersion": "2026.09.07"},
+                    "safetyHints": [],
+                }
+            ),
+        ),
+    )
+
+    assert result.status == "policy_refusal"
+    assert result.error_code == "refusal"
 
 
 def test_wire_refusal_is_detected_before_card_validation() -> None:

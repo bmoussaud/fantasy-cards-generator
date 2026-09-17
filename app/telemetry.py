@@ -20,6 +20,7 @@ SAFE_ROUTES = {
     "/auth/callback",
     "/auth/logout",
     "/healthz",
+    "/livez",
     "/partials/ping",
     "/api/v1/cards/generate",
     "/api/v1/cards/{card_id}/artwork/retry",

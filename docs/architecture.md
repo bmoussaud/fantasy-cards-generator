@@ -68,8 +68,10 @@ secrets are stored as ACA-native secrets and exposed to the application through
 Foundry's AI Services account and project use public endpoints and Entra tokens
 with local key authentication disabled. The app receives project-scoped Foundry
 Agent Consumer and the project identity receives Foundry User access as mandatory
-agent-only prerequisites. Application startup and `/healthz` perform a bounded
-agent access probe; mandatory telemetry must initialize before the runtime starts.
+agent-only prerequisites. Application startup and dependency readiness
+(`/healthz`) validate the exact configured active agent version with a bounded
+probe; process liveness (`/livez`) is dependency-free so a Foundry outage cannot
+cause restart loops. Mandatory telemetry must initialize before the runtime starts.
 The root `azure.yaml`
 deploys the web service only; hosted-agent build/deployment tooling is separate
 under `deployments/card-orchestrator/`.

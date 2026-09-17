@@ -85,8 +85,14 @@ param aiFoundryProjectDisplayName string = 'Fantasy Cards'
 @description('Hosted agent name for the card-orchestrator agent. Injected as FOUNDRY_AGENT_NAME.')
 param foundryAgentName string = ''
 
+@description('Exact active hosted agent version. Injected as FOUNDRY_AGENT_VERSION.')
+param foundryAgentVersion string = ''
+
 @description('Expected agent version for metadata check. Injected as FOUNDRY_AGENT_EXPECTED_VERSION. Optional.')
 param foundryAgentExpectedVersion string = ''
+
+@description('Hosted agent invocation and readiness timeout in seconds.')
+param foundryAgentTimeoutSeconds string = '70'
 
 @allowed([
   'ServicePrincipal'
@@ -135,9 +141,6 @@ param aiFoundryImageDeploymentSkuName string = 'GlobalStandard'
 
 @description('Azure AI Foundry capacity units for the image deployment. Verify against live quota before deployment.')
 param aiFoundryImageDeploymentCapacity int = 1
-
-@description('AI orchestration mode for the app runtime.')
-param aiMode string = 'live'
 
 @description('Persistence mode for the app runtime.')
 param persistenceMode string = 'azure'
@@ -445,7 +448,6 @@ module containerApps './modules/container-apps.bicep' = {
   params: {
     acrLoginServer: registry.outputs.registryLoginServer
     acrPullIdentityResourceId: registry.outputs.acrPullIdentityResourceId
-    aiMode: aiMode
     appInsightsConnectionString: monitoring.outputs.appInsightsConnectionString
     appSessionSecretKeyValue: appSessionSecretKeyValue
     auditRetentionDays: auditRetentionDays
@@ -476,7 +478,9 @@ module containerApps './modules/container-apps.bicep' = {
     foundryImageDeployment: aiFoundryImageDeploymentName
     foundryProjectEndpoint: aiFoundryProjectEndpoint
     foundryAgentName: foundryAgentName
+    foundryAgentVersion: foundryAgentVersion
     foundryAgentExpectedVersion: foundryAgentExpectedVersion
+    foundryAgentTimeoutSeconds: foundryAgentTimeoutSeconds
     healthzBlobTimeoutMs: healthzBlobTimeoutMs
     healthzCosmosTimeoutMs: healthzCosmosTimeoutMs
     imageMaxRetries: imageMaxRetries

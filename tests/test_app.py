@@ -28,7 +28,7 @@ def test_healthz() -> None:
                 "errorCategory": "none",
             },
             "agent": {
-                "status": "not_applicable",
+                "status": "ok",
                 "durationMs": 0,
                 "errorCategory": "none",
             },

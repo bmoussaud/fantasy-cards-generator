@@ -63,9 +63,6 @@ param entraRedirectUri string = ''
 @description('Deployed post-logout redirect URI injected as ENTRA_POST_LOGOUT_REDIRECT_URI. Empty when Entra app registration is disabled.')
 param entraPostLogoutRedirectUri string = ''
 
-@description('AI orchestration mode injected as AI_MODE.')
-param aiMode string = 'live'
-
 @description('Persistence mode injected as PERSISTENCE_MODE.')
 param persistenceMode string = 'azure'
 
@@ -84,11 +81,17 @@ param foundryImageDeployment string = 'gpt-image-2'
 @description('Foundry hosted agent name injected as FOUNDRY_AGENT_NAME.')
 param foundryAgentName string = ''
 
+@description('Exact active hosted agent version injected as FOUNDRY_AGENT_VERSION.')
+param foundryAgentVersion string = ''
+
 @description('Expected agent version for metadata check injected as FOUNDRY_AGENT_EXPECTED_VERSION. Optional.')
 param foundryAgentExpectedVersion string = ''
 
 @description('Agent API version injected as FOUNDRY_AGENT_API_VERSION.')
 param foundryAgentApiVersion string = 'v1'
+
+@description('Hosted agent invocation and readiness timeout in seconds.')
+param foundryAgentTimeoutSeconds string = '70'
 
 @description('Cosmos DB endpoint injected as COSMOS_ENDPOINT.')
 param cosmosEndpoint string = ''
@@ -282,10 +285,6 @@ var containerAppEnv = concat(
       value: telemetrySamplingRatio
     }
     {
-      name: 'AI_MODE'
-      value: aiMode
-    }
-    {
       name: 'PERSISTENCE_MODE'
       value: persistenceMode
     }
@@ -310,12 +309,20 @@ var containerAppEnv = concat(
       value: foundryAgentName
     }
     {
+      name: 'FOUNDRY_AGENT_VERSION'
+      value: foundryAgentVersion
+    }
+    {
       name: 'FOUNDRY_AGENT_EXPECTED_VERSION'
       value: foundryAgentExpectedVersion
     }
     {
       name: 'FOUNDRY_AGENT_API_VERSION'
       value: foundryAgentApiVersion
+    }
+    {
+      name: 'FOUNDRY_AGENT_TIMEOUT_SECONDS'
+      value: foundryAgentTimeoutSeconds
     }
     {
       name: 'COSMOS_ENDPOINT'
@@ -546,14 +553,14 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
               }
               initialDelaySeconds: 0
               periodSeconds: 5
-              timeoutSeconds: 3
-              failureThreshold: 30
+              timeoutSeconds: 75
+              failureThreshold: 3
               successThreshold: 1
             }
             {
               type: 'Liveness'
               httpGet: {
-                path: '/healthz'
+                path: '/livez'
                 port: 8000
                 scheme: 'HTTP'
               }
@@ -572,7 +579,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
               }
               initialDelaySeconds: 5
               periodSeconds: 10
-              timeoutSeconds: 3
+              timeoutSeconds: 75
               failureThreshold: 3
               successThreshold: 1
             }
