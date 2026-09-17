@@ -284,9 +284,10 @@ Additional operational settings:
 - `SAVED_PHOTO_THUMBNAIL_SIZE`
 
 Startup validates local settings and mandatory telemetry. Dependency readiness
-then validates the exact agent name/version, active hosted version status, and
-managed-identity access with a bounded content-free
-`GET /agents/{name}/versions/{version}` request after the server listens. The
+then validates the exact agent name/version, active hosted version status,
+the endpoint's single 100% selector for that same version, and managed-identity
+access with bounded content-free `GET /agents/{name}/versions/{version}` and
+`GET /agents/{name}` requests after the server listens. The
 70-second client cap covers
 the hosted runtime's 65-second overall budget while remaining inside the
 application's 225-second request budget. Missing configuration, identity/RBAC

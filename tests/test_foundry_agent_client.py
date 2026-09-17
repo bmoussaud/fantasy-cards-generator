@@ -12,7 +12,11 @@ from azure.core.exceptions import (
     ServiceRequestError,
     ServiceResponseError,
 )
-from azure.identity import ChainedTokenCredential
+from azure.identity import (
+    ChainedTokenCredential,
+    CredentialUnavailableError,
+    ManagedIdentityCredential,
+)
 
 from app.foundry_agent_client import (
     FOUNDRY_AGENT_TOKEN_SCOPE,
@@ -145,25 +149,125 @@ def check_access_with_transport(
 
 
 def test_agent_access_probe_validates_identity_rbac_and_response_shape() -> None:
-    captured: dict[str, str] = {}
+    captured: list[tuple[str, str]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        captured["url"] = str(request.url)
-        captured["authorization"] = request.headers["Authorization"]
+        captured.append((str(request.url), request.headers["Authorization"]))
+        if "/versions/7?" in str(request.url):
+            return httpx.Response(
+                200,
+                json={"name": AGENT_NAME, "version": "7", "status": "active"},
+            )
         return httpx.Response(
             200,
-            json={"name": AGENT_NAME, "version": "7", "status": "active"},
+            json={
+                "agent_endpoint": {
+                    "version_selector": {
+                        "version_selection_rules": [
+                            {
+                                "type": "FixedRatio",
+                                "agent_version": "7",
+                                "traffic_percentage": 100,
+                            }
+                        ]
+                    }
+                }
+            },
         )
 
     result, credential = check_access_with_transport(configured_settings(), handler)
 
     assert result == "ok"
     assert credential.scopes == [(FOUNDRY_AGENT_TOKEN_SCOPE,)]
-    assert captured["url"] == (
-        f"{PROJECT_ENDPOINT}/agents/{AGENT_NAME}/versions/7" "?api-version=2025-11-15-preview"
-    )
-    assert captured["authorization"].startswith("Bearer ")
-    assert captured["authorization"].endswith("fake-token")
+    assert captured == [
+        (
+            f"{PROJECT_ENDPOINT}/agents/{AGENT_NAME}/versions/7" "?api-version=2025-11-15-preview",
+            "Bearer fake-token",
+        ),
+        (
+            f"{PROJECT_ENDPOINT}/agents/{AGENT_NAME}?api-version=2025-11-15-preview",
+            "Bearer fake-token",
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    "agent_body",
+    [
+        {},
+        {"agent_endpoint": {}},
+        {"agent_endpoint": {"version_selector": {}}},
+        {
+            "agent_endpoint": {
+                "version_selector": {
+                    "version_selection_rules": [
+                        {
+                            "type": "FixedRatio",
+                            "agent_version": "8",
+                            "traffic_percentage": 100,
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "agent_endpoint": {
+                "version_selector": {
+                    "version_selection_rules": [
+                        {
+                            "type": "FixedRatio",
+                            "agent_version": "7",
+                            "traffic_percentage": 50,
+                        }
+                    ]
+                }
+            }
+        },
+    ],
+)
+def test_agent_access_probe_rejects_missing_or_mismatched_active_selector(
+    agent_body: dict[str, Any],
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "/versions/7?" in str(request.url):
+            return httpx.Response(
+                200,
+                json={"name": AGENT_NAME, "version": "7", "status": "active"},
+            )
+        return httpx.Response(200, json=agent_body)
+
+    result, _ = check_access_with_transport(configured_settings(), handler)
+
+    assert result == "misconfigured"
+
+
+def test_agent_access_probe_accepts_camel_case_active_selector() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "/versions/7?" in str(request.url):
+            return httpx.Response(
+                200,
+                json={"name": AGENT_NAME, "version": "7", "status": "active"},
+            )
+        return httpx.Response(
+            200,
+            json={
+                "agentEndpoint": {
+                    "versionSelector": {
+                        "versionSelectionRules": [
+                            {
+                                "type": "FixedRatio",
+                                "agentVersion": "7",
+                                "trafficPercentage": 100,
+                            }
+                        ]
+                    }
+                }
+            },
+        )
+
+    result, _ = check_access_with_transport(configured_settings(), handler)
+
+    assert result == "ok"
 
 
 @pytest.mark.parametrize(
@@ -696,6 +800,63 @@ def test_chained_credential_transport_failures_are_sanitized_and_retryable(
     assert result.message == "Foundry credential service is temporarily unavailable."
     assert "private-credential-diagnostic" not in repr(result)
     assert "private-credential-diagnostic" not in caplog.text
+
+
+def test_managed_identity_imds_transport_unavailability_survives_chain_aggregation(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class MissingEnvironmentCredential(FakeCredential):
+        def get_token(self, *scopes: str, **kwargs: Any) -> FakeAccessToken:
+            raise CredentialUnavailableError("normal unavailable credential")
+
+    class ImdsTransportFailure:
+        def get_token(self, *scopes: str, **kwargs: Any) -> FakeAccessToken:
+            try:
+                raise ServiceRequestError("private-imds-transport-diagnostic")
+            except ServiceRequestError as exc:
+                raise CredentialUnavailableError(
+                    "ManagedIdentityCredential authentication unavailable."
+                ) from exc
+
+    managed_identity = ManagedIdentityCredential()
+    managed_identity._credential = ImdsTransportFailure()
+    credential = _TransportAwareChainedCredential(
+        ChainedTokenCredential(
+            MissingEnvironmentCredential(),
+            managed_identity,
+            MissingEnvironmentCredential(),
+        )
+    )
+    result, _ = invoke_with_transport(
+        configured_settings(),
+        lambda request: pytest.fail("Failed token acquisition must not make an HTTP request"),
+        credential=credential,
+    )
+
+    assert result.status == "transient_error"
+    assert result.retryable is True
+    assert result.error_code == "credential_service_unavailable"
+    assert "private-imds-transport-diagnostic" not in repr(result)
+    assert "private-imds-transport-diagnostic" not in caplog.text
+
+
+def test_normal_unavailable_credential_chain_remains_non_retryable_auth_failure() -> None:
+    class MissingCredential(FakeCredential):
+        def get_token(self, *scopes: str, **kwargs: Any) -> FakeAccessToken:
+            raise CredentialUnavailableError("normal unavailable credential")
+
+    credential = _TransportAwareChainedCredential(
+        ChainedTokenCredential(MissingCredential(), MissingCredential())
+    )
+    result, _ = invoke_with_transport(
+        configured_settings(),
+        lambda request: pytest.fail("Failed token acquisition must not make an HTTP request"),
+        credential=credential,
+    )
+
+    assert result.status == "auth_error"
+    assert result.retryable is False
+    assert result.error_code == "credential_unavailable"
 
 
 @pytest.mark.parametrize(

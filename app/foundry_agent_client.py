@@ -50,13 +50,16 @@ class _RecordingCredential:
     def get_token(self, *scopes: str, **kwargs: Any) -> Any:
         try:
             return self._credential.get_token(*scopes, **kwargs)
-        except CredentialUnavailableError:
+        except CredentialUnavailableError as exc:
+            if _is_transient_credential_failure(exc):
+                self._recorder.transient_failure = True
             raise CredentialUnavailableError("Credential is unavailable.") from None
         except (ServiceRequestError, ServiceResponseError):
             self._recorder.transient_failure = True
             raise ServiceRequestError("Credential service is temporarily unavailable.") from None
         except ClientAuthenticationError as exc:
-            self._recorder.transient_failure = _is_transient_credential_failure(exc)
+            if _is_transient_credential_failure(exc):
+                self._recorder.transient_failure = True
             raise ClientAuthenticationError("Credential authentication failed.") from None
         except HttpResponseError as exc:
             if _is_transient_credential_failure(exc):
@@ -304,6 +307,35 @@ class FoundryAgentClient:
             value != self._settings.foundry_agent_version for value in returned_versions
         ):
             return "misconfigured"
+
+        try:
+            endpoint_response = await self._client().get(
+                f"{endpoint}agents/{agent_name}" f"?api-version={FOUNDRY_AGENT_ACCESS_API_VERSION}",
+                headers={
+                    "Authorization": "Bearer " + token,
+                    "Accept": "application/json",
+                },
+            )
+        except httpx.TimeoutException:
+            return "timeout"
+        except httpx.TransportError:
+            return "unavailable"
+
+        if endpoint_response.status_code in {401, 403}:
+            return "unauthorized"
+        if endpoint_response.status_code in {400, 404}:
+            return "misconfigured"
+        if endpoint_response.status_code >= 400:
+            return "unavailable"
+        try:
+            endpoint_body = endpoint_response.json()
+        except ValueError:
+            return "unavailable"
+        if not _endpoint_selects_version(
+            endpoint_body,
+            expected_version=self._settings.foundry_agent_version,
+        ):
+            return "misconfigured"
         return "ok"
 
     async def _invoke_without_outer_timeout(self, query: str) -> FoundryAgentInvocationResult:
@@ -435,16 +467,56 @@ def _default_azure_credential() -> TokenCredential:
 
 
 def _is_transient_credential_failure(exc: Exception) -> bool:
-    if isinstance(exc, (ServiceRequestError, ServiceResponseError)):
-        return True
-    if isinstance(exc, HttpResponseError):
-        status_code = getattr(exc, "status_code", None)
-        return (
-            status_code == 408
-            or status_code == 429
-            or (isinstance(status_code, int) and status_code >= 500)
-        )
+    pending: list[BaseException] = [exc]
+    visited: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in visited:
+            continue
+        visited.add(id(current))
+        if isinstance(current, (ServiceRequestError, ServiceResponseError)):
+            return True
+        if isinstance(current, HttpResponseError):
+            status_code = getattr(current, "status_code", None)
+            if (
+                status_code == 408
+                or status_code == 429
+                or (isinstance(status_code, int) and status_code >= 500)
+            ):
+                return True
+        for nested in (
+            current.__cause__,
+            current.__context__,
+            getattr(current, "inner_exception", None),
+        ):
+            if isinstance(nested, BaseException):
+                pending.append(nested)
     return False
+
+
+def _endpoint_selects_version(body: Any, *, expected_version: str) -> bool:
+    if not isinstance(body, dict):
+        return False
+    endpoint = body.get("agent_endpoint", body.get("agentEndpoint"))
+    if not isinstance(endpoint, dict):
+        return False
+    selector = endpoint.get("version_selector", endpoint.get("versionSelector"))
+    if not isinstance(selector, dict):
+        return False
+    rules = selector.get("version_selection_rules", selector.get("versionSelectionRules"))
+    if not isinstance(rules, list) or len(rules) != 1:
+        return False
+    rule = rules[0]
+    if not isinstance(rule, dict):
+        return False
+    version = rule.get("agent_version", rule.get("agentVersion"))
+    traffic = rule.get("traffic_percentage", rule.get("trafficPercentage"))
+    rule_type = rule.get("type")
+    return (
+        version == expected_version
+        and traffic == 100
+        and rule_type in {"FixedRatio", "fixed_ratio"}
+    )
 
 
 def _build_responses_url(

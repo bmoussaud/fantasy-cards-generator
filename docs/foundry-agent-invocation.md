@@ -27,8 +27,11 @@ there is no fallback to the account/model endpoint or to direct text generation.
 
 At startup, the web app synchronously validates local configuration and mandatory
 telemetry, then begins serving dependency-free `/livez`. Dependency-aware
-`/healthz` readiness acquires an Entra token and performs a bounded, content-free
-`GET /agents/{name}/versions/{version}?api-version=2025-11-15-preview` check.
+`/healthz` readiness acquires an Entra token and performs bounded, content-free
+checks of both `GET /agents/{name}/versions/{version}` and
+`GET /agents/{name}`. The version resource must have the exact configured
+name/version and `active` status, and the endpoint's single 100% fixed-ratio
+selector must route to that same `FOUNDRY_AGENT_VERSION`.
 Only the exact configured version with `status: active` passes. Failure prevents
 traffic routing without blocking ASGI startup or causing liveness restart loops.
 
