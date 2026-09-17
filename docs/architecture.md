@@ -33,12 +33,14 @@ generation or reference-photo edit calls. Saved-photo uploads additionally use
 Azure AI Content Safety; this is distinct from the generation pipeline's
 heuristic moderation and model-side content filtering.
 
-Cards, saved-photo metadata, and audit records share Cosmos DB. Artwork and
-saved photos/thumbnails use the `card-assets` and `profile-photos` Blob
-containers. The backend streams image bytes after ownership checks; browsers
-do not fetch private blobs directly. Card/account deletion retains minimal
-TTL-limited deletion audits and schedules blob cleanup in FastAPI background
-tasks, not an external queue or worker service.
+Cards, saved-photo metadata, operational generation audits, and deletion audits
+share Cosmos DB. Policy refusals persist none of those generation records or
+artwork blobs. Artwork and saved photos/thumbnails use the `card-assets` and
+`profile-photos` Blob containers. The backend streams image bytes after
+ownership checks; browsers do not fetch private blobs directly. Card/account
+deletion removes retained operational generation audits, keeps only the
+documented TTL-limited deletion audits, and schedules blob cleanup in FastAPI
+background tasks, not an external queue or worker service.
 
 ## Network, identity, and operations
 

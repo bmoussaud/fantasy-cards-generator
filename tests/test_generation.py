@@ -572,7 +572,7 @@ def test_trusted_proxy_uses_rightmost_forwarded_hop() -> None:
     assert client_ip_from_request(request, trusted_proxy_hops=1) == "198.51.100.7"
 
 
-def test_pre_moderation_rejection_records_sanitized_audit(
+def test_pre_moderation_rejection_persists_no_audit(
     authenticated_client: TestClient,
 ) -> None:
     csrf_token = extract_hidden_value(authenticated_client.get("/app").text, "csrf_token")
@@ -592,13 +592,9 @@ def test_pre_moderation_rejection_records_sanitized_audit(
 
     services = authenticated_client.app.state.services
     assert prompt not in response.text
-    assert len(services.audit_repository._records) == 1
-    audit = next(iter(services.audit_repository._records.values()))
-    assert audit is not None
-    assert audit.prompt is None
-    assert audit.ttl_seconds == 30 * 24 * 60 * 60
-    assert audit.error_code == "living-artist-imitation"
+    assert services.audit_repository._records == {}
     assert services.card_repository._records == {}
+    assert services.asset_store._assets == {}
 
 
 def test_invalid_model_output_is_rejected_and_not_persisted(

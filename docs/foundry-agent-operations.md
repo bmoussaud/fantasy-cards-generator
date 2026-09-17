@@ -816,6 +816,15 @@ PR #122 is not merged by this operation.
 | Model | Existing text deployment; three bounded concept/lore/art-direction specialists |
 | Excluded | Image generation, persistence, web activation, scheduled evaluation/probes |
 
+At the web boundary, a hosted-agent policy refusal and every authoritative
+generation-moderation refusal use deny-wins handling. Operations may observe
+only the allowlisted status/public code in response telemetry; the application
+stores no refusal card, artwork blob, generation-audit document, repository
+error payload, or owner/request/idempotency hash. TTL-limited generation audits
+remain available for unrelated operational failures. Application
+nonpersistence does not imply that the Foundry platform itself emits no
+platform telemetry.
+
 The real runtime and `hosted-agent` optional extra are integrated with the
 dedicated container/deployment package in PR #119. Packaging-only tests are not
 startup evidence; the integrated validation below includes the correct agent

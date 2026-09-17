@@ -45,6 +45,10 @@ CARD_DOCUMENT_ID_PREFIX = "card:"
 AUDIT_DOCUMENT_ID_PREFIX = "audit:"
 
 
+class _GenerationRefusal(ProblemDetails):
+    pass
+
+
 def _exception_diagnostic(exc: Exception) -> tuple[str, int | None, str | None]:
     status_code = getattr(exc, "status_code", None)
     error_code = getattr(exc, "error_code", None)
@@ -1696,6 +1700,8 @@ class CardGenerationService:
                 ),
                 timeout=self.services.settings.retry.overall_timeout_seconds,
             )
+        except _GenerationRefusal:
+            raise
         except ProblemDetails as exc:
             await self._save_audit_failure(
                 owner.owner_id,
@@ -1789,24 +1795,18 @@ class CardGenerationService:
         )
         moderation.append(pre_decision)
         if not pre_decision.allowed:
-            problem = ProblemDetails(
+            problem = _GenerationRefusal(
                 status_code=422,
                 title="Prompt Rejected",
                 detail="The prompt was rejected by the moderation policy.",
                 type="/problems/prompt-rejected",
                 error_code="prompt_rejected",
             )
-            await self.services.card_repository.delete(owner.owner_id, card_id)
-            await self._save_audit_failure(
-                owner.owner_id,
-                card_id,
-                request_id,
-                idempotency_key,
-                request_hash,
-                pre_decision.reasonCode,
+            await self._raise_refusal(
+                owner_id=owner.owner_id,
+                card_id=card_id,
                 problem=problem,
             )
-            raise problem
 
         progress.stage = "foundry-text"
         (
@@ -1838,24 +1838,18 @@ class CardGenerationService:
         )
         moderation.append(post_text)
         if not post_text.allowed:
-            problem = ProblemDetails(
+            problem = _GenerationRefusal(
                 status_code=422,
                 title="Generated Content Rejected",
                 detail="The generated card text was rejected by moderation.",
                 type="/problems/generated-text-rejected",
                 error_code="generated_text_rejected",
             )
-            await self.services.card_repository.delete(owner.owner_id, card_id)
-            await self._save_audit_failure(
-                owner.owner_id,
-                card_id,
-                request_id,
-                idempotency_key,
-                request_hash,
-                post_text.reasonCode,
+            await self._raise_refusal(
+                owner_id=owner.owner_id,
+                card_id=card_id,
                 problem=problem,
             )
-            raise problem
 
         derived_art_prompt = (
             agent_art_prompt
@@ -1869,24 +1863,18 @@ class CardGenerationService:
         )
         moderation.append(post_art_prompt)
         if not post_art_prompt.allowed:
-            problem = ProblemDetails(
+            problem = _GenerationRefusal(
                 status_code=422,
                 title="Artwork Prompt Rejected",
                 detail="The derived artwork prompt was rejected by moderation.",
                 type="/problems/generated-art-rejected",
                 error_code="generated_art_rejected",
             )
-            await self.services.card_repository.delete(owner.owner_id, card_id)
-            await self._save_audit_failure(
-                owner.owner_id,
-                card_id,
-                request_id,
-                idempotency_key,
-                request_hash,
-                post_art_prompt.reasonCode,
+            await self._raise_refusal(
+                owner_id=owner.owner_id,
+                card_id=card_id,
                 problem=problem,
             )
-            raise problem
 
         progress.validated_payload = validated_payload
         progress.derived_art_prompt = derived_art_prompt
@@ -1950,29 +1938,18 @@ class CardGenerationService:
         post_image = await self.services.moderation_service.moderate_image(image_result.image)
         moderation.append(post_image)
         if not post_image.allowed:
-            partial = await self._persist_partial(
-                owner=owner,
+            problem = _GenerationRefusal(
+                status_code=422,
+                title="Generated Artwork Rejected",
+                detail="The generated artwork was rejected by moderation.",
+                type="/problems/generated-art-rejected",
+                error_code="generated_art_rejected",
+            )
+            await self._raise_refusal(
+                owner_id=owner.owner_id,
                 card_id=card_id,
-                request_id=request_id,
-                idempotency_key=idempotency_key,
-                request_hash=request_hash,
-                prompt=prompt,
-                validated_payload=validated_payload,
-                derived_art_prompt=derived_art_prompt,
-                moderation=moderation,
-                text_result=text_result,
-                partial_reason="moderation_rejection",
-                image_quality=image_quality,
+                problem=problem,
             )
-            await self._save_audit_failure(
-                owner.owner_id,
-                f"{card_id}:unsafe-image",
-                request_id,
-                idempotency_key,
-                request_hash,
-                post_image.reasonCode,
-            )
-            return self._as_response(partial)
 
         progress.stage = "persistence"
         completed = await self._persist_completed(
@@ -2102,12 +2079,17 @@ class CardGenerationService:
             return "agent", text_result, agent_result.card, agent_result.art_prompt
 
         if agent_result.status in {"policy_refusal", "refused"}:
-            problem = ProblemDetails(
+            problem = _GenerationRefusal(
                 status_code=422,
                 title="Prompt Rejected",
                 detail="The prompt was rejected by the generation agent policy.",
                 type="/problems/prompt-rejected",
                 error_code="prompt_rejected",
+            )
+            await self._raise_refusal(
+                owner_id=owner_id,
+                card_id=card_id,
+                problem=problem,
             )
         elif _agent_failure_class(agent_result) == "timeout":
             problem = ProblemDetails(
@@ -2152,6 +2134,19 @@ class CardGenerationService:
             problem=problem,
         )
         set_generation_path("agent")
+        raise problem
+
+    async def _raise_refusal(
+        self,
+        *,
+        owner_id: str,
+        card_id: str,
+        problem: ProblemDetails,
+        audit_card_id: str | None = None,
+    ) -> None:
+        await self.services.card_repository.delete(owner_id, card_id)
+        if audit_card_id is not None:
+            await self.services.audit_repository.delete_audit(owner_id, audit_card_id)
         raise problem
 
     async def _generate_text_mock(
@@ -2257,15 +2252,19 @@ class CardGenerationService:
         moderation = [ModerationDecision.model_validate(item) for item in record.moderation]
         moderation.append(post_image)
         if not post_image.allowed:
-            await self._save_audit_failure(
-                record.owner_id,
-                retry_card_id,
-                request_id,
-                retry_idempotency_key,
-                request_hash,
-                post_image.reasonCode,
+            problem = _GenerationRefusal(
+                status_code=422,
+                title="Generated Artwork Rejected",
+                detail="The generated artwork was rejected by moderation.",
+                type="/problems/generated-art-rejected",
+                error_code="generated_art_rejected",
             )
-            return self._as_response(record)
+            await self._raise_refusal(
+                owner_id=record.owner_id,
+                card_id=record.id,
+                problem=problem,
+                audit_card_id=retry_card_id,
+            )
         payload = GeneratedCardModel.model_validate(record.validated_payload)
         completed = await self._persist_completed(
             owner=AuthenticatedOwner(

@@ -839,18 +839,19 @@ Azure Content Safety is not used for card text or generated images today, and
 
 | Scenario | Current behavior | [FUTURE] behavior |
 |----------|------------------|------------------|
-| Heuristic BLOCK on text stage | `422`; later stages do not run | Same |
-| Heuristic BLOCK on `post_image` after image/image-edit success | `200` + `awaiting_artwork_retry`; safe text stays persisted | Same |
+| Heuristic BLOCK on text stage | `422`; later stages do not run and no card/blob/refusal audit is persisted | Same |
+| Heuristic BLOCK on `post_image` after image/image-edit success | `422 generated_art_rejected`; bytes discarded and no card/blob/refusal audit persisted | Same |
 | Saved-photo Content Safety threshold exceedance | `422 saved_photo_rejected` | Same |
 | Saved-photo Content Safety endpoint missing or Azure HTTP error | `503`; upload blocked | Same |
 | Saved-photo Content Safety missing category evidence | **Current gap:** parser may still allow | Treat as INDETERMINATE / block if that layer is required |
-| Hosted orchestrator structured refusal/failure + heuristic ALLOW | N/A | Backend maps refusal/failure to `ProblemDetails`; no fail-open replacement path |
+| Hosted orchestrator structured refusal + heuristic ALLOW | `422 prompt_rejected`; no card/blob/refusal audit persisted | Same; no fail-open replacement path |
+| Hosted orchestrator structured technical failure + heuristic ALLOW | Bounded operational error; TTL-limited content-free failure audit may be retained | Same |
 | Optional advisory safety-skill concern + no authoritative deny | N/A | Advisory only; backend/managed authoritative layers still decide |
 | Managed guardrail denial + heuristic ALLOW | N/A | Deny; no fallback around the guardrail |
 | Agent technical failure with no authoritative deny | N/A | Bounded structured error; no replacement text path |
 | Upstream image-edit failure on reference-image path | Hard error (`502`/`504`) | Same unless future policy explicitly changes it |
-| Successful reference-image edit followed by `post_image` heuristic BLOCK | `200` + `awaiting_artwork_retry` | Same |
-| Idempotency replay of current `audit_failed` record | Replays stored structured failure fields first; legacy reason-code fallback is secondary | Same |
+| Successful reference-image edit followed by `post_image` heuristic BLOCK | `422 generated_art_rejected`; no persistence | Same |
+| Idempotency replay of an operational `audit_failed` record | Replays stored structured failure fields first; legacy reason-code fallback is secondary | Same |
 
 ### Open gaps relevant to agent integration
 

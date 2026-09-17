@@ -214,6 +214,8 @@ from `invalid_prompt` (normalized prompt length), photo-input errors, and
 `prompt_rejected` / `generated_text_rejected` / `generated_art_rejected` (policy).
 An upstream agent HTTP 422 is a non-retryable dependency failure surfaced as
 HTTP 502, not a request-validation 422. Agent policy refusals can return 422.
+`generated_art_rejected` covers both a rejected derived art prompt and a
+generated image rejected before publication.
 For diagnostics, share only the HTTP status and the error panel's static
 title/detail/code, not form contents, cookies, tokens, or a HAR export.
 
@@ -233,9 +235,11 @@ The service applies moderation at:
 3. the derived artwork prompt
 4. the generated image payload before publication
 
-Unsafe generated image bytes are discarded. Only a minimal sanitized forensic
-audit record is retained for 30 days; prompts, unsafe outputs, secrets, tokens,
-and SAS URLs are never logged.
+Every policy refusal is deny-wins. The service returns only the bounded response
+status and public error code, stops before later stages, and persists no card,
+artwork blob, or generation-audit record. This includes hosted-agent refusal and
+all four moderation stages. Operational failures that are not content refusals
+may still retain the existing TTL-limited, content-free generation audit.
 
 Saved-photo persistence uses Azure AI Content Safety image analysis before
 Blob/Cosmos persistence. The backend rejects saves when any of

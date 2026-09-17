@@ -14,16 +14,21 @@ from app import generation as generation_module
 from app.foundry_agent_client import FoundryAgentClient, FoundryAgentInvocationResult
 from app.generation import (
     AppServices,
+    AuthenticatedOwner,
+    CardGenerationService,
     GeneratedCardModel,
     InMemoryAssetStore,
     InMemoryAuditRepository,
     InMemoryCardRepository,
     MockAgentClient,
     MockAIClient,
+    ModerationDecision,
+    StoredCard,
     create_services,
 )
 from app.health import DependencyHealthResult
 from app.main import create_app
+from app.problems import ProblemDetails
 from app.settings import SettingsError, load_app_settings
 from tests.conftest import FakeOAuthClient, begin_login, extract_hidden_value
 
@@ -136,6 +141,35 @@ def _generate(client: TestClient, *, key: str = "agent-only-test"):
             "csrfToken": csrf_token,
         },
     )
+
+
+class StageModeration:
+    def __init__(self, refused_stage: str | None = None) -> None:
+        self.refused_stage = refused_stage
+        self.calls: list[str] = []
+
+    async def moderate_text(self, text: str, *, stage: str) -> ModerationDecision:
+        del text
+        self.calls.append(stage)
+        refused = stage == self.refused_stage
+        return ModerationDecision(
+            stage=stage,
+            allowed=not refused,
+            reasonCode="graphic-violence" if refused else "allowed",
+            details="bounded test decision",
+        )
+
+    async def moderate_image(self, image: Any) -> ModerationDecision:
+        del image
+        stage = "post_image"
+        self.calls.append(stage)
+        refused = stage == self.refused_stage
+        return ModerationDecision(
+            stage=stage,
+            allowed=not refused,
+            reasonCode="unsafe-generated-image" if refused else "allowed",
+            details="bounded test decision",
+        )
 
 
 def test_live_mode_requires_agent_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -322,11 +356,6 @@ def test_agent_success_preserves_card_contract_image_and_persistence(
             502,
             "invalid_model_output",
         ),
-        (
-            FoundryAgentInvocationResult(status="policy_refusal", error_code="refusal"),
-            422,
-            "prompt_rejected",
-        ),
     ],
 )
 def test_agent_failures_are_structured_and_never_fallback(
@@ -360,6 +389,7 @@ def test_agent_failures_are_structured_and_never_fallback(
     assert direct_calls == 0
     assert not services.card_repository._records
     assert not services.asset_store._assets
+    assert len(services.audit_repository._records) == 1
     assert "silver shield" not in response.text
 
 
@@ -394,7 +424,9 @@ def test_hosted_agent_http_408_returns_public_upstream_timeout(
     assert not services.asset_store._assets
 
 
-def test_input_moderation_blocks_before_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_input_moderation_refusal_persists_nothing_and_stops_before_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls = 0
 
     class Agent:
@@ -404,6 +436,8 @@ def test_input_moderation_blocks_before_agent(monkeypatch: pytest.MonkeyPatch) -
             return _success()
 
     services = _services(monkeypatch, Agent())
+    moderation = StageModeration("pre_prompt")
+    services.moderation_service = moderation
     client = _client(monkeypatch, services)
     csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
     response = client.post(
@@ -418,9 +452,13 @@ def test_input_moderation_blocks_before_agent(monkeypatch: pytest.MonkeyPatch) -
     assert response.status_code == 422
     assert response.json()["errorCode"] == "prompt_rejected"
     assert calls == 0
+    assert moderation.calls == ["pre_prompt"]
+    assert not services.card_repository._records
+    assert not services.audit_repository._records
+    assert not services.asset_store._assets
 
 
-def test_output_moderation_blocks_before_image_and_persistence(
+def test_output_moderation_refusal_persists_nothing_and_stops_before_image(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     image_calls = 0
@@ -433,19 +471,54 @@ def test_output_moderation_blocks_before_image_and_persistence(
 
     class Agent:
         async def invoke(self, query: str) -> FoundryAgentInvocationResult:
-            return _success(card=_card(rules_text="Graphic gore in the style of a living artist."))
+            return _success()
 
     settings = _live_settings(monkeypatch)
     services = _services(monkeypatch, Agent(), ai_client=ImageSpy(settings))
+    moderation = StageModeration("post_text")
+    services.moderation_service = moderation
     response = _generate(_client(monkeypatch, services), key="output-moderation")
 
     assert response.status_code == 422
     assert response.json()["errorCode"] == "generated_text_rejected"
     assert image_calls == 0
+    assert moderation.calls == ["pre_prompt", "post_text"]
     assert not services.card_repository._records
+    assert not services.audit_repository._records
+    assert not services.asset_store._assets
 
 
-def test_valid_refused_status_blocks_image_and_persistence(
+def test_art_prompt_moderation_refusal_persists_nothing_and_stops_before_image(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image_calls = 0
+
+    class ImageSpy(MockAIClient):
+        async def generate_image(self, art_prompt: str, **kwargs: Any):
+            nonlocal image_calls
+            image_calls += 1
+            return await super().generate_image(art_prompt, **kwargs)
+
+    class Agent:
+        async def invoke(self, query: str) -> FoundryAgentInvocationResult:
+            return _success()
+
+    settings = _live_settings(monkeypatch)
+    services = _services(monkeypatch, Agent(), ai_client=ImageSpy(settings))
+    moderation = StageModeration("post_art_prompt")
+    services.moderation_service = moderation
+    response = _generate(_client(monkeypatch, services), key="art-prompt-moderation")
+
+    assert response.status_code == 422
+    assert response.json()["errorCode"] == "generated_art_rejected"
+    assert image_calls == 0
+    assert moderation.calls == ["pre_prompt", "post_text", "post_art_prompt"]
+    assert not services.card_repository._records
+    assert not services.audit_repository._records
+    assert not services.asset_store._assets
+
+
+def test_agent_policy_refusal_persists_nothing_and_stops_before_output_moderation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     image_calls = 0
@@ -466,12 +539,103 @@ def test_valid_refused_status_blocks_image_and_persistence(
 
     settings = _live_settings(monkeypatch)
     services = _services(monkeypatch, Agent(), ai_client=ImageSpy(settings))
+    moderation = StageModeration()
+    services.moderation_service = moderation
     response = _generate(_client(monkeypatch, services), key="agent-refused")
 
     assert response.status_code == 422
     assert response.json()["errorCode"] == "prompt_rejected"
     assert image_calls == 0
+    assert moderation.calls == ["pre_prompt"]
     assert not services.card_repository._records
+    assert not services.audit_repository._records
+    assert not services.asset_store._assets
+
+
+def test_image_moderation_refusal_persists_nothing_and_stops_before_persistence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image_calls = 0
+
+    class ImageSpy(MockAIClient):
+        async def generate_image(self, art_prompt: str, **kwargs: Any):
+            nonlocal image_calls
+            image_calls += 1
+            return await super().generate_image(art_prompt, **kwargs)
+
+    class Agent:
+        async def invoke(self, query: str) -> FoundryAgentInvocationResult:
+            return _success()
+
+    settings = _live_settings(monkeypatch)
+    services = _services(monkeypatch, Agent(), ai_client=ImageSpy(settings))
+    moderation = StageModeration("post_image")
+    services.moderation_service = moderation
+    response = _generate(_client(monkeypatch, services), key="image-moderation")
+
+    assert response.status_code == 422
+    assert response.json()["errorCode"] == "generated_art_rejected"
+    assert image_calls == 1
+    assert moderation.calls == [
+        "pre_prompt",
+        "post_text",
+        "post_art_prompt",
+        "post_image",
+    ]
+    assert not services.card_repository._records
+    assert not services.audit_repository._records
+    assert not services.asset_store._assets
+
+
+def test_artwork_retry_moderation_refusal_removes_partial_card_and_retry_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Agent:
+        async def invoke(self, query: str) -> FoundryAgentInvocationResult:
+            return _success()
+
+    services = _services(monkeypatch, Agent())
+    moderation = StageModeration("post_image")
+    services.moderation_service = moderation
+    owner = AuthenticatedOwner(
+        owner_id="tenant:object",
+        tenant_id="tenant",
+        object_id="object",
+        subject="subject",
+        display_name=None,
+        email=None,
+    )
+    record = StoredCard(
+        id="partial-card",
+        document_type="card",
+        owner_id=owner.owner_id,
+        request_id="initial-request",
+        idempotency_key="initial-key",
+        request_hash="initial-hash",
+        status="awaiting_artwork_retry",
+        validated_payload=_card().model_dump(),
+        derived_art_prompt="Safe original fantasy artwork.",
+        moderation=[],
+        image_quality="low",
+    )
+    asyncio.run(services.card_repository.save(record))
+
+    with pytest.raises(ProblemDetails) as raised:
+        asyncio.run(
+            CardGenerationService(services).retry_artwork(
+                owner=owner,
+                card_id=record.id,
+                idempotency_key="retry-key",
+                request_id="retry-request",
+                client_ip="127.0.0.1",
+            )
+        )
+
+    assert raised.value.status_code == 422
+    assert raised.value.error_code == "generated_art_rejected"
+    assert moderation.calls == ["post_image"]
+    assert not services.card_repository._records
+    assert not services.audit_repository._records
     assert not services.asset_store._assets
 
 
