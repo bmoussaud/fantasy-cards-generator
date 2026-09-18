@@ -1,3 +1,13 @@
 {
-  "version": 1
+  "version": 1,
+  "agentModelOverrides": {
+    "gandalf": "claude-opus-5",
+    "aragorn": "gpt-5.3-codex",
+    "legolas": "gpt-5.3-codex",
+    "gimli": "gpt-5.3-codex",
+    "samwise": "gpt-5.3-codex"
+  },
+  "agentReasoningEffortOverrides": {
+    "gandalf": "xhigh"
+  }
 }
