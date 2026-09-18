@@ -1,2 +1,7 @@
 {"timestamp":"2026-09-16T13:46:29.513Z","action":"search","reason":"Search returned 0 result(s)"}
 {"timestamp":"2026-09-16T13:48:00.306Z","action":"search","reason":"Search returned 0 result(s)"}
+{"timestamp":"2026-09-17T07:21:27.975Z","action":"write","id":"d5a198c8-1bd5-4a39-996d-008493312a09","class":"DECISION","title":"Stand-up 2026-09-17 — exécution J1 de #143","path":".squad/decisions/inbox/rai-stand-up-2026-09-17-ex-cution-j1-de-143-d5a198c8.md","reason":"Content is allowed for governed local memory","actor":"Rai","provider":"local"}
+{"timestamp":"2026-09-17T07:22:14.291Z","action":"search","reason":"Search returned 0 result(s)"}
+{"timestamp":"2026-09-17T07:24:00.781Z","action":"write","id":"fc433b8e-d366-4ac5-b4e9-40b9e5cbe584","class":"DECISION","title":"Exécution autonome jusqu’au gate final de #143","path":".squad/decisions/inbox/rai-ex-cution-autonome-jusqu-au-gate-final-de-143-fc433b8e.md","reason":"Content is allowed for governed local memory","actor":"Rai","provider":"local"}
+{"timestamp":"2026-09-17T11:24:11.830Z","action":"search","reason":"Search returned 0 result(s)"}
+{"timestamp":"2026-09-17T14:26:15.900Z","action":"search","reason":"Search returned 0 result(s)"}

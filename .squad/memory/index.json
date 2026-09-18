@@ -1,1 +1,22 @@
-[]
+[
+  {
+    "id": "d5a198c8-1bd5-4a39-996d-008493312a09",
+    "class": "DECISION",
+    "loadGuidance": "ALWAYS",
+    "title": "Stand-up 2026-09-17 — exécution J1 de #143",
+    "path": ".squad/decisions/inbox/rai-stand-up-2026-09-17-ex-cution-j1-de-143-d5a198c8.md",
+    "status": "active",
+    "createdAt": "2026-09-17T07:21:27.970Z",
+    "updatedAt": "2026-09-17T07:21:27.970Z"
+  },
+  {
+    "id": "fc433b8e-d366-4ac5-b4e9-40b9e5cbe584",
+    "class": "DECISION",
+    "loadGuidance": "ALWAYS",
+    "title": "Exécution autonome jusqu’au gate final de #143",
+    "path": ".squad/decisions/inbox/rai-ex-cution-autonome-jusqu-au-gate-final-de-143-fc433b8e.md",
+    "status": "active",
+    "createdAt": "2026-09-17T07:24:00.778Z",
+    "updatedAt": "2026-09-17T07:24:00.778Z"
+  }
+]
