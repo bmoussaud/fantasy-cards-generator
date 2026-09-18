@@ -266,15 +266,17 @@ const flush = () => new Promise(setImmediate);
   await flush();
   assert.equal(generator.dataset.photoReferenceBound, "true");
   assert.equal(grid.children.length, 1);
-  grid.children[0].handlers.click();
   assert.equal(savedId.value, photo.photoId);
   assert.equal(grid.children[0].attributes["aria-pressed"], "true");
+  assert.match(
+    generator.elements["[data-saved-photo-picker-feedback]"].textContent,
+    /default saved reference photo/
+  );
   clear.handlers.click();
   assert.equal(savedId.value, "");
   assert.equal(clear.hidden, true);
   grid.children[0].handlers.click();
-  grid.children[0].handlers.click();
-  assert.equal(savedId.value, "");
+  assert.equal(savedId.value, photo.photoId);
   assert.ok(pickerState.requests.every(request => !request.options.method));
 
   const manager = new Element();
@@ -339,6 +341,139 @@ const flush = () => new Promise(setImmediate);
     );
   }
   handlers.pagehide();
+})().catch(error => { console.error(error); process.exitCode = 1; });
+"""
+    result = subprocess.run(
+        ["node", "-e", harness], input=script, text=True, capture_output=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_photo_picker_default_selection_rules() -> None:
+    script = client.get("/static/js/app.js").text
+    harness = r"""
+const assert = require("node:assert/strict");
+const vm = require("node:vm");
+const fs = require("node:fs");
+const source = fs.readFileSync(0, "utf8");
+
+class Element {
+  constructor() {
+    this.dataset = {}; this.children = []; this.handlers = {}; this.elements = {};
+    this.attributes = {}; this.textContent = ""; this.value = "";
+    const classes = new Set();
+    this.classList = {
+      add(name) { classes.add(name); }, remove(name) { classes.delete(name); },
+      toggle(name, enabled) { enabled ? classes.add(name) : classes.delete(name); }
+    };
+  }
+  querySelector(selector) { return this.elements[selector] || null; }
+  querySelectorAll() { return this.grid ? this.grid.children : []; }
+  appendChild(child) { this.children.push(child); }
+  replaceChildren(...children) { this.children = children; }
+  addEventListener(name, handler) { this.handlers[name] = handler; }
+  setAttribute(name, value) { this.attributes[name] = value; }
+}
+
+function child(parent, selector) {
+  const element = new Element();
+  parent.elements[selector] = element;
+  return element;
+}
+
+function mountGenerator(photos) {
+  const root = new Element();
+  const picker = child(root, "[data-saved-photo-picker]");
+  picker.dataset.photoLibraryEndpoint = "/my/photos";
+  const grid = child(root, "[data-saved-photo-picker-grid]");
+  picker.grid = grid;
+  const feedback = child(root, "[data-saved-photo-picker-feedback]");
+  const clear = child(root, "[data-clear-saved-photo]");
+  clear.hidden = true;
+  const savedId = child(root, "[data-saved-photo-id-input]");
+  const requests = [];
+  vm.runInNewContext(source, {
+    document: {
+      querySelector(selector) {
+        return selector === "[data-card-generator-form]" ? root : null;
+      },
+      createElement() { return new Element(); },
+      addEventListener() {},
+      body: new Element(),
+    },
+    window: { addEventListener() {}, matchMedia() { return { matches: false }; } },
+    fetch(url, options) {
+      requests.push({ url, options });
+      return Promise.resolve({
+        ok: true,
+        text: async () => JSON.stringify({ photos }),
+      });
+    },
+  });
+  return { root, grid, feedback, clear, savedId, requests };
+}
+
+const flush = () => new Promise(setImmediate);
+const importedSource = "entra-profile-photo";
+const photo = (photoId, createdAt, source = null) => ({
+  photoId,
+  label: photoId,
+  source,
+  createdAt,
+  image: { url: `/my/photos/${photoId}/image`, sizeBytes: 100 },
+  thumbnail: { url: `/my/photos/${photoId}/thumbnail` },
+});
+
+(async () => {
+  const zero = mountGenerator([]);
+  await flush();
+  assert.equal(zero.savedId.value, "");
+  assert.equal(zero.clear.hidden, true);
+  assert.equal(zero.grid.children.length, 1);
+
+  const oneEligible = mountGenerator([photo("eligible-1", "2026-09-16T10:00:00Z")]);
+  await flush();
+  assert.equal(oneEligible.savedId.value, "eligible-1");
+  assert.equal(oneEligible.grid.children[0].attributes["aria-pressed"], "true");
+  assert.equal(oneEligible.clear.hidden, false);
+  assert.match(oneEligible.feedback.textContent, /default saved reference photo/);
+
+  const manyEligible = mountGenerator([
+    photo("newest", "2026-09-18T10:00:00Z"),
+    photo("older", "2026-09-17T10:00:00Z"),
+  ]);
+  await flush();
+  assert.equal(manyEligible.savedId.value, "newest");
+
+  const allImported = mountGenerator([
+    photo("ms-1", "2026-09-18T10:00:00Z", importedSource),
+    photo("ms-2", "2026-09-17T10:00:00Z", importedSource),
+  ]);
+  await flush();
+  assert.equal(allImported.savedId.value, "");
+  assert.equal(allImported.clear.hidden, true);
+  assert.equal(allImported.grid.children[0].attributes["aria-pressed"], "false");
+  assert.equal(allImported.grid.children[1].attributes["aria-pressed"], "false");
+
+  const mixed = mountGenerator([
+    photo("ms-newest", "2026-09-18T10:00:00Z", importedSource),
+    photo("eligible-next", "2026-09-17T10:00:00Z"),
+  ]);
+  await flush();
+  assert.equal(mixed.savedId.value, "eligible-next");
+  assert.equal(mixed.grid.children[0].attributes["aria-pressed"], "false");
+  assert.equal(mixed.grid.children[1].attributes["aria-pressed"], "true");
+  mixed.grid.children[0].handlers.click();
+  assert.equal(mixed.savedId.value, "ms-newest");
+  assert.equal(mixed.grid.children[0].attributes["aria-pressed"], "true");
+
+  oneEligible.clear.handlers.click();
+  assert.equal(oneEligible.savedId.value, "");
+  assert.equal(oneEligible.clear.hidden, true);
+  const reloaded = mountGenerator([photo("eligible-1", "2026-09-16T10:00:00Z")]);
+  await flush();
+  assert.equal(reloaded.savedId.value, "eligible-1");
+  assert.equal(reloaded.clear.hidden, false);
 })().catch(error => { console.error(error); process.exitCode = 1; });
 """
     result = subprocess.run(

@@ -6,6 +6,7 @@
 (function () {
   "use strict";
   var ALLOWED_PHOTO_TYPES = ["image/jpeg", "image/png", "image/webp"];
+  var PROFILE_PHOTO_IMPORT_SOURCE = "entra-profile-photo";
 
   function formatPhotoSize(bytes) {
     if (bytes < 1024 * 1024) {
@@ -99,6 +100,7 @@
     button.className = "saved-photo-option";
     button.dataset.photoId = photo.photoId;
     button.dataset.photoLabel = photo.label || "";
+    button.dataset.photoSource = photo.source || "";
     button.setAttribute("aria-pressed", "false");
 
     var image = document.createElement("img");
@@ -240,6 +242,7 @@
     }
 
     function selectSavedPhoto(button) {
+      var options = arguments.length > 1 && arguments[1] ? arguments[1] : {};
       var nextPhotoId = button.dataset.photoId || "";
       var nextLabel = button.dataset.photoLabel || "Saved photo";
       if (selectedSavedPhotoId === nextPhotoId) {
@@ -254,7 +257,11 @@
         item.classList.toggle("is-selected", isSelected);
         item.setAttribute("aria-pressed", isSelected ? "true" : "false");
       });
-      pickerFeedback.textContent = "Using " + nextLabel + " as your saved reference photo.";
+      pickerFeedback.textContent = options.isDefaultSelection
+        ? "Using " +
+          nextLabel +
+          " as your default saved reference photo. You can clear or change it."
+        : "Using " + nextLabel + " as your saved reference photo.";
       clearSavedPhotoButton.hidden = false;
     }
 
@@ -273,14 +280,33 @@
         return;
       }
 
+      var defaultPhotoId = "";
+      photos.some(function (photo) {
+        var source = photo && photo.source;
+        if (source === PROFILE_PHOTO_IMPORT_SOURCE) {
+          return false;
+        }
+        defaultPhotoId = photo.photoId || "";
+        return Boolean(defaultPhotoId);
+      });
+
+      var defaultButton = null;
       photos.forEach(function (photo) {
         var button = createSavedPhotoOption(photo);
         button.addEventListener("click", function () {
           selectSavedPhoto(button);
         });
+        if (!defaultButton && defaultPhotoId && button.dataset.photoId === defaultPhotoId) {
+          defaultButton = button;
+        }
         pickerGrid.appendChild(button);
       });
-      pickerFeedback.textContent = "Select one saved photo, or generate without a reference photo.";
+      if (defaultButton) {
+        selectSavedPhoto(defaultButton, { isDefaultSelection: true });
+        return;
+      }
+      pickerFeedback.textContent =
+        "Select one saved photo, or generate without a reference photo.";
     }
 
     clearSavedPhotoButton.addEventListener("click", clearSavedPhotoSelection);
