@@ -97,6 +97,7 @@ def test_app_shell_renders_generation_form(authenticated_client: TestClient) -> 
     assert 'name="photo"' not in response.text
     assert 'name="saved_photo_id"' in response.text
     assert "data-saved-photo-id-input" in response.text
+    assert "pre-selected each time this page loads" in response.text
     assert 'name="save_photo"' not in response.text
     assert 'name="photo_label"' not in response.text
     assert 'type="file"' not in response.text
