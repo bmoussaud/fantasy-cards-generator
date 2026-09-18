@@ -1127,7 +1127,7 @@ def test_preprovision_hook_guards_session_secret() -> None:
 
 
 def test_azd_yaml_wires_preprovision_session_secret_hook() -> None:
-    """Verify azure.yaml has a preprovision hook that runs ensure_session_secret.sh.
+    """Preserve the image exactly once before ensuring the session secret.
 
     Without the preprovision hook, a fresh azd env (or one that has lost
     APP_SESSION_SECRET_KEY) silently passes an empty value through the
@@ -1136,24 +1136,55 @@ def test_azd_yaml_wires_preprovision_session_secret_hook() -> None:
     """
     azure_yaml = (REPO_ROOT / "azure.yaml").read_text()
 
-    assert "preprovision:" in azure_yaml
-    assert "ensure_session_secret.sh" in azure_yaml
+    root_hooks = azure_yaml.split("\nhooks:\n", 1)[1]
+    preprovision = root_hooks.split("  preprovision:\n", 1)[1].split("\n  postprovision:", 1)[0]
+    active_lines = [
+        line
+        for line in preprovision.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    assert active_lines == [
+        "    - shell: sh",
+        "      run: ./hooks/ensure_agent_version.sh",
+        "    - shell: sh",
+        "      run: ./hooks/preserve_web_image.sh",
+        "    - shell: sh",
+        "      run: ./hooks/ensure_session_secret.sh",
+    ]
 
 
-def test_preprovision_hook_preserves_existing_web_image(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("image", "set_exit_code", "error"),
+    [
+        ("image-sentinel.invalid/web@sha256:abc123", 0, None),
+        ("image-sentinel.invalid/web:release-152", 0, None),
+        ("image-sentinel.invalid/web:invalid tag", 0, "reference is invalid"),
+        ("image-sentinel.invalid/web:invalid\ttag", 0, "reference is invalid"),
+        ("image-sentinel.invalid/web:" + "x" * 512, 0, "reference is invalid"),
+        ("image-sentinel.invalid/web:release-152", 1, "Failed to preserve"),
+    ],
+    ids=["digest", "tag", "space", "tab", "oversized", "env-set-failure"],
+)
+def test_preprovision_hook_preserves_existing_web_image(
+    tmp_path: Path, image: str, set_exit_code: int, error: str | None
+) -> None:
     script = REPO_ROOT / "hooks" / "preserve_web_image.sh"
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     azd_log = tmp_path / "azd.log"
+    az_log = tmp_path / "az.log"
+    auth_log = tmp_path / "auth.log"
     fake_azd = fake_bin / "azd"
     fake_azd.write_text(
         "#!/bin/sh\n"
         'if [ "$1 $2 $3" = "env get-value AZURE_RESOURCE_GROUP" ]; then\n'
-        "  printf '%s\\n' rg-fcag-dev\n"
+        "  printf '%s\\n' rg-resource-sentinel\n"
         'elif [ "$1 $2 $3" = "env get-value AZURE_CONTAINER_APP_NAME" ]; then\n'
-        "  printf '%s\\n' fcag-dev-app\n"
+        "  printf '%s\\n' app-resource-sentinel\n"
         'elif [ "$1 $2" = "env set" ]; then\n'
-        f'  printf "%s\\n" "$*" > "{azd_log}"\n'
+        f'  printf "%s\\0" "$@" > "{azd_log}"\n'
+        '  printf "%s\\n" "$3"\n'
+        f"  exit {set_exit_code}\n"
         "else\n"
         "  exit 2\n"
         "fi\n"
@@ -1162,8 +1193,92 @@ def test_preprovision_hook_preserves_existing_web_image(tmp_path: Path) -> None:
     fake_az = fake_bin / "az"
     fake_az.write_text(
         "#!/bin/sh\n"
-        "printf '%s\\n' "
-        "fcagdev.azurecr.io/fantasy-cards-generator/web-nat-dev@sha256:abc123\n"
+        'if [ "$1 $2" = "account get-access-token" ]; then\n'
+        f'  printf "%s\\0" "$@" > "{auth_log}"\n'
+        "  echo token-sentinel\n"
+        "  echo token-sentinel >&2\n"
+        "  exit 0\n"
+        "fi\n"
+        f'printf "%s\\0" "$@" > "{az_log}"\n'
+        'printf "%s\\n" "$FAKE_IMAGE"\n'
+    )
+    fake_az.chmod(0o755)
+
+    result = subprocess.run(
+        ["sh", str(script)],
+        capture_output=True,
+        text=True,
+        env={"PATH": f"{fake_bin}:/usr/bin:/bin", "FAKE_IMAGE": image},
+    )
+
+    assert auth_log.read_bytes().split(b"\0") == [
+        b"account",
+        b"get-access-token",
+        b"--resource",
+        b"https://management.azure.com/",
+        b"--output",
+        b"none",
+        b"",
+    ]
+    assert az_log.read_bytes().split(b"\0") == [
+        b"containerapp",
+        b"list",
+        b"--resource-group",
+        b"rg-resource-sentinel",
+        b"--query",
+        b"[?name=='app-resource-sentinel'].properties.template.containers[0].image | [0]",
+        b"--output",
+        b"tsv",
+        b"",
+    ]
+    assert result.returncode == (1 if error else 0)
+    if error == "reference is invalid":
+        assert not azd_log.exists()
+    else:
+        assert azd_log.read_bytes().split(b"\0") == [
+            b"env",
+            b"set",
+            f"CONTAINER_IMAGE={image}".encode(),
+            b"",
+        ]
+    if error:
+        assert error in result.stderr
+    else:
+        assert "Current web image preserved" in result.stderr
+    for sentinel in (
+        "rg-resource-sentinel",
+        "app-resource-sentinel",
+        "image-sentinel.invalid",
+        "token-sentinel",
+    ):
+        assert sentinel not in result.stdout
+        assert sentinel not in result.stderr
+
+
+def test_preprovision_hook_requires_azure_cli_authentication(tmp_path: Path) -> None:
+    script = REPO_ROOT / "hooks" / "preserve_web_image.sh"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    az_log = tmp_path / "az.log"
+    azd_log = tmp_path / "azd.log"
+    fake_azd = fake_bin / "azd"
+    fake_azd.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1 $2" = "env get-value" ]; then\n'
+        "  echo resource-sentinel\n"
+        "else\n"
+        f'  printf "%s\\n" "$*" >> "{azd_log}"\n'
+        "  exit 2\n"
+        "fi\n"
+    )
+    fake_azd.chmod(0o755)
+    fake_az = fake_bin / "az"
+    fake_az.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s\\0" "$@" >> "{az_log}"\n'
+        "echo token-sentinel\n"
+        "echo private-error-sentinel >&2\n"
+        "exit 1\n"
     )
     fake_az.chmod(0o755)
 
@@ -1174,13 +1289,54 @@ def test_preprovision_hook_preserves_existing_web_image(tmp_path: Path) -> None:
         env={"PATH": f"{fake_bin}:/usr/bin:/bin"},
     )
 
-    assert result.returncode == 0
-    assert azd_log.read_text().strip() == (
-        "env set CONTAINER_IMAGE="
-        "fcagdev.azurecr.io/fantasy-cards-generator/web-nat-dev@sha256:abc123"
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr == (
+        "ERROR: Unable to obtain an Azure CLI token. Run 'az login' and retry.\n"
     )
-    assert "sha256:abc123" not in result.stdout
-    assert "sha256:abc123" not in result.stderr
+    assert az_log.read_bytes().split(b"\0") == [
+        b"account",
+        b"get-access-token",
+        b"--resource",
+        b"https://management.azure.com/",
+        b"--output",
+        b"none",
+        b"",
+    ]
+    assert not azd_log.exists()
+
+
+@pytest.mark.parametrize("missing_key", ["AZURE_RESOURCE_GROUP", "AZURE_CONTAINER_APP_NAME"])
+def test_preprovision_hook_skips_authentication_without_app_metadata(
+    tmp_path: Path, missing_key: str
+) -> None:
+    script = REPO_ROOT / "hooks" / "preserve_web_image.sh"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    az_log = tmp_path / "az.log"
+    fake_azd = fake_bin / "azd"
+    fake_azd.write_text(
+        "#!/bin/sh\n"
+        f'if [ "$3" = "{missing_key}" ]; then\n'
+        "  exit 1\n"
+        "fi\n"
+        "echo resource-sentinel\n"
+    )
+    fake_azd.chmod(0o755)
+    fake_az = fake_bin / "az"
+    fake_az.write_text("#!/bin/sh\n" f'printf "%s\\n" "$*" >> "{az_log}"\n' "exit 1\n")
+    fake_az.chmod(0o755)
+
+    result = subprocess.run(
+        ["sh", str(script)],
+        capture_output=True,
+        text=True,
+        env={"PATH": f"{fake_bin}:/usr/bin:/bin"},
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == result.stderr == ""
+    assert not az_log.exists()
 
 
 def test_preprovision_hook_keeps_bootstrap_when_web_app_does_not_exist(
@@ -1215,6 +1371,9 @@ def test_preprovision_hook_keeps_bootstrap_when_web_app_does_not_exist(
 
     assert result.returncode == 0
     assert not azd_log.exists()
+    for sentinel in ("rg-fcag-dev", "fcag-dev-app"):
+        assert sentinel not in result.stdout
+        assert sentinel not in result.stderr
 
 
 def test_preprovision_hook_fails_closed_when_live_image_lookup_fails(
@@ -1223,6 +1382,7 @@ def test_preprovision_hook_fails_closed_when_live_image_lookup_fails(
     script = REPO_ROOT / "hooks" / "preserve_web_image.sh"
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
+    azd_log = tmp_path / "azd.log"
     fake_azd = fake_bin / "azd"
     fake_azd.write_text(
         "#!/bin/sh\n"
@@ -1230,11 +1390,19 @@ def test_preprovision_hook_fails_closed_when_live_image_lookup_fails(
         "  printf '%s\\n' rg-fcag-dev\n"
         'elif [ "$1 $2 $3" = "env get-value AZURE_CONTAINER_APP_NAME" ]; then\n'
         "  printf '%s\\n' fcag-dev-app\n"
+        'elif [ "$1 $2" = "env set" ]; then\n'
+        f'  printf "%s\\n" "$*" > "{azd_log}"\n'
         "fi\n"
     )
     fake_azd.chmod(0o755)
     fake_az = fake_bin / "az"
-    fake_az.write_text("#!/bin/sh\nexit 1\n")
+    fake_az.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1 $2" = "account get-access-token" ]; then\n'
+        "  exit 0\n"
+        "fi\n"
+        "exit 1\n"
+    )
     fake_az.chmod(0o755)
 
     result = subprocess.run(
@@ -1246,6 +1414,10 @@ def test_preprovision_hook_fails_closed_when_live_image_lookup_fails(
 
     assert result.returncode == 1
     assert "currently deployed web image" in result.stderr
+    assert not azd_log.exists()
+    for sentinel in ("rg-fcag-dev", "fcag-dev-app"):
+        assert sentinel not in result.stdout
+        assert sentinel not in result.stderr
 
 
 def test_session_secret_flows_into_key_vault_and_container_app_secret() -> None:
@@ -1343,27 +1515,135 @@ def test_root_manifest_hooks_stamp_agent_identity_after_deploy() -> None:
     assert azure_yaml.count("prepublish:") == 1
     assert azure_yaml.count("predeploy:") == 1
     assert "guard_agent_deploy" in azure_yaml
+    assert (
+        "    agentEndpoint:\n"
+        "      protocols:\n"
+        "        - responses\n"
+        "      authorizationSchemes:\n"
+        "        - type: Entra\n"
+        "      versionSelector:\n"
+        "        versionSelectionRules:\n"
+        "          - type: FixedRatio\n"
+        '            agentVersion: "@latest"\n'
+        "            trafficPercentage: 100\n"
+    ) in azure_yaml
+    main_bicep = (REPO_ROOT / "infra/main.bicep").read_text()
+    assert (
+        "output AZURE_AI_MODEL_DEPLOYMENT_NAME string = "
+        "aiFoundry.outputs.aiFoundryTextDeploymentName"
+    ) in main_bicep
 
 
+@pytest.mark.parametrize(
+    ("existing_version", "git_version", "git_exit", "set_exit", "error"),
+    [
+        (None, "a" * 40, 0, 0, None),
+        ("", "a" * 40, 0, 0, None),
+        (None, "b" * 64, 0, 0, None),
+        ("approved-rollback-sha", "", 1, 0, None),
+        ("candidate.1_2-3", "a" * 40, 0, 0, None),
+        ("v" * 64, "", 1, 0, None),
+        ("v" * 65, "", 1, 0, "must not exceed 64"),
+        ("bad version", "", 1, 0, "artifact identifier"),
+        ("bad\nversion", "", 1, 0, "artifact identifier"),
+        ("-bad", "", 1, 0, "artifact identifier"),
+        ("bad/identifier", "", 1, 0, "artifact identifier"),
+        (None, "", 1, 0, "Cannot determine"),
+        (None, "", 0, 0, "artifact identifier"),
+        (None, "a" * 40, 0, 1, "Failed to store"),
+    ],
+)
+def test_agent_version_hook_initializes_or_preserves_artifact_identity(
+    tmp_path: Path,
+    existing_version: str | None,
+    git_version: str,
+    git_exit: int,
+    set_exit: int,
+    error: str | None,
+) -> None:
+    script = REPO_ROOT / "hooks" / "ensure_agent_version.sh"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    git_log = tmp_path / "git.log"
+    azd_log = tmp_path / "azd.log"
+    fake_git = fake_bin / "git"
+    fake_git.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s\\0" "$@" >> "{git_log}"\n'
+        'printf "%s\\n" "$FAKE_GIT_VERSION"\n'
+        f"exit {git_exit}\n"
+    )
+    fake_git.chmod(0o755)
+    fake_azd = fake_bin / "azd"
+    fake_azd.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s\\0" "$@" >> "{azd_log}"\n'
+        "echo stored-value-sentinel\n"
+        f"exit {set_exit}\n"
+    )
+    fake_azd.chmod(0o755)
+    env = {
+        "PATH": f"{fake_bin}:/usr/bin:/bin",
+        "FAKE_GIT_VERSION": git_version,
+    }
+    if existing_version is not None:
+        env["CARD_ORCHESTRATOR_VERSION"] = existing_version
+
+    result = subprocess.run(
+        ["sh", str(script)],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode == (1 if error else 0)
+    assert result.stdout == ""
+    assert "stored-value-sentinel" not in result.stderr
+    if existing_version:
+        assert not git_log.exists()
+    else:
+        assert git_log.read_bytes().split(b"\0") == [b"rev-parse", b"--verify", b"HEAD", b""]
+    if error:
+        assert error in result.stderr
+        assert "stored for packaging" not in result.stderr
+    else:
+        assert "stored for packaging" in result.stderr
+    if error and error != "Failed to store":
+        assert not azd_log.exists()
+    else:
+        assert azd_log.read_bytes().split(b"\0") == [
+            b"env",
+            b"set",
+            b"CARD_ORCHESTRATOR_VERSION",
+            (existing_version or git_version).encode(),
+            b"",
+        ]
+
+
+@pytest.mark.parametrize("initial_version", [None, "approved-rollback-sha"])
+@pytest.mark.parametrize("endpoint_update_fails", [False, True])
 def test_agent_deployment_sync_hook_atomically_replaces_stale_rollback_version(
     tmp_path: Path,
+    initial_version: str | None,
+    endpoint_update_fails: bool,
 ) -> None:
     script = REPO_ROOT / "hooks" / "sync_agent_deployment.sh"
+    initialize_script = REPO_ROOT / "hooks" / "ensure_agent_version.sh"
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     state = tmp_path / "azd-state.json"
-    state.write_text(
-        json.dumps(
-            {
-                "AGENT_CARD_ORCHESTRATOR_NAME": "card-orchestrator",
-                "AGENT_CARD_ORCHESTRATOR_VERSION": "18",
-                "CARD_ORCHESTRATOR_VERSION": "approved-rollback-sha",
-                "FOUNDRY_AGENT_NAME": "card-orchestrator",
-                "FOUNDRY_AGENT_VERSION": "17",
-                "FOUNDRY_AGENT_EXPECTED_VERSION": "failed-release-sha",
-            }
-        )
-    )
+    endpoint_log = tmp_path / "endpoint.log"
+    initial_state = {
+        "AGENT_CARD_ORCHESTRATOR_NAME": "card-orchestrator",
+        "AGENT_CARD_ORCHESTRATOR_VERSION": "18",
+        "FOUNDRY_AGENT_NAME": "card-orchestrator",
+        "FOUNDRY_AGENT_VERSION": "17",
+        "FOUNDRY_AGENT_EXPECTED_VERSION": "failed-release-sha",
+        "AZURE_AI_PROJECT_ENDPOINT": "https://test.services.ai.azure.com/api/projects/cards",
+    }
+    if initial_version is not None:
+        initial_state["CARD_ORCHESTRATOR_VERSION"] = initial_version
+    state.write_text(json.dumps(initial_state))
     fake_azd = fake_bin / "azd"
     fake_azd.write_text(
         "#!/usr/bin/env python3\n"
@@ -1377,32 +1657,93 @@ def test_agent_deployment_sync_hook_atomically_replaces_stale_rollback_version(
         "        raise SystemExit(1)\n"
         "    print(value)\n"
         "elif sys.argv[1:3] == ['env', 'set']:\n"
-        "    updates = dict(argument.split('=', 1) for argument in sys.argv[3:])\n"
+        "    if len(sys.argv) == 5 and '=' not in sys.argv[3]:\n"
+        "        updates = {sys.argv[3]: sys.argv[4]}\n"
+        "    else:\n"
+        "        updates = dict(argument.split('=', 1) for argument in sys.argv[3:])\n"
         "    values.update(updates)\n"
         "    open(state_path, 'w').write(json.dumps(values))\n"
         "else:\n"
         "    raise SystemExit(2)\n"
     )
     fake_azd.chmod(0o755)
+    fake_az = fake_bin / "az"
+    fake_az.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        f"values = json.loads(open({str(state)!r}).read())\n"
+        "assert values['FOUNDRY_AGENT_VERSION'] == '17'\n"
+        "assert values['FOUNDRY_AGENT_EXPECTED_VERSION'] == 'failed-release-sha'\n"
+        "assert sys.argv[1:6] == ['rest', '--method', 'PATCH', '--resource', 'https://ai.azure.com']\n"
+        "assert sys.argv[6:9] == ['--url', "
+        "'https://test.services.ai.azure.com/api/projects/cards/agents/card-orchestrator"
+        "?api-version=2025-11-15-preview', '--body']\n"
+        "assert sys.argv[10:] == ['--output', 'none']\n"
+        "body = json.loads(sys.argv[9])\n"
+        "assert body == {'agent_endpoint': {'version_selector': {'version_selection_rules': ["
+        "{'type': 'FixedRatio', 'agent_version': '18', 'traffic_percentage': 100}]}, "
+        "'protocols': ['responses'], 'authorization_schemes': [{'type': 'Entra'}]}}\n"
+        f"open({str(endpoint_log)!r}, 'w').write('18')\n"
+        f"raise SystemExit({1 if endpoint_update_fails else 0})\n"
+    )
+    fake_az.chmod(0o755)
+    fake_git = fake_bin / "git"
+    fake_git.write_text("#!/bin/sh\n" f"echo {'a' * 40}\n")
+    fake_git.chmod(0o755)
+    env = {"PATH": f"{fake_bin}:/usr/bin:/bin"}
+    if initial_version is not None:
+        env["CARD_ORCHESTRATOR_VERSION"] = initial_version
+
+    initialized = subprocess.run(
+        ["sh", str(initialize_script)],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert initialized.returncode == 0
+    artifact_version = initial_version or "a" * 40
+    packaged_state = json.loads(state.read_text())
+    assert packaged_state["CARD_ORCHESTRATOR_VERSION"] == artifact_version
+    assert packaged_state["FOUNDRY_AGENT_EXPECTED_VERSION"] == "failed-release-sha"
 
     result = subprocess.run(
         ["sh", str(script)],
         capture_output=True,
         text=True,
-        env={"PATH": f"{fake_bin}:/usr/bin:/bin"},
+        env=env,
     )
+    assert endpoint_log.read_text() == "18"
+    if endpoint_update_fails:
+        assert result.returncode == 1
+        assert "Failed to pin the agent endpoint" in result.stderr
+        assert json.loads(state.read_text()) == packaged_state
+        return
     assert result.returncode == 0
     updated_state = json.loads(state.read_text())
     assert updated_state["FOUNDRY_AGENT_NAME"] == "card-orchestrator"
     assert updated_state["FOUNDRY_AGENT_VERSION"] == "18"
-    assert updated_state["FOUNDRY_AGENT_EXPECTED_VERSION"] == "approved-rollback-sha"
+    assert updated_state["FOUNDRY_AGENT_EXPECTED_VERSION"] == artifact_version
     assert "card-orchestrator" not in result.stdout
     assert "approved-rollback-sha" not in result.stdout
     assert "failed-release-sha" not in result.stderr
     assert "approved-rollback-sha" not in result.stderr
 
+    env["CARD_ORCHESTRATOR_VERSION"] = updated_state["CARD_ORCHESTRATOR_VERSION"]
+    fake_git.write_text("#!/bin/sh\nexit 1\n")
+    repeated = subprocess.run(
+        ["sh", str(initialize_script)],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert repeated.returncode == 0
+    assert json.loads(state.read_text()) == updated_state
 
-def test_agent_deployment_sync_hook_rejects_missing_platform_version(tmp_path: Path) -> None:
+
+@pytest.mark.parametrize("platform_version", ["", "18\ninvalid", '18"}', "@latest", "v" * 65])
+def test_agent_deployment_sync_hook_rejects_invalid_platform_version(
+    tmp_path: Path, platform_version: str
+) -> None:
     script = REPO_ROOT / "hooks" / "sync_agent_deployment.sh"
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -1411,6 +1752,8 @@ def test_agent_deployment_sync_hook_rejects_missing_platform_version(tmp_path: P
         "#!/bin/sh\n"
         'if [ "$1 $2 $3" = "env get-value AGENT_CARD_ORCHESTRATOR_NAME" ]; then\n'
         "  printf '%s\\n' card-orchestrator\n"
+        'elif [ "$1 $2 $3" = "env get-value AGENT_CARD_ORCHESTRATOR_VERSION" ]; then\n'
+        '  printf "%s\\n" "$TEST_PLATFORM_VERSION"\n'
         "fi\n"
     )
     fake_azd.chmod(0o755)
@@ -1419,11 +1762,61 @@ def test_agent_deployment_sync_hook_rejects_missing_platform_version(tmp_path: P
         ["sh", str(script)],
         capture_output=True,
         text=True,
-        env={"PATH": f"{fake_bin}:/usr/bin:/bin"},
+        env={
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+            "TEST_PLATFORM_VERSION": platform_version,
+        },
     )
 
     assert result.returncode == 1
     assert "version" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "project_endpoint",
+    [
+        "",
+        "http://test.services.ai.azure.com/api/projects/cards",
+        "https://unexpected.invalid/api/projects/cards",
+        "https://test.services.ai.azure.com/api/projects/cards?unexpected=true",
+        "https://test.services.ai.azure.com/api/projects/cards\ninvalid",
+        "https://user@test.services.ai.azure.com/api/projects/cards",
+    ],
+)
+def test_agent_deployment_sync_hook_rejects_invalid_project_before_token_request(
+    tmp_path: Path, project_endpoint: str
+) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    log = tmp_path / "mutations.log"
+    fake_azd = fake_bin / "azd"
+    fake_azd.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1 $2" = "env get-value" ]; then\n'
+        '  case "$3" in\n'
+        "    AGENT_CARD_ORCHESTRATOR_NAME) echo card-orchestrator ;;\n"
+        "    AGENT_CARD_ORCHESTRATOR_VERSION) echo 18 ;;\n"
+        "    CARD_ORCHESTRATOR_VERSION) echo release-1 ;;\n"
+        '    AZURE_AI_PROJECT_ENDPOINT) printf "%s\\n" "$TEST_ENDPOINT" ;;\n'
+        "  esac\n"
+        "else\n"
+        f'  echo unexpected-env-write >> "{log}"\n'
+        "fi\n"
+    )
+    fake_azd.chmod(0o755)
+    fake_az = fake_bin / "az"
+    fake_az.write_text("#!/bin/sh\n" f'echo unexpected-api-call >> "{log}"\n')
+    fake_az.chmod(0o755)
+
+    result = subprocess.run(
+        ["sh", str(REPO_ROOT / "hooks/sync_agent_deployment.sh")],
+        capture_output=True,
+        text=True,
+        env={"PATH": f"{fake_bin}:/usr/bin:/bin", "TEST_ENDPOINT": project_endpoint},
+    )
+    assert result.returncode == 1
+    assert "AZURE_AI_PROJECT_ENDPOINT must be a valid Foundry project URL" in result.stderr
+    assert not log.exists()
 
 
 def test_agent_deployment_sync_hook_rejects_missing_artifact_before_env_change(

@@ -15,7 +15,8 @@ only.
    web-nat.
 2. **Service lifecycle hooks** — `hooks/guard_agent_deploy.sh` is registered on
    `prebuild`, `prepackage`, `prepublish`, and `predeploy` to block
-   build/package/push/deploy unless `CARD_ORCHESTRATOR_ENABLE_PREREQUISITES=true`.
+   build/package/push/deploy unless `CARD_ORCHESTRATOR_ENABLE_PREREQUISITES=true`
+   and both the text model deployment and application artifact version are valid.
 3. **Root `deploy.sh`** — production-safe orchestrator with
    `--approve-change` / `--approve-prod` enforcement gates.
 
@@ -49,6 +50,16 @@ azd provision
 azd deploy web-nat
 ```
 
+The root preprovision hook initializes a missing `CARD_ORCHESTRATOR_VERSION`
+from the current Git commit before the agent is packaged. It preserves an
+existing value, including an explicitly selected rollback version. For a new
+release, set the intended commit before packaging; standalone agent
+package/deploy commands do not initialize this value. Missing Git metadata,
+invalid versions and persistence errors stop provisioning.
+Provisioning exports the existing text deployment name as
+`AZURE_AI_MODEL_DEPLOYMENT_NAME`; an empty model name is rejected by every agent
+lifecycle guard.
+
 Or via the root orchestrator:
 
 ```bash
@@ -76,14 +87,24 @@ path.
 The agent `postdeploy` hook reads azd's generated
 `AGENT_CARD_ORCHESTRATOR_NAME` and `AGENT_CARD_ORCHESTRATOR_VERSION`, validates
 their bounded shapes, and reads the explicitly selected
-`CARD_ORCHESTRATOR_VERSION` artifact identity. It validates all three before one
-`azd env set` transaction persists `FOUNDRY_AGENT_NAME`,
+`CARD_ORCHESTRATOR_VERSION` artifact identity. It validates all three and the
+Foundry project URL, then patches the Foundry agent endpoint with `az rest` using
+the emitted concrete version, Responses protocol and Entra authentication.
+The installed azd extension does not expand variables inside `agentEndpoint`,
+so the dynamic pin is applied by this hook rather than a manifest placeholder.
+Only after that succeeds,
+one `azd env set` transaction persists `FOUNDRY_AGENT_NAME`,
 `FOUNDRY_AGENT_VERSION`, and `FOUNDRY_AGENT_EXPECTED_VERSION`. It never derives
 a version from logs or exception text. The following provision injects the
 triplet atomically; Bicep omits all three during initial placeholder
 provisioning and rejects a partial triplet. Agent deploy and rollback therefore
 fail before changing web configuration state when the artifact identity is
 missing or malformed.
+The manifest supplies an initial `@latest` selector; after every agent deployment,
+the postdeploy update pins 100% of endpoint traffic to the emitted platform version.
+Readiness intentionally rejects `@latest`, even when it currently resolves to
+the expected version. Do not relax that check or bypass Container Apps readiness
+to activate a new web revision.
 The second provision does not rotate an existing managed Entra client secret:
 the credential hook now creates a secret only when the azd environment has none.
 Clear `ENTRA_CLIENT_SECRET` only for an explicit, coordinated rotation.

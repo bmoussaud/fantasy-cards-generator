@@ -98,11 +98,19 @@ Three layers keep hosted-agent deployment explicit:
 ```bash
 azd env new dev
 azd env set AZURE_LOCATION eastus2
-azd env set CARD_ORCHESTRATOR_VERSION "$(git rev-parse HEAD)"
 azd env set CARD_ORCHESTRATOR_ENABLE_PREREQUISITES true
 azd env set CARD_ORCHESTRATOR_CREATE_REGISTRY_CONNECTION true
 azd up
 ```
+
+Before provisioning, `hooks/ensure_agent_version.sh` initializes an unset
+`CARD_ORCHESTRATOR_VERSION` from the current Git commit and persists it in the
+selected azd environment. Existing values are validated and preserved so the
+second provision cannot change the packaged artifact's identity. This is a
+default, not automatic release advancement: explicitly set the intended commit
+before packaging a new release or rollback. Without Git metadata, provide an
+explicit version. Standalone agent package/deploy commands must have the value
+set already; they do not run preprovision hooks.
 
 The first provision uses the public placeholder image and omits both hosted-agent
 environment variables. Agent deployment then writes
@@ -121,6 +129,28 @@ so the empty value intentionally selects the public bootstrap image until
 The second provision reuses an existing `ENTRA_CLIENT_SECRET`; the
 postprovision hook creates one only when the managed registration has no stored
 secret. Clear that azd value only for an explicit, coordinated rotation.
+
+When the resource group and app name are configured, the image-preservation
+hook first checks that Azure CLI can obtain an Azure Resource Manager token.
+If it cannot, the hook stops and asks you to run `az login` and retry.
+Signing in with `azd auth login` alone does not authenticate `az`.
+The check never starts an interactive login or prints the token. A successful
+token check does not guarantee Container Apps permissions; image lookup
+failures are still handled separately.
+
+To inspect the current web image manually, replace the placeholders and keep
+the entire JMESPath query in double quotes:
+
+```bash
+az containerapp list --resource-group <resource-group> --query "[?name=='<app-name>'].properties.template.containers[0].image | [0]" --output tsv
+```
+
+The hook already passes this query as one argument. `/bin/sh` xtrace output
+(`set -x`) is not reliably copyable shell input: it can omit protective quotes.
+Pasting an unquoted query makes the shell interpret `|` as a pipeline and try
+to execute `[0]`, causing `[0]: command not found` and an invalid JMESPath
+argument. Keep tracing disabled in the hook so resource and image values are
+not logged.
 
 ### Existing environment deployment
 
@@ -168,7 +198,8 @@ Do not use bare `azd deploy` with this manifest. Supported entrypoints are
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `CARD_ORCHESTRATOR_VERSION` | none | Immutable application build identifier used for the agent image/tag |
+| `CARD_ORCHESTRATOR_VERSION` | Git HEAD when unset during root preprovision | Immutable application build identifier used for the agent image/tag; existing values are preserved |
+| `AZURE_AI_MODEL_DEPLOYMENT_NAME` | Provisioned text deployment output | Required model deployment for the agent; exported from `aiFoundryTextDeploymentName` |
 | `CARD_ORCHESTRATOR_ENABLE_PREREQUISITES` | `false` | Must be set to `true` before the first agent deployment |
 | `CARD_ORCHESTRATOR_CREATE_REGISTRY_CONNECTION` | `false` | Set to `true` for a fresh project so Foundry can pull from ACR |
 | `CARD_ORCHESTRATOR_ENABLE_AGENT_ALERTS` | `false` | Enable agent monitoring alert rules |
@@ -196,6 +227,15 @@ prints the planned azd commands and exits without starting azd.
 The service-level `prebuild`/`prepackage`/`prepublish`/`predeploy`
 hooks are the raw-azd guards that prevent build, package, push, and deploy
 before prerequisite opt-in.
+They also reject missing or malformed model deployment and application version
+values before publishing. `sync_agent_deployment.sh` uses `az rest` to pin the
+endpoint to azd's new `AGENT_CARD_ORCHESTRATOR_VERSION`, preserving the Responses
+protocol and Entra authentication, before storing the web identity triplet.
+The installed azd extension does not interpolate variables inside
+`agentEndpoint`; dynamic version selection is therefore applied by the hook.
+If pinning fails, web identity state is not updated. After every agent deployment,
+the postdeploy hook must replace the manifest's initial `@latest` selector with
+the concrete version before the new web configuration becomes ready.
 
 ### Deprecated files
 
@@ -222,7 +262,6 @@ Use the normal azd workflow:
 ```bash
 azd env new dev
 azd env set AZURE_LOCATION eastus2
-azd env set CARD_ORCHESTRATOR_VERSION "$(git rev-parse HEAD)"
 azd env set CARD_ORCHESTRATOR_ENABLE_PREREQUISITES true
 azd env set CARD_ORCHESTRATOR_CREATE_REGISTRY_CONNECTION true
 azd env set LEGACY_COSMOS_IP_RULE 20.10.253.231
