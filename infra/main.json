@@ -6,7 +6,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.46.1.21595",
-      "templateHash": "10524219877568902696"
+      "templateHash": "14027049556108286502"
     }
   },
   "parameters": {
@@ -9339,6 +9339,10 @@
     "AZURE_AI_PROJECT_NAME": {
       "type": "string",
       "value": "[reference('aiFoundry').outputs.aiFoundryProjectName.value]"
+    },
+    "AZURE_AI_MODEL_DEPLOYMENT_NAME": {
+      "type": "string",
+      "value": "[reference('aiFoundry').outputs.aiFoundryTextDeploymentName.value]"
     },
     "AZURE_CONTAINER_REGISTRY_RESOURCE_ID": {
       "type": "string",

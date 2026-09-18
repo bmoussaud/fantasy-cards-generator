@@ -84,11 +84,17 @@ Provision the application with Azure Developer CLI:
 ```bash
 azd env new dev
 azd env set AZURE_LOCATION eastus2
-azd env set CARD_ORCHESTRATOR_VERSION "$(git rev-parse HEAD)"
 azd env set CARD_ORCHESTRATOR_ENABLE_PREREQUISITES true
 azd env set CARD_ORCHESTRATOR_CREATE_REGISTRY_CONNECTION true
 azd up
 ```
+
+The preprovision hook initializes an unset `CARD_ORCHESTRATOR_VERSION` from
+`git rev-parse HEAD` and persists it before agent packaging. An explicit or
+previously stored version is preserved, including on the second provision.
+For a new release or rollback, set it to the intended source commit before
+packaging; never reuse an identifier for different agent code. A standalone
+`azd deploy card-orchestrator` does not run this provisioning hook.
 
 `azd up` performs the clean bootstrap in dependency order: it provisions the
 shared Foundry/ACR/Container Apps resources with the public placeholder image,
@@ -108,6 +114,13 @@ environment, the empty value still selects the public placeholder until the
 first web deployment. The repeated provision also does not rotate an existing
 managed Entra client secret; clear that azd value only as part of an explicit
 credential-rotation operation.
+
+Provisioning also exports the existing text model deployment as
+`AZURE_AI_MODEL_DEPLOYMENT_NAME`; agent lifecycle hooks reject a missing model
+or artifact version before publication. After agent deployment, the postdeploy
+hook pins the Foundry endpoint to that exact platform version with 100% traffic
+before storing the web configuration. `@latest` is only a bootstrap selector,
+not an acceptable steady-state readiness configuration.
 
 The workload-profile Container Apps environment uses the delegated `aca-infra`
 subnet and a NAT Gateway with a static public IP for public-service egress.

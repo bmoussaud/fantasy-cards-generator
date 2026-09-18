@@ -473,16 +473,55 @@ def test_predeploy_guard_rejects_unset_prerequisites() -> None:
 
 
 def test_predeploy_guard_allows_enabled_prerequisites() -> None:
-    """The guard script exits zero when CARD_ORCHESTRATOR_ENABLE_PREREQUISITES=true."""
+    """The guard permits an explicitly enabled, fully configured agent build."""
     guard = ROOT / "hooks/guard_agent_deploy.sh"
 
     result = subprocess.run(
         ["bash", str(guard)],
         capture_output=True,
         text=True,
-        env={"PATH": "/usr/bin:/bin", "CARD_ORCHESTRATOR_ENABLE_PREREQUISITES": "true"},
+        env={
+            "PATH": "/usr/bin:/bin",
+            "CARD_ORCHESTRATOR_ENABLE_PREREQUISITES": "true",
+            "AZURE_AI_MODEL_DEPLOYMENT_NAME": "text-model",
+            "CARD_ORCHESTRATOR_VERSION": "a" * 40,
+        },
     )
     assert result.returncode == 0
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("AZURE_AI_MODEL_DEPLOYMENT_NAME", ""),
+        ("AZURE_AI_MODEL_DEPLOYMENT_NAME", "bad model"),
+        ("AZURE_AI_MODEL_DEPLOYMENT_NAME", "bad\nmodel"),
+        ("AZURE_AI_MODEL_DEPLOYMENT_NAME", "m" * 129),
+        ("CARD_ORCHESTRATOR_VERSION", ""),
+        ("CARD_ORCHESTRATOR_VERSION", "@latest"),
+        ("CARD_ORCHESTRATOR_VERSION", "bad\nversion"),
+        ("CARD_ORCHESTRATOR_VERSION", "v" * 65),
+    ],
+)
+def test_predeploy_guard_rejects_missing_or_invalid_build_configuration(
+    key: str, value: str
+) -> None:
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "CARD_ORCHESTRATOR_ENABLE_PREREQUISITES": "true",
+        "AZURE_AI_MODEL_DEPLOYMENT_NAME": "text-model",
+        "CARD_ORCHESTRATOR_VERSION": "a" * 40,
+    }
+    env[key] = value
+    result = subprocess.run(
+        ["sh", str(ROOT / "hooks/guard_agent_deploy.sh")],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert result.returncode == 1
+    assert key in result.stderr
+    assert "proceeding" not in result.stdout
 
 
 def test_root_orchestrator_preserves_approval_gates() -> None:

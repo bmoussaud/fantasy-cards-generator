@@ -717,6 +717,7 @@ output AZURE_AI_PROJECT_ENDPOINT string = aiFoundry.outputs.aiFoundryProjectEndp
 output FOUNDRY_PROJECT_ENDPOINT string = aiFoundry.outputs.aiFoundryProjectEndpoint
 output AZURE_AI_ACCOUNT_NAME string = aiFoundry.outputs.aiFoundryAccountName
 output AZURE_AI_PROJECT_NAME string = aiFoundry.outputs.aiFoundryProjectName
+output AZURE_AI_MODEL_DEPLOYMENT_NAME string = aiFoundry.outputs.aiFoundryTextDeploymentName
 output AZURE_CONTAINER_REGISTRY_RESOURCE_ID string = registry.outputs.registryResourceId
 output AZURE_AI_PROJECT_ACR_CONNECTION_NAME string = enableCardOrchestratorPrerequisites && createRegistryConnection && empty(registryConnectionName)
   ? '${registryName}-conn'

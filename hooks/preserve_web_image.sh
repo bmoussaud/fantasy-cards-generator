@@ -15,6 +15,13 @@ if [ -z "$resource_group" ] || [ -z "$container_app" ]; then
   exit 0
 fi
 
+if ! az account get-access-token \
+  --resource https://management.azure.com/ \
+  --output none >/dev/null 2>&1; then
+  echo "ERROR: Unable to obtain an Azure CLI token. Run 'az login' and retry." >&2
+  exit 1
+fi
+
 if ! current_image="$(
   az containerapp list \
     --resource-group "$resource_group" \

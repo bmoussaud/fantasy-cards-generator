@@ -33,6 +33,16 @@ services:
     protocols:
       - protocol: responses
         version: "2.0.0"
+    agentEndpoint:
+      protocols:
+        - responses
+      authorizationSchemes:
+        - type: Entra
+      versionSelector:
+        versionSelectionRules:
+          - type: FixedRatio
+            agentVersion: "@latest"
+            trafficPercentage: 100
     environmentVariables:
       - name: AZURE_AI_MODEL_DEPLOYMENT_NAME
         value: ${AZURE_AI_MODEL_DEPLOYMENT_NAME}
@@ -85,6 +95,9 @@ workflows:
     - azd: deploy web-nat
 hooks:
   preprovision:
+    # Initialize the build identifier before the agent deployment step.
+    - shell: sh
+      run: ./hooks/ensure_agent_version.sh
     # Preserve an existing deployed web image so repeat provisioning cannot
     # replace it with the first-deploy bootstrap container.
     - shell: sh
