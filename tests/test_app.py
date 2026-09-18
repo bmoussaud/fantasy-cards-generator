@@ -450,22 +450,24 @@ const photo = (photoId, createdAt, source = null) => ({
     photo("ms-2", "2026-09-17T10:00:00Z", importedSource),
   ]);
   await flush();
-  assert.equal(allImported.savedId.value, "");
-  assert.equal(allImported.clear.hidden, true);
-  assert.equal(allImported.grid.children[0].attributes["aria-pressed"], "false");
+  assert.equal(allImported.savedId.value, "ms-1");
+  assert.equal(allImported.clear.hidden, false);
+  assert.equal(allImported.grid.children[0].attributes["aria-pressed"], "true");
   assert.equal(allImported.grid.children[1].attributes["aria-pressed"], "false");
+  assert.match(allImported.feedback.textContent, /default saved reference photo/);
 
   const mixed = mountGenerator([
     photo("ms-newest", "2026-09-18T10:00:00Z", importedSource),
     photo("eligible-next", "2026-09-17T10:00:00Z"),
   ]);
   await flush();
+  assert.equal(mixed.savedId.value, "ms-newest");
+  assert.equal(mixed.grid.children[0].attributes["aria-pressed"], "true");
+  assert.equal(mixed.grid.children[1].attributes["aria-pressed"], "false");
+  mixed.grid.children[1].handlers.click();
   assert.equal(mixed.savedId.value, "eligible-next");
   assert.equal(mixed.grid.children[0].attributes["aria-pressed"], "false");
   assert.equal(mixed.grid.children[1].attributes["aria-pressed"], "true");
-  mixed.grid.children[0].handlers.click();
-  assert.equal(mixed.savedId.value, "ms-newest");
-  assert.equal(mixed.grid.children[0].attributes["aria-pressed"], "true");
 
   oneEligible.clear.handlers.click();
   assert.equal(oneEligible.savedId.value, "");

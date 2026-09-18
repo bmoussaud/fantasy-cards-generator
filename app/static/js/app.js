@@ -6,7 +6,6 @@
 (function () {
   "use strict";
   var ALLOWED_PHOTO_TYPES = ["image/jpeg", "image/png", "image/webp"];
-  var PROFILE_PHOTO_IMPORT_SOURCE = "entra-profile-photo";
 
   function formatPhotoSize(bytes) {
     if (bytes < 1024 * 1024) {
@@ -280,15 +279,7 @@
         return;
       }
 
-      var defaultPhotoId = "";
-      photos.some(function (photo) {
-        var source = photo && photo.source;
-        if (source === PROFILE_PHOTO_IMPORT_SOURCE) {
-          return false;
-        }
-        defaultPhotoId = photo.photoId || "";
-        return Boolean(defaultPhotoId);
-      });
+      var defaultPhotoId = (photos[0] && photos[0].photoId) || "";
 
       var defaultButton = null;
       photos.forEach(function (photo) {
