@@ -1097,6 +1097,39 @@ def test_production_container_starts_through_telemetry_first_entrypoint() -> Non
     assert "opentelemetry-instrumentation-httpx" in pyproject
 
 
+def test_compiled_agent_detail_setting_defaults_on_and_reaches_web_unchanged() -> None:
+    template = _compile_bicep(REPO_ROOT / "infra/main.bicep")
+    assert template["parameters"]["environmentName"]["allowedValues"] == ["dev", "prod"]
+    assert template["parameters"]["agentTraceEnabled"]["type"] == "string"
+    assert template["parameters"]["agentTraceEnabled"]["defaultValue"] == "true"
+    assert "allowedValues" not in template["parameters"]["agentTraceEnabled"]
+    deployment = template["resources"]["containerApps"]
+    assert deployment["properties"]["parameters"]["agentTraceEnabled"] == {
+        "value": "[parameters('agentTraceEnabled')]"
+    }
+    container_template = deployment["properties"]["template"]
+    assert container_template["parameters"]["agentTraceEnabled"]["defaultValue"] == "true"
+    environment = container_template["variables"]["containerAppEnv"]
+    assert environment.startswith("[concat(createArray(")
+    assert environment.count("'AGENT_TRACE_ENABLED'") == 1
+    assert (
+        "createObject('name', 'AGENT_TRACE_ENABLED', 'value', parameters('agentTraceEnabled'))"
+        in environment
+    )
+    for name in ("TELEMETRY_ENABLED", "AZURE_EXPERIMENTAL_ENABLE_GENAI_TRACING"):
+        assert f"createObject('name', '{name}', 'value', 'true')" in environment
+    container = next(
+        resource
+        for resource in container_template["resources"]
+        if resource["type"] == "Microsoft.App/containerApps"
+    )
+    assert container["properties"]["template"]["containers"][0]["env"] == (
+        "[variables('containerAppEnv')]"
+    )
+    parameters = json.loads((REPO_ROOT / "infra/main.parameters.json").read_text())["parameters"]
+    assert parameters["agentTraceEnabled"]["value"] == "${AGENT_TRACE_ENABLED=true}"
+
+
 def test_preprovision_hook_guards_session_secret() -> None:
     """Verify ensure_session_secret.sh guards APP_SESSION_SECRET_KEY before provision.
 
@@ -1144,6 +1177,8 @@ def test_azd_yaml_wires_preprovision_session_secret_hook() -> None:
         if line.strip() and not line.lstrip().startswith("#")
     ]
     assert active_lines == [
+        "    - shell: sh",
+        "      run: python3 ./hooks/validate_agent_trace.py",
         "    - shell: sh",
         "      run: ./hooks/ensure_agent_version.sh",
         "    - shell: sh",
@@ -1511,9 +1546,11 @@ def test_root_manifest_hooks_stamp_agent_identity_after_deploy() -> None:
     assert "postdeploy:" in azure_yaml
     assert "sync_agent_deployment.sh" in azure_yaml
     assert azure_yaml.count("prebuild:") == 1
-    assert azure_yaml.count("prepackage:") == 1
-    assert azure_yaml.count("prepublish:") == 1
-    assert azure_yaml.count("predeploy:") == 1
+    service = azure_yaml.split("\n  card-orchestrator:\n", 1)[1].split("\nresources:", 1)[0]
+    root_hooks = azure_yaml.split("\nhooks:\n", 1)[1]
+    for event in ("prepackage:", "prepublish:", "predeploy:"):
+        assert service.count(event) == 1
+        assert root_hooks.count(event) == 1
     assert "guard_agent_deploy" in azure_yaml
     assert (
         "    agentEndpoint:\n"

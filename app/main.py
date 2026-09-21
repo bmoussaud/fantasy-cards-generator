@@ -114,6 +114,8 @@ class ParsedCardGenerateRequest:
 
 
 def create_app(services: AppServices | None = None) -> FastAPI:
+    from app.agent_detail import DetailReleaseMiddleware
+
     configure_auth_access_logging()
     auth_settings = load_auth_settings()
     app_settings = load_app_settings()
@@ -1198,6 +1200,7 @@ def create_app(services: AppServices | None = None) -> FastAPI:
         payload, content_type = await card_service.fetch_image(owner, card_id)
         return StreamingResponse(iter([payload]), media_type=content_type)
 
+    app.add_middleware(DetailReleaseMiddleware, enabled=app_services.settings.agent_trace_enabled)
     return app
 
 

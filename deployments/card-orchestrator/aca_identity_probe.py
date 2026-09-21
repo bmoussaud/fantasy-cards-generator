@@ -48,7 +48,7 @@ def parser_source():
     imports = (
         "from __future__ import annotations\n"
         "import json\nimport re\n"
-        "from collections.abc import Mapping\nfrom dataclasses import dataclass\n"
+        "from collections.abc import Mapping\nfrom dataclasses import dataclass, field\n"
         "from typing import Any, Literal\n"
         "from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator\n"
         "from app.generation import GeneratedCardModel\n"

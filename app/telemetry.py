@@ -37,6 +37,7 @@ PROFILE_PHOTO_IMPORT_EVENTS = {
     "auth.profile_photo_import_reset_failed",
 }
 SAFE_EVENTS = {
+    "agent.detail.omitted",
     "exception",
     "request.completed",
     "request.failed",
@@ -197,6 +198,7 @@ SAFE_ERROR_CODES = {
     "photo_moderation_unconfigured",
 }
 SAFE_ATTRIBUTE_KEYS = {
+    "fcg.detail.omission",
     "app.request_id",
     "fcg.operation",
     "fcg.outcome",
@@ -488,7 +490,7 @@ def safe_log(
     attributes: dict[str, Any] | None = None,
 ) -> None:
     profile_import_event = name in PROFILE_PHOTO_IMPORT_EVENTS
-    if not _enabled and not profile_import_event:
+    if not _enabled and not profile_import_event and name != "agent.detail.omitted":
         return
     if name not in SAFE_EVENTS:
         name = "generation.failed"
@@ -507,6 +509,8 @@ def safe_log(
             f"error_code={extra.get('fcg_error_code', 'internal_error')} "
             f"http_status={extra.get('http_response_status_code', 'none')}"
         )
+    elif name == "agent.detail.omitted":
+        name = f"{name} reason={extra.get('fcg_detail_omission', 'capture_failure')}"
     _logger.log(level, name, extra=extra)
 
 
@@ -780,7 +784,28 @@ def safe_attributes(attributes: dict[str, Any]) -> dict[str, Any]:
     for key, value in attributes.items():
         if key not in SAFE_ATTRIBUTE_KEYS:
             continue
-        if key == "app.request_id":
+        if key == "fcg.detail.omission":
+            safe[key] = _bounded_value(
+                value,
+                {
+                    "omitted_budget",
+                    "invalid_extension",
+                    "invalid_safety",
+                    "export_failure",
+                    "instrumentation_failure",
+                    "unvalidated_instruction",
+                    "unvalidated",
+                    "suppressed_policy",
+                    "capture_failure",
+                    "capture_capacity",
+                    "duplicate_operation",
+                    "response_unvalidated",
+                    "invalid_export",
+                    "not_recording",
+                },
+                "capture_failure",
+            )
+        elif key == "app.request_id":
             if valid_request_id(value):
                 safe[key] = value
         elif key == "fcg.operation":
@@ -1015,18 +1040,21 @@ def _replace_span_attributes(span: Any) -> None:
     attributes = getattr(span, "_attributes", None)
     if attributes is None:
         return
+    from app.agent_detail import export_attributes
+
+    retained = _safe_span_attributes(attributes) | export_attributes(span)
     try:
         from opentelemetry.attributes import BoundedAttributes
 
         limits = getattr(span, "_limits", None)
         span._attributes = BoundedAttributes(
             maxlen=getattr(limits, "max_span_attributes", 128),
-            attributes=_safe_span_attributes(attributes),
+            attributes=retained,
             immutable=True,
             max_value_len=getattr(limits, "max_span_attribute_length", None),
         )
     except (AttributeError, ImportError):
-        span._attributes = _safe_span_attributes(attributes)
+        span._attributes = retained
 
 
 def _replace_span_events(span: Any) -> None:

@@ -39,6 +39,9 @@ param telemetryEnvironmentName string
 @description('Parent-consistent trace sampling ratio passed to OpenTelemetry.')
 param telemetrySamplingRatio string = '1.0'
 
+@description('Application-owned agent detail tracing. Passed unchanged for strict runtime true/false validation.')
+param agentTraceEnabled string = 'true'
+
 @secure()
 @description('Application Insights connection string used by the app foundation.')
 param appInsightsConnectionString string
@@ -283,6 +286,10 @@ var containerAppEnv = concat(
     {
       name: 'TELEMETRY_ENABLED'
       value: 'true'
+    }
+    {
+      name: 'AGENT_TRACE_ENABLED'
+      value: agentTraceEnabled
     }
     {
       name: 'AZURE_EXPERIMENTAL_ENABLE_GENAI_TRACING'

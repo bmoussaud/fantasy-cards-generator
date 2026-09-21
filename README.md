@@ -56,6 +56,14 @@ registration details.
 uv run pytest -q
 ```
 
+To include hosted-agent integration and detailed telemetry coverage (also run in CI):
+
+```bash
+uv run --extra hosted-agent pytest -q
+```
+
+Hosted-agent tests are skipped when their optional SDK dependencies are not installed.
+
 The issue qualification and remote Copilot execution process is documented in
 [`docs/issue-to-copilot-workflow.md`](docs/issue-to-copilot-workflow.md).
 

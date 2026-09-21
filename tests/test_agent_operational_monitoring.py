@@ -6,10 +6,12 @@ import json
 import subprocess
 from pathlib import Path
 
+from tests.test_hosted_agent_deployment_config import _root_agent_environment
+
 ROOT = Path(__file__).resolve().parents[1]
 DEPLOYMENT = ROOT / "deployments/card-orchestrator"
 AGENT_INFRA = DEPLOYMENT / "infra"
-AGENT_MONITORING = AGENT_INFRA / "modules/agent-monitoring.bicep"
+AGENT_MONITORING = ROOT / "infra/modules/agent-monitoring.bicep"
 
 
 def _compile(path: Path) -> dict:
@@ -97,12 +99,9 @@ def test_root_infra_links_application_insights_to_foundry_without_azd_secret_out
 
 
 def test_manifest_enables_custom_metrics_without_redeclaring_reserved_values() -> None:
-    manifest = json.loads((DEPLOYMENT / "azure.yaml").read_text())
-    environment = {
-        item["name"]: item["value"]
-        for item in manifest["services"]["card-orchestrator"]["environmentVariables"]
-    }
+    environment = _root_agent_environment()
     assert environment["TELEMETRY_ENABLED"] == "true"
+    assert environment["AGENT_TRACE_ENABLED"] == "${AGENT_TRACE_ENABLED=true}"
     assert environment["TELEMETRY_ENVIRONMENT"] == "${AZURE_ENV_NAME}"
     assert environment["AZURE_EXPERIMENTAL_ENABLE_GENAI_TRACING"] == "true"
     assert "APPLICATIONINSIGHTS_CONNECTION_STRING" not in environment
@@ -161,10 +160,43 @@ def test_runbook_uses_immutable_redeployment_and_preserves_web_image() -> None:
 
 
 def test_prod_path_is_executable_but_requires_explicit_second_approval() -> None:
-    launcher = (DEPLOYMENT / "deploy.py").read_text()
+    launcher = (ROOT / "deploy.sh").read_text()
     runbook = (ROOT / "docs/agent-operational-ownership.md").read_text()
-    assert 'choices=("dev", "prod")' in launcher
+    assert '"$ENVIRONMENT" != "dev" && "$ENVIRONMENT" != "prod"' in launcher
     assert "--approve-prod" in launcher
     assert "--approve-prod" in (DEPLOYMENT / "aca_identity_probe.py").read_text()
     assert "--environment prod" in runbook
     assert "--approve-prod" in runbook
+
+
+def test_runbooks_use_root_deployment_and_define_detail_rollout_gates() -> None:
+    runbook = (ROOT / "docs/agent-operational-ownership.md").read_text()
+    monitoring = (ROOT / "docs/operational-monitoring.md").read_text()
+    operations = (ROOT / "docs/foundry-agent-operations.md").read_text()
+    assert "./deploy.sh agent --approve-change" in runbook
+    assert "./deploy.sh provision --approve-change" in runbook
+    assert "cd deployments/card-orchestrator" not in runbook
+    assert "python deploy.py" not in runbook
+    for document in (runbook, monitoring, operations):
+        for required in (
+            "AGENT_TRACE_ENABLED",
+            "configure_telemetry()",
+            "invoke_agent",
+            "NoResponseStore",
+            "terminal",
+            "startup",
+        ):
+            assert required in document
+    for required in (
+        "2 KiB UTF-8",
+        "8 KiB",
+        "24 KiB HOSTED-source + 24 KiB WEB-source",
+        "3 HOSTED-source + 5 WEB-source",
+        "16 HOSTED + 16 WEB",
+        "16, no waiting",
+        "inherited RBAC",
+        "Card/account deletion does not automatically delete",
+        "not a universal PII guarantee",
+        "not retroactively attached",
+    ):
+        assert required in monitoring
