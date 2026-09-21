@@ -32,7 +32,7 @@ explicitly authorized `azd` operation.
 
 ### Agent detail telemetry (#159 r1)
 
-`AGENT_TRACE_ENABLED` defaults to `true` in both dev and prod. Root `azure.yaml`
+`FCG_AGENT_TRACE_ENABLED` defaults to `true` in both dev and prod. Root `azure.yaml`
 injects it into HOSTED; `main.parameters.json` passes the same azd setting through
 the string `agentTraceEnabled` parameter into WEB. Bicep preserves the resolved
 string for runtime validation: trimmed case-insensitive true/false are accepted,

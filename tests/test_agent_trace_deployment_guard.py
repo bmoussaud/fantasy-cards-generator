@@ -11,7 +11,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 HOOK = ROOT / "hooks/validate_agent_trace.py"
-ERROR = "ERROR: AGENT_TRACE_ENABLED must be true or false when set."
+ERROR = "ERROR: FCG_AGENT_TRACE_ENABLED must be true or false when set."
 VALUES = [
     None,
     "",
@@ -52,6 +52,7 @@ def _environment() -> dict[str, str]:
         "PATH": os.defpath,
         "PYTHONIOENCODING": "utf-8",
         "UNRELATED_SECRET": "unrelated-secret-canary",
+        "AGENT_TRACE_ENABLED": "platform-owned-value",
     }
 
 
@@ -59,7 +60,7 @@ def _environment() -> dict[str, str]:
 def test_raw_setting_validation(value: str | None) -> None:
     env = _environment()
     if value is not None:
-        env["AGENT_TRACE_ENABLED"] = value
+        env["FCG_AGENT_TRACE_ENABLED"] = value
     result = subprocess.run(
         [sys.executable, str(HOOK)], env=env, capture_output=True, text=True, check=False
     )
@@ -148,7 +149,7 @@ def test_real_azd_preserves_raw_setting_for_guard(
     command = [azd, "--cwd", str(project)]
     if value is not None:
         result = subprocess.run(
-            [*command, "env", "set", "AGENT_TRACE_ENABLED", value, "--no-prompt"],
+            [*command, "env", "set", "FCG_AGENT_TRACE_ENABLED", value, "--no-prompt"],
             env=env,
             capture_output=True,
             text=True,
@@ -156,7 +157,7 @@ def test_real_azd_preserves_raw_setting_for_guard(
         )
         assert result.returncode == 0, result.stdout + result.stderr
         # Persisted azd state must win even over a valid inherited shell value.
-        env["AGENT_TRACE_ENABLED"] = "true"
+        env["FCG_AGENT_TRACE_ENABLED"] = "true"
     # Exercise the actual azd hook runner against the root manifest, not a shell
     # approximation of substitution. Only the guard and local tripwires can run.
     for event in EVENTS:
@@ -176,7 +177,7 @@ def test_real_azd_preserves_raw_setting_for_guard(
         assert (project / "downstream.log").exists() == valid
     if value is not None:
         result = subprocess.run(
-            [*command, "env", "get-value", "AGENT_TRACE_ENABLED", "--no-prompt"],
+            [*command, "env", "get-value", "FCG_AGENT_TRACE_ENABLED", "--no-prompt"],
             env=env,
             capture_output=True,
             text=True,

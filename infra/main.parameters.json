@@ -87,7 +87,7 @@
       "value": "${TELEMETRY_SAMPLING_RATIO=1.0}"
     },
     "agentTraceEnabled": {
-      "value": "${AGENT_TRACE_ENABLED=true}"
+      "value": "${FCG_AGENT_TRACE_ENABLED=true}"
     },
     "monitoringAlertsEnabled": {
       "value": "${MONITORING_ALERTS_ENABLED=false}"

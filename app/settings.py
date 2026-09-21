@@ -89,9 +89,9 @@ class SettingsError(RuntimeError):
 
 def parse_agent_trace_enabled(environ: Mapping[str, str] | None = None) -> bool:
     env = os.environ if environ is None else environ
-    value = env.get("AGENT_TRACE_ENABLED", "true").strip().lower()
+    value = env.get("FCG_AGENT_TRACE_ENABLED", "true").strip().lower()
     if value not in {"true", "false"}:
-        raise SettingsError("AGENT_TRACE_ENABLED must be true or false.")
+        raise SettingsError("FCG_AGENT_TRACE_ENABLED must be true or false.")
     return value == "true"
 
 

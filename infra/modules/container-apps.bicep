@@ -288,7 +288,7 @@ var containerAppEnv = concat(
       value: 'true'
     }
     {
-      name: 'AGENT_TRACE_ENABLED'
+      name: 'FCG_AGENT_TRACE_ENABLED'
       value: agentTraceEnabled
     }
     {
