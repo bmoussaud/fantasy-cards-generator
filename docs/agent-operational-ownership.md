@@ -24,7 +24,7 @@ Foundry project monitoring injects the reserved
 copied between environments. Root Bicep creates account- and project-level
 `AppInsights` connections to the existing workspace-based Application Insights
 resource. The hosted manifest explicitly sets only non-secret
-`TELEMETRY_ENABLED=true`, `AGENT_TRACE_ENABLED` (default `true`), the environment
+`TELEMETRY_ENABLED=true`, `FCG_AGENT_TRACE_ENABLED` (default `true`), the environment
 name, and the experimental
 `AZURE_EXPERIMENTAL_ENABLE_GENAI_TRACING=true` SDK tracing opt-in.
 
@@ -214,7 +214,7 @@ deploy without the matching WEB configuration provision can fail readiness.
 
 ### Detail configuration rollout
 
-`AGENT_TRACE_ENABLED` defaults ON for dev and prod through root hosted service
+`FCG_AGENT_TRACE_ENABLED` defaults ON for dev and prod through root hosted service
 substitution and WEB azd/Bicep parameters. Bicep passes the resolved string
 unchanged. Root preprovision, prepackage, prepublish and predeploy hooks validate
 the raw azd-injected key with `hooks/validate_agent_trace.py` before deployment

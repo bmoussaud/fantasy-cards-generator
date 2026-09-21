@@ -58,7 +58,7 @@ def test_only_nonreserved_runtime_variables_are_supplied() -> None:
         {"name": "AZURE_AI_MODEL_DEPLOYMENT_NAME", "value": "${AZURE_AI_MODEL_DEPLOYMENT_NAME}"},
         {"name": "CARD_ORCHESTRATOR_VERSION", "value": "${CARD_ORCHESTRATOR_VERSION}"},
         {"name": "TELEMETRY_ENABLED", "value": "true"},
-        {"name": "AGENT_TRACE_ENABLED", "value": "${AGENT_TRACE_ENABLED=true}"},
+        {"name": "FCG_AGENT_TRACE_ENABLED", "value": "${FCG_AGENT_TRACE_ENABLED=true}"},
         {"name": "TELEMETRY_ENVIRONMENT", "value": "${AZURE_ENV_NAME}"},
         {"name": "AZURE_EXPERIMENTAL_ENABLE_GENAI_TRACING", "value": "true"},
     ]
@@ -360,11 +360,25 @@ def _root_agent_environment() -> dict[str, str]:
     return dict(pairs)
 
 
+@pytest.mark.parametrize("manifest", ["root", "deprecated"])
+def test_hosted_runtime_variables_avoid_platform_reserved_prefixes(manifest: str) -> None:
+    environment = (
+        _root_agent_environment()
+        if manifest == "root"
+        else {
+            item["name"]: item["value"]
+            for item in _manifest()["services"]["card-orchestrator"]["environmentVariables"]
+        }
+    )
+    for name in environment:
+        assert not name.startswith(("FOUNDRY_", "AGENT_")), name
+
+
 def test_root_hosted_detail_default_matches_web_without_replacing_baseline() -> None:
     environment = _root_agent_environment()
     parameters = json.loads((ROOT / "infra/main.parameters.json").read_text())["parameters"]
-    assert environment["AGENT_TRACE_ENABLED"] == "${AGENT_TRACE_ENABLED=true}"
-    assert environment["AGENT_TRACE_ENABLED"] == parameters["agentTraceEnabled"]["value"]
+    assert environment["FCG_AGENT_TRACE_ENABLED"] == "${FCG_AGENT_TRACE_ENABLED=true}"
+    assert environment["FCG_AGENT_TRACE_ENABLED"] == parameters["agentTraceEnabled"]["value"]
     assert environment["TELEMETRY_ENABLED"] == "true"
     assert environment["AZURE_EXPERIMENTAL_ENABLE_GENAI_TRACING"] == "true"
     assert environment["TELEMETRY_ENVIRONMENT"] == "${AZURE_ENV_NAME}"

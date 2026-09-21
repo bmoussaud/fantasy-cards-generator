@@ -19,7 +19,7 @@ is not copied through azd state or declared in the hosted manifest.
 | Setting | Default | Deployment variable |
 |---|---:|---|
 | Trace sampling | 100%, parent-consistent | `TELEMETRY_SAMPLING_RATIO` |
-| Application-owned agent detail | On in dev and prod | `AGENT_TRACE_ENABLED` |
+| Application-owned agent detail | On in dev and prod | `FCG_AGENT_TRACE_ENABLED` |
 | Workspace retention | 30 days | `MONITORING_RETENTION_DAYS` |
 | Workspace daily cap | 0.25 GB/day | `MONITORING_DAILY_QUOTA_GB` |
 | Cap warning | 80% | `MONITORING_INGESTION_WARNING_PERCENT` |
@@ -44,7 +44,7 @@ setting defaults ON, but does not create or enable an exporter:
 
 ```dotenv
 TELEMETRY_ENABLED=false
-AGENT_TRACE_ENABLED=true
+FCG_AGENT_TRACE_ENABLED=true
 OTEL_SERVICE_NAME=fantasy-cards-generator
 TELEMETRY_SAMPLING_RATIO=1.0
 AZURE_EXPERIMENTAL_ENABLE_GENAI_TRACING=
@@ -132,6 +132,15 @@ it must be sanitized, length-bounded, and excluded from metrics.
 
 ### Startup setting and process-local OFF
 
+The application setting is `FCG_AGENT_TRACE_ENABLED`. Foundry reserves all
+`AGENT_*` and `FOUNDRY_*` names for platform use, so the previous custom name
+`AGENT_TRACE_ENABLED` cannot be supplied to the hosted container and is no longer
+read by either runtime or the deployment guard. Existing azd values under that
+old name do not control this feature. Before redeploying, copy any explicit
+choice to `FCG_AGENT_TRACE_ENABLED` in the selected azd environment, especially
+an earlier `false` opt-out; leaving the new setting unset defaults to ON.
+Redeploy both runtimes through the root workflow so their configuration agrees.
+
 Both runtimes use the same parser: unset means `true`; trimmed, case-insensitive
 `true`/`false` are accepted; invalid values, **including empty**, reject startup
 with a content-free configuration error. This is read at process startup, never
@@ -152,14 +161,14 @@ initialization failure nor controls SDK/platform `invoke_agent` spans. The exist
 Turning WEB OFF does not remotely turn HOSTED OFF. Turning both OFF does not delete
 already-exported telemetry.
 
-Root `azure.yaml` passes `${AGENT_TRACE_ENABLED=true}` to HOSTED. The same azd
+Root `azure.yaml` passes `${FCG_AGENT_TRACE_ENABLED=true}` to HOSTED. The same azd
 setting passes through `infra/main.parameters.json`, `infra/main.bicep` and
 `infra/modules/container-apps.bicep` to WEB. After azd substitution, Bicep passes
 the resolved string unchanged for strict runtime validation.
 The Bicep parameter is a string intentionally, not an ARM boolean conversion.
 Because azd's default-expression substitution treats empty as unset, root
 preprovision, prepackage, prepublish and predeploy hooks validate the **raw**
-azd-injected `AGENT_TRACE_ENABLED` using `hooks/validate_agent_trace.py`.
+azd-injected `FCG_AGENT_TRACE_ENABLED` using `hooks/validate_agent_trace.py`.
 The raw hook environment preserves explicit empty values: unset is allowed to
 default ON, trimmed case-insensitive true/false pass unchanged, and empty,
 whitespace-only or invalid settings stop the command with a content-free error
@@ -370,11 +379,11 @@ No deployment was performed for this implementation. During an authorized rollou
 
 If serving health regresses, redeploy/reactivate the recorded known-good image or
 revision. Baseline WEB exporter initialization retains its existing fail-open
-behavior; invalid `AGENT_TRACE_ENABLED` instead rejects startup in both runtimes,
+behavior; invalid `FCG_AGENT_TRACE_ENABLED` instead rejects startup in both runtimes,
 and HOSTED monitoring initialization remains mandatory. `/healthz` must remain
 independent of exporter availability. To stop
 notifications without removing resources, set `MONITORING_ALERTS_ENABLED=false` and
 reprovision. To disable application export, remove the connection string or set
 `TELEMETRY_ENABLED=false`, then redeploy the WEB application. Do not disable mandatory
-HOSTED monitoring as a detail rollback: use `AGENT_TRACE_ENABLED=false` in both
+HOSTED monitoring as a detail rollback: use `FCG_AGENT_TRACE_ENABLED=false` in both
 processes and apply their respective configuration revision/version instead.

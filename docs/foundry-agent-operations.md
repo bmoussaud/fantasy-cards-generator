@@ -9,7 +9,7 @@ only.
 
 ### Agent detail configuration (#159 r1)
 
-Root `azure.yaml` injects `${AGENT_TRACE_ENABLED=true}` into HOSTED; root azd
+Root `azure.yaml` injects `${FCG_AGENT_TRACE_ENABLED=true}` into HOSTED; root azd
 parameters pass the same setting through Bicep to WEB. Defaults remain ON in dev
 and prod. Resolved values are passed as strings unchanged: each runtime accepts trimmed,
 case-insensitive true/false, rejects empty/invalid values, and reads only at
@@ -52,7 +52,7 @@ and [root rollout procedure](agent-operational-ownership.md#detail-configuration
 3. **Root `deploy.sh`** — production-safe orchestrator with
    `--approve-change` / `--approve-prod` enforcement gates.
 4. **Raw detail-setting guard** — root preprovision, prepackage, prepublish and
-   predeploy hooks reject invalid `AGENT_TRACE_ENABLED` for both services.
+   predeploy hooks reject invalid `FCG_AGENT_TRACE_ENABLED` for both services.
    This covers targeted web/agent commands, `azd up`, and the commands invoked by
    `deploy.sh`. Do not bypass hooks; the deprecated nested manifest is unsupported.
 

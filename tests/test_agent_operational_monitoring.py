@@ -101,7 +101,7 @@ def test_root_infra_links_application_insights_to_foundry_without_azd_secret_out
 def test_manifest_enables_custom_metrics_without_redeclaring_reserved_values() -> None:
     environment = _root_agent_environment()
     assert environment["TELEMETRY_ENABLED"] == "true"
-    assert environment["AGENT_TRACE_ENABLED"] == "${AGENT_TRACE_ENABLED=true}"
+    assert environment["FCG_AGENT_TRACE_ENABLED"] == "${FCG_AGENT_TRACE_ENABLED=true}"
     assert environment["TELEMETRY_ENVIRONMENT"] == "${AZURE_ENV_NAME}"
     assert environment["AZURE_EXPERIMENTAL_ENABLE_GENAI_TRACING"] == "true"
     assert "APPLICATIONINSIGHTS_CONNECTION_STRING" not in environment
@@ -179,7 +179,7 @@ def test_runbooks_use_root_deployment_and_define_detail_rollout_gates() -> None:
     assert "python deploy.py" not in runbook
     for document in (runbook, monitoring, operations):
         for required in (
-            "AGENT_TRACE_ENABLED",
+            "FCG_AGENT_TRACE_ENABLED",
             "configure_telemetry()",
             "invoke_agent",
             "NoResponseStore",

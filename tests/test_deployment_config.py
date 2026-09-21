@@ -1111,9 +1111,9 @@ def test_compiled_agent_detail_setting_defaults_on_and_reaches_web_unchanged() -
     assert container_template["parameters"]["agentTraceEnabled"]["defaultValue"] == "true"
     environment = container_template["variables"]["containerAppEnv"]
     assert environment.startswith("[concat(createArray(")
-    assert environment.count("'AGENT_TRACE_ENABLED'") == 1
+    assert environment.count("'FCG_AGENT_TRACE_ENABLED'") == 1
     assert (
-        "createObject('name', 'AGENT_TRACE_ENABLED', 'value', parameters('agentTraceEnabled'))"
+        "createObject('name', 'FCG_AGENT_TRACE_ENABLED', 'value', parameters('agentTraceEnabled'))"
         in environment
     )
     for name in ("TELEMETRY_ENABLED", "AZURE_EXPERIMENTAL_ENABLE_GENAI_TRACING"):
@@ -1127,7 +1127,7 @@ def test_compiled_agent_detail_setting_defaults_on_and_reaches_web_unchanged() -
         "[variables('containerAppEnv')]"
     )
     parameters = json.loads((REPO_ROOT / "infra/main.parameters.json").read_text())["parameters"]
-    assert parameters["agentTraceEnabled"]["value"] == "${AGENT_TRACE_ENABLED=true}"
+    assert parameters["agentTraceEnabled"]["value"] == "${FCG_AGENT_TRACE_ENABLED=true}"
 
 
 def test_preprovision_hook_guards_session_secret() -> None:

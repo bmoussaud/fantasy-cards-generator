@@ -183,19 +183,20 @@ def test_startup_flag_parity(value, expected):
         "FOUNDRY_PROJECT_ENDPOINT": "https://example.services.ai.azure.com/api/projects/test",
         "AZURE_AI_MODEL_DEPLOYMENT_NAME": "test",
         "CARD_ORCHESTRATOR_VERSION": "test",
+        "AGENT_TRACE_ENABLED": "platform-owned-value",
     }
     if value is not None:
-        env["AGENT_TRACE_ENABLED"] = value
+        env["FCG_AGENT_TRACE_ENABLED"] = value
     assert parse_agent_trace_enabled(env) is expected
     assert RuntimeSettings.from_env(env).agent_trace_enabled is expected
 
 
 @pytest.mark.parametrize("value", ["", " ", "1", "0", "yes", "off", "truthy"])
 def test_invalid_flag_is_safe_startup_error(value):
-    with pytest.raises(SettingsError, match="AGENT_TRACE_ENABLED must be true or false"):
-        parse_agent_trace_enabled({"AGENT_TRACE_ENABLED": value})
+    with pytest.raises(SettingsError, match="FCG_AGENT_TRACE_ENABLED must be true or false"):
+        parse_agent_trace_enabled({"FCG_AGENT_TRACE_ENABLED": value})
     with pytest.raises(SettingsError):
-        RuntimeSettings.from_env({"AGENT_TRACE_ENABLED": value})
+        RuntimeSettings.from_env({"FCG_AGENT_TRACE_ENABLED": value})
 
 
 @pytest.mark.parametrize("environment", ["development", "production", "test"])
@@ -203,14 +204,14 @@ def test_default_on_in_every_environment_is_startup_scoped(monkeypatch, environm
     monkeypatch.setenv("APP_ENV", environment)
     monkeypatch.setenv("TELEMETRY_ENABLED", "true")
     monkeypatch.setenv("APPLICATIONINSIGHTS_CONNECTION_STRING", "InstrumentationKey=offline")
-    monkeypatch.delenv("AGENT_TRACE_ENABLED", raising=False)
+    monkeypatch.delenv("FCG_AGENT_TRACE_ENABLED", raising=False)
     original = load_app_settings()
     assert original.agent_trace_enabled is True
-    monkeypatch.setenv("AGENT_TRACE_ENABLED", "false")
+    monkeypatch.setenv("FCG_AGENT_TRACE_ENABLED", "false")
     assert original.agent_trace_enabled is True
     assert load_app_settings().agent_trace_enabled is False
-    monkeypatch.setenv("AGENT_TRACE_ENABLED", "")
-    with pytest.raises(SettingsError, match="AGENT_TRACE_ENABLED"):
+    monkeypatch.setenv("FCG_AGENT_TRACE_ENABLED", "")
+    with pytest.raises(SettingsError, match="FCG_AGENT_TRACE_ENABLED"):
         load_app_settings()
 
 
