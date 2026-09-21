@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+# ruff: noqa: E402
 import asyncio
 import hashlib
 import json
@@ -11,6 +12,10 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+
+pytest.importorskip("azure.ai.agentserver.responses")
+pytest.importorskip("agent_framework.foundry")
+
 from agent_framework.exceptions import ChatClientContentFilterException
 from azure.monitor.opentelemetry.exporter.export.trace._exporter import _convert_span_to_envelope
 from openai import APIStatusError
