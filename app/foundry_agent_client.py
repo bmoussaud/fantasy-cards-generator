@@ -7,7 +7,7 @@ import json
 import re
 import threading
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from math import isfinite
 from typing import Any, Literal, Protocol
 from urllib.parse import quote, urlsplit, urlunsplit
@@ -26,6 +26,7 @@ from azure.identity import (
 )
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from app.agent_detail import Envelope, Source, current, parse_envelope
 from app.generation import GeneratedCardModel
 from app.settings import AppSettings, SettingsError, load_app_settings
 
@@ -195,6 +196,8 @@ class FoundryAgentInvocationResult:
         | None
     ) = None
     message: str = ""
+    agent_detail: Envelope | None = field(default=None, repr=False)
+    agent_detail_rejected: bool = False
 
 
 class FoundryAgentConfigurationError(SettingsError):
@@ -370,12 +373,18 @@ class FoundryAgentClient:
             )
 
         client = self._client()
+        from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+
+        trace_headers: dict[str, str] = {}
+        TraceContextTextMapPropagator().inject(trace_headers)
+        trace_headers.pop("tracestate", None)
         try:
             response = await client.post(
                 url,
                 headers={
                     "Authorization": "Bearer " + token,
                     "Content-Type": "application/json",
+                    **trace_headers,
                 },
                 json={
                     "store": False,
@@ -431,10 +440,17 @@ class FoundryAgentClient:
                 error_code="malformed_response",
                 message="Foundry agent response envelope was malformed.",
             )
+        capture = current()
         return _parse_success_envelope(
             body,
             request_id=request_id,
             expected_version=self._settings.foundry_agent_expected_version,
+            capture_details=self._settings.agent_trace_enabled and current() is not None,
+            detail_source=(
+                capture.execution.source
+                if capture is not None and capture.execution is not None
+                else None
+            ),
         )
 
     async def _get_token(self) -> str:
@@ -655,6 +671,8 @@ def _parse_success_envelope(
     *,
     request_id: str | None,
     expected_version: str | None,
+    capture_details: bool = False,
+    detail_source: Source | None = None,
 ) -> FoundryAgentInvocationResult:
     response_id = _safe_identifier_or_none(body.get("id"))
     envelope_error = body.get("error")
@@ -773,6 +791,16 @@ def _parse_success_envelope(
             message="Foundry agent reported an unexpected application version.",
         )
 
+    private_detail = (
+        parse_envelope(
+            agent_response.metadata.get("agentDetail"),
+            agent_response.metadata.get("safetyEvidence"),
+            expected_source=detail_source,
+            deployment_version=agent_response.metadata.get("hostedVersion") or agent_version,
+        )
+        if capture_details
+        else None
+    )
     return FoundryAgentInvocationResult(
         status="completed",
         success=True,
@@ -782,6 +810,10 @@ def _parse_success_envelope(
         agent_version=agent_version,
         card=agent_response.card,
         art_prompt=agent_response.artPrompt,
+        agent_detail=private_detail,
+        agent_detail_rejected=(
+            capture_details and "agentDetail" in agent_response.metadata and private_detail is None
+        ),
         message="Foundry agent invocation completed.",
     )
 

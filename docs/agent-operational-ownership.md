@@ -24,7 +24,8 @@ Foundry project monitoring injects the reserved
 copied between environments. Root Bicep creates account- and project-level
 `AppInsights` connections to the existing workspace-based Application Insights
 resource. The hosted manifest explicitly sets only non-secret
-`TELEMETRY_ENABLED=true`, the environment name, and the experimental
+`TELEMETRY_ENABLED=true`, `AGENT_TRACE_ENABLED` (default `true`), the environment
+name, and the experimental
 `AZURE_EXPERIMENTAL_ENABLE_GENAI_TRACING=true` SDK tracing opt-in.
 
 Foundry fixes `service.name` to the agent name, so `AppRoleName ==
@@ -49,9 +50,33 @@ versions pass through closed allowlists or bounded identifier validation.
 
 The runtime never adds prompts, responses, card fields, art prompts, user or session
 identifiers, tokens, URLs, endpoints, exception messages, or arbitrary caller values
-to these measurements. The strict request boundary and no-response-store behavior are
-unchanged. Framework payload instrumentation and SDK payload-bearing logs remain
-disabled.
+to these measurements. Named HOSTED execution spans also remain content-free.
+The approved #159 r1 exception is limited to bounded sanitized candidates in private,
+optional, independently versioned response metadata, released as **WEB-owned linked
+detail only after terminal full business success**. Every candidate needs its own
+privacy/safety acceptance; a safe final card does not approve rejected intermediates.
+All later refusals, partial/held/deferred/unknown outcomes, errors, cancellations,
+and validation, image, persistence or response failures suppress all content.
+There is no UI, endpoint, business-response field, or card/audit persistence.
+
+The strict business request/response boundary is unchanged. Framework payload
+instrumentation and SDK payload-bearing logs remain disabled in both flag states.
+`store:false` / `NoResponseStore` do not prove provider non-retention of internally
+transported metadata before WEB's decision. Standalone HOSTED calls export no
+diagnostic content; platform non-persistence and forwarding evidence remain
+separately authorized delivery gates, not claims of this implementation.
+
+See [the exact privacy, flag and budget contract](operational-monitoring.md#privacy-exclusions-and-approved-159-r1-exception)
+for the four mixed runtime states, closed versions/statuses, actual trusted
+application instruction (shared rules + stage + schema), UTF-8 limits and residual
+PII risk. Oversized structured projections omit their entire payload, never
+partial JSON. Redacted or omitted input/output projections carry
+`validation='modified'`, not `validation='validated'`.
+Both runtimes parse trimmed case-insensitive true/false at startup,
+default ON when unset and reject invalid/empty values. OFF suppresses only new
+process-local detail spans/capture-only work; baseline spans/metrics/safe errors,
+`TELEMETRY_ENABLED`, mandatory `configure_telemetry()` startup and experimental
+GenAI opt-in semantics are unchanged. It does not control platform `invoke_agent`.
 
 The single custom version dimension is `fcg.agent_version`. In Foundry it uses the
 platform-injected hosted version; local tests fall back to the immutable image
@@ -59,7 +84,7 @@ candidate version. `service.version` follows the same precedence.
 
 ## Monitoring and alerts
 
-`deployments/card-orchestrator/infra/modules/agent-monitoring.bicep` deploys one
+The authoritative root `infra/modules/agent-monitoring.bicep` deploys one
 environment-isolated workbook, Action Group, and four scheduled-query alerts:
 
 | Alert | Window | Default threshold | Source |
@@ -78,30 +103,22 @@ There is no fabricated heartbeat alert. Foundry does not expose the internal
 `/readiness` endpoint to Azure availability tests. Operators use the bounded managed
 identity smoke below; absence of traffic alone is not treated as runtime failure.
 
-Monitoring resource IDs are mandatory. Provisioning fails during parameter resolution
-if either root output is absent:
+The root stack passes its monitoring outputs directly to the agent monitoring
+module; do not copy IDs into a second azd environment or provision a duplicate
+stack. All commands below are future, separately approved operator procedures,
+not actions authorized by implementation approval.
 
 ```bash
-# Root project: provision the App Insights resource and Foundry linkage first.
-AZURE_DEV_USER_AGENT=microsoft_foundry_skill azd provision --no-prompt
-
-# Copy only non-secret ARM resource IDs into the dedicated agent azd environment.
-azd env get-value AZURE_LOG_ANALYTICS_WORKSPACE_RESOURCE_ID
-azd env get-value AZURE_APP_INSIGHTS_RESOURCE_ID
-
-cd deployments/card-orchestrator
-azd env set AZURE_LOG_ANALYTICS_WORKSPACE_RESOURCE_ID "<workspace-resource-id>"
-azd env set AZURE_APP_INSIGHTS_RESOURCE_ID "<app-insights-resource-id>"
-python deploy.py preview --execute
-python deploy.py provision --execute --approve-change
+# Repository root, selected dev environment.
+./deploy.sh preview --environment dev
+./deploy.sh provision --environment dev --approve-change
 ```
 
 For production, there is no implicit fallback from dev and no prod default:
 
 ```bash
-cd deployments/card-orchestrator
-python deploy.py preview --environment prod --execute --approve-prod
-python deploy.py provision --environment prod --execute --approve-change --approve-prod
+./deploy.sh preview --environment prod --approve-prod
+./deploy.sh provision --environment prod --approve-change --approve-prod
 ```
 
 Review the Bicep what-if and validate the environment-specific IDs before either
@@ -109,7 +126,9 @@ command. Never reuse dev monitoring IDs for prod.
 
 ## Independent rollout
 
-Run all agent commands from `deployments/card-orchestrator`. Set
+Run all deployment commands from the repository root using root `azure.yaml`.
+The nested manifest/launcher under `deployments/card-orchestrator` are deprecated
+references, not supported entrypoints. Set
 `AZURE_DEV_USER_AGENT=microsoft_foundry_skill` inline for every azd command.
 
 ### Pre-rollout gates
@@ -119,8 +138,14 @@ Run all agent commands from `deployments/card-orchestrator`. Set
 2. Record the public web ACA revision, image, environment variables or configuration
    hash, and traffic weights.
 3. Confirm mandatory monitoring IDs resolve and project monitoring is connected.
-4. Confirm model capacity and alert routing approval.
+4. Confirm model capacity and alert routing approval; satisfy the diagnostic
+   access/retention/export/deletion and retry-peak ingestion gates in
+   [operational monitoring](operational-monitoring.md#rollout-access-retention-and-deletion-gates).
 5. Run offline tests and Bicep compilation.
+6. Obtain separate authorization for platform non-persistence, SDK suppression,
+   cross-runtime correlation and synthetic terminal-success/refusal verification.
+   Local injection tests are not evidence of Foundry forwarding. Failure returns
+   to intake; no new resources/grants/retention changes are approved by #159.
 
 ```bash
 git rev-parse HEAD
@@ -139,10 +164,12 @@ incident/change process; it is not committed to this repository.
 
 ```bash
 export CARD_ORCHESTRATOR_VERSION="$(git rev-parse HEAD)"
-
-cd deployments/card-orchestrator
-python deploy.py deploy
-python deploy.py deploy --execute --approve-change
+AZURE_DEV_USER_AGENT=microsoft_foundry_skill \
+  azd env set CARD_ORCHESTRATOR_VERSION "$CARD_ORCHESTRATOR_VERSION"
+./deploy.sh agent
+./deploy.sh agent --approve-change
+# Inject the newly stamped exact hosted version while preserving the web image.
+./deploy.sh provision --approve-change
 
 AZURE_DEV_USER_AGENT=microsoft_foundry_skill \
   azd ai agent show --output json > "<evidence-directory>/agent-after.json"
@@ -151,14 +178,15 @@ AZURE_DEV_USER_AGENT=microsoft_foundry_skill \
 ```
 
 For a deliberately approved production rollout, add `--environment prod
---approve-prod` to both launcher commands and add `--approve-prod` to the production
+--approve-prod` to the root launcher commands, select the same environment for
+azd settings/inspection, and add `--approve-prod` to the production
 managed-identity probe.
 
 Run exactly one bounded target-managed-identity invocation against the new hosted
 version, using the pinned ACA revision/replica and the expected immutable candidate:
 
 ```bash
-python aca_identity_probe.py \
+python deployments/card-orchestrator/aca_identity_probe.py \
   --environment dev \
   --subscription "<subscription-id>" \
   --resource-group "<resource-group>" \
@@ -179,8 +207,45 @@ python aca_identity_probe.py \
 The probe must report `invocation_verified`, one invocation attempted, a schema-valid
 response, and the expected version. Complete the probe's owned session cleanup. Then
 capture the web ACA state again and compare it byte-for-byte or structurally with the
-pre-rollout snapshot. The agent rollout is rejected if web image, revision,
-configuration, identity, or traffic changed.
+pre-rollout snapshot. The web image, identity and traffic must be preserved.
+A new WEB revision and the intended stamped agent configuration are expected
+after root provision; reject unrelated configuration changes. An agent-only
+deploy without the matching WEB configuration provision can fail readiness.
+
+### Detail configuration rollout
+
+`AGENT_TRACE_ENABLED` defaults ON for dev and prod through root hosted service
+substitution and WEB azd/Bicep parameters. Bicep passes the resolved string
+unchanged. Root preprovision, prepackage, prepublish and predeploy hooks validate
+the raw azd-injected key with `hooks/validate_agent_trace.py` before deployment
+can consume the default. Unset keeps ON; trimmed case-insensitive true/false pass
+unchanged; empty, whitespace-only and invalid values stop both supported deployment
+paths with a content-free error. The guard reads only that key, not environment
+files or bulk azd output. See
+[operational monitoring](operational-monitoring.md#startup-setting-and-process-local-off).
+Use explicit `false`, never an empty setting, to opt out.
+No request or configuration-state edit reloads a running process.
+
+For a separately approved diagnostic rollback, set the shared value to `false`
+in the selected environment, then deploy the intended immutable hosted artifact
+and provision WEB configuration using the root procedure above. HOSTED needs a
+new version/restart with that environment; WEB needs its configuration revision
+and restart. A mere web image deploy does not apply Bicep parameter changes.
+Verify the effective value in **both** processes, their exact artifact/version
+binding, and baseline monitoring health. Restore ON using the same procedure
+only after the privacy/operations gates are satisfied.
+
+Mixed deployments are not globally OFF: WEB false suppresses its processing and
+release but HOSTED true can still capture/transport private candidates; HOSTED
+false with WEB true permits WEB-only detail. Neither setting disables platform
+`invoke_agent` or erases exported data. Do not set `TELEMETRY_ENABLED=false` or
+bypass mandatory hosted initialization to suppress detail.
+
+Current 30-day retention, 0.25 GB/day shared cap and 100% sampling are baseline
+defaults, not consent to content retention. Confirm actual readers/inherited RBAC,
+downstream exports, deletion and cost headroom before rollout. Card/account deletion
+does not remove operational telemetry automatically. Sanitization/truncation is
+explicit, bounded and not a universal PII guarantee.
 
 ## Restore-first rollback
 
@@ -247,10 +312,12 @@ optional cleanup after approval and is never part of service restoration.
   recurrent platform heartbeat.
 - Alert thresholds are initial operational baselines and require tuning after
   representative dev traffic.
-- Project monitoring linkage is deployed by root Bicep. Deploying only the dedicated
-  agent infra against an unrelated pre-existing project does not create that linkage;
-  operators must first verify the project has the intended Application Insights
-  connection.
+- Project monitoring linkage is deployed by root Bicep; the deprecated nested
+  agent infra is not a supported alternative entrypoint.
+- #159 implementation approval is not rollout approval. No live platform
+  non-persistence, payload-suppression or forwarding validation was performed for
+  this change; these remain delivery gates alongside approved content
+  retention/access and baseline ingestion headroom.
 
 Authoritative platform references:
 

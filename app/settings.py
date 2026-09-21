@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from math import isfinite
 from typing import Literal
@@ -79,10 +80,19 @@ class AppSettings:
     saved_photo_max_count: int
     saved_photo_max_bytes: int
     saved_photo_thumbnail_size: int
+    agent_trace_enabled: bool = True
 
 
 class SettingsError(RuntimeError):
     pass
+
+
+def parse_agent_trace_enabled(environ: Mapping[str, str] | None = None) -> bool:
+    env = os.environ if environ is None else environ
+    value = env.get("AGENT_TRACE_ENABLED", "true").strip().lower()
+    if value not in {"true", "false"}:
+        raise SettingsError("AGENT_TRACE_ENABLED must be true or false.")
+    return value == "true"
 
 
 def load_telemetry_settings() -> TelemetrySettings:
@@ -120,6 +130,7 @@ def load_app_settings() -> AppSettings:
         raise SettingsError("IMAGE_QUALITY must be one of: low, medium, high.")
 
     settings = AppSettings(
+        agent_trace_enabled=parse_agent_trace_enabled(),
         app_env=app_env,
         persistence_mode=persistence_mode,
         foundry_endpoint=_optional_env("FOUNDRY_ENDPOINT"),

@@ -30,6 +30,35 @@ rules, cost estimation, deployment verification, and rollback. No monitoring
 resources are deployed by repository changes alone; deployment remains a separate,
 explicitly authorized `azd` operation.
 
+### Agent detail telemetry (#159 r1)
+
+`AGENT_TRACE_ENABLED` defaults to `true` in both dev and prod. Root `azure.yaml`
+injects it into HOSTED; `main.parameters.json` passes the same azd setting through
+the string `agentTraceEnabled` parameter into WEB. Bicep preserves the resolved
+string for runtime validation: trimmed case-insensitive true/false are accepted,
+empty or invalid runtime values reject startup. Root preprovision, prepackage,
+prepublish and predeploy hooks validate the raw azd-injected setting with
+`hooks/validate_agent_trace.py` before deployment can consume the default.
+Unset remains ON; empty, whitespace-only and invalid values stop the command
+with a content-free error. The guard reads only this one environment key, without
+loading or printing environment files. Use explicit `false` to opt out.
+The deprecated nested manifest mirrors the setting
+only as a reference; it is not a deployment entrypoint.
+
+OFF is process-local and does not disable baseline monitoring, mandatory hosted
+startup telemetry, or the existing experimental GenAI tracing opt-in. Changing
+azd state alone does not update containers: apply the hosted version and WEB
+configuration revision/restart through the root deployment procedure. A web
+image-only deploy does not apply Bicep environment changes.
+
+The narrow content exception permits only WEB-exported bounded detail after
+terminal full success, linked to content-free HOSTED execution spans. Existing
+retention/cap/sampling defaults are not approved content policy. Platform
+non-persistence/correlation, readers/inherited RBAC, retention/exports/deletion
+and baseline ingestion headroom remain delivery/rollout gates; no resources,
+grants or retention settings are changed here. See
+[the exact contract](../docs/operational-monitoring.md#privacy-exclusions-and-approved-159-r1-exception).
+
 ## `/healthz` dependency probe budget
 
 Issue [#51](https://github.com/bmoussaud/fantasy-cards-generator/issues/51)

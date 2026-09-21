@@ -58,6 +58,7 @@ def test_only_nonreserved_runtime_variables_are_supplied() -> None:
         {"name": "AZURE_AI_MODEL_DEPLOYMENT_NAME", "value": "${AZURE_AI_MODEL_DEPLOYMENT_NAME}"},
         {"name": "CARD_ORCHESTRATOR_VERSION", "value": "${CARD_ORCHESTRATOR_VERSION}"},
         {"name": "TELEMETRY_ENABLED", "value": "true"},
+        {"name": "AGENT_TRACE_ENABLED", "value": "${AGENT_TRACE_ENABLED=true}"},
         {"name": "TELEMETRY_ENVIRONMENT", "value": "${AZURE_ENV_NAME}"},
         {"name": "AZURE_EXPERIMENTAL_ENABLE_GENAI_TRACING", "value": "true"},
     ]
@@ -343,9 +344,32 @@ def test_root_manifest_card_orchestrator_matches_nested_contract() -> None:
     nested_dockerfile = (DEPLOYMENT / nested_service["docker"]["path"]).resolve()
     assert root_dockerfile.resolve() == nested_dockerfile
 
-    # Environment variables match
-    for env_var in nested_service["environmentVariables"]:
-        assert env_var["name"] in root_yaml
+    assert _root_agent_environment() == {
+        item["name"]: item["value"] for item in nested_service["environmentVariables"]
+    }
+
+
+def _root_agent_environment() -> dict[str, str]:
+    """Read the root service's simple name/value list without a YAML dependency."""
+    root_yaml = (ROOT / "azure.yaml").read_text()
+    service = root_yaml.split("\n  card-orchestrator:\n", 1)[1].split("\nresources:", 1)[0]
+    block = service.split("    environmentVariables:\n", 1)[1].split("    hooks:\n", 1)[0]
+    pairs = re.findall(r'      - name: (\w+)\n        value: "?([^"\n]+)"?\n', block)
+    assert len(pairs) == block.count("      - name:")
+    assert len(dict(pairs)) == len(pairs)
+    return dict(pairs)
+
+
+def test_root_hosted_detail_default_matches_web_without_replacing_baseline() -> None:
+    environment = _root_agent_environment()
+    parameters = json.loads((ROOT / "infra/main.parameters.json").read_text())["parameters"]
+    assert environment["AGENT_TRACE_ENABLED"] == "${AGENT_TRACE_ENABLED=true}"
+    assert environment["AGENT_TRACE_ENABLED"] == parameters["agentTraceEnabled"]["value"]
+    assert environment["TELEMETRY_ENABLED"] == "true"
+    assert environment["AZURE_EXPERIMENTAL_ENABLE_GENAI_TRACING"] == "true"
+    assert environment["TELEMETRY_ENVIRONMENT"] == "${AZURE_ENV_NAME}"
+    assert "APPLICATIONINSIGHTS_CONNECTION_STRING" not in environment
+    assert "OTEL_SERVICE_NAME" not in environment
 
 
 def test_root_manifest_card_orchestrator_container_contract() -> None:

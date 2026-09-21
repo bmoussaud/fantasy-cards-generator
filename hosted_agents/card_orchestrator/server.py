@@ -227,7 +227,20 @@ class StatelessBoundary:
                 return {"type": "http.request", "body": canonical, "more_body": False}
             return await receive()
 
-        await self.app(scope, replay, send)
+        from opentelemetry.context import attach, detach
+        from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+
+        # Only W3C trace context is accepted, never baggage or model metadata.
+        headers = {
+            "traceparent": value.decode("ascii", errors="ignore")
+            for key, value in scope.get("headers", ())
+            if key == b"traceparent" and len(value) == 55
+        }
+        token = attach(TraceContextTextMapPropagator().extract(headers))
+        try:
+            await self.app(scope, replay, send)
+        finally:
+            detach(token)
 
 
 class NoResponseStore(InMemoryResponseProvider):

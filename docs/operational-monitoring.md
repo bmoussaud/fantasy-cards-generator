@@ -8,7 +8,7 @@ No Azure resources were deployed as part of this change.
 For hosted-agent (`card-orchestrator`) operational ownership, alert definitions, and
 rollout/rollback procedure, see [docs/agent-operational-ownership.md](agent-operational-ownership.md).
 Agent monitoring is deployed by
-`deployments/card-orchestrator/infra/modules/agent-monitoring.bicep` and is separate
+`infra/modules/agent-monitoring.bicep` through the authoritative root stack and is separate
 from the web app monitoring stack. Root Bicep links the shared workspace-based
 Application Insights resource to the Foundry account and project; Foundry then
 injects its reserved connection setting into hosted versions. The connection string
@@ -19,6 +19,7 @@ is not copied through azd state or declared in the hosted manifest.
 | Setting | Default | Deployment variable |
 |---|---:|---|
 | Trace sampling | 100%, parent-consistent | `TELEMETRY_SAMPLING_RATIO` |
+| Application-owned agent detail | On in dev and prod | `AGENT_TRACE_ENABLED` |
 | Workspace retention | 30 days | `MONITORING_RETENTION_DAYS` |
 | Workspace daily cap | 0.25 GB/day | `MONITORING_DAILY_QUOTA_GB` |
 | Cap warning | 80% | `MONITORING_INGESTION_WARNING_PERCENT` |
@@ -38,10 +39,12 @@ Container Apps supplies `CONTAINER_APP_NAME`, `CONTAINER_APP_REVISION`, and
 `CONTAINER_APP_REPLICA_NAME` at runtime; application instrumentation should map the
 revision and replica values into spans/logs, not metric dimensions.
 
-For local work, telemetry is off by default:
+For local work, the baseline exporter is off by default; the independent detail
+setting defaults ON, but does not create or enable an exporter:
 
 ```dotenv
 TELEMETRY_ENABLED=false
+AGENT_TRACE_ENABLED=true
 OTEL_SERVICE_NAME=fantasy-cards-generator
 TELEMETRY_SAMPLING_RATIO=1.0
 AZURE_EXPERIMENTAL_ENABLE_GENAI_TRACING=
@@ -105,17 +108,164 @@ dependency-free `/livez` on port 8000; readiness uses `/healthz`. Telemetry expo
 is not part of either probe response, while readiness fails closed on required
 Azure dependencies.
 
-## Privacy exclusions
+## Privacy exclusions and approved #159 r1 exception
 
-Telemetry must never include prompts, generated text or images, request/response
-bodies, query-string values, credentials, tokens, cookies, authorization headers,
-email/user/tenant/card/blob identifiers, idempotency keys, raw client IPs, or
-exception text that may echo those values.
+Baseline spans, metrics, logs, SDK payload instrumentation and arbitrary
+request/response bodies remain content-free. #159 r1 authorizes only a narrow
+application-owned, closed-schema diagnostic exception for bounded, sanitized
+stage input, effective application instruction, validated output and closed
+execution result. It is default ON in **dev and prod**, not a development-only
+debug policy. It does not authorize blanket SDK logging, a trace UI, application
+endpoints, browser/API fields, or card/audit persistence.
+
+Never intentionally capture credentials, tokens, cookies, authorization data,
+email/user/tenant/card/blob/session or business identifiers, idempotency keys,
+raw client IPs, binary/base64/images, image or signed URLs, hidden reasoning, or
+arbitrary exception text. Reject unknown fields before capture and withhold
+uninspectable values. Conservative sanitization is not a universal PII guarantee:
+undetected personal data in otherwise permitted prose remains a rollout risk.
 
 Use normalized route templates, bounded outcome/error codes, and allowlisted
 attributes only. Do not add request headers or arbitrary URLs as dimensions.
 Application Insights IP masking remains enabled. `X-Request-ID` is diagnostic only:
 it must be sanitized, length-bounded, and excluded from metrics.
+
+### Startup setting and process-local OFF
+
+Both runtimes use the same parser: unset means `true`; trimmed, case-insensitive
+`true`/`false` are accepted; invalid values, **including empty**, reject startup
+with a content-free configuration error. This is read at process startup, never
+enabled by a request or dynamically reloaded.
+
+| WEB | HOSTED | New application-owned detail behavior |
+|---|---|---|
+| true / unset | true / unset | Both capture within bounds; only WEB may release content after terminal full success |
+| false | true | HOSTED may capture/transport candidates and export content-free execution spans; WEB performs no capture-only processing or content export |
+| true | false | WEB-only eligible detail; HOSTED performs no new detail spans/capture-only processing |
+| false | false | No new detail spans/events, capture-only sanitization, serialization or buffers in either process |
+
+OFF preserves baseline generation/dependency spans and metrics, safe errors,
+functional validation and moderation, `TELEMETRY_ENABLED`, and the mandatory
+HOSTED `configure_telemetry()` startup gate. It neither bypasses monitoring
+initialization failure nor controls SDK/platform `invoke_agent` spans. The existing
+`AZURE_EXPERIMENTAL_ENABLE_GENAI_TRACING` opt-in semantics are unchanged.
+Turning WEB OFF does not remotely turn HOSTED OFF. Turning both OFF does not delete
+already-exported telemetry.
+
+Root `azure.yaml` passes `${AGENT_TRACE_ENABLED=true}` to HOSTED. The same azd
+setting passes through `infra/main.parameters.json`, `infra/main.bicep` and
+`infra/modules/container-apps.bicep` to WEB. After azd substitution, Bicep passes
+the resolved string unchanged for strict runtime validation.
+The Bicep parameter is a string intentionally, not an ARM boolean conversion.
+Because azd's default-expression substitution treats empty as unset, root
+preprovision, prepackage, prepublish and predeploy hooks validate the **raw**
+azd-injected `AGENT_TRACE_ENABLED` using `hooks/validate_agent_trace.py`.
+The raw hook environment preserves explicit empty values: unset is allowed to
+default ON, trimmed case-insensitive true/false pass unchanged, and empty,
+whitespace-only or invalid settings stop the command with a content-free error
+before deployment can consume the substituted default. The guard reads only that
+key, never environment files or bulk azd output. It covers both targeted services,
+`azd up` and the root `deploy.sh` wrapper; bypassing hooks or using the deprecated
+nested manifest is unsupported. Use explicit `false`, not empty, to opt out.
+There is no production-specific override to OFF. Changing azd state alone has no
+effect on running processes: apply a new hosted version and the respective WEB
+configuration revision/restart through the approved root rollout. A web image-only
+deploy does not apply changed Bicep environment parameters. See
+[the operational runbook](agent-operational-ownership.md#detail-configuration-rollout).
+
+### Release ownership, source links and compatibility
+
+HOSTED execution spans `card_concept`, `card_lore`, `card_art_direction` remain
+content-free. After hosted validation/moderation succeeds, immutable sanitized
+candidates may travel privately in optional, independently versioned response
+metadata. WEB is the sole release authority: every candidate must independently
+pass privacy and applicable safety checks, and the entire business operation must
+reach terminal **full success**, after all text/art/image moderation, validation,
+persistence and business-response validation/serialization gates.
+
+Any partial, refused, held, routing-deferred, unknown-safety, unvalidated, failed,
+timed-out or cancelled outcome discards all candidate content, including earlier
+successful stages. A later successful retry never releases a failed/rejected
+attempt. Safe partial-card/artwork-retry behavior is unchanged. Replays and
+single-flight followers do not fabricate executions or duplicate content release.
+
+Eligible records are **WEB-exported detail linked to source execution spans**,
+labelled `source_runtime=hosted` or `web` with measured source timing. They are
+not retroactively attached to finished original HOSTED spans. WEB owns its hosted
+invocation and image attempt/retry spans. Use only validated instrumentation-owned
+trace/span correlation handles; no baggage or user/resource identifiers. Local
+W3C injection/extraction tests cannot establish actual Foundry gateway forwarding
+or a continuous platform trace tree.
+
+Missing N-1 metadata is supported. Unknown/malformed versions, source links,
+overflow or diagnostic processing/export failures suppress detail with bounded
+content-free reasons while valid business responses remain usable. Business
+`schemaVersion=1` and application-version matching stay unchanged; diagnostic,
+redaction, trusted instruction/schema and hosted source versions are separate.
+Malformed business responses still fail normally.
+
+**Transport limitation:** candidates cross the Foundry response transport before
+WEB's terminal decision. The provider may process or retain response metadata
+despite `store:false` / `NoResponseStore`. Application export suppression is not
+a guarantee that later-refused content exists nowhere. Supported non-persisting
+transport, SDK payload suppression and actual platform correlation remain
+unverified delivery gates requiring separately authorized validation; failure
+returns to intake rather than authorizing a store or blanket SDK logging.
+
+### Content and capacity bounds
+
+| Bound, including retries and serialized context/status/envelope overhead | Ceiling |
+|---|---|
+| Text field | 2 KiB UTF-8 |
+| Serialized record | 8 KiB |
+| Serialized detail per generation | 48 KiB: fixed 24 KiB HOSTED-source + 24 KiB WEB-source, no borrowing |
+| Content records | 8: at most 3 HOSTED-source + 5 WEB-source |
+| New execution/detail spans, including release spans | 32: fixed 16 HOSTED + 16 WEB |
+| Active request-scoped buffers per process | 16, no waiting, disk spill or cross-request reuse |
+
+WEB candidates have at most 48 KiB serialized-equivalent data per active request;
+HOSTED has at most 24 KiB. Bound traversal and transient memory too, not an
+unbounded stringify followed by truncation. Budget exhaustion omits further
+detail, never generation work or baseline signals; measure peak memory and
+ingestion under concurrency and retries before rollout.
+
+Sanitize before deterministic UTF-8 truncation of instruction text. Oversized
+structured input/output projections omit the entire payload, never partial JSON.
+Preserve metadata/status over content, using stable field priority: instruction,
+input, output. Explicit
+`redacted`, `truncated`, `suppressed_policy`, `unvalidated`, and `omitted_budget`
+indicators may coexist; suppressed records never echo rejected values.
+Redacted or omitted input/output projections carry `validation='modified'`, not
+`validation='validated'`. Modified data is not an exact reproduction.
+
+Input represents the actual stage query/card snapshot, not a reconstruction from
+the final card. Instruction means trusted application shared rules + stage task +
+schema, not unknown SDK/model instructions. Output distinguishes validated
+specialist refinement from merged card. Image detail contains only safe textual
+art instructions, closed mode/quality and outcome metadata, never bytes or URLs.
+Execution result separates model-call outcome from validation/moderation acceptance.
+
+Synthetic operator example: a successful `card_lore` candidate for "a silver
+woodland guardian" can carry a sanitized input, bounded application instruction,
+validated lore refinement and a closed result. If its instruction is shortened,
+`truncated` must be visible. If subsequent image moderation refuses the request,
+**none** of that candidate content is exported; only safe structural outcomes
+remain. Do not paste real requests or trace identifiers into runbooks or tickets.
+
+### Rollout access, retention and deletion gates
+
+Before enabling traffic on a new detail-capable version, record approved readers
+including inherited RBAC, environment boundaries, downstream exports, retention,
+and deletion procedures with the privacy/operations owners. Existing 30-day
+retention, 0.25 GB/day cap and 100% sampling are observed baseline defaults, **not
+approval to retain content**. Card/account deletion does not automatically delete
+operational telemetry or downstream copies; establish those procedures explicitly.
+Assess retry-peak ingestion headroom so detail does not starve mandatory baseline
+signals. The shared daily cap is not an instantaneous hard stop.
+
+No new resource, access grant, retention or sampling change is authorized by #159.
+Missing platform evidence or unapproved access/retention/headroom blocks rollout;
+it is not permission to deploy. This implementation performs no live validation.
 
 ## Workspace tables and KQL
 
@@ -181,7 +331,8 @@ token dimensions.
 
 ## Sampling and cost
 
-The approved `dev` and `prod` default is 100% parent-consistent trace sampling.
+The baseline `dev` and `prod` default is 100% parent-consistent trace sampling;
+this is not approval of diagnostic-content retention or ingestion headroom.
 Metrics remain unsampled so rare operational outcomes can still be counted. Review
 ingestion after deployment and lower sampling only through an approved configuration
 change.
@@ -218,8 +369,12 @@ No deployment was performed for this implementation. During an authorized rollou
 5. Confirm the new revision is healthy before treating the rollout as successful.
 
 If serving health regresses, redeploy/reactivate the recorded known-good image or
-revision. Telemetry initialization must fail open when configuration is absent or
-invalid, and `/healthz` must remain independent of exporter availability. To stop
+revision. Baseline WEB exporter initialization retains its existing fail-open
+behavior; invalid `AGENT_TRACE_ENABLED` instead rejects startup in both runtimes,
+and HOSTED monitoring initialization remains mandatory. `/healthz` must remain
+independent of exporter availability. To stop
 notifications without removing resources, set `MONITORING_ALERTS_ENABLED=false` and
 reprovision. To disable application export, remove the connection string or set
-`TELEMETRY_ENABLED=false`, then redeploy the application.
+`TELEMETRY_ENABLED=false`, then redeploy the WEB application. Do not disable mandatory
+HOSTED monitoring as a detail rollback: use `AGENT_TRACE_ENABLED=false` in both
+processes and apply their respective configuration revision/version instead.

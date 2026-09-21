@@ -258,6 +258,9 @@ param monitoringDailyQuotaGb string = '0.25'
 @description('Parent-consistent OpenTelemetry trace sampling ratio.')
 param telemetrySamplingRatio string = '1.0'
 
+@description('Application-owned agent detail tracing. Defaults ON in dev and prod; passed unchanged for strict runtime true/false validation.')
+param agentTraceEnabled string = 'true'
+
 @description('Master alert switch. Disabled by default for the initial dashboard-only rollout.')
 param monitoringAlertsEnabled bool = false
 
@@ -505,6 +508,7 @@ module containerApps './modules/container-apps.bicep' = {
     tags: tags
     telemetryEnvironmentName: telemetryEnvironmentName
     telemetrySamplingRatio: telemetrySamplingRatio
+    agentTraceEnabled: agentTraceEnabled
     telemetryServiceName: 'fantasy-cards-generator'
     trustedProxyHops: trustedProxyHops
     upstreamBaseBackoffSeconds: upstreamBaseBackoffSeconds

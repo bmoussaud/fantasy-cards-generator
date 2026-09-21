@@ -7,6 +7,38 @@ The root `azure.yaml` is now the single entry point for both `web-nat` and
 and `deployments/card-orchestrator/deploy.py` are retained as legacy references
 only.
 
+### Agent detail configuration (#159 r1)
+
+Root `azure.yaml` injects `${AGENT_TRACE_ENABLED=true}` into HOSTED; root azd
+parameters pass the same setting through Bicep to WEB. Defaults remain ON in dev
+and prod. Resolved values are passed as strings unchanged: each runtime accepts trimmed,
+case-insensitive true/false, rejects empty/invalid values, and reads only at
+startup. Root preprovision, prepackage, prepublish and predeploy hooks run
+`hooks/validate_agent_trace.py` against the raw azd-injected key, preserving the
+distinction between unset and explicitly empty before deployment consumes the
+default. Empty, whitespace-only and invalid settings fail with a content-free
+error; unset keeps the ON default. No environment file or bulk environment read
+is needed. Use explicit `false` to opt out.
+Preserve `TELEMETRY_ENABLED`, required hosted `configure_telemetry()`,
+and the existing experimental GenAI tracing opt-in.
+
+Changing azd state is not runtime reload. Apply the intended new hosted version,
+then provision WEB configuration/revision with the existing image-preservation
+hooks. A web image-only deploy does not apply changed Bicep parameters. Set false
+in both processes to stop all new application-owned detail; one process cannot
+disable the other's capture, nor SDK/platform `invoke_agent` spans.
+
+HOSTED exports content-free named executions. Bounded sanitized metadata candidates
+may be transported internally, but WEB alone releases linked content records after
+terminal full business success, never on partial/refused/held/deferred/error/cancel
+outcomes. There is no persisted trace UI or business-response addition.
+`store:false` / `NoResponseStore` are not proof of provider metadata non-retention.
+Platform forwarding/non-persistence, access/retention/export/deletion and ingestion
+headroom remain separately authorized delivery/rollout gates; no live validation
+was performed for this change. See the
+[exact privacy and budget contract](operational-monitoring.md#privacy-exclusions-and-approved-159-r1-exception)
+and [root rollout procedure](agent-operational-ownership.md#detail-configuration-rollout).
+
 ### Deploy guards
 
 1. **`workflows.up`** — azd 1.32 supports only the `up` workflow override.
@@ -19,6 +51,10 @@ only.
    and both the text model deployment and application artifact version are valid.
 3. **Root `deploy.sh`** — production-safe orchestrator with
    `--approve-change` / `--approve-prod` enforcement gates.
+4. **Raw detail-setting guard** — root preprovision, prepackage, prepublish and
+   predeploy hooks reject invalid `AGENT_TRACE_ENABLED` for both services.
+   This covers targeted web/agent commands, `azd up`, and the commands invoked by
+   `deploy.sh`. Do not bypass hooks; the deprecated nested manifest is unsupported.
 
 Bare `azd deploy` is **unsupported** for this manifest. The installed azd 1.32
 help states that bare `azd deploy` targets all services in `azure.yaml`, and a
@@ -32,7 +68,7 @@ signal in root hooks before service hooks run. Use targeted `azd deploy
 |---|---|---|
 | Clean full bootstrap | `azd up` | Provisions, deploys agent, stamps exact version, then deploys web |
 | Bare deploy | `azd deploy` | **Unsupported**: azd targets both declared services |
-| Web redeploy | `azd deploy web-nat` | Does not trigger provision hooks or the agent guard |
+| Web redeploy | `azd deploy web-nat` | Runs the raw detail guard, not provision hooks or the agent prerequisite guard |
 | Agent deploy | `azd deploy card-orchestrator` | Requires prerequisites enabled via lifecycle hooks |
 | Full provision | `azd provision` | Deploys all infra and preserves the current web image |
 | Approved deploy | `./deploy.sh agent --approve-change` | Plan-only by default |

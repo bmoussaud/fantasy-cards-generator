@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.foundry_agent_client import FoundryAgentConfigurationError, _normalize_project_endpoint
+from app.settings import parse_agent_trace_enabled
 
 POLICY = "original-fantasy-v1"
 
@@ -19,6 +20,7 @@ class RuntimeSettings(BaseModel):
     stage_timeout_seconds: float = Field(default=20, gt=0, le=20, allow_inf_nan=False)
     timeout_seconds: float = Field(default=65, gt=0, le=65, allow_inf_nan=False)
     moderation_policy: str = POLICY
+    agent_trace_enabled: bool = True
 
     @field_validator("project_endpoint")
     @classmethod
@@ -39,6 +41,7 @@ class RuntimeSettings(BaseModel):
     def from_env(cls, environ: Mapping[str, str] | None = None) -> RuntimeSettings:
         env = os.environ if environ is None else environ
         values = {
+            "agent_trace_enabled": parse_agent_trace_enabled(env),
             "project_endpoint": env.get("FOUNDRY_PROJECT_ENDPOINT"),
             "model_deployment": env.get("AZURE_AI_MODEL_DEPLOYMENT_NAME"),
             "version": env.get("CARD_ORCHESTRATOR_VERSION"),

@@ -50,6 +50,8 @@ services:
         value: ${CARD_ORCHESTRATOR_VERSION}
       - name: TELEMETRY_ENABLED
         value: "true"
+      - name: AGENT_TRACE_ENABLED
+        value: ${AGENT_TRACE_ENABLED=true}
       - name: TELEMETRY_ENVIRONMENT
         value: ${AZURE_ENV_NAME}
       - name: AZURE_EXPERIMENTAL_ENABLE_GENAI_TRACING
@@ -94,7 +96,19 @@ workflows:
     - azd: package web-nat
     - azd: deploy web-nat
 hooks:
+  prepackage:
+    - shell: sh
+      run: python3 ./hooks/validate_agent_trace.py
+  prepublish:
+    - shell: sh
+      run: python3 ./hooks/validate_agent_trace.py
+  predeploy:
+    - shell: sh
+      run: python3 ./hooks/validate_agent_trace.py
   preprovision:
+    # Validate the raw setting before azd's default can mask an explicit empty value.
+    - shell: sh
+      run: python3 ./hooks/validate_agent_trace.py
     # Initialize the build identifier before the agent deployment step.
     - shell: sh
       run: ./hooks/ensure_agent_version.sh

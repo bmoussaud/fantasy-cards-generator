@@ -27,6 +27,7 @@ from openai import (
 )
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from app import agent_detail
 from app.foundry_agent_client import GenerateCardAgentRequest, GenerateCardAgentResponse
 from app.generation import (
     GeneratedCardModel,
@@ -304,6 +305,7 @@ class CardOrchestrator:
         )
 
     @instrument_generation("generate")
+    @agent_detail.operation("hosted")
     async def generate(
         self, request: GenerateCardAgentRequest, *, hosted_version: str | None = None
     ) -> GenerateCardAgentResponse:
@@ -335,66 +337,111 @@ class CardOrchestrator:
                             if card is None
                             else {"card": card.model_dump()}
                         )
-                        started = time.perf_counter()
-                        try:
-                            async with asyncio.timeout(self.settings.stage_timeout_seconds):
-                                result = await specialists.run(stage, payload)
-                        except Exception as exc:
-                            failure = classify_runtime_failure(exc, failure_stage)
+                        with agent_detail.execution(stage) as detail:
+                            snapshot = (
+                                dict(payload.get("card", payload)) if detail is not None else None
+                            )
+                            started = time.perf_counter()
+                            try:
+                                async with asyncio.timeout(self.settings.stage_timeout_seconds):
+                                    result = await specialists.run(stage, payload)
+                            except Exception as exc:
+                                failure = classify_runtime_failure(exc, failure_stage)
+                                if detail is not None:
+                                    detail.reason = failure.reason.value
+                                record_dependency_attempt(
+                                    dependency="foundry_text",
+                                    attempt=1,
+                                    outcome=_dependency_failure_outcome(failure),
+                                    duration_ms=(time.perf_counter() - started) * 1000,
+                                    request_id=None,
+                                    error_code=failure.reason.value,
+                                    retryable=False,
+                                    stage=stage,
+                                    agent_version=telemetry_version,
+                                )
+                                raise failure from None
                             record_dependency_attempt(
                                 dependency="foundry_text",
                                 attempt=1,
-                                outcome=_dependency_failure_outcome(failure),
+                                outcome=(
+                                    "completed"
+                                    if result.status == "completed"
+                                    else "blocked" if result.status == "refused" else "failed"
+                                ),
                                 duration_ms=(time.perf_counter() - started) * 1000,
                                 request_id=None,
-                                error_code=failure.reason.value,
+                                error_code="none",
                                 retryable=False,
                                 stage=stage,
                                 agent_version=telemetry_version,
                             )
-                            raise failure from None
-                        record_dependency_attempt(
-                            dependency="foundry_text",
-                            attempt=1,
-                            outcome=(
-                                "completed"
-                                if result.status == "completed"
-                                else "blocked" if result.status == "refused" else "failed"
-                            ),
-                            duration_ms=(time.perf_counter() - started) * 1000,
-                            request_id=None,
-                            error_code="none",
-                            retryable=False,
-                            stage=stage,
-                            agent_version=telemetry_version,
-                        )
-                        if result.status != "completed":
-                            if result.status not in {"refused", "held", "routing_defer"}:
-                                raise _Stop("held", "invalid_stage_status")
-                            reason = (
-                                result.reason
-                                if result.reason
-                                in {
-                                    "model_refusal",
-                                    "model_content_filter",
-                                    "model_incomplete",
-                                }
-                                else "stage_not_completed"
-                            )
-                            raise _Stop(result.status, reason)
-                        try:
-                            refinement = SCHEMAS[stage].model_validate_json(result.text)
-                            merged = (card.model_dump() if card else {}) | refinement.model_dump()
-                            card = GeneratedCardModel.model_validate(merged)
-                        except (ValidationError, ValueError, TypeError):
-                            raise _Stop("held", "schema_invalid") from None
-                        if stage in ("concept", "lore"):
-                            await self._gate(
-                                card.model_dump_json(),
-                                "post_text",
+                            if detail is not None:
+                                detail.outcome = result.status
+                                detail.reason = (
+                                    "none"
+                                    if result.status == "completed"
+                                    else (
+                                        "model_refusal"
+                                        if result.status == "refused"
+                                        else "stage_incomplete"
+                                    )
+                                )
+                            if result.status != "completed":
+                                if result.status not in {"refused", "held", "routing_defer"}:
+                                    raise _Stop("held", "invalid_stage_status")
+                                reason = (
+                                    result.reason
+                                    if result.reason
+                                    in {
+                                        "model_refusal",
+                                        "model_content_filter",
+                                        "model_incomplete",
+                                    }
+                                    else "stage_not_completed"
+                                )
+                                raise _Stop(result.status, reason)
+                            try:
+                                refinement = SCHEMAS[stage].model_validate_json(result.text)
+                                merged = (
+                                    card.model_dump() if card else {}
+                                ) | refinement.model_dump()
+                                card = GeneratedCardModel.model_validate(merged)
+                            except (ValidationError, ValueError, TypeError):
+                                if detail is not None:
+                                    detail.reason = "schema_invalid"
+                                raise _Stop("held", "schema_invalid") from None
+                            if detail is not None:
+                                detail.validation = "validated"
+                            if stage in ("concept", "lore"):
+                                try:
+                                    await self._gate(
+                                        card.model_dump_json(),
+                                        "post_text",
+                                        stage,
+                                        evidence,
+                                        telemetry_version,
+                                    )
+                                except _Stop as stop:
+                                    if detail is not None and stop.status == "refused":
+                                        detail.moderation = "blocked"
+                                        detail.reason = "suppressed_policy"
+                                    raise
+                                if detail is not None:
+                                    detail.moderation = "allowed"
+                        if detail is not None:
+                            await agent_detail.candidate(
                                 stage,
-                                evidence,
-                                telemetry_version,
+                                detail,
+                                instruction=detail.instruction,
+                                input_payload=snapshot,
+                                output_payload=refinement.model_dump(),
+                                input_fields=(
+                                    {"query"} if stage == "concept" else agent_detail.CARD_FIELDS
+                                ),
+                                output_fields=set(SCHEMAS[stage].model_fields),
+                                output_kind="card" if stage == "concept" else "refinement",
+                                deployment_version=telemetry_version,
                             )
                 art_prompt = derive_art_prompt(card)
                 await self._gate(

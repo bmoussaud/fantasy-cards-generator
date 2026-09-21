@@ -7,6 +7,7 @@ import hmac
 import time
 from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -15,6 +16,7 @@ from uuid import uuid4
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from app import agent_detail
 from app.health import (
     AzureBlobHealthProbe,
     AzureCosmosHealthProbe,
@@ -1519,6 +1521,7 @@ class CardGenerationService:
         self._flights: dict[str, _GenerationFlight] = {}
 
     @instrument_generation("generate")
+    @agent_detail.operation("web")
     async def generate_card(
         self,
         *,
@@ -1675,6 +1678,7 @@ class CardGenerationService:
             raise problem from exc
 
     @instrument_generation("artwork_retry")
+    @agent_detail.operation("web")
     async def retry_artwork(
         self,
         *,
@@ -1847,6 +1851,7 @@ class CardGenerationService:
             stage="pre_prompt",
         )
         moderation.append(pre_decision)
+        agent_detail.require_allowed(pre_decision, "pre_prompt")
         if not pre_decision.allowed:
             raise _GenerationRefusal(
                 status_code=422,
@@ -1885,6 +1890,7 @@ class CardGenerationService:
             stage="post_text",
         )
         moderation.append(post_text)
+        agent_detail.require_allowed(post_text, "post_text")
         if not post_text.allowed:
             raise _GenerationRefusal(
                 status_code=422,
@@ -1905,6 +1911,7 @@ class CardGenerationService:
             stage="post_art_prompt",
         )
         moderation.append(post_art_prompt)
+        agent_detail.require_allowed(post_art_prompt, "post_art_prompt")
         if not post_art_prompt.allowed:
             raise _GenerationRefusal(
                 status_code=422,
@@ -1929,6 +1936,8 @@ class CardGenerationService:
                     ),
                     service_name="foundry-image",
                     request_id=request_id,
+                    detail_prompt=derived_art_prompt,
+                    detail_quality=image_quality,
                 )
             else:
                 image_result = await self._retry_upstream(
@@ -1941,6 +1950,9 @@ class CardGenerationService:
                     service_name="foundry-image",
                     request_id=request_id,
                     on_foundry_image_failure="error",
+                    detail_prompt=derived_art_prompt,
+                    detail_quality=image_quality,
+                    detail_mode="edit",
                 )
             record_token_usage("image", image_result.usage)
         except ProblemDetails as exc:
@@ -1974,6 +1986,7 @@ class CardGenerationService:
         progress.stage = "post-image-moderation"
         post_image = await self.services.moderation_service.moderate_image(image_result.image)
         moderation.append(post_image)
+        agent_detail.require_allowed(post_image, "post_image")
         if not post_image.allowed:
             raise _GenerationRefusal(
                 status_code=422,
@@ -2067,10 +2080,12 @@ class CardGenerationService:
 
         Every failure is surfaced through the structured public error contract.
         """
-        from app.foundry_agent_client import FoundryAgentInvocationResult  # noqa: F401
-
         started = time.perf_counter()
-        agent_result = await self.services.agent_client.invoke(prompt)
+        with agent_detail.execution("hosted_invocation") as detail:
+            agent_result = await self.services.agent_client.invoke(prompt)
+            if detail is not None:
+                detail.outcome, detail.reason = agent_detail.invocation_outcome(agent_result)
+                detail.validation = "validated" if agent_result.schema_valid else "unvalidated"
         duration_ms = (time.perf_counter() - started) * 1000
 
         agent_version = agent_result.agent_version
@@ -2092,6 +2107,24 @@ class CardGenerationService:
             and agent_result.card is not None
             and agent_result.art_prompt is not None
         ):
+            if detail is not None:
+                if not agent_result.schema_valid or agent_result.agent_detail_rejected:
+                    agent_detail.current().deny()
+                else:
+                    await agent_detail.accept_hosted(
+                        agent_result.agent_detail, source=detail.source
+                    )
+                    await agent_detail.candidate(
+                        "hosted_invocation",
+                        detail,
+                        instruction="",
+                        input_payload={"query": prompt},
+                        output_payload=agent_result.card.model_dump(),
+                        input_fields={"query"},
+                        output_fields=agent_detail.CARD_FIELDS,
+                        output_kind="final_card",
+                        deployment_version=agent_result.agent_version or "",
+                    )
             text_result = AITextResult(
                 payload=agent_result.card.model_dump(),
                 metadata=ModelMetadata(
@@ -2245,6 +2278,8 @@ class CardGenerationService:
                 ),
                 service_name="foundry-image",
                 request_id=request_id,
+                detail_prompt=record.derived_art_prompt,
+                detail_quality=retry_quality,
             )
             record_token_usage("image", image_result.usage)
         except ProblemDetails as exc:
@@ -2260,7 +2295,10 @@ class CardGenerationService:
             return self._as_response(record)
         post_image = await self.services.moderation_service.moderate_image(image_result.image)
         moderation = [ModerationDecision.model_validate(item) for item in record.moderation]
+        for decision in moderation:
+            agent_detail.require_allowed(decision, decision.stage)
         moderation.append(post_image)
+        agent_detail.require_allowed(post_image, "post_image")
         if not post_image.allowed:
             raise _GenerationRefusal(
                 status_code=422,
@@ -2277,6 +2315,8 @@ class CardGenerationService:
             request_id=request_id,
         )
         if reservation is not None and not created:
+            if agent_detail.current() is not None:
+                agent_detail.current().deny()
             self._assert_matching_request_hash(reservation.request_hash, request_hash)
             return await self._replay_artwork_retry_or_wait(
                 owner_id=record.owner_id,
@@ -2348,6 +2388,8 @@ class CardGenerationService:
             request_id=request_id,
         )
         if replay is not None:
+            if agent_detail.current() is not None:
+                agent_detail.current().deny()
             return replay
         record = StoredCard(
             id=card_id,
@@ -2420,6 +2462,8 @@ class CardGenerationService:
                 request_id=request_id,
             )
             if replay is not None:
+                if agent_detail.current() is not None:
+                    agent_detail.current().deny()
                 return replay
         blob_name = build_blob_name(owner.owner_id, card_id)
         blob_uploaded = False
@@ -2801,6 +2845,9 @@ class CardGenerationService:
         service_name: str,
         request_id: str,
         on_foundry_image_failure: Literal["pending", "error"] = "pending",
+        detail_prompt: str = "",
+        detail_quality: str = "",
+        detail_mode: str = "generate",
     ) -> Any:
         timeout_seconds, max_retries = self._upstream_policy(service_name)
         for attempt in range(max_retries + 1):
@@ -2821,7 +2868,30 @@ class CardGenerationService:
                     },
                 )
                 try:
-                    result = await asyncio.wait_for(operation(), timeout=timeout_seconds)
+                    with (
+                        agent_detail.execution("image", attempt=attempt + 1)
+                        if service_name == "foundry-image"
+                        else nullcontext()
+                    ) as detail:
+                        result = await asyncio.wait_for(operation(), timeout=timeout_seconds)
+                        if detail is not None:
+                            detail.outcome = "completed"
+                            detail.reason = "none"
+                    if detail is not None:
+                        await agent_detail.candidate(
+                            "image",
+                            detail,
+                            instruction="",
+                            input_payload={
+                                "artPrompt": detail_prompt,
+                                "quality": detail_quality,
+                                "mode": detail_mode,
+                            },
+                            output_payload={"outcome": "completed"},
+                            input_fields={"artPrompt", "quality", "mode"},
+                            output_fields={"outcome"},
+                            output_kind="image_outcome",
+                        )
                 except asyncio.TimeoutError as exc:
                     record_dependency_attempt(
                         dependency=service_name,
