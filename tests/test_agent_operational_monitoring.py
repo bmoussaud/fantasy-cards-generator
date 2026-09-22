@@ -200,3 +200,97 @@ def test_runbooks_use_root_deployment_and_define_detail_rollout_gates() -> None:
         "not retroactively attached",
     ):
         assert required in monitoring
+
+
+def test_runbooks_document_original_hosted_release_and_legacy_web_gate() -> None:
+    for path in (
+        "docs/operational-monitoring.md",
+        "docs/agent-operational-ownership.md",
+        "docs/foundry-agent-operations.md",
+    ):
+        document = " ".join((ROOT / path).read_text().split())
+        for required in (
+            "#162",
+            "card_concept",
+            "card_lore",
+            "card_art_direction",
+            "fcg.detail.record",
+            "custom properties",
+            "serialization/revalidation",
+            "HOSTED ON / WEB OFF",
+            "cannot retract",
+            "metadata.agentDetail",
+            "New HOSTED / old WEB",
+            "old HOSTED / new WEB",
+            "unvalidated",
+            "Process death",
+            "non-atomic",
+        ):
+            assert required.lower() in document.lower(), (path, required)
+        assert "web alone releases" not in document.lower()
+        assert "standalone hosted calls export no" not in document.lower()
+
+
+def test_monitoring_runbook_defines_version_flag_timing_and_privacy_boundaries() -> None:
+    monitoring = " ".join((ROOT / "docs/operational-monitoring.md").read_text().split())
+    for required in (
+        "| New HOSTED / new WEB |",
+        "| New HOSTED / old WEB |",
+        "| Old HOSTED / new WEB |",
+        "| Old HOSTED / old WEB |",
+        "| false | true | HOSTED can export eligible content",
+        "| true | false | WEB-only eligible detail",
+        "| false | false | No new detail",
+        "pre_prompt",
+        "final_text",
+        "final_art_prompt",
+        "successful specialist/resource closure",
+        "complete eligible batch",
+        "At most three pending source span handles",
+        "saved stage completion timestamp",
+        "hosted_guardrails=unavailable",
+        "post_image=not_applicable",
+        "sampled-out spans are not resurrected",
+        "successful final HTTP send",
+        "provider-controlled system metadata",
+        "Flag rollback is prospective only",
+        "not proof of live ingestion",
+        "issuecomment-5761213933",
+    ):
+        assert required in monitoring, required
+
+
+def test_monitoring_runbook_queries_original_properties_and_preserves_linked_query() -> None:
+    monitoring = (ROOT / "docs/operational-monitoring.md").read_text()
+    original = monitoring.split("### Original HOSTED content (#162)", 1)[1].split(
+        "### Legacy linked records and WEB-owned detail", 1
+    )[0]
+    for required in (
+        "AppDependencies",
+        'AppRoleName == "card-orchestrator"',
+        'Name in ("card_concept", "card_lore", "card_art_direction")',
+        'parse_json(tostring(Properties["fcg.detail.record"]))',
+        "dependencies",
+        'cloud_RoleName == "card-orchestrator"',
+        'name in ("card_concept", "card_lore", "card_art_direction")',
+        'parse_json(tostring(customDimensions["fcg.detail.record"]))',
+        "Detail.input.text",
+        "Detail.input.flags",
+        "Detail.instruction.text",
+        "Detail.instruction.flags",
+        "Detail.output.text",
+        "Detail.output.flags",
+        "Detail.flags",
+        "Detail.source.trace_id",
+        "Detail.source.span_id",
+        "Detail.duration_ms",
+        "Detail.validation",
+        "Detail.moderation",
+        'Properties["fcg.detail.moderation"]',
+        "OperationId, Id, ParentId, DurationMs",
+        "operation_Id, id, operation_ParentId, duration",
+    ):
+        assert required in original, required
+    legacy = monitoring.split("### Legacy linked records and WEB-owned detail", 1)[1]
+    assert 'Name == "fcg.agent.detail"' in legacy
+    assert 'AppRoleName == "fantasy-cards-generator"' in legacy

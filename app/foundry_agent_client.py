@@ -445,7 +445,13 @@ class FoundryAgentClient:
             body,
             request_id=request_id,
             expected_version=self._settings.foundry_agent_expected_version,
-            capture_details=self._settings.agent_trace_enabled and current() is not None,
+            capture_details=(
+                self._settings.agent_trace_enabled
+                and capture is not None
+                and capture.eligible
+                and capture.execution is not None
+                and capture.execution.source is not None
+            ),
             detail_source=(
                 capture.execution.source
                 if capture is not None and capture.execution is not None

@@ -90,8 +90,9 @@ def new_spans(exporter):
 
 
 class LocalHostedTransport(httpx.AsyncBaseTransport):
-    def __init__(self, host):
+    def __init__(self, host, *, legacy=False):
         self.host = host
+        self.legacy = legacy
         self.headers = []
         self.responses = []
 
@@ -103,11 +104,21 @@ class LocalHostedTransport(httpx.AsyncBaseTransport):
             response = await client.post(
                 "/responses", content=request.content, headers=request.headers
             )
-        self.responses.append(response.json())
-        return httpx.Response(response.status_code, json=response.json(), request=request)
+        body = response.json()
+        if self.legacy and response.status_code == 200:
+            part = body["output"][0]["content"][0]
+            payload = json.loads(part["text"])
+            if payload["status"] == "completed":
+                payload["metadata"]["agentDetail"] = legacy_envelope(
+                    request.headers["traceparent"].split("-")[1],
+                    payload["metadata"].get("hostedVersion") or payload["metadata"]["agentVersion"],
+                )
+                part["text"] = json.dumps(payload)
+        self.responses.append(body)
+        return httpx.Response(response.status_code, json=body, request=request)
 
 
-def stack(monkeypatch, *, web=True, hosted=True, outputs=None):
+def stack(monkeypatch, *, web=True, hosted=True, outputs=None, legacy=False):
     calls = []
     outputs = outputs or [CARD, LORE, ART]
 
@@ -140,9 +151,11 @@ def stack(monkeypatch, *, web=True, hosted=True, outputs=None):
     async def factory(_settings):
         yield specialists.FoundrySpecialists(None)
 
-    hosted_settings = settings(agent_trace_enabled=hosted)
+    hosted_settings = settings(agent_trace_enabled=hosted and not legacy)
     runtime = CardOrchestrator(hosted_settings, specialist_factory=factory)
-    transport = LocalHostedTransport(create_host(hosted_settings, orchestrator=runtime))
+    transport = LocalHostedTransport(
+        create_host(hosted_settings, orchestrator=runtime), legacy=legacy and hosted
+    )
     services = _services(monkeypatch, None)
     services.settings = replace(
         services.settings,
@@ -225,7 +238,8 @@ def test_full_entrypoints_mixed_flags_and_private_terminal_release(
     assert response.status_code == 200
     assert response.json()["status"] == "completed"
     records = content(exported)
-    assert len(records) == (5 if hosted else 2) if web else len(records) == 0
+    assert len(records) == (3 if hosted else 0) + (2 if web else 0)
+    assert "agentDetail" not in json.dumps(transport.responses)
     assert "agentDetail" not in response.text
     assert "capture_version" not in response.text
     assert len(calls) == 3
@@ -234,7 +248,9 @@ def test_full_entrypoints_mixed_flags_and_private_terminal_release(
         ({"card_concept", "card_lore", "card_art_direction"} if hosted else set())
         | ({"fcg.agent.invoke", "fcg.agent.image"} if web else set())
     )
-    assert all("fcg.detail.record" not in s.attributes for s in execution)
+    assert all(
+        ("fcg.detail.record" in s.attributes) == s.name.startswith("card_") for s in execution
+    )
     assert all(s.status.description is None for s in new_spans(exported))
     if web and hosted:
         hosted_records = {r["stage"]: r for r in records if r["source_runtime"] == "hosted"}
@@ -274,16 +290,15 @@ def test_full_entrypoints_mixed_flags_and_private_terminal_release(
     assert "agentDetail" not in repr(services.audit_repository.__dict__)
 
 
+@pytest.mark.parametrize("legacy", [False, True])
 @pytest.mark.parametrize("stage", ["post_text", "post_art_prompt", "post_image"])
-def test_late_web_denial_discards_every_hosted_candidate(monkeypatch, exported, stage):
-    services, _, _, _ = stack(monkeypatch)
+def test_late_web_denial_preserves_only_new_hosted_content(monkeypatch, exported, stage, legacy):
+    services, _, _, _ = stack(monkeypatch, legacy=legacy)
     services.moderation_service = StageModeration(stage)
     with pytest.raises(ProblemDetails):
         asyncio.run(generate(CardGenerationService(services)))
-    assert not content(exported)
-    assert {"card_concept", "card_lore", "card_art_direction"} <= {
-        s.name for s in new_spans(exported)
-    }
+    assert len(content(exported)) == (0 if legacy else 3)
+    assert all(r["source_runtime"] == "hosted" for r in content(exported))
 
 
 @pytest.mark.parametrize(
@@ -298,8 +313,9 @@ def test_late_web_denial_discards_every_hosted_candidate(monkeypatch, exported, 
         "unknown_safety",
     ],
 )
-def test_late_non_success_has_zero_content(monkeypatch, exported, failure):
-    services, _, _, _ = stack(monkeypatch)
+@pytest.mark.parametrize("legacy", [False, True])
+def test_late_non_success_suppresses_web_content(monkeypatch, exported, failure, legacy):
+    services, _, _, _ = stack(monkeypatch, legacy=legacy)
     if failure == "partial":
 
         async def image(*args, **kwargs):
@@ -352,12 +368,14 @@ def test_late_non_success_has_zero_content(monkeypatch, exported, failure):
         )
     except (ProblemDetails, RuntimeError, asyncio.CancelledError):
         assert failure in {"persistence", "card_write", "response", "cancel"}
-    assert not content(exported)
+    assert len(content(exported)) == (0 if legacy else 3)
+    assert all(r["source_runtime"] == "hosted" for r in content(exported))
     assert "PRIVATE-ERROR" not in repr(exported.get_finished_spans())
 
 
-def test_real_http_serialization_failure_does_not_release(monkeypatch, exported):
-    services, _, _, _ = stack(monkeypatch)
+@pytest.mark.parametrize("legacy", [False, True])
+def test_real_http_serialization_failure_does_not_release_web(monkeypatch, exported, legacy):
+    services, _, _, _ = stack(monkeypatch, legacy=legacy)
     client = _client(monkeypatch, services)
     import fastapi.routing
 
@@ -372,7 +390,7 @@ def test_real_http_serialization_failure_does_not_release(monkeypatch, exported)
     monkeypatch.setattr(fastapi.routing, "serialize_response", fail_card)
     with pytest.raises(RuntimeError):
         _generate(client)
-    assert not content(exported)
+    assert len(content(exported)) == (0 if legacy else 3)
 
 
 def test_real_image_retry_records_attempts_not_failed_content(monkeypatch, exported):
@@ -496,6 +514,20 @@ def record(runtime="web", *, stage=None, text="safe", source=None):
     return result
 
 
+def legacy_envelope(trace_id="1" * 32, deployment_version="test"):
+    """The unchanged v1 carrier from pre-162 producers, not new HOSTED export."""
+    return detail.Envelope(
+        records=tuple(
+            record(
+                "hosted",
+                stage=stage,
+                source=detail.Source(trace_id=trace_id, span_id=f"{index:016x}"),
+            ).model_copy(update={"deployment_version": deployment_version})
+            for index, stage in enumerate(("concept", "lore", "art_direction"), start=1)
+        )
+    ).model_dump(mode="json")
+
+
 @contextmanager
 def capture(runtime="web"):
     assert detail._capacity.acquire(blocking=False)
@@ -567,26 +599,57 @@ def test_sixteen_active_buffers_without_waiting_and_cleanup(exported):
     active = []
 
     class Runner:
-        settings = SimpleNamespace(agent_trace_enabled=True)
+        settings = SimpleNamespace(agent_trace_enabled=True, version="test")
 
         @detail.operation("hosted")
-        async def run(self, gate):
+        async def run(self, gate, all_held):
+            assert detail.current() is None
+            with detail.execution("concept") as execution:
+                if execution is not None:
+                    assert execution.span.is_recording()
+                    assert execution.span.get_span_context().trace_flags.sampled
             active.append(detail.current())
+            if len(active) == 17:
+                all_held.set()
             await gate.wait()
             return GenerateCardAgentResponse(schemaVersion=1, status="held")
 
     async def scenario():
-        gate = asyncio.Event()
-        tasks = [asyncio.create_task(Runner().run(gate)) for _ in range(17)]
-        await asyncio.sleep(0)
-        assert len(active) == 17
-        assert sum(state is not None for state in active) == 16
-        assert len({id(state) for state in active if state is not None}) == 16
-        gate.set()
-        await asyncio.gather(*tasks)
-        assert all(state.closed for state in active if state is not None)
-        with capture():
-            pass
+        gate, all_held = asyncio.Event(), asyncio.Event()
+        tasks = [asyncio.create_task(Runner().run(gate, all_held)) for _ in range(17)]
+        try:
+            async with asyncio.timeout(5):
+                await all_held.wait()
+            assert len(active) == 17
+            admitted = [state for state in active if state is not None]
+            assert len(admitted) == len({id(state) for state in admitted}) == 16
+            assert active[-1] is None
+            assert all(
+                not state.closed and len(state.pending) == state.spans == 1 for state in admitted
+            )
+            assert [span.name for span in new_spans(exported)] == ["card_concept"]
+            assert not content(exported)
+            assert not detail._capacity.acquire(blocking=False)
+        finally:
+            gate.set()
+            await asyncio.gather(*tasks)
+        assert all(
+            state.closed and not state.pending and not state.records and state.execution is None
+            for state in admitted
+        )
+        assert len(new_spans(exported)) == 17
+        assert not content(exported)
+        permits = []
+        try:
+            permits = [detail._capacity.acquire(blocking=False) for _ in range(17)]
+            assert permits == [True] * 16 + [False]
+        finally:
+            for acquired in permits:
+                if acquired:
+                    detail._capacity.release()
+        assert detail.current() is None
+        assert detail._admission.get() is None
+        assert detail._ending.get() is None
 
     asyncio.run(scenario())
 
@@ -611,8 +674,10 @@ def test_malformed_private_extension_preserves_business_success(monkeypatch, exp
     services, runtime, _, _ = stack(monkeypatch)
     result = asyncio.run(runtime.generate(GenerateCardAgentRequest(query=PROMPT)))
     assert result.status == "completed"
-    assert not content(exported)
-    value = result.metadata["agentDetail"]
+    assert len(content(exported)) == 3
+    exported.clear()
+    value = legacy_envelope()
+    result.metadata["agentDetail"] = value
     evidence = result.metadata["safetyEvidence"]
     if mutation == "version":
         value["version"] = 99
@@ -741,7 +806,7 @@ def test_artwork_retry_is_web_only_and_replay_has_no_details(monkeypatch, export
     async def scenario():
         partial = await generate(service)
         assert partial.status == "awaiting_artwork_retry"
-        assert not content(exported)
+        assert len(content(exported)) == 3
         services.ai_client.generate_image = original
         if audit_failure:
 
@@ -765,11 +830,11 @@ def test_artwork_retry_is_web_only_and_replay_has_no_details(monkeypatch, export
     if audit_failure:
         with pytest.raises(RuntimeError, match="audit unavailable"):
             asyncio.run(scenario())
-        assert not content(exported)
+        assert len(content(exported)) == 3
         return
     result = asyncio.run(scenario())
     assert result.status == "completed"
-    records = content(exported)
+    records = [r for r in content(exported) if r["source_runtime"] == "web"]
     assert len(records) == 1
     assert records[0]["stage"] == "image"
     assert records[0]["source_runtime"] == "web"
@@ -923,7 +988,7 @@ def test_record_versions_are_independently_strict(version):
 def test_invalid_or_unsafe_carrier_degrades_entire_web_operation_content_free(
     monkeypatch, exported, corruption
 ):
-    services, _, transport, _ = stack(monkeypatch)
+    services, _, transport, _ = stack(monkeypatch, legacy=True)
     original = transport.handle_async_request
 
     async def tamper(request):
@@ -982,7 +1047,7 @@ def test_terminal_release_is_single_use(exported):
 def test_untrusted_carrier_is_withheld_through_terminal_export(
     monkeypatch, exported, caplog, corruption
 ):
-    services, _, transport, _ = stack(monkeypatch)
+    services, _, transport, _ = stack(monkeypatch, legacy=True)
     original = transport.handle_async_request
     canary = "Cookie: SYNTHETIC-CARRIER-CANARY"
 
@@ -1079,7 +1144,7 @@ def test_oversized_projection_has_no_partial_json_or_full_validation_claim(monke
         "flags": ["omitted_budget", "truncated"],
     }
     assert concept["validation"] == "modified"
-    assert "agentDetail" in json.dumps(transport.responses)
+    assert "agentDetail" not in json.dumps(transport.responses)
     converted = [_convert_span_to_envelope(s).as_dict() for s in new_spans(exported)]
     assert converted
     for record_value in records:
@@ -1183,11 +1248,11 @@ def test_private_label_categories_withheld_before_transport_and_export(
     records = content(exported)
     assert len(records) == 5
     hosted = json.loads(transport.responses[0]["output"][0]["content"][0]["text"])
-    carrier = hosted["metadata"]["agentDetail"]
+    assert "agentDetail" not in hosted["metadata"]
     converted = json.dumps(
         [_convert_span_to_envelope(s).as_dict() for s in exported.get_finished_spans()]
     )
-    assert "SYNTHETIC-PRIVATE-VALUE" not in json.dumps(carrier) + converted + caplog.text
+    assert "SYNTHETIC-PRIVATE-VALUE" not in converted + caplog.text
     affected = (
         [r for r in records if r["stage"] in {"concept", "hosted_invocation"}]
         if location == "query"
@@ -1225,7 +1290,7 @@ def test_escaped_private_labels_rejected_at_strict_carrier_boundaries(
         with detail._tracer().start_as_current_span("fcg.agent.detail") as span:
             span.set_attribute("fcg.detail.record", detail.encoded(value).decode())
     else:
-        services, _, transport, _ = stack(monkeypatch)
+        services, _, transport, _ = stack(monkeypatch, legacy=True)
         original = transport.handle_async_request
 
         async def tamper(request):
@@ -1267,7 +1332,7 @@ def test_cross_instance_artwork_retry_loser_discards_candidate(monkeypatch, expo
         services.ai_client.generate_image = fail
         partial = await generate(CardGenerationService(services))
         assert partial.status == "awaiting_artwork_retry"
-        assert not content(exported)
+        assert len(content(exported)) == 3
         barrier = asyncio.Barrier(2)
 
         async def image(*args, **kwargs):
@@ -1305,12 +1370,12 @@ def test_cross_instance_artwork_retry_loser_discards_candidate(monkeypatch, expo
         if s.name == "fcg.agent.image" and s.attributes["fcg.detail.operation"] == "artwork_retry"
     ]
     assert len({s.context.span_id for s in attempts}) == 2
-    records = content(exported)
+    records = [r for r in content(exported) if r["source_runtime"] == "web"]
     assert len(records) == 1
     assert records[0]["operation"] == "artwork_retry"
     assert records[0]["stage"] == "image"
     converted = [_convert_span_to_envelope(s).as_dict() for s in new_spans(exported)]
-    assert json.dumps(converted).count("fcg.detail.record") == 1
+    assert json.dumps(converted).count("fcg.detail.record") == 4
 
 
 @pytest.mark.parametrize(
@@ -1383,7 +1448,7 @@ def test_web_invocation_preserves_typed_non_success_through_export(
         assert response.json()["errorCode"] == "prompt_rejected"
         lore = next(s for s in new_spans(exported) if s.name == "card_lore")
         assert lore.attributes["fcg.detail.result"] == "refused"
-    assert not content(exported)
+    assert len(content(exported)) == (3 if failure == "schema" else 0)
     invocation = next(s for s in new_spans(exported) if s.name == "fcg.agent.invoke")
     assert invocation.attributes["fcg.detail.result"] == outcome
     assert invocation.attributes["fcg.detail.reason"] == reason
@@ -1422,12 +1487,13 @@ def test_invocation_outcomes_never_echo_arbitrary_result_values(
     assert "SYNTHETIC-PRIVATE" not in converted
 
 
-def test_response_send_failure_discards_pending_content(monkeypatch, exported):
-    services, _, _, _ = stack(monkeypatch)
+@pytest.mark.parametrize("legacy", [False, True])
+def test_response_send_failure_discards_pending_web_content(monkeypatch, exported, legacy):
+    services, _, _, _ = stack(monkeypatch, legacy=legacy)
 
     async def app(scope, receive, send):
         await generate(CardGenerationService(services))
-        assert not content(exported)
+        assert len(content(exported)) == (0 if legacy else 3)
         await send({"type": "http.response.start", "status": 200, "headers": []})
         await send({"type": "http.response.body", "body": b"complete"})
 
@@ -1441,7 +1507,7 @@ def test_response_send_failure_discards_pending_content(monkeypatch, exported):
     middleware = detail.DetailReleaseMiddleware(app)
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(middleware({"type": "http"}, receive, send))
-    assert not content(exported)
+    assert len(content(exported)) == (0 if legacy else 3)
     with capture():
         pass
 
@@ -1460,17 +1526,18 @@ def test_uninspectable_values_and_bounded_traversal_do_not_stringify():
 
 
 @pytest.mark.parametrize("render_failure", [False, True])
-def test_html_render_is_part_of_terminal_boundary(monkeypatch, exported, render_failure):
+@pytest.mark.parametrize("legacy", [False, True])
+def test_html_render_is_part_of_web_boundary(monkeypatch, exported, render_failure, legacy):
     from starlette.templating import Jinja2Templates
 
-    services, _, _, _ = stack(monkeypatch)
+    services, _, _, _ = stack(monkeypatch, legacy=legacy)
     client = _client(monkeypatch, services)
     csrf = extract_hidden_value(client.get("/app").text, "csrf_token")
     original = Jinja2Templates.TemplateResponse
 
     def render(self, *args, **kwargs):
         if "partials/card_result.html" in args:
-            assert not content(exported)
+            assert len(content(exported)) == (0 if legacy else 3)
             if render_failure:
                 raise RuntimeError("render failed")
         return original(self, *args, **kwargs)
@@ -1486,7 +1553,7 @@ def test_html_render_is_part_of_terminal_boundary(monkeypatch, exported, render_
                     "csrf_token": csrf,
                 },
             )
-        assert not content(exported)
+        assert len(content(exported)) == (0 if legacy else 3)
     else:
         response = client.post(
             "/ui/cards/generate",

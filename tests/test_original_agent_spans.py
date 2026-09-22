@@ -1,0 +1,1882 @@
+from __future__ import annotations
+
+# ruff: noqa: E402, F811
+import asyncio
+import contextvars
+import json
+import threading
+import time
+import tracemalloc
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager, contextmanager
+from datetime import datetime, timezone
+
+import httpx
+import pytest
+
+pytest.importorskip("azure.ai.agentserver.responses")
+pytest.importorskip("agent_framework.foundry")
+
+from azure.monitor.opentelemetry.exporter.export.trace._exporter import _convert_span_to_envelope
+from opentelemetry import trace
+from opentelemetry.sdk.trace import Span, TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor, SimpleSpanProcessor, SpanExportResult
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.sdk.trace.sampling import ALWAYS_ON, Decision, ParentBased, StaticSampler
+from opentelemetry.sdk.util.instrumentation import InstrumentationScope
+from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags
+
+from app import agent_detail as detail
+from app import telemetry
+from app.foundry_agent_client import (
+    GenerateCardAgentRequest,
+    GenerateCardAgentResponse,
+    _parse_success_envelope,
+)
+from app.generation import CardGenerationService, ModerationDecision
+from hosted_agents.card_orchestrator import specialists
+from hosted_agents.card_orchestrator.orchestrator import RuntimeFailure
+from hosted_agents.card_orchestrator.server import create_host
+from tests.test_agent_detail_telemetry import (
+    PROMPT,
+    capture,
+    content,
+    exported,  # noqa: F401
+    generate,
+    new_spans,
+    record,
+    stack,
+)
+from tests.test_agentic_generation import _client, _generate
+from tests.test_card_orchestrator import ART, CARD, LORE, wire
+
+
+@contextmanager
+def batched_provider(monkeypatch, sampler=None, *, queue_size=64):
+    monkeypatch.delenv("OTEL_SDK_DISABLED", raising=False)
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider(sampler=sampler or ParentBased(ALWAYS_ON))
+    provider.add_span_processor(telemetry.PrivacySpanProcessor())
+    processor = BatchSpanProcessor(
+        exporter,
+        max_queue_size=queue_size,
+        max_export_batch_size=queue_size,
+        schedule_delay_millis=60000,
+    )
+    provider.add_span_processor(processor)
+    monkeypatch.setattr(telemetry, "_enabled", True)
+    monkeypatch.setattr(telemetry, "_tracer", provider.get_tracer("baseline"))
+    monkeypatch.setattr(detail, "_tracer", lambda: provider.get_tracer(detail.SCOPE))
+    monkeypatch.setattr(detail, "_capacity", threading.BoundedSemaphore(16))
+    try:
+        yield provider, exporter, processor
+    finally:
+        provider.shutdown()
+
+
+def assert_capacity_recovered():
+    permits = [detail._capacity.acquire(blocking=False) for _ in range(17)]
+    assert permits == [True] * 16 + [False]
+    for _ in range(16):
+        detail._capacity.release()
+    assert detail.current() is None
+    assert detail._ending.get() is None
+
+
+def test_original_identity_stage_time_and_azure_batch_conversion(monkeypatch):
+    with batched_provider(monkeypatch) as (provider, exporter, _):
+        _, runtime, _, _ = stack(monkeypatch)
+        stage_contexts, completed, finalized, captures = [], [], [], []
+        original_run = specialists.FoundrySpecialists.run
+        original_candidate = detail.candidate
+        original_end = Span.end
+
+        async def run(self, stage, payload):
+            stage_contexts.append(trace.get_current_span().get_span_context())
+            await asyncio.sleep(0.002)
+            return await original_run(self, stage, payload)
+
+        async def candidate(*args, **kwargs):
+            state = detail.current()
+            captures.append(state)
+            saved = state.pending[-1]
+            completed.append(saved)
+            assert saved.span.is_recording()
+            assert trace.get_current_span().get_span_context() == saved.span.parent
+            assert "fcg.detail.record" not in saved.span.attributes
+            assert not content(exporter)
+            await asyncio.sleep(0.01)
+            await original_candidate(*args, **kwargs)
+
+        def end(self, end_time=None):
+            if self.instrumentation_scope.name == detail.SCOPE:
+                finalized.append((self.get_span_context(), end_time, time.time_ns()))
+            return original_end(self, end_time=end_time)
+
+        monkeypatch.setattr(specialists.FoundrySpecialists, "run", run)
+        monkeypatch.setattr(detail, "candidate", candidate)
+        monkeypatch.setattr(Span, "end", end)
+        with provider.get_tracer("baseline").start_as_current_span("parent") as parent:
+            parent_context = parent.get_span_context()
+            result = asyncio.run(runtime.generate(GenerateCardAgentRequest(query=PROMPT)))
+            assert trace.get_current_span() is parent
+            assert result.status == "completed"
+            assert "agentDetail" not in result.metadata
+        assert provider.force_flush()
+        spans = new_spans(exporter)
+        assert [s.name for s in spans] == ["card_concept", "card_lore", "card_art_direction"]
+        assert len(finalized) == 3
+        generation_context = spans[0].parent
+        generation = next(
+            s for s in exporter.get_finished_spans() if s.context == generation_context
+        )
+        assert generation.parent == parent_context
+        for span, saved, current, ended in zip(spans, completed, stage_contexts, finalized):
+            assert span.context == current == ended[0]
+            assert span.parent == generation_context
+            assert span.end_time == saved.end_time == ended[1]
+            assert ended[2] - span.end_time > 8_000_000
+            assert span.start_time < span.end_time
+            value = json.loads(span.attributes["fcg.detail.record"])
+            assert value["source"] == {
+                "trace_id": f"{span.context.trace_id:032x}",
+                "span_id": f"{span.context.span_id:016x}",
+            }
+            assert value["duration_ms"] == dict(saved.attributes)["fcg.detail.duration_ms"]
+            assert abs(value["duration_ms"] - (span.end_time - span.start_time) / 1e6) < 5
+            converted = _convert_span_to_envelope(span).as_dict()
+            data = converted["data"]["baseData"]
+            assert json.loads(data["properties"]["fcg.detail.record"]) == value
+            assert data["id"] == f"{span.context.span_id:016x}"
+            assert (
+                converted["tags"]["ai.operation.parentId"] == f"{generation_context.span_id:016x}"
+            )
+            duration_ms = (span.end_time - span.start_time + 500000) // 1000000
+            assert data["duration"] == f"0.00:00:00.{duration_ms:03d}"
+            assert datetime.fromisoformat(converted["time"]) == datetime.fromtimestamp(
+                span.start_time / 1e9, tz=timezone.utc
+            )
+        art = spans[-1]
+        assert art.attributes["fcg.detail.moderation"] == "unvalidated"
+        assert json.loads(art.attributes["fcg.detail.record"])["moderation"] == "allowed"
+        assert all(
+            c.closed and not c.pending and not c.records and c.execution is None for c in captures
+        )
+        assert_capacity_recovered()
+
+
+@pytest.mark.parametrize("decision", [Decision.DROP, Decision.RECORD_ONLY])
+def test_unsampled_has_no_capture_processing_or_sampling_resurrection(monkeypatch, decision):
+    with batched_provider(monkeypatch, StaticSampler(decision)) as (provider, exporter, _):
+        services, _, _, calls = stack(monkeypatch)
+
+        def forbidden(*args, **kwargs):
+            pytest.fail("sampled-out execution performed capture-only work")
+
+        for name in ("candidate", "projection_view", "_contracts", "parse_envelope"):
+            monkeypatch.setattr(detail, name, forbidden)
+        assert asyncio.run(generate(CardGenerationService(services))).status == "completed"
+        assert len(calls) == 3
+        assert provider.force_flush()
+        assert not content(exporter)
+        assert_capacity_recovered()
+
+
+def test_parent_based_remote_unsampled_is_not_resurrected(monkeypatch):
+    with batched_provider(monkeypatch) as (provider, exporter, _):
+        _, runtime, _, _ = stack(monkeypatch)
+        parent = NonRecordingSpan(SpanContext(123, 456, True, TraceFlags(0)))
+        with trace.use_span(parent):
+            response = asyncio.run(runtime.generate(GenerateCardAgentRequest(query=PROMPT)))
+            assert trace.get_current_span() is parent
+        assert response.status == "completed"
+        provider.force_flush()
+        assert not new_spans(exporter)
+        assert_capacity_recovered()
+
+
+def test_parent_sampled_decision_is_preserved_when_root_sampling_is_off(monkeypatch):
+    with batched_provider(monkeypatch, ParentBased(StaticSampler(Decision.DROP))) as (
+        provider,
+        exporter,
+        _,
+    ):
+        _, runtime, _, _ = stack(monkeypatch)
+        parent = NonRecordingSpan(SpanContext(123, 456, True, TraceFlags(1)))
+        with trace.use_span(parent):
+            response = asyncio.run(runtime.generate(GenerateCardAgentRequest(query=PROMPT)))
+            assert trace.get_current_span() is parent
+        assert response.status == "completed"
+        provider.force_flush()
+        spans = new_spans(exporter)
+        assert len(spans) == len(converted_records(exporter)) == 3
+        assert all(s.context.trace_id == 123 and s.context.trace_flags.sampled for s in spans)
+        assert_capacity_recovered()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "source",
+        "stage",
+        "runtime",
+        "agent",
+        "operation",
+        "attempt",
+        "duration_ms",
+        "deployment_version",
+        "result",
+        "validation",
+        "instruction",
+        "extra",
+        "foreign_scope",
+        "foreign_name",
+    ],
+)
+def test_original_export_rejects_mismatched_identity_and_content(monkeypatch, exported, mutation):
+    tracer = detail._tracer()
+    provider = None
+    if mutation == "foreign_scope":
+        provider = TracerProvider()
+        provider.add_span_processor(telemetry.PrivacySpanProcessor())
+        provider.add_span_processor(SimpleSpanProcessor(exported))
+        tracer = provider.get_tracer("untrusted.sdk")
+    span = tracer.start_span("invoke_agent" if mutation == "foreign_name" else "card_concept")
+    value = record("hosted", source=detail._source(span))
+    attributes = {
+        "fcg.detail.runtime": "hosted",
+        "fcg.detail.stage": "concept",
+        "fcg.detail.agent": "card_concept",
+        "fcg.detail.operation": "generate",
+        "fcg.detail.attempt": 1,
+        "fcg.detail.duration_ms": 1,
+        "fcg.detail.deployment_version": "test",
+        "fcg.detail.result": "completed",
+        "fcg.detail.reason": "none",
+        "fcg.detail.validation": "validated",
+        "fcg.detail.moderation": "allowed",
+    }
+    payload = value.model_dump(mode="json")
+    if mutation == "source":
+        payload["source"]["span_id"] = "f" * 16
+    elif mutation == "instruction":
+        payload["instruction"]["text"] = "SYNTHETIC-PRIVATE-CONTENT"
+    elif mutation == "extra":
+        payload["raw"] = "SYNTHETIC-PRIVATE-CONTENT"
+    elif mutation not in {"foreign_scope", "foreign_name"}:
+        key = f"fcg.detail.{mutation}"
+        attributes[key] = 2 if type(attributes[key]) is int else "wrong"
+    span.set_attributes(attributes)
+    span.set_attribute("fcg.detail.record", detail.encoded(payload).decode())
+    span.end()
+    assert not content(exported)
+    converted = json.dumps(
+        [_convert_span_to_envelope(s).as_dict() for s in exported.get_finished_spans()]
+    )
+    assert "SYNTHETIC-PRIVATE-CONTENT" not in converted
+    if provider:
+        provider.shutdown()
+
+
+@pytest.mark.parametrize("mutation", ["source", "duration", "instruction", "unknown_field"])
+def test_whole_hosted_batch_preflight_rejects_last_candidate(monkeypatch, exported, mutation):
+    _, runtime, _, _ = stack(monkeypatch)
+    original = detail.Capture._release
+    captures = []
+
+    def release(self):
+        captures.append(self)
+        value = self.records[-1]
+        updates = {
+            "source": {"source": detail.Source(trace_id="f" * 32, span_id="e" * 16)},
+            "duration": {"duration_ms": value.duration_ms + 1},
+            "instruction": {"instruction": detail.View(text="not the effective instructions")},
+            "unknown_field": {"output": detail.View(text='{"raw":"unchecked"}')},
+        }
+        self.records[-1] = value.model_copy(update=updates[mutation])
+        return original(self)
+
+    monkeypatch.setattr(detail.Capture, "_release", release)
+    result = asyncio.run(runtime.generate(GenerateCardAgentRequest(query=PROMPT)))
+    assert result.status == "completed"
+    assert not content(exported)
+    assert len(new_spans(exported)) == 3
+    assert all(c.closed and not c.pending and not c.records for c in captures)
+    assert_capacity_recovered()
+
+
+def converted_records(exporter):
+    return [
+        json.loads(properties["fcg.detail.record"])
+        for span in exporter.get_finished_spans()
+        if "fcg.detail.record"
+        in (
+            properties := _convert_span_to_envelope(span).as_dict()["data"]["baseData"][
+                "properties"
+            ]
+        )
+    ]
+
+
+def observe_hosted_lifecycle(monkeypatch):
+    observed = {"created": [], "captures": [], "ended": [], "attached": []}
+    tracer = detail._tracer()
+    original_start, original_init = tracer.start_span, detail.Capture.__init__
+    original_end, original_attribute = Span.end, Span.set_attribute
+
+    def start(*args, **kwargs):
+        span = original_start(*args, **kwargs)
+        # NonRecordingSpan sampling results are not owned recording SDK originals.
+        if isinstance(span, Span):
+            observed["created"].append(span)
+        return span
+
+    def initialize(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        observed["captures"].append(self)
+
+    def end(self, end_time=None):
+        if self.instrumentation_scope.name == detail.SCOPE:
+            observed["ended"].append((self, end_time, time.monotonic()))
+        return original_end(self, end_time=end_time)
+
+    def attribute(self, key, value):
+        if key == "fcg.detail.record":
+            observed["attached"].append((self, time.monotonic()))
+        return original_attribute(self, key, value)
+
+    monkeypatch.setattr(tracer, "start_span", start)
+    monkeypatch.setattr(detail, "_tracer", lambda: tracer)
+    monkeypatch.setattr(detail.Capture, "__init__", initialize)
+    monkeypatch.setattr(Span, "end", end)
+    monkeypatch.setattr(Span, "set_attribute", attribute)
+    return observed
+
+
+def assert_owned_lifecycle_drained(observed):
+    created = observed["created"]
+    ended = [span for span, _, _ in observed["ended"]]
+    assert len(ended) == len(created)
+    assert {id(span) for span in ended} == {id(span) for span in created}
+    assert len({id(span) for span in ended}) == len(ended)
+    assert all(not span.is_recording() for span in created)
+    assert observed["captures"]
+    assert all(
+        c.closed
+        and not c.pending
+        and not c.records
+        and not c._approved_records
+        and c.execution is None
+        for c in observed["captures"]
+    )
+    assert_capacity_recovered()
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        "serialization",
+        "revalidation",
+        "last_pending",
+        "last_record",
+        "aggregate",
+        "remaining_budget",
+    ],
+)
+def test_original_deadline_covers_sync_acceptance_preflight(
+    monkeypatch, exported, record_property, boundary
+):
+    _, runtime, _, _ = stack(monkeypatch)
+    runtime.settings = runtime.settings.model_copy(
+        update={"timeout_seconds": 0.3 if boundary == "remaining_budget" else 0.1}
+    )
+    observed = observe_hosted_lifecycle(monkeypatch)
+    events = []
+    in_release = False
+    original_serialize = GenerateCardAgentResponse.model_dump_json
+    original_validate = GenerateCardAgentResponse.model_validate_json
+    original_pending, original_record = detail._validate_pending, detail._validate_original
+    original_encoded, original_release = detail.encoded, detail.Capture._release
+
+    if boundary == "remaining_budget":
+        original_gate = runtime._gate
+
+        async def gate(*args):
+            await original_gate(*args)
+            if args[2] == "final_art_prompt":
+                await asyncio.sleep(0.18)
+
+        runtime._gate = gate
+
+    def delay(name):
+        target = "serialization" if boundary == "remaining_budget" else boundary
+        if name != target or events:
+            return
+        assert len(observed["created"]) == 3
+        assert not observed["attached"]
+        assert not content(exported)
+        events.append((name, time.monotonic()))
+        # Blocking work need not be preempted, but cannot authorize an expired release.
+        time.sleep(0.18 if boundary == "remaining_budget" else 0.2)
+        events.append(("blocking_work_returned", time.monotonic()))
+
+    def serialize(self, *args, **kwargs):
+        result = original_serialize(self, *args, **kwargs)
+        delay("serialization")
+        return result
+
+    def validate(*args, **kwargs):
+        result = original_validate(*args, **kwargs)
+        delay("revalidation")
+        return result
+
+    def pending(owned, span, *, ending=False):
+        result = original_pending(owned, span, ending=ending)
+        if not ending and owned.stage == "art_direction":
+            delay("last_pending")
+        return result
+
+    def record_check(record, *args, **kwargs):
+        result = original_record(record, *args, **kwargs)
+        if in_release and record.stage == "art_direction":
+            delay("last_record")
+        return result
+
+    def encoded(value):
+        result = original_encoded(value)
+        if (
+            in_release
+            and type(value) is dict
+            and value.keys() == {"version", "records"}
+            and len(value["records"]) == 3
+        ):
+            delay("aggregate")
+        return result
+
+    def release(self):
+        nonlocal in_release
+        in_release = True
+        try:
+            return original_release(self)
+        finally:
+            in_release = False
+
+    monkeypatch.setattr(GenerateCardAgentResponse, "model_dump_json", serialize)
+    monkeypatch.setattr(GenerateCardAgentResponse, "model_validate_json", validate)
+    monkeypatch.setattr(detail, "_validate_pending", pending)
+    monkeypatch.setattr(detail, "_validate_original", record_check)
+    monkeypatch.setattr(detail, "encoded", encoded)
+    monkeypatch.setattr(detail.Capture, "_release", release)
+
+    async def scenario():
+        with telemetry._tracer.start_as_current_span("outer") as outer:
+            started = time.monotonic()
+            try:
+                with pytest.raises(RuntimeFailure) as failure:
+                    await runtime.generate(GenerateCardAgentRequest(query=PROMPT))
+                assert failure.value.reason.value == "timeout"
+            finally:
+                finished = time.monotonic()
+                record_property("elapsed_seconds", finished - started)
+                record_property(
+                    "lifecycle",
+                    [(name, at - started) for name, at in events]
+                    + [("end_attempt", at - started) for _, _, at in observed["ended"]]
+                    + [("attachment", at - started) for _, at in observed["attached"]],
+                )
+                # Assert inside the invoking task, not after asyncio.run discarded its context.
+                assert trace.get_current_span() is outer
+                assert detail.current() is None
+
+    asyncio.run(scenario())
+    assert len(events) == 2
+    assert events[-1][1] - events[0][1] >= (0.18 if boundary == "remaining_budget" else 0.2)
+    assert not observed["attached"]
+    assert not converted_records(exported)
+    assert len(new_spans(exported)) == 3
+    assert_owned_lifecycle_drained(observed)
+
+
+def test_original_deadline_covers_async_resource_finalization(
+    monkeypatch, exported, record_property
+):
+    _, runtime, _, _ = stack(monkeypatch)
+    runtime.settings = runtime.settings.model_copy(update={"timeout_seconds": 0.1})
+    observed = observe_hosted_lifecycle(monkeypatch)
+    events = []
+
+    @asynccontextmanager
+    async def factory(_):
+        try:
+            yield specialists.FoundrySpecialists(None)
+            assert len(detail.current().pending) == len(detail.current().records) == 3
+            events.append(("finalization_entered", time.monotonic()))
+            await asyncio.sleep(10)
+        finally:
+            events.append(("finalization_exited", time.monotonic()))
+
+    runtime.specialist_factory = factory
+
+    async def scenario():
+        with telemetry._tracer.start_as_current_span("outer") as outer:
+            started = time.monotonic()
+            with pytest.raises(RuntimeFailure) as failure:
+                await runtime.generate(GenerateCardAgentRequest(query=PROMPT))
+            elapsed = time.monotonic() - started
+            record_property("elapsed_seconds", elapsed)
+            record_property("lifecycle", [(name, at - started) for name, at in events])
+            assert failure.value.reason.value == "timeout"
+            assert elapsed < 1
+            assert trace.get_current_span() is outer
+            assert detail.current() is None
+
+    asyncio.run(scenario())
+    assert [name for name, _ in events] == ["finalization_entered", "finalization_exited"]
+    assert not observed["attached"]
+    assert not converted_records(exported)
+    assert_owned_lifecycle_drained(observed)
+
+
+@pytest.mark.parametrize("stage", ["concept", "lore", "art_direction"])
+@pytest.mark.parametrize("boundary", ["before_attributes", "after_attributes"])
+@pytest.mark.parametrize("failure", ["cancel", "exception"])
+def test_stage_exit_structural_failure_finalizes_and_restores_same_task_context(
+    monkeypatch, exported, caplog, record_property, stage, boundary, failure
+):
+    _, runtime, _, _ = stack(monkeypatch)
+    observed = observe_hosted_lifecycle(monkeypatch)
+    original_set = Span.set_attributes
+    interrupted = []
+
+    def attributes(self, values):
+        matches = (
+            self.instrumentation_scope.name == detail.SCOPE
+            and values.get("fcg.detail.stage") == stage
+            and "fcg.detail.record" not in values
+        )
+        if not matches:
+            return original_set(self, values)
+        interrupted.append(self)
+        assert self.is_recording()
+        assert trace.get_current_span() is self
+        if boundary == "after_attributes":
+            original_set(self, values)
+        if failure == "cancel":
+            raise asyncio.CancelledError("SYNTHETIC-PRIVATE-STAGE-EXIT")
+        raise RuntimeError("SYNTHETIC-PRIVATE-STAGE-EXIT")
+
+    monkeypatch.setattr(Span, "set_attributes", attributes)
+
+    async def scenario():
+        with telemetry._tracer.start_as_current_span("outer") as outer:
+            try:
+                if failure == "cancel":
+                    with pytest.raises(asyncio.CancelledError):
+                        await runtime.generate(GenerateCardAgentRequest(query=PROMPT))
+                else:
+                    result = await runtime.generate(GenerateCardAgentRequest(query=PROMPT))
+                    assert result.status == "completed"
+            finally:
+                record_property(
+                    "lifecycle",
+                    {
+                        "created": len(observed["created"]),
+                        "end_attempts": len(observed["ended"]),
+                        "still_recording": sum(s.is_recording() for s in observed["created"]),
+                        "attachments": len(observed["attached"]),
+                        "outer_restored": trace.get_current_span() is outer,
+                    },
+                )
+                assert trace.get_current_span() is outer
+                assert detail.current() is None
+                assert detail._ending.get() is None
+
+    asyncio.run(scenario())
+    assert len(interrupted) == 1
+    expected = ["concept", "lore", "art_direction"].index(stage) + 1 if failure == "cancel" else 3
+    assert len(observed["created"]) == expected
+    assert not observed["attached"]
+    assert not converted_records(exported)
+    assert "SYNTHETIC-PRIVATE-STAGE-EXIT" not in caplog.text
+    assert_owned_lifecycle_drained(observed)
+
+
+@pytest.mark.parametrize("parent_kind", ["remote_unsampled", "root_drop", "root_record_only"])
+def test_nonrecording_requests_cannot_starve_sampled_hosted_capture(
+    monkeypatch, record_property, parent_kind
+):
+    root_decision = Decision.RECORD_ONLY if parent_kind == "root_record_only" else Decision.DROP
+    sampler = ParentBased(
+        ALWAYS_ON if parent_kind == "remote_unsampled" else StaticSampler(root_decision)
+    )
+    with batched_provider(monkeypatch, sampler) as (provider, exporter, _):
+        _, runtime, _, _ = stack(monkeypatch)
+        observed = observe_hosted_lifecycle(monkeypatch)
+        original_gate = runtime._gate
+        held = []
+
+        async def scenario():
+            release, all_held = asyncio.Event(), asyncio.Event()
+
+            async def gate(*args):
+                if (
+                    args[2] == "final_text"
+                    and not trace.get_current_span().get_span_context().trace_flags.sampled
+                ):
+                    held.append(detail.current())
+                    if len(held) == 16:
+                        all_held.set()
+                    await release.wait()
+                return await original_gate(*args)
+
+            async def unsampled(index):
+                parent = (
+                    NonRecordingSpan(SpanContext(123 + index, 456 + index, True, TraceFlags(0)))
+                    if parent_kind == "remote_unsampled"
+                    else trace.INVALID_SPAN
+                )
+                with trace.use_span(parent):
+                    result = await runtime.generate(GenerateCardAgentRequest(query=PROMPT))
+                    assert trace.get_current_span() is parent
+                    return result
+
+            runtime._gate = gate
+            tasks = [asyncio.create_task(unsampled(i)) for i in range(16)]
+            try:
+                async with asyncio.timeout(5):
+                    await all_held.wait()
+                allocations_while_held = list(observed["captures"])
+                held_buffers = list(held)
+                permits = []
+                try:
+                    for _ in range(17):
+                        permits.append(detail._capacity.acquire(blocking=False))
+                finally:
+                    for acquired in permits:
+                        if acquired:
+                            detail._capacity.release()
+                sampled_parent = NonRecordingSpan(SpanContext(999, 888, True, TraceFlags(1)))
+                with trace.use_span(sampled_parent):
+                    response = await runtime.generate(GenerateCardAgentRequest(query=PROMPT))
+                    assert trace.get_current_span() is sampled_parent
+                assert response.status == "completed"
+                assert provider.force_flush()
+                # Verify usable sampling/capture while all sixteen ineligible calls remain live.
+                spans = new_spans(exporter)
+                record_property(
+                    "lifecycle",
+                    {
+                        "ineligible_capture_allocations": len(allocations_while_held),
+                        "ineligible_retained_buffers": sum(c is not None for c in held_buffers),
+                        "available_permits": sum(permits),
+                        "sampled_originals": len(spans),
+                        "sampled_records": len(converted_records(exporter)),
+                    },
+                )
+                assert [s.name for s in spans] == [
+                    "card_concept",
+                    "card_lore",
+                    "card_art_direction",
+                ]
+                assert len(converted_records(exporter)) == 3
+                assert all(s.context.trace_id == 999 for s in spans)
+                assert not allocations_while_held
+                assert held_buffers == [None] * 16
+                assert permits == [True] * 16 + [False]
+            finally:
+                release.set()
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+            assert all(
+                isinstance(r, GenerateCardAgentResponse) and r.status == "completed"
+                for r in results
+            )
+
+        asyncio.run(scenario())
+        assert provider.force_flush()
+        assert len(converted_records(exporter)) == 3
+        assert len(observed["captures"]) == 1
+        assert len(observed["created"]) == 3
+        assert_owned_lifecycle_drained(observed)
+
+
+def test_late_recording_stage_uses_actual_sampler_decision_before_capture(monkeypatch):
+    class DropConceptSampler(ParentBased):
+        def should_sample(self, parent_context, trace_id, name, *args, **kwargs):
+            if name == "card_concept":
+                return StaticSampler(Decision.DROP).should_sample(
+                    parent_context, trace_id, name, *args, **kwargs
+                )
+            return super().should_sample(parent_context, trace_id, name, *args, **kwargs)
+
+    with batched_provider(monkeypatch, DropConceptSampler(ALWAYS_ON)) as (provider, exporter, _):
+        _, runtime, _, _ = stack(monkeypatch)
+        observed = observe_hosted_lifecycle(monkeypatch)
+        original_run, original_candidate = specialists.FoundrySpecialists.run, detail.candidate
+        stages, candidates = [], []
+
+        async def run(self, stage, payload):
+            span = trace.get_current_span()
+            stages.append((stage, span.is_recording(), detail.current()))
+            if stage == "concept":
+                assert not observed["captures"]
+                assert_capacity_recovered()
+            return await original_run(self, stage, payload)
+
+        async def candidate(stage, *args, **kwargs):
+            candidates.append(stage)
+            return await original_candidate(stage, *args, **kwargs)
+
+        monkeypatch.setattr(specialists.FoundrySpecialists, "run", run)
+        monkeypatch.setattr(detail, "candidate", candidate)
+
+        async def scenario():
+            parent = NonRecordingSpan(SpanContext(123, 456, True, TraceFlags(1)))
+            with trace.use_span(parent):
+                response = await runtime.generate(GenerateCardAgentRequest(query=PROMPT))
+                assert response.status == "completed"
+                assert trace.get_current_span() is parent
+
+        asyncio.run(scenario())
+        assert [(stage, recording) for stage, recording, _ in stages] == [
+            ("concept", False),
+            ("lore", True),
+            ("art_direction", True),
+        ]
+        assert stages[0][2] is None
+        assert stages[1][2] is stages[2][2] is observed["captures"][0]
+        assert len(observed["captures"]) == 1
+        assert candidates == ["lore", "art_direction"]
+        assert provider.force_flush()
+        assert [s.name for s in new_spans(exporter)] == ["card_lore", "card_art_direction"]
+        assert [r["stage"] for r in converted_records(exporter)] == ["lore", "art_direction"]
+        assert_owned_lifecycle_drained(observed)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "attempt",
+        "name",
+        "legacy_name",
+        "parent",
+        "start_time",
+        "scope",
+        "foreign_scope",
+        "context",
+        "context_flags",
+        "parent_flags",
+        "duration_ms",
+        "moderation",
+        "stage",
+        "runtime",
+        "agent",
+        "operation",
+        "deployment_version",
+        "result",
+        "reason",
+        "validation",
+    ],
+)
+def test_last_live_original_corruption_preflights_entire_batch(monkeypatch, exported, mutation):
+    _, runtime, _, _ = stack(monkeypatch)
+    original_release, original_end = detail.Capture._release, Span.end
+    retained, ended = [], []
+
+    def release(self):
+        retained.extend(self.pending)
+        span = self.pending[-1].span
+        if mutation in {"name", "legacy_name"}:
+            span.update_name("card_concept" if mutation == "name" else "fcg.agent.detail")
+        elif mutation == "parent":
+            span._parent = SpanContext(span.context.trace_id, 987, False, TraceFlags(1))
+        elif mutation == "start_time":
+            span._start_time += 1
+        elif mutation in {"scope", "foreign_scope"}:
+            span._instrumentation_scope = InstrumentationScope(
+                detail.SCOPE if mutation == "scope" else "foreign.sdk", version="wrong"
+            )
+        elif mutation == "context":
+            span._context = SpanContext(span.context.trace_id, 987, False, TraceFlags(1))
+        elif mutation in {"context_flags", "parent_flags"}:
+            context = span.context if mutation == "context_flags" else span.parent
+            changed = SpanContext(context.trace_id, context.span_id, False, TraceFlags(0))
+            if mutation == "context_flags":
+                span._context = changed
+            else:
+                span._parent = changed
+        else:
+            key = f"fcg.detail.{mutation}"
+            current = span.attributes[key]
+            span.set_attribute(key, current + 1 if type(current) is int else "allowed")
+        return original_release(self)
+
+    def end(self, end_time=None):
+        if any(self is saved.span for saved in retained):
+            ended.append((self, end_time))
+        return original_end(self, end_time=end_time)
+
+    monkeypatch.setattr(detail.Capture, "_release", release)
+    monkeypatch.setattr(Span, "end", end)
+    response = asyncio.run(runtime.generate(GenerateCardAgentRequest(query=PROMPT)))
+    assert response.status == "completed"
+    assert not converted_records(exported)
+    assert not content(exported)
+    assert len(ended) == 3
+    assert all(ended[i] == (saved.span, saved.end_time) for i, saved in enumerate(retained))
+    assert all(not saved.span.is_recording() for saved in retained)
+    assert_capacity_recovered()
+
+
+@pytest.mark.parametrize("unsafe", [False, True])
+def test_unowned_original_lookalike_never_exports_content(exported, unsafe):
+    from app.generation import HeuristicModerationService
+
+    span = detail._tracer().start_span("card_concept")
+    value = record("hosted", source=detail._source(span))
+    if unsafe:
+        query = "graphic gore"
+        decision = asyncio.run(
+            HeuristicModerationService("original-fantasy-v1", record_telemetry=False).moderate_text(
+                query, stage="post_text"
+            )
+        )
+        assert not decision.allowed
+        value = value.model_copy(update={"input": detail.View(text=json.dumps({"query": query}))})
+    wire_value = detail.encoded(value.model_dump(mode="json")).decode()
+    detail.Record.model_validate_json(wire_value, strict=True)
+    span.set_attributes(
+        {
+            "fcg.detail.runtime": "hosted",
+            "fcg.detail.stage": value.stage,
+            "fcg.detail.agent": value.agent_name,
+            "fcg.detail.operation": value.operation,
+            "fcg.detail.attempt": value.attempt,
+            "fcg.detail.duration_ms": value.duration_ms,
+            "fcg.detail.deployment_version": value.deployment_version,
+            "fcg.detail.result": "completed",
+            "fcg.detail.reason": "none",
+            "fcg.detail.validation": "validated",
+            "fcg.detail.moderation": "allowed",
+            "fcg.detail.record": wire_value,
+        }
+    )
+    assert detail.current() is None
+    span.end()
+    assert not converted_records(exported)
+    assert not content(exported)
+
+
+def test_schema_valid_record_replacement_is_not_candidate_approval(monkeypatch, exported):
+    _, runtime, _, _ = stack(monkeypatch)
+    original = detail.Capture._release
+
+    def release(self):
+        value = self.records[-1].model_copy(
+            update={
+                "input": detail.View(text=detail.encoded(CARD | {"name": "graphic gore"}).decode())
+            }
+        )
+        detail.Record.model_validate_json(
+            detail.encoded(value.model_dump(mode="json")), strict=True
+        )
+        self.records[-1] = value
+        return original(self)
+
+    monkeypatch.setattr(detail.Capture, "_release", release)
+    assert (
+        asyncio.run(runtime.generate(GenerateCardAgentRequest(query=PROMPT))).status == "completed"
+    )
+    assert not converted_records(exported)
+    assert len(new_spans(exported)) == 3
+    assert_capacity_recovered()
+
+
+def test_preflight_checks_retained_span_even_without_a_candidate(monkeypatch, exported):
+    _, runtime, _, _ = stack(monkeypatch)
+    original = detail.Capture._release
+
+    def release(self):
+        self.records.pop()
+        self.pending[-1].span.set_attribute("fcg.detail.attempt", 2)
+        return original(self)
+
+    monkeypatch.setattr(detail.Capture, "_release", release)
+    assert (
+        asyncio.run(runtime.generate(GenerateCardAgentRequest(query=PROMPT))).status == "completed"
+    )
+    assert not converted_records(exported)
+    assert len(new_spans(exported)) == 3
+    assert_capacity_recovered()
+
+
+@pytest.mark.parametrize(
+    "mutation", ["record", "parent", "name", "start_time", "end_time", "approved_batch"]
+)
+def test_ending_rechecks_exact_record_identity_and_frozen_times(monkeypatch, exported, mutation):
+    _, runtime, _, _ = stack(monkeypatch)
+    original_end, original_finish = Span.end, detail.Capture.finish_hosted
+    authorizations, contexts, captures = [], [], []
+
+    def changed_record(value):
+        payload = json.loads(value)
+        payload["input"]["text"] = json.dumps({"query": "graphic gore"})
+        changed = detail.encoded(payload).decode()
+        detail.Record.model_validate_json(changed, strict=True)
+        return changed
+
+    def finish(self, batch=None):
+        captures.append(self)
+        if batch and mutation == "approved_batch":
+            first = self.pending[0].source.span_id
+            batch[first] = changed_record(batch[first])
+        return original_finish(self, batch)
+
+    def end(self, end_time=None):
+        if self.name == "card_concept":
+            authorization = detail._ending.get()
+            assert list(authorization) == [id(self)]
+            authorizations.append(authorization)
+            contexts.append(contextvars.copy_context())
+            if mutation == "record":
+                self.set_attribute(
+                    "fcg.detail.record", changed_record(self.attributes["fcg.detail.record"])
+                )
+            elif mutation == "parent":
+                self._parent = SpanContext(self.context.trace_id, 987, False, TraceFlags(1))
+            elif mutation == "name":
+                self.update_name("fcg.agent.detail")
+            elif mutation == "start_time":
+                self._start_time += 1
+            elif mutation == "end_time":
+                end_time += 1
+        return original_end(self, end_time=end_time)
+
+    monkeypatch.setattr(detail.Capture, "finish_hosted", finish)
+    monkeypatch.setattr(Span, "end", end)
+    assert (
+        asyncio.run(runtime.generate(GenerateCardAgentRequest(query=PROMPT))).status == "completed"
+    )
+    assert [item["stage"] for item in converted_records(exported)] == ["lore", "art_direction"]
+    assert all(not value for value in authorizations)
+    assert all(not context.run(detail._ending.get) for context in contexts)
+    assert all(not c._approved_records and not c.pending and not c.records for c in captures)
+    assert_capacity_recovered()
+
+
+def test_matching_context_clone_cannot_borrow_active_original_authorization(monkeypatch, exported):
+    _, runtime, _, _ = stack(monkeypatch)
+    original_processor = telemetry.PrivacySpanProcessor._on_ending
+    originals, clones, authorizations, contexts = [], [], [], []
+
+    def process(self, span):
+        authorization = detail._ending.get()
+        if authorization and id(span) in authorization:
+            assert isinstance(span, Span)
+            assert list(authorization) == [id(span)]
+            owned, accepted, _ = authorization[id(span)]
+            assert owned.span is span
+            assert accepted == span.attributes["fcg.detail.record"]
+            authorizations.append(authorization)
+            contexts.append(contextvars.copy_context())
+            originals.append(span)
+            clone = detail._tracer().start_span(span.name)
+            clone._context, clone._parent = span.context, span.parent
+            clone._start_time = span.start_time
+            clone.set_attributes(dict(span.attributes))
+            clones.append(clone)
+            clone.end(end_time=span.end_time)
+        return original_processor(self, span)
+
+    monkeypatch.setattr(telemetry.PrivacySpanProcessor, "_on_ending", process)
+    assert (
+        asyncio.run(runtime.generate(GenerateCardAgentRequest(query=PROMPT))).status == "completed"
+    )
+    assert len(originals) == len(clones) == len(converted_records(exported)) == 3
+    assert all("fcg.detail.record" not in clone.attributes for clone in clones)
+    assert all("fcg.detail.record" in original.attributes for original in originals)
+    assert all(
+        span is not original for span in exported.get_finished_spans() for original in originals
+    )
+    assert all(not value for value in authorizations)
+    assert all(not context.run(detail._ending.get) for context in contexts)
+    assert_capacity_recovered()
+
+
+@pytest.mark.parametrize("failure", ["attributes", "end", "processor"])
+def test_release_authorization_is_cleared_on_instrumentation_failure(
+    monkeypatch, exported, caplog, failure
+):
+    _, runtime, _, _ = stack(monkeypatch)
+    original_end, original_set = Span.end, Span.set_attribute
+    original_process = telemetry.PrivacySpanProcessor._on_ending
+    authorizations, contexts = [], []
+
+    def fail(span):
+        if span.name == "card_concept":
+            authorization = detail._ending.get()
+            assert list(authorization) == [id(span)]
+            authorizations.append(authorization)
+            contexts.append(contextvars.copy_context())
+            raise RuntimeError("SYNTHETIC-PRIVATE-FAILURE")
+
+    def end(self, end_time=None):
+        if failure == "end":
+            fail(self)
+        return original_end(self, end_time=end_time)
+
+    def attribute(self, key, value):
+        if key == "fcg.detail.record" and failure == "attributes":
+            fail(self)
+        return original_set(self, key, value)
+
+    def process(self, span):
+        if failure == "processor":
+            fail(span)
+        return original_process(self, span)
+
+    monkeypatch.setattr(Span, "end", end)
+    monkeypatch.setattr(Span, "set_attribute", attribute)
+    monkeypatch.setattr(telemetry.PrivacySpanProcessor, "_on_ending", process)
+    assert (
+        asyncio.run(runtime.generate(GenerateCardAgentRequest(query=PROMPT))).status == "completed"
+    )
+    assert authorizations and all(not value for value in authorizations)
+    assert all(not context.run(detail._ending.get) for context in contexts)
+    assert len(converted_records(exported)) == 2
+    assert "SYNTHETIC-PRIVATE-FAILURE" not in caplog.text
+    assert_capacity_recovered()
+
+
+def test_simultaneous_threads_cannot_share_release_authorization(monkeypatch, exported):
+    _, runtime, _, _ = stack(monkeypatch)
+    original_processor = telemetry.PrivacySpanProcessor._on_ending
+    barrier = threading.Barrier(2)
+    authorizations = []
+
+    def process(self, span):
+        if span.name == "card_concept":
+            authorization = detail._ending.get()
+            assert list(authorization) == [id(span)]
+            authorizations.append(authorization)
+            barrier.wait(timeout=10)
+            assert detail._ending.get() is authorization
+            assert list(authorization) == [id(span)]
+        return original_processor(self, span)
+
+    def generate_in_thread():
+        response = asyncio.run(runtime.generate(GenerateCardAgentRequest(query=PROMPT)))
+        assert detail._ending.get() is None
+        return response.status
+
+    monkeypatch.setattr(telemetry.PrivacySpanProcessor, "_on_ending", process)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(generate_in_thread) for _ in range(2)]
+        assert [future.result(timeout=20) for future in futures] == ["completed", "completed"]
+    assert len(authorizations) == 2 and authorizations[0] is not authorizations[1]
+    assert all(not value for value in authorizations)
+    assert len(converted_records(exported)) == 6
+    assert_capacity_recovered()
+
+
+def test_child_task_cannot_reuse_inherited_ending_authorization(monkeypatch, exported):
+    _, runtime, _, _ = stack(monkeypatch)
+    original_process = telemetry.PrivacySpanProcessor._on_ending
+    children, holders = [], []
+
+    async def child(span):
+        inherited = detail._ending.get()
+        assert inherited is not None and not inherited
+        clone = detail._tracer().start_span(span.name)
+        clone._context, clone._parent = span.context, span.parent
+        clone._start_time = span.start_time
+        clone.set_attributes(dict(span.attributes))
+        clone.end(end_time=span.end_time)
+        assert "fcg.detail.record" not in clone.attributes
+
+    def process(self, span):
+        authorization = detail._ending.get()
+        if authorization and id(span) in authorization:
+            holders.append(authorization)
+            children.append(asyncio.create_task(child(span)))
+        return original_process(self, span)
+
+    async def scenario():
+        result = await runtime.generate(GenerateCardAgentRequest(query=PROMPT))
+        assert result.status == "completed"
+        await asyncio.gather(*children)
+        assert detail._ending.get() is None
+
+    monkeypatch.setattr(telemetry.PrivacySpanProcessor, "_on_ending", process)
+    asyncio.run(scenario())
+    assert len(children) == len(converted_records(exported)) == 3
+    assert all(not holder for holder in holders)
+    assert_capacity_recovered()
+
+
+@pytest.mark.parametrize(
+    "failure", ["closure", "serialization", "revalidation", "serialized_status", "evidence"]
+)
+def test_hosted_acceptance_includes_closure_and_business_serialization(
+    monkeypatch, exported, failure
+):
+    _, runtime, _, _ = stack(monkeypatch)
+    if failure == "closure":
+
+        @asynccontextmanager
+        async def factory(_):
+            yield specialists.FoundrySpecialists(None)
+            raise RuntimeError("SYNTHETIC-PRIVATE-FAILURE")
+
+        runtime.specialist_factory = factory
+    elif failure == "serialization":
+
+        def fail(self, *args, **kwargs):
+            raise ValueError("SYNTHETIC-PRIVATE-FAILURE")
+
+        monkeypatch.setattr(GenerateCardAgentResponse, "model_dump_json", fail)
+    elif failure == "revalidation":
+
+        def fail(*args, **kwargs):
+            raise ValueError("SYNTHETIC-PRIVATE-FAILURE")
+
+        monkeypatch.setattr(GenerateCardAgentResponse, "model_validate_json", fail)
+    elif failure == "serialized_status":
+        original = GenerateCardAgentResponse.model_dump_json
+
+        def serialize(self, *args, **kwargs):
+            return original(self.model_copy(update={"status": "held"}), *args, **kwargs)
+
+        monkeypatch.setattr(GenerateCardAgentResponse, "model_dump_json", serialize)
+    else:
+        original = runtime._gate
+
+        async def gate(*args):
+            await original(*args)
+            if args[2] == "final_art_prompt":
+                # Preserve the set of allowed stages but invalidate authoritative evidence.
+                args[3][0] = args[3][0].model_copy(update={"reason": "invalid_evidence"})
+
+        runtime._gate = gate
+    if failure == "closure":
+        with pytest.raises(RuntimeFailure):
+            asyncio.run(runtime.generate(GenerateCardAgentRequest(query=PROMPT)))
+    else:
+        assert (
+            asyncio.run(runtime.generate(GenerateCardAgentRequest(query=PROMPT))).status
+            == "completed"
+        )
+    assert not content(exported)
+    assert len(new_spans(exported)) == 3
+    assert_capacity_recovered()
+
+
+def test_unsafe_intermediate_cannot_be_authorized_by_safe_final_card(monkeypatch, exported):
+    _, runtime, _, _ = stack(monkeypatch, outputs=[CARD | {"name": "graphic gore"}, LORE, ART])
+
+    async def permissive(text, *, stage):
+        return ModerationDecision(
+            stage=stage, allowed=True, reasonCode="allowed", details="allowed"
+        )
+
+    runtime.moderation.moderate_text = permissive
+    result = asyncio.run(runtime.generate(GenerateCardAgentRequest(query=PROMPT)))
+    assert result.status == "completed"
+    assert result.card.name == LORE["name"]
+    assert not content(exported)
+    assert len(new_spans(exported)) == 3
+    assert_capacity_recovered()
+
+
+@pytest.mark.parametrize("stage", ["final_text", "final_art_prompt"])
+def test_last_hosted_policy_gate_suppresses_all_original_content(monkeypatch, exported, stage):
+    _, runtime, _, _ = stack(monkeypatch)
+    original = runtime._gate
+
+    async def gate(text, moderation_stage, evidence_stage, *args):
+        return await original(
+            "graphic gore" if evidence_stage == stage else text,
+            moderation_stage,
+            evidence_stage,
+            *args,
+        )
+
+    runtime._gate = gate
+    response = asyncio.run(runtime.generate(GenerateCardAgentRequest(query=PROMPT)))
+    assert response.status == "refused"
+    assert len(new_spans(exported)) == 3
+    assert not content(exported)
+    assert_capacity_recovered()
+
+
+def test_hosted_release_and_close_are_exactly_once(monkeypatch, exported):
+    _, runtime, _, _ = stack(monkeypatch)
+    original_release, original_end = detail.Capture._release, Span.end
+    finalized = []
+
+    def release(self):
+        original_release(self)
+        original_release(self)
+        self.close()
+        self.close()
+
+    def end(self, end_time=None):
+        if self.instrumentation_scope.name == detail.SCOPE:
+            finalized.append(self.get_span_context().span_id)
+        return original_end(self, end_time=end_time)
+
+    monkeypatch.setattr(detail.Capture, "_release", release)
+    monkeypatch.setattr(Span, "end", end)
+    assert (
+        asyncio.run(runtime.generate(GenerateCardAgentRequest(query=PROMPT))).status == "completed"
+    )
+    assert len(content(exported)) == len(set(finalized)) == len(finalized) == 3
+    assert_capacity_recovered()
+
+
+@pytest.mark.parametrize("boundary", ["attributes", "end", "processor"])
+@pytest.mark.parametrize("accepted", [False, True])
+def test_cancellation_during_finalization_drains_all_owned_spans(
+    monkeypatch, exported, boundary, accepted
+):
+    _, runtime, _, _ = stack(monkeypatch)
+    original_end, original_set = Span.end, Span.set_attribute
+    original_process, original_close = (
+        telemetry.PrivacySpanProcessor._on_ending,
+        detail.Capture.close,
+    )
+    ended, captures, holders = [], [], []
+
+    def interrupt(span):
+        if span.name == "card_concept":
+            holders.append(detail._ending.get())
+            raise asyncio.CancelledError
+
+    def end(self, end_time=None):
+        if self.instrumentation_scope.name == detail.SCOPE:
+            ended.append(self.get_span_context().span_id)
+        if boundary == "end":
+            interrupt(self)
+        return original_end(self, end_time=end_time)
+
+    def attribute(self, key, value):
+        result = original_set(self, key, value)
+        if key == "fcg.detail.record" and boundary == "attributes":
+            interrupt(self)
+        return result
+
+    def process(self, span):
+        if boundary == "processor":
+            interrupt(span)
+        return original_process(self, span)
+
+    def close(self):
+        captures.append(self)
+        return original_close(self)
+
+    if not accepted:
+        original_gate = runtime._gate
+
+        async def gate(text, moderation_stage, evidence_stage, *args):
+            return await original_gate(
+                "graphic gore" if evidence_stage == "final_text" else text,
+                moderation_stage,
+                evidence_stage,
+                *args,
+            )
+
+        runtime._gate = gate
+    monkeypatch.setattr(Span, "end", end)
+    monkeypatch.setattr(Span, "set_attribute", attribute)
+    monkeypatch.setattr(telemetry.PrivacySpanProcessor, "_on_ending", process)
+    monkeypatch.setattr(detail.Capture, "close", close)
+    if boundary == "attributes" and not accepted:
+        response = asyncio.run(runtime.generate(GenerateCardAgentRequest(query=PROMPT)))
+        assert response.status == "refused"
+    else:
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(runtime.generate(GenerateCardAgentRequest(query=PROMPT)))
+    assert len(ended) == len(set(ended)) == 3
+    assert all(
+        c.closed and not c.pending and not c.records and not c._approved_records for c in captures
+    )
+    assert all(not holder for holder in holders)
+    assert not converted_records(exported)
+    assert_capacity_recovered()
+
+
+def test_business_closure_serialization_and_batch_preflight_precede_first_attachment(
+    monkeypatch, exported
+):
+    _, runtime, _, _ = stack(monkeypatch)
+    events = []
+    original_serialize = GenerateCardAgentResponse.model_dump_json
+    original_validate = GenerateCardAgentResponse.model_validate_json
+    original_pending, original_set = detail._validate_pending, Span.set_attribute
+
+    @asynccontextmanager
+    async def factory(_):
+        yield specialists.FoundrySpecialists(None)
+        assert not content(exported)
+        events.append("closed")
+
+    def serialize(self, *args, **kwargs):
+        assert not content(exported)
+        events.append("serialized")
+        return original_serialize(self, *args, **kwargs)
+
+    def validate(*args, **kwargs):
+        assert not content(exported)
+        result = original_validate(*args, **kwargs)
+        events.append("revalidated")
+        return result
+
+    def pending(owned, span, *, ending=False):
+        result = original_pending(owned, span, ending=ending)
+        if not ending:
+            assert not content(exported)
+            events.append(owned.stage)
+        return result
+
+    def attribute(self, key, value):
+        if key == "fcg.detail.record":
+            assert events[:6] == [
+                "closed",
+                "serialized",
+                "revalidated",
+                "concept",
+                "lore",
+                "art_direction",
+            ]
+            events.append("attached")
+        return original_set(self, key, value)
+
+    runtime.specialist_factory = factory
+    monkeypatch.setattr(GenerateCardAgentResponse, "model_dump_json", serialize)
+    monkeypatch.setattr(GenerateCardAgentResponse, "model_validate_json", validate)
+    monkeypatch.setattr(detail, "_validate_pending", pending)
+    monkeypatch.setattr(Span, "set_attribute", attribute)
+    assert (
+        asyncio.run(runtime.generate(GenerateCardAgentRequest(query=PROMPT))).status == "completed"
+    )
+    assert events[6:] == ["attached"] * 3
+    assert len(converted_records(exported)) == 3
+    assert_capacity_recovered()
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    ["concept", "lore", "art_direction", "candidate", "closure", "final_text", "final_art_prompt"],
+)
+@pytest.mark.parametrize("failure", ["cancel", "timeout"])
+def test_every_hosted_await_boundary_finalizes_and_restores(
+    monkeypatch, exported, boundary, failure
+):
+    _, runtime, _, _ = stack(monkeypatch)
+    states, ended = [], []
+    original_run, original_candidate, original_gate = (
+        specialists.FoundrySpecialists.run,
+        detail.candidate,
+        runtime._gate,
+    )
+    original_end = Span.end
+
+    def fail():
+        raise asyncio.CancelledError if failure == "cancel" else TimeoutError
+
+    async def run(self, stage, payload):
+        states.append(detail.current())
+        if stage == boundary:
+            fail()
+        return await original_run(self, stage, payload)
+
+    async def candidate(*args, **kwargs):
+        if boundary == "candidate" and args[0] == "art_direction":
+            fail()
+        return await original_candidate(*args, **kwargs)
+
+    async def gate(*args):
+        if args[2] == boundary:
+            fail()
+        return await original_gate(*args)
+
+    @asynccontextmanager
+    async def factory(_):
+        yield specialists.FoundrySpecialists(None)
+        if boundary == "closure":
+            fail()
+
+    def end(self, end_time=None):
+        if self.instrumentation_scope.name == detail.SCOPE:
+            ended.append(self.get_span_context().span_id)
+        return original_end(self, end_time=end_time)
+
+    monkeypatch.setattr(specialists.FoundrySpecialists, "run", run)
+    monkeypatch.setattr(detail, "candidate", candidate)
+    monkeypatch.setattr(Span, "end", end)
+    runtime._gate, runtime.specialist_factory = gate, factory
+    parent = trace.get_current_span()
+    with pytest.raises(asyncio.CancelledError if failure == "cancel" else RuntimeFailure):
+        asyncio.run(runtime.generate(GenerateCardAgentRequest(query=PROMPT)))
+    assert trace.get_current_span() is parent
+    assert len(ended) == len(set(ended)) == len(new_spans(exported))
+    assert all(c.closed and not c.pending and not c.records and c.execution is None for c in states)
+    assert not content(exported)
+    assert_capacity_recovered()
+
+
+@pytest.mark.parametrize("failure", ["attributes", "end", "processor"])
+def test_instrumentation_failure_cannot_strand_other_originals(
+    monkeypatch, exported, caplog, failure
+):
+    _, runtime, _, _ = stack(monkeypatch)
+    original_end, original_set, original_processor = (
+        Span.end,
+        Span.set_attributes,
+        telemetry.PrivacySpanProcessor._on_ending,
+    )
+    ended, captures = [], []
+    original_candidate = detail.candidate
+
+    async def candidate(*args, **kwargs):
+        captures.append(detail.current())
+        return await original_candidate(*args, **kwargs)
+
+    def end(self, end_time=None):
+        if self.instrumentation_scope.name == detail.SCOPE:
+            ended.append(self.name)
+            if self.name == "card_concept" and failure == "end":
+                raise RuntimeError("SYNTHETIC-PRIVATE-FAILURE")
+        return original_end(self, end_time=end_time)
+
+    def attributes(self, values):
+        if self.name == "card_concept" and failure == "attributes":
+            raise RuntimeError("SYNTHETIC-PRIVATE-FAILURE")
+        return original_set(self, values)
+
+    def process(self, span):
+        if span.name == "card_concept" and failure == "processor":
+            raise RuntimeError("SYNTHETIC-PRIVATE-FAILURE")
+        return original_processor(self, span)
+
+    monkeypatch.setattr(detail, "candidate", candidate)
+    monkeypatch.setattr(Span, "end", end)
+    monkeypatch.setattr(Span, "set_attributes", attributes)
+    monkeypatch.setattr(telemetry.PrivacySpanProcessor, "_on_ending", process)
+    result = asyncio.run(runtime.generate(GenerateCardAgentRequest(query=PROMPT)))
+    assert result.status == "completed"
+    assert ended == ["card_concept", "card_lore", "card_art_direction"]
+    assert len(content(exported)) == (0 if failure == "attributes" else 2)
+    assert "SYNTHETIC-PRIVATE-FAILURE" not in caplog.text
+    assert all(c.closed and not c.pending and not c.records for c in captures)
+    assert_capacity_recovered()
+
+
+def test_hosted_send_failure_does_not_retract_originals(monkeypatch, exported):
+    _, runtime, _, _ = stack(monkeypatch)
+    host = create_host(runtime.settings, orchestrator=runtime)
+    app = httpx.ASGITransport(app=host)
+    original_app = app.app
+
+    async def failing_send_app(scope, receive, send):
+        async def fail(message):
+            if message["type"] == "http.response.body":
+                assert len(content(exported)) == 3
+                raise RuntimeError("synthetic delivery failure")
+            await send(message)
+
+        await original_app(scope, receive, fail)
+
+    app.app = failing_send_app
+
+    async def request():
+        async with httpx.AsyncClient(transport=app, base_url="http://offline") as client:
+            await client.post("/responses", json=wire())
+
+    with pytest.raises(RuntimeError, match="synthetic delivery failure"):
+        asyncio.run(request())
+    assert len(content(exported)) == 3
+    assert_capacity_recovered()
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("consumer", ["unchanged_v1_parser", "new_web"])
+def test_v1_web_consumer_accepts_both_producers_without_duplicate_specialists(
+    monkeypatch, exported, legacy, consumer
+):
+    services, _, transport, _ = stack(monkeypatch, legacy=legacy)
+    response = _generate(_client(monkeypatch, services))
+    assert response.json()["status"] == "completed"
+    assert len(content(exported)) == 5
+    hosted = [
+        s
+        for s in new_spans(exported)
+        if "fcg.detail.record" in s.attributes
+        and json.loads(s.attributes["fcg.detail.record"])["source_runtime"] == "hosted"
+    ]
+    assert len(hosted) == 3
+    assert all((s.name == "fcg.agent.detail") == legacy for s in hosted)
+    assert ("agentDetail" in json.dumps(transport.responses)) == legacy
+    assert "agentDetail" not in response.text
+    if consumer == "unchanged_v1_parser":
+        # This optional-carrier parser is unchanged from fff9b92 (old WEB).
+        invocation = next(s for s in new_spans(exported) if s.name == "fcg.agent.invoke")
+        parsed = _parse_success_envelope(
+            transport.responses[0],
+            request_id=None,
+            expected_version="candidate-1",
+            capture_details=True,
+            detail_source=detail.Source(
+                trace_id=f"{invocation.context.trace_id:032x}",
+                span_id=f"{invocation.context.span_id:016x}",
+            ),
+        )
+        assert parsed.success and not parsed.agent_detail_rejected
+        assert (parsed.agent_detail is not None) == legacy
+
+
+@pytest.mark.parametrize("web", [False, True])
+@pytest.mark.parametrize("hosted", [False, True])
+def test_legacy_producer_mixed_flags_keep_web_as_release_authority(
+    monkeypatch, exported, web, hosted
+):
+    services, _, transport, _ = stack(monkeypatch, legacy=True, web=web, hosted=hosted)
+    response = _generate(_client(monkeypatch, services))
+    assert response.json()["status"] == "completed"
+    records = converted_records(exported)
+    assert len(records) == (2 + (3 if hosted else 0) if web else 0)
+    assert ("agentDetail" in json.dumps(transport.responses)) == hosted
+    assert "agentDetail" not in response.text
+    assert all(
+        s.name == "fcg.agent.detail"
+        for s in new_spans(exported)
+        if "fcg.detail.record" in s.attributes
+    )
+    assert_capacity_recovered()
+
+
+@pytest.mark.parametrize("boundary", ["final_text", "candidate"])
+def test_hosted_retained_capacity_and_peak_memory_with_real_deadline(
+    monkeypatch, exported, record_property, boundary
+):
+    _, runtime, _, _ = stack(monkeypatch)
+    runtime.settings = runtime.settings.model_copy(update={"timeout_seconds": 0.1})
+    captures = []
+    original_gate = runtime._gate
+
+    async def wait():
+        captures.append(detail.current())
+        assert len(detail.current().pending) == 3
+        assert len(detail.current().records) == 3
+        await asyncio.sleep(1)
+
+    async def gate(*args):
+        if args[2] == boundary:
+            await wait()
+        return await original_gate(*args)
+
+    runtime._gate = gate
+    if boundary == "candidate":
+        original_candidate = detail.candidate
+
+        async def candidate(*args, **kwargs):
+            await original_candidate(*args, **kwargs)
+            if args[0] == "art_direction":
+                await wait()
+
+        monkeypatch.setattr(detail, "candidate", candidate)
+    tracemalloc.start()
+    start = time.monotonic()
+    try:
+        with pytest.raises(RuntimeFailure):
+            asyncio.run(runtime.generate(GenerateCardAgentRequest(query=PROMPT)))
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    elapsed = time.monotonic() - start
+    record_property("elapsed_seconds", elapsed)
+    record_property("peak_bytes", peak)
+    assert elapsed < 0.5
+    assert peak < 2 * 1024 * 1024
+    assert captures and all(c.closed and not c.pending and not c.records for c in captures)
+    assert len(new_spans(exported)) == 3
+    assert not content(exported)
+    assert_capacity_recovered()
+
+
+def test_nested_hosted_span_admission_never_retains_more_than_three(exported):
+    with capture("hosted") as state:
+        with detail.execution("concept"):
+            with detail.execution("lore"):
+                with detail.execution("art_direction"):
+                    with detail.execution("concept") as rejected:
+                        assert rejected is None
+        assert len(state.pending) == 3
+        assert not state.eligible
+    assert len(new_spans(exported)) == 3
+    assert_capacity_recovered()
+
+
+@pytest.mark.parametrize("maximum_fields", [False, True])
+def test_seventeenth_real_hosted_request_cannot_allocate_retained_spans(
+    monkeypatch, exported, record_property, maximum_fields
+):
+    glyph = "\U0001f9d9"
+    outputs = (
+        [
+            CARD
+            | {
+                "name": glyph * 80,
+                "rulesText": glyph * 400,
+                "flavorText": glyph * 280,
+                "artBrief": glyph * 300,
+            },
+            {"name": glyph * 80, "flavorText": glyph * 280},
+            {"artBrief": glyph * 300},
+        ]
+        if maximum_fields
+        else None
+    )
+    _, runtime, _, _ = stack(monkeypatch, outputs=outputs)
+    observed = observe_hosted_lifecycle(monkeypatch)
+    original_gate = runtime._gate
+    original_acquire = detail._capacity.acquire
+    captures = []
+    acquisitions = []
+
+    def acquire(*args, **kwargs):
+        acquired = original_acquire(*args, **kwargs)
+        acquisitions.append(acquired)
+        return acquired
+
+    monkeypatch.setattr(detail._capacity, "acquire", acquire)
+
+    async def scenario():
+        gate = asyncio.Event()
+
+        async def wait(*args):
+            if args[2] == "final_text":
+                captures.append(detail.current())
+                await gate.wait()
+            return await original_gate(*args)
+
+        runtime._gate = wait
+        tasks = [
+            asyncio.create_task(
+                runtime.generate(
+                    GenerateCardAgentRequest(query=glyph * 400 if maximum_fields else PROMPT)
+                )
+            )
+            for _ in range(17)
+        ]
+        try:
+            async with asyncio.timeout(5):
+                while len(captures) != 17:
+                    await asyncio.sleep(0)
+            active = [c for c in captures if c is not None]
+            assert len(active) == 16
+            assert captures[-1] is None
+            assert observed["captures"] == active
+            assert acquisitions == [True] * 16 + [False]
+            assert all(len(c.pending) == len(c.records) == 3 for c in active)
+            assert all(c.spans == 3 and not c.closed for c in active)
+            assert len({p.source.span_id for c in active for p in c.pending}) == 48
+            assert len(observed["created"]) == 49
+            assert len(observed["ended"]) == 1
+            rejected = observed["ended"][0][0]
+            assert rejected is observed["created"][-1]
+            assert rejected.name == "card_concept"
+            assert not rejected.is_recording()
+            assert all(p.span is not rejected for c in active for p in c.pending)
+            assert [s.context for s in new_spans(exported)] == [rejected.get_span_context()]
+            assert "fcg.detail.record" not in rejected.attributes
+            assert not observed["attached"]
+            assert not content(exported)
+            retained, _ = tracemalloc.get_traced_memory()
+            record_property("retained_bytes_at_capacity", retained)
+            record_property(
+                "capacity",
+                {
+                    "active_buffers": len(active),
+                    "retained_originals": sum(len(c.pending) for c in active),
+                    "successful_admissions": sum(acquisitions),
+                    "rejected_finalized_content_free": len(observed["ended"]),
+                },
+            )
+            if maximum_fields:
+                assert all(
+                    "omitted_budget" in record.output.flags
+                    for c in active
+                    for record in c.records
+                    if record.stage == "concept"
+                )
+            tasks[0].cancel()
+        finally:
+            gate.set()
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+        assert isinstance(results[0], asyncio.CancelledError)
+        assert all(r.status == "completed" for r in results[1:])
+
+    tracemalloc.start()
+    try:
+        asyncio.run(scenario())
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    record_property("peak_bytes", peak)
+    assert peak < 8 * 1024 * 1024
+    assert len(new_spans(exported)) == 49
+    assert len(content(exported)) == len(observed["attached"]) == 45
+    assert acquisitions == [True] * 16 + [False]
+    assert all(c is None or (c.closed and not c.pending and not c.records) for c in captures)
+    assert_owned_lifecycle_drained(observed)
+
+
+@pytest.mark.parametrize("limit", ["record", "runtime"])
+@pytest.mark.parametrize("delta", [-1, 0, 1])
+def test_actual_hosted_byte_ceilings_include_utf8_escaping_and_envelope(
+    exported, record_property, limit, delta
+):
+    def sized(size):
+        # Deliberately invalid instruction projections isolate the admission-size guard.
+        item = record("hosted", text=" " * detail.FIELD_BYTES).model_copy(
+            update={"output": detail.View(text="\u00e9" * (detail.FIELD_BYTES // 2))}
+        )
+        extra = size - len(detail.encoded(item.model_dump(mode="json")))
+        assert 0 <= extra <= detail.FIELD_BYTES
+        item = item.model_copy(
+            update={"instruction": detail.View(text='"' * extra + " " * (2048 - extra))}
+        )
+        assert len(detail.encoded(item.model_dump(mode="json"))) == size
+        return item
+
+    assert (detail.FIELD_BYTES, detail.RECORD_BYTES, detail.RUNTIME_BYTES) == (2048, 8192, 24576)
+    with capture("hosted") as state:
+        if limit == "record":
+            target = detail.RECORD_BYTES + delta
+            state.append(sized(target))
+            assert len(state.records) == (1 if delta <= 0 else 0)
+        else:
+            prefix = [sized(detail.RECORD_BYTES), sized(detail.RECORD_BYTES)]
+            wrapper = len(
+                detail.encoded(
+                    {"version": 1, "records": [r.model_dump(mode="json") for r in prefix]}
+                )
+            ) - sum(len(detail.encoded(r.model_dump(mode="json"))) for r in prefix)
+            target = detail.RUNTIME_BYTES + delta
+            last = sized(target - wrapper - 1 - 2 * detail.RECORD_BYTES)
+            batch = prefix + [last]
+            assert (
+                len(
+                    detail.encoded(
+                        {"version": 1, "records": [r.model_dump(mode="json") for r in batch]}
+                    )
+                )
+                == target
+            )
+            for item in batch:
+                state.append(item)
+            assert len(state.records) == (3 if delta <= 0 else 2)
+        record_property("serialized_bytes_at_boundary", target)
+    assert not content(exported)
+    assert_capacity_recovered()
+
+
+@pytest.mark.parametrize("failure", ["exception", "failure_result", "shutdown", "queue_loss"])
+def test_batch_export_loss_is_best_effort_and_releases_all_handles(
+    monkeypatch, exported, failure, caplog
+):
+    del exported
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider(sampler=ParentBased(ALWAYS_ON))
+    provider.add_span_processor(telemetry.PrivacySpanProcessor())
+    entered, unblock = threading.Event(), threading.Event()
+    calls = []
+    original_export = exporter.export
+
+    def export(spans):
+        calls.append(len(spans))
+        if failure == "exception":
+            raise RuntimeError("synthetic exporter unavailable")
+        if failure == "failure_result":
+            return SpanExportResult.FAILURE
+        if failure == "queue_loss" and len(calls) == 1:
+            entered.set()
+            assert unblock.wait(10)
+        return original_export(spans)
+
+    monkeypatch.setattr(exporter, "export", export)
+    processor = BatchSpanProcessor(
+        exporter, max_queue_size=1, max_export_batch_size=1, schedule_delay_millis=60000
+    )
+    provider.add_span_processor(processor)
+    monkeypatch.setattr(telemetry, "_tracer", provider.get_tracer("baseline"))
+    monkeypatch.setattr(detail, "_tracer", lambda: provider.get_tracer(detail.SCOPE))
+    _, runtime, _, _ = stack(monkeypatch)
+    ended, captures = [], []
+    original_end, original_release = Span.end, detail.Capture._release
+
+    def end(self, end_time=None):
+        if self.instrumentation_scope.name == detail.SCOPE:
+            ended.append(self.get_span_context().span_id)
+        return original_end(self, end_time=end_time)
+
+    def release(self):
+        captures.append(self)
+        return original_release(self)
+
+    monkeypatch.setattr(Span, "end", end)
+    monkeypatch.setattr(detail.Capture, "_release", release)
+    try:
+        if failure == "shutdown":
+            processor.shutdown()
+        elif failure == "queue_loss":
+            provider.get_tracer("baseline").start_span("fcg.generation").end()
+            assert entered.wait(5)
+        response = asyncio.run(runtime.generate(GenerateCardAgentRequest(query=PROMPT)))
+        assert response.status == "completed"
+        assert len(ended) == len(set(ended)) == 3
+        assert all(c.closed and not c.pending and not c.records for c in captures)
+    finally:
+        unblock.set()
+        provider.force_flush()
+        provider.shutdown()
+    assert len(content(exporter)) < 3
+    assert_capacity_recovered()
+
+
+@pytest.mark.parametrize("failure", ["create", "activate", "detach"])
+def test_context_lifecycle_failures_are_content_free_and_business_safe(
+    monkeypatch, exported, caplog, failure
+):
+    _, runtime, _, _ = stack(monkeypatch)
+    tracer = detail._tracer()
+    original = tracer.start_span
+    original_use = trace.use_span
+    calls = []
+
+    def start(name, *args, **kwargs):
+        calls.append(name)
+        if name == "card_lore" and failure == "create":
+            raise RuntimeError("SYNTHETIC-PRIVATE-CREATION")
+        return original(name, *args, **kwargs)
+
+    @contextmanager
+    def activate(span, *args, **kwargs):
+        if span.name == "card_lore" and failure == "activate":
+            raise RuntimeError("SYNTHETIC-PRIVATE-CREATION")
+        with original_use(span, *args, **kwargs):
+            yield span
+        if span.name == "card_lore" and failure == "detach":
+            raise RuntimeError("SYNTHETIC-PRIVATE-CREATION")
+
+    monkeypatch.setattr(tracer, "start_span", start)
+    monkeypatch.setattr(detail, "_tracer", lambda: tracer)
+    monkeypatch.setattr(trace, "use_span", activate)
+    assert (
+        asyncio.run(runtime.generate(GenerateCardAgentRequest(query=PROMPT))).status == "completed"
+    )
+    assert calls == ["card_concept", "card_lore", "card_art_direction"]
+    assert len(new_spans(exported)) == (2 if failure == "create" else 3)
+    assert not content(exported)
+    assert "SYNTHETIC-PRIVATE-CREATION" not in caplog.text
+    assert_capacity_recovered()
