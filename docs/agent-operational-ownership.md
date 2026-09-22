@@ -164,8 +164,19 @@ references, not supported entrypoints. Set
 
 ### Pre-rollout gates
 
+The requester [approved retaining current #164 r1 and opening its PR without
+performance acceptance](https://github.com/bmoussaud/fantasy-cards-generator/issues/164#issuecomment-5778665499).
+The former 5-second / 8-MiB first-ready-wave study thresholds are not PR blockers;
+the observed 11.71 seconds / 9.54 MiB are nonproduction, nonblocking evidence,
+not a benchmark pass. This does not waive functional/privacy checks, change
+runtime/capture limits or authorize deployment. No r2 startup preparation is
+included. Last recorded dev remains hosted v9 at `7d68e4e`.
+
 1. Record the commit, immutable image candidate tag, current agent/version list, and
-   endpoint selector.
+   endpoint selector. For #164, also bind the resolved frozen hosted-extra
+   dependencies, Python 3.12/linux-amd64 artifact and retained
+   `ResponsesAgentServerHost` to that candidate; source API compatibility alone
+   is not packaging/startup evidence.
 2. Record the public web ACA revision, image, environment variables or configuration
    hash, and traffic weights.
 3. Confirm mandatory monitoring IDs resolve and project monitoring is connected.
@@ -181,6 +192,20 @@ references, not supported entrypoints. Set
    during synchronous acceptance work, using the original operation deadline.
    Blocking callbacks are not preemptible; report their overrun separately from
    release authorization and cleanup rather than claiming a hard elapsed-time cap.
+   For #164, additionally execute the real Workflow/AgentExecutor/Agent stack over
+   mocked model HTTP: required edges must control dispatch, success makes exactly
+   three model calls and only one terminal envelope can escape. Verify merged
+   typed inputs, refusal at each stage, strict provider option translation and
+   zero retries. Interleave at least eight requests with cancellation/refusal
+   isolation; prove original span identity/timing and context cleanup across SDK
+   task boundaries, with no unsafe intermediate release or new framework
+   payload-bearing telemetry. Preserve original-span identity/timing, runtime
+   deadlines, capture admission, sampling and byte limits; do not treat the
+   waived cold-wave performance thresholds as passing results or remaining PR
+   gates. Missing dependencies or skipped functional hosted tests are not acceptance.
+   The current-source frozen packaging refresh is unverified: its one local
+   network-disabled build stopped at an uncached dependency download. Earlier
+   pre-cache image proof does not substitute for the current artifact.
 6. Obtain separate authorization for platform non-persistence, SDK suppression,
    cross-runtime correlation and synthetic HOSTED-acceptance/WEB-terminal verification,
    including later WEB refusal and HOSTED/WEB delivery failure after HOSTED release.
@@ -188,6 +213,9 @@ references, not supported entrypoints. Set
    discoverability; offline exporter conversion does not prove live acceptance.
    Local injection tests are not evidence of Foundry forwarding. Failure returns
    to intake; no new resources/grants/retention changes are approved by #159 or #162.
+   #164 adds no deployment/live authorization either: historical #162 dev-v9
+   evidence cannot establish acceptance of the new graph. Record the actual
+   candidate artifact and hosted version for any separately authorized live check.
 
 ```bash
 git rev-parse HEAD
@@ -369,7 +397,7 @@ optional cleanup after approval and is never part of service restoration.
   representative dev traffic.
 - Project monitoring linkage is deployed by root Bicep; the deprecated nested
   agent infra is not a supported alternative entrypoint.
-- #159 and #162 implementation approval is not rollout approval. No live platform
+- #159, #162 and #164 implementation approval is not rollout approval. No live platform
   non-persistence, payload-suppression, forwarding or original-span portal validation
   was performed for this documentation update; these remain delivery gates alongside
   approved content retention/access and baseline ingestion headroom.

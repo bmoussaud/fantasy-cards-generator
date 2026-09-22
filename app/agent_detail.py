@@ -32,6 +32,7 @@ from pydantic import (
 )
 
 if TYPE_CHECKING:
+    from opentelemetry.context import Context
     from opentelemetry.trace import SpanContext
 
     from app.foundry_agent_client import FoundryAgentInvocationResult
@@ -909,7 +910,7 @@ class Admission:
 
 
 @contextmanager
-def execution(stage: Stage, *, attempt: int = 1):
+def execution(stage: Stage, *, attempt: int = 1, parent_context: Context | None = None):
     capture = current()
     admission = _admission.get()
     owner = capture if capture is not None else admission
@@ -938,11 +939,12 @@ def execution(stage: Stage, *, attempt: int = 1):
     started = time.perf_counter()
     previous = capture.execution if capture is not None else None
     # This outer token also restores context if instrumentation fails after attaching.
-    context_token = otel_context.attach(otel_context.get_current())
+    context_token = None
     try:
         try:
+            context_token = otel_context.attach(otel_context.get_current())
             owner.spans += 1
-            span = _tracer().start_span(NAMES[stage])
+            span = _tracer().start_span(NAMES[stage], context=parent_context)
             source = _source(span)
             if source is not None:
                 if capture is None and admission is not None:
@@ -1025,7 +1027,13 @@ def execution(stage: Stage, *, attempt: int = 1):
                 diagnostic("instrumentation_failure")
             finally:
                 try:
-                    otel_context.detach(context_token)
+                    if context_token is not None:
+                        try:
+                            otel_context.detach(context_token)
+                        except Exception:
+                            if capture is not None:
+                                capture.deny()
+                            diagnostic("instrumentation_failure")
                 finally:
                     if span is not None:
                         if (

@@ -7,6 +7,44 @@ The root `azure.yaml` is now the single entry point for both `web-nat` and
 and `deployments/card-orchestrator/deploy.py` are retained as legacy references
 only.
 
+### Workflow engine migration (#164 r1)
+
+[Approved #164 r1](https://github.com/bmoussaud/fantasy-cards-generator/issues/164#issuecomment-5775375929)
+replaces application-owned specialist sequencing with per-request
+`WorkflowBuilder`/`AgentExecutor` execution through `WorkflowAgent`.
+It retains `ResponsesAgentServerHost`, the frozen hosted-extra pins, port 8088,
+stateless nonstream Responses contract, version identity and readiness behavior.
+The upstream sample's `ResponsesHostServer` is a different host adapter requiring
+separately qualified dependency and contract changes; see the
+[immutable references and graph contract](architecture-agents-foundry.md#approved-workflow-engine-contract-164-r1).
+
+This is the current r1 PR candidate, not a new deployed version or live
+verification. The last recorded dev deployment remains hosted v9 at `7d68e4e`.
+Historical #162 dev-v9 original-span evidence does not
+validate Workflow execution, task-context ownership or release timing.
+The root commands, endpoint stamping, image-preserving WEB configuration and
+restore-first rollback below are unchanged. No new flag, host, deployment or
+live invocation is authorized by #164 implementation approval. Require the
+[Workflow acceptance gates](agent-operational-ownership.md#pre-rollout-gates)
+before a separately authorized rollout; do not infer a portal graph, quality,
+cost or latency improvement from engine adoption.
+
+The requester [waived performance acceptance for the current implementation](https://github.com/bmoussaud/fantasy-cards-generator/issues/164#issuecomment-5778665499).
+The offline first-ready wave (11.71 seconds / 9.54 MiB against the former
+5 seconds / 8 MiB thresholds) is disclosed, nonproduction and nonblocking, not a
+passing benchmark. The 65-second overall / 20-second model-stage limits and
+privacy/capture bounds remain unchanged. The lazy immutable static-contract
+cache and per-Agent schema copies remain; no r2 startup preparation is included.
+
+Local frozen packaging is separate from performance and live readiness. An
+earlier pre-cache image passed import, non-root startup and local `/readiness`;
+that evidence does not verify the current source. The single refreshed local
+build on 2026-09-22 used the unchanged Dockerfile and
+`uv sync --frozen --no-dev --extra hosted-agent` with build-step networking
+disabled. It stopped at an uncached `jinja2==3.1.6` download, before copying the
+current runtime. Current-image import/startup/readiness therefore remain
+unverified; no new image was published, container started or Azure call made.
+
 ### Agent detail configuration (#162 r1; legacy #159 compatibility)
 
 Root `azure.yaml` injects `${FCG_AGENT_TRACE_ENABLED=true}` into HOSTED; root azd

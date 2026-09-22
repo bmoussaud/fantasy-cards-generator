@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 
 import httpx
@@ -79,6 +80,10 @@ def model_transport(monkeypatch):
             "https://example.services.ai.azure.com/api/projects/test/openai/v1/responses"
         )
         response = responses[min(len(calls) - 1, len(responses) - 1)]
+        if callable(response):
+            response = response(json.loads(request.content))
+            if inspect.isawaitable(response):
+                response = await response
         if isinstance(response, httpx.Response):
             return response
         if isinstance(response, Exception):

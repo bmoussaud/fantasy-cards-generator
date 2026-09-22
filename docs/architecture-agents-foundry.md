@@ -1,6 +1,7 @@
 # Agent architecture with Microsoft Foundry and Microsoft Agent Framework
 
-This document proposes how `fantasy-cards-generator` can introduce agent-based capabilities while preserving the current FastAPI + Azure Container Apps application shape.
+This document separates the current service boundaries and approved Workflow
+implementation contract from the historical agent-architecture proposal below.
 
 The direction is intentionally conservative: keep authentication, rate limiting, persistence, and HTTP/UI behavior in the existing web application, and add a Foundry-hosted agent layer only where agent reasoning adds value.
 
@@ -13,10 +14,119 @@ The direction is intentionally conservative: keep authentication, rate limiting,
 > recorded separately in the [operations runbook](foundry-agent-operations.md);
 > they are not fresh live verification. The proposal and earlier inventories
 > below are historical design context, not the current implementation inventory.
-> The runtime's 20-second stages / 65-second overall deadline do not supersede
-> the production latency proposal below.
+> The runtime's 20-second model stages / 65-second overall deadline remain
+> enforced. Historical latency proposals below are not #164 PR acceptance gates.
 
-## Executive summary
+## Approved Workflow engine contract (#164 r1)
+
+[Requester approval on 2026-09-22](https://github.com/bmoussaud/fantasy-cards-generator/issues/164#issuecomment-5775375929)
+authorizes the internal engine migration only. This section describes the current
+r1 PR candidate, not deployed behavior or a claim that all release gates passed.
+The requester subsequently
+[approved keeping the current implementation and creating the PR without performance acceptance](https://github.com/bmoussaud/fantasy-cards-generator/issues/164#issuecomment-5778665499).
+No r2 startup preparation or host migration is included. The pre-#164 runtime used
+MAF `Agent`/`FoundryChatClient` inside an application-owned stage loop. That baseline
+was not a MAF Workflow, and wrapping that loop in one executor does not satisfy #164.
+
+### Engine and host are separate
+
+`WorkflowBuilder` edges dispatch three actual `AgentExecutor` instances;
+`WorkflowAgent` is the agent-facing wrapper over that graph. The existing
+`ResponsesAgentServerHost`, `StatelessBoundary` and typed response adapter remain
+the protocol boundary. Keep `agent-framework-core==1.17.0`,
+`agent-framework-foundry==1.12.0` and `azure-ai-agentserver-responses==2.1.0`
+with the resolved frozen lock; internal Workflow execution does not intrinsically
+require an upgrade.
+
+The reference is the [immutable official workflow sample at
+e21140c78898067be2899995c67f1ed24db6fe1c](https://github.com/microsoft/agent-framework/blob/e21140c78898067be2899995c67f1ed24db6fe1c/python/samples/04-hosting/foundry-hosted-agents/responses/workflows/main.py),
+checked against the [matching release source at
+4507512f95effaae4518d658e86e9afc0ccb4514](https://github.com/microsoft/agent-framework/tree/4507512f95effaae4518d658e86e9afc0ccb4514/python/packages)
+in #164. Its `ResponsesHostServer` is a different, separately packaged hosting
+adapter, not the Workflow engine. The sample-era hosting package requires core
+`>=1.19.0,<2` and Responses `>=2.2.0b1,<3`; even the matching-release hosting
+package requires Responses `>=2.2.0b1,<3` and lacks the later factory API.
+Adopting it needs separately qualified dependency and boundary-equivalence work,
+not a conclusion that the official adapter can never be used. Source inspection
+is not resolved-provider, container or live integration proof.
+
+### Typed graph and request ownership
+
+The success path is: typed request decode -> pre-prompt safety -> Concept
+`AgentExecutor` -> concept merge/gate -> Lore `AgentExecutor` -> lore merge/gate ->
+Art Direction `AgentExecutor` -> art merge/gate -> final text/art safety ->
+terminal envelope. In `workflow.py`, these are `decode`, `pre_prompt`, `concept`,
+`concept_merge`, `lore`, `lore_merge`, `art_direction`, `art_direction_merge`,
+`final_safety` and `terminal`. Conditional stopped-outcome edges from decode,
+pre-prompt and the three merge nodes lead directly to terminal.
+
+- The decoder accepts the `WorkflowAgent` message input and validates the domain
+  request. Concept receives `{"query": validated_query}`. Lore receives
+  `{"card": validated_and_moderated_concept_card}`; art receives the complete
+  validated concept-plus-lore card. The sample's raw `last_agent` forwarding is
+  insufficient. Lore may refine only `name`/`flavorText`, art only `artBrief`;
+  each merge revalidates the whole card and preserves mechanics.
+- Each executor uses the public `SupportsAgentRun` protocol through a
+  request-local `DeferredSpecialist`; it constructs the actual Agent only when
+  reached and invokes it with the executor's fresh session. `StageBoundary`
+  middleware preserves authoritative provider
+  refusal precedence and parsing/validation/moderation inside the original
+  measured specialist span. Deterministic graph nodes verify typed results and
+  trusted safety evidence and construct the next input; they neither duplicate
+  model/moderation calls nor trust model-authored evidence.
+- Every request owns fresh workflow/executors, agent sessions and mutable card,
+  evidence and diagnostic state. SDK sibling tasks must not rely on a
+  `ContextVar` update in another child task. No cross-request mutable state,
+  conversations, checkpoints or state persistence is introduced. The only shared
+  contract cache is lazy, bounded to three immutable schema/instruction string
+  pairs; `effective_schema()` supplies a fresh mutable dictionary for each Agent.
+  It caches no SDK objects, request data or diagnostic state, and does not prepare
+  the Workflow at startup.
+- Refusal, held/deferred results and invalid evidence stop downstream specialists;
+  dependency failures travel internally as payload-free `FailureCode` values.
+  Only `TerminalEnvelope` is selected by `output_from`. Domain outcomes return one
+  schemaVersion 1 envelope; an internal failure marker is translated back into
+  the existing bounded `RuntimeFailure`, never exposed as a successful response.
+  No intermediate messages, candidates or graph events reach the public wire.
+- The pre-prompt gate precedes resource acquisition. The request task owns its
+  `AsyncExitStack`; graph/request event handshakes close it before final safety
+  and mandatory terminal serialization. Cancellation drains graph activity
+  before closing live resources, and all owned tasks drain before HOSTED content
+  acceptance. One absolute 65-second deadline covers scheduling, acquisition,
+  closure, serialization/revalidation and batch preflight; model-stage calls
+  retain their 20-second limit. No node starts a fresh operation deadline. The
+  [original-span and release contract](operational-monitoring.md#workflow-task-contexts-and-164-acceptance)
+  remains binding.
+
+Exactly three model calls occur on success, with strict per-stage schemas,
+1,800-token limits, `store=false`, `stream=false`, no SDK retries or tools.
+There is no autonomous routing, fan-out, repair loop, new specialist, model/prompt
+policy change or API/UI addition. Image generation, artwork retry, auth,
+idempotency and persistence remain WEB-owned. Workflow/provider telemetry is not
+the three original custom spans and does not authorize payload logging.
+
+The [offline acceptance requirements](agent-evaluation.md#workflow-migration-acceptance-164-r1)
+must prove real edge execution, isolation, lifecycle and public compatibility.
+There is no promise of an automatic Foundry portal graph, better quality, lower
+cost or lower latency. Root deployment/rollback procedures are unchanged and need
+separate authorization. Historical #162 dev-v9 original-span evidence is not
+acceptance evidence for this graph.
+
+### Performance disposition
+
+The requester waiver removes performance as a #164 PR acceptance gate, not
+functional, safety, privacy or cleanup requirements. The offline first-ready wave
+was **11.71 seconds / 9.54 MiB**, above the former **5 seconds / 8 MiB** study
+thresholds. These are nonproduction, nonblocking observations, not passing
+benchmarks or production capacity measurements. Runtime timeouts, admission,
+sampling and content byte/span limits remain unchanged; no further optimization
+or r2 startup preparation is implied.
+
+## Historical proposal: executive summary
+
+The remaining proposal and earlier inventories preserve their original design
+context. References below to direct text calls, skills, optional safety/repair
+agents or future hosting choices are not the #164 implementation scope.
 
 The current application already has a clean generation pipeline: authenticate the user, validate the request, moderate the prompt, generate structured card text, derive an art prompt, generate or edit artwork, moderate the result, then persist metadata and image assets.
 
@@ -44,7 +154,7 @@ Agent-based reasoning is useful here because card generation is not only a singl
 
 A hosted agent is a better long-term home for those responsibilities than adding more prompt-shaping logic directly into `app/generation.py`.
 
-## Current architecture recap
+## Historical architecture recap
 
 ### Application layer today
 

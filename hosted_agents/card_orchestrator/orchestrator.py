@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Callable
-from contextlib import AbstractAsyncContextManager
+from collections.abc import Awaitable, Callable
+from contextlib import AbstractAsyncContextManager, AsyncExitStack
 from enum import StrEnum
 from functools import wraps
-from typing import Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from agent_framework.exceptions import (
     ChatClientInvalidAuthException,
@@ -34,11 +34,19 @@ from app.generation import (
     GeneratedCardModel,
     HeuristicModerationService,
     ModerationDecision,
-    derive_art_prompt,
 )
+from app.specialist_contract import Stage, effective_instructions
 from app.telemetry import instrument_generation, record_dependency_attempt, record_moderation
 from hosted_agents.card_orchestrator.settings import POLICY, RuntimeSettings
-from hosted_agents.card_orchestrator.specialists import SCHEMAS, Specialists, create_specialists
+from hosted_agents.card_orchestrator.specialists import (
+    SCHEMAS,
+    SpecialistResult,
+    Specialists,
+    create_specialists,
+)
+
+if TYPE_CHECKING:
+    from opentelemetry.context import Context
 
 REASONS = {
     "allowed",
@@ -329,172 +337,88 @@ class CardOrchestrator:
     async def generate(
         self, request: GenerateCardAgentRequest, *, hosted_version: str | None = None
     ) -> GenerateCardAgentResponse:
+        from agent_framework import Message
+
+        from hosted_agents.card_orchestrator.workflow import RequestState, build_workflow
+
         telemetry_version = hosted_version or self.settings.version
-        evidence: list[SafetyEvidence] = []
+        state = RequestState(self, telemetry_version)
+        evidence = state.evidence
         metadata = {
             "agentVersion": self.settings.version,
             "candidate": "offline",
         }
         if hosted_version:
             metadata["hostedVersion"] = hosted_version
-        failure_stage = RuntimeFailureStage.ORCHESTRATION
+        graph_task = None
+        acquire_waiter = None
+        close_waiter = None
         try:
             async with asyncio.timeout_at(agent_detail.current_deadline()):
-                await self._gate(
-                    request.query,
-                    "pre_prompt",
-                    "pre_prompt",
-                    evidence,
-                    telemetry_version,
+                workflow = build_workflow(state).as_agent()
+                graph_task = asyncio.create_task(
+                    workflow.run([Message("user", [request.model_dump_json()])], stream=False)
                 )
-                failure_stage = RuntimeFailureStage.SPECIALIST_SETUP
-                async with self.specialist_factory(self.settings) as specialists:
-                    card = None
-                    for stage in ("concept", "lore", "art_direction"):
-                        failure_stage = RuntimeFailureStage(stage)
-                        payload = (
-                            {"query": request.query}
-                            if card is None
-                            else {"card": card.model_dump()}
-                        )
-                        with agent_detail.execution(stage) as detail:
-                            snapshot = (
-                                dict(payload.get("card", payload)) if detail is not None else None
+                acquire_waiter = asyncio.create_task(state.acquire_requested.wait())
+                close_waiter = asyncio.create_task(state.close_requested.wait())
+                try:
+                    async with AsyncExitStack() as resources:
+                        try:
+                            await asyncio.wait(
+                                (graph_task, acquire_waiter, close_waiter),
+                                return_when=asyncio.FIRST_COMPLETED,
                             )
-                            started = time.perf_counter()
-                            try:
-                                async with asyncio.timeout(self.settings.stage_timeout_seconds):
-                                    result = await specialists.run(stage, payload)
-                            except Exception as exc:
-                                failure = classify_runtime_failure(exc, failure_stage)
-                                if detail is not None:
-                                    detail.reason = failure.reason.value
-                                record_dependency_attempt(
-                                    dependency="foundry_text",
-                                    attempt=1,
-                                    outcome=_dependency_failure_outcome(failure),
-                                    duration_ms=(time.perf_counter() - started) * 1000,
-                                    request_id=None,
-                                    error_code=failure.reason.value,
-                                    retryable=False,
-                                    stage=stage,
-                                    agent_version=telemetry_version,
-                                )
-                                raise failure from None
-                            record_dependency_attempt(
-                                dependency="foundry_text",
-                                attempt=1,
-                                outcome=(
-                                    "completed"
-                                    if result.status == "completed"
-                                    else "blocked" if result.status == "refused" else "failed"
-                                ),
-                                duration_ms=(time.perf_counter() - started) * 1000,
-                                request_id=None,
-                                error_code="none",
-                                retryable=False,
-                                stage=stage,
-                                agent_version=telemetry_version,
-                            )
-                            if detail is not None:
-                                detail.outcome = result.status
-                                detail.reason = (
-                                    "none"
-                                    if result.status == "completed"
-                                    else (
-                                        "model_refusal"
-                                        if result.status == "refused"
-                                        else "stage_incomplete"
-                                    )
-                                )
-                            if result.status != "completed":
-                                if result.status not in {"refused", "held", "routing_defer"}:
-                                    raise _Stop("held", "invalid_stage_status")
-                                reason = (
-                                    result.reason
-                                    if result.reason
-                                    in {
-                                        "model_refusal",
-                                        "model_content_filter",
-                                        "model_incomplete",
-                                    }
-                                    else "stage_not_completed"
-                                )
-                                raise _Stop(result.status, reason)
-                            try:
-                                refinement = SCHEMAS[stage].model_validate_json(result.text)
-                                merged = (
-                                    card.model_dump() if card else {}
-                                ) | refinement.model_dump()
-                                card = GeneratedCardModel.model_validate(merged)
-                            except (ValidationError, ValueError, TypeError):
-                                if detail is not None:
-                                    detail.reason = "schema_invalid"
-                                raise _Stop("held", "schema_invalid") from None
-                            if detail is not None:
-                                detail.validation = "validated"
-                            if stage in ("concept", "lore"):
+                            if acquire_waiter.done() and not close_waiter.done():
                                 try:
-                                    await self._gate(
-                                        card.model_dump_json(),
-                                        "post_text",
-                                        stage,
-                                        evidence,
-                                        telemetry_version,
+                                    state.specialists = await resources.enter_async_context(
+                                        self.specialist_factory(self.settings)
                                     )
-                                except _Stop as stop:
-                                    if detail is not None and stop.status == "refused":
-                                        detail.moderation = "blocked"
-                                        detail.reason = "suppressed_policy"
-                                    raise
-                                if detail is not None:
-                                    detail.moderation = "allowed"
-                        if detail is not None:
-                            await agent_detail.candidate(
-                                stage,
-                                detail,
-                                instruction=detail.instruction,
-                                input_payload=snapshot,
-                                output_payload=refinement.model_dump(),
-                                input_fields=(
-                                    {"query"} if stage == "concept" else agent_detail.CARD_FIELDS
-                                ),
-                                output_fields=set(SCHEMAS[stage].model_fields),
-                                output_kind="card" if stage == "concept" else "refinement",
-                                deployment_version=telemetry_version,
-                            )
-                art_prompt = derive_art_prompt(card)
-                await self._gate(
-                    card.model_dump_json(),
-                    "post_text",
-                    "final_text",
-                    evidence,
-                    telemetry_version,
-                )
-                await self._gate(
-                    art_prompt,
-                    "post_art_prompt",
-                    "final_art_prompt",
-                    evidence,
-                    telemetry_version,
-                )
-                required = {"pre_prompt", "concept", "lore", "final_text", "final_art_prompt"}
-                if {e.stage for e in evidence if e.decision == "allowed"} != required:
-                    raise _Stop("held", "invalid_evidence")
-                response = GenerateCardAgentResponse(
-                    schemaVersion=1, status="completed", card=card, artPrompt=art_prompt
-                )
-        except _Stop as stop:
-            response = GenerateCardAgentResponse(
-                schemaVersion=1, status=stop.status, safetyHints=[stop.reason]
-            )
+                                except Exception as exc:
+                                    state.resource_failure = classify_runtime_failure(
+                                        exc, RuntimeFailureStage.SPECIALIST_SETUP
+                                    )
+                                state.resources_ready.set()
+                                await asyncio.wait(
+                                    (graph_task, close_waiter),
+                                    return_when=asyncio.FIRST_COMPLETED,
+                                )
+                            if graph_task.done():
+                                await graph_task
+                                raise ValueError("missing_terminal_outcome")
+                        except BaseException:
+                            # SDK work must stop before its request-owned resources close.
+                            await _drain_graph(graph_task, acquire_waiter, close_waiter)
+                            raise
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    if graph_task.done():
+                        raise
+                    state.resource_failure = classify_runtime_failure(exc, state.failure_stage)
+                finally:
+                    state.specialists = None
+                state.resources_closed.set()
+                result = await graph_task
+                if (
+                    not state.terminal_emitted
+                    or len(result.messages) != 1
+                    or result.messages[0].role != "assistant"
+                    or len(result.messages[0].contents) != 1
+                    or result.messages[0].contents[0].type != "text"
+                ):
+                    raise ValueError("invalid_terminal_output")
+                if state.terminal_failure is not None:
+                    raise state.terminal_failure
+                response = GenerateCardAgentResponse.model_validate_json(result.text, strict=True)
         except asyncio.CancelledError:
             deadline = agent_detail.current_deadline()
             if deadline is not None and asyncio.get_running_loop().time() >= deadline:
-                raise RuntimeFailure(failure_stage, RuntimeFailureReason.TIMEOUT) from None
+                raise RuntimeFailure(state.failure_stage, RuntimeFailureReason.TIMEOUT) from None
             raise
         except Exception as exc:
-            raise classify_runtime_failure(exc, failure_stage) from None
+            raise classify_runtime_failure(exc, state.failure_stage) from None
+        finally:
+            await _drain_graph(graph_task, acquire_waiter, close_waiter)
 
         evidence.extend(
             [
@@ -514,6 +438,108 @@ class CardOrchestrator:
         )
         response.metadata = metadata | {"safetyEvidence": [e.model_dump() for e in evidence]}
         return response
+
+    async def _run_stage(
+        self,
+        stage: Stage,
+        payload: dict[str, Any],
+        card: GeneratedCardModel | None,
+        evidence: list[SafetyEvidence],
+        telemetry_version: str,
+        invoke: Callable[[], Awaitable[SpecialistResult]],
+        *,
+        parent_context: Context | None = None,
+    ) -> GeneratedCardModel:
+        with agent_detail.execution(stage, parent_context=parent_context) as detail:
+            agent_detail.set_instruction(effective_instructions(stage))
+            snapshot = dict(payload.get("card", payload)) if detail is not None else None
+            started = time.perf_counter()
+            try:
+                async with asyncio.timeout(self.settings.stage_timeout_seconds):
+                    result = await invoke()
+            except Exception as exc:
+                failure = classify_runtime_failure(exc, RuntimeFailureStage(stage))
+                if detail is not None:
+                    detail.reason = failure.reason.value
+                record_dependency_attempt(
+                    dependency="foundry_text",
+                    attempt=1,
+                    outcome=_dependency_failure_outcome(failure),
+                    duration_ms=(time.perf_counter() - started) * 1000,
+                    request_id=None,
+                    error_code=failure.reason.value,
+                    retryable=False,
+                    stage=stage,
+                    agent_version=telemetry_version,
+                )
+                raise failure from None
+            record_dependency_attempt(
+                dependency="foundry_text",
+                attempt=1,
+                outcome=(
+                    "completed"
+                    if result.status == "completed"
+                    else "blocked" if result.status == "refused" else "failed"
+                ),
+                duration_ms=(time.perf_counter() - started) * 1000,
+                request_id=None,
+                error_code="none",
+                retryable=False,
+                stage=stage,
+                agent_version=telemetry_version,
+            )
+            if detail is not None:
+                detail.outcome = result.status
+                detail.reason = (
+                    "none"
+                    if result.status == "completed"
+                    else "model_refusal" if result.status == "refused" else "stage_incomplete"
+                )
+            if result.status != "completed":
+                if result.status not in {"refused", "held", "routing_defer"}:
+                    raise _Stop("held", "invalid_stage_status")
+                reason = (
+                    result.reason
+                    if result.reason
+                    in {"model_refusal", "model_content_filter", "model_incomplete"}
+                    else "stage_not_completed"
+                )
+                raise _Stop(result.status, reason)
+            try:
+                refinement = SCHEMAS[stage].model_validate_json(result.text, strict=True)
+                merged = (card.model_dump() if card else {}) | refinement.model_dump()
+                card = GeneratedCardModel.model_validate(merged, strict=True)
+            except (ValidationError, ValueError, TypeError):
+                if detail is not None:
+                    detail.reason = "schema_invalid"
+                raise _Stop("held", "schema_invalid") from None
+            if detail is not None:
+                detail.validation = "validated"
+            if stage in ("concept", "lore"):
+                try:
+                    await self._gate(
+                        card.model_dump_json(), "post_text", stage, evidence, telemetry_version
+                    )
+                except _Stop as stop:
+                    if detail is not None and stop.status == "refused":
+                        detail.moderation = "blocked"
+                        detail.reason = "suppressed_policy"
+                    raise
+                if detail is not None:
+                    detail.moderation = "allowed"
+        if detail is not None:
+            await agent_detail.candidate(
+                stage,
+                detail,
+                instruction=detail.instruction,
+                input_payload=snapshot,
+                output_payload=refinement.model_dump(),
+                input_fields={"query"} if stage == "concept" else agent_detail.CARD_FIELDS,
+                output_fields=set(SCHEMAS[stage].model_fields),
+                output_kind="card" if stage == "concept" else "refinement",
+                deployment_version=telemetry_version,
+            )
+        return card
 
     async def _gate(
         self,
@@ -556,3 +582,13 @@ def _dependency_failure_outcome(failure: RuntimeFailure) -> str:
     if failure.reason == RuntimeFailureReason.TIMEOUT:
         return "timed_out"
     return "failed"
+
+
+async def _drain_graph(*tasks: asyncio.Task | None) -> None:
+    owned = [task for task in tasks if task is not None]
+    for task in owned:
+        if not task.done():
+            task.cancel()
+    # Exceptions are classified at the request boundary; cleanup must retrieve every task.
+    if owned:
+        await asyncio.gather(*owned, return_exceptions=True)

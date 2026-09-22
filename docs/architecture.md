@@ -29,6 +29,23 @@ three sequential Microsoft Agent Framework specialists:
 concept, lore, and art direction. These are internal specialists, not three
 separate hosted services.
 
+Approved [#164 r1](https://github.com/bmoussaud/fantasy-cards-generator/issues/164#issuecomment-5775375929)
+changes the internal execution engine, not those service boundaries: per-request
+`WorkflowBuilder` edges dispatch three real `AgentExecutor` specialists through
+`WorkflowAgent`, with deterministic typed decode, merge and safety nodes and only
+a terminal envelope eligible for output. Lore and art receive the complete merged,
+validated card, not the previous agent's raw output. `ResponsesAgentServerHost`,
+the pinned dependencies and the stateless, nonstream Responses API remain unchanged.
+See the [approved graph contract](architecture-agents-foundry.md#approved-workflow-engine-contract-164-r1)
+for request isolation and acceptance requirements. This describes the current PR
+candidate, not a deployed graph. The requester
+[approved retaining it without a performance acceptance gate](https://github.com/bmoussaud/fantasy-cards-generator/issues/164#issuecomment-5778665499);
+that waiver changes neither runtime deadlines nor privacy/capture limits.
+The candidate retains a lazy immutable static-contract cache with fresh mutable
+schema copies for each Agent; no r2 startup preparation is implemented.
+The last recorded dev deployment remains hosted v9 at `7d68e4e`;
+historical #162 evidence does not validate the new graph.
+
 The agent receives text, not uploaded photos, user/session credentials, or
 data-store access tools. There is no direct card-text implementation or
 automatic fallback: all agent failures use bounded, content-free structured
