@@ -7,7 +7,7 @@ The root `azure.yaml` is now the single entry point for both `web-nat` and
 and `deployments/card-orchestrator/deploy.py` are retained as legacy references
 only.
 
-### Agent detail configuration (#159 r1)
+### Agent detail configuration (#162 r1; legacy #159 compatibility)
 
 Root `azure.yaml` injects `${FCG_AGENT_TRACE_ENABLED=true}` into HOSTED; root azd
 parameters pass the same setting through Bicep to WEB. Defaults remain ON in dev
@@ -28,16 +28,91 @@ hooks. A web image-only deploy does not apply changed Bicep parameters. Set fals
 in both processes to stop all new application-owned detail; one process cannot
 disable the other's capture, nor SDK/platform `invoke_agent` spans.
 
-HOSTED exports content-free named executions. Bounded sanitized metadata candidates
-may be transported internally, but WEB alone releases linked content records after
-terminal full business success, never on partial/refused/held/deferred/error/cancel
-outcomes. There is no persisted trace UI or business-response addition.
-`store:false` / `NoResponseStore` are not proof of provider metadata non-retention.
-Platform forwarding/non-persistence, access/retention/export/deletion and ingestion
-headroom remain separately authorized delivery/rollout gates; no live validation
-was performed for this change. See the
-[exact privacy and budget contract](operational-monitoring.md#privacy-exclusions-and-approved-159-r1-exception)
+Approved #162 r1 specifies new-version behavior, not a claim about existing
+deployments: original `card_concept`, `card_lore` and `card_art_direction` spans
+gain strict JSON `fcg.detail.record` in Application Insights custom properties.
+Built-in Foundry input/output panel rendering is not promised. The record contains
+sanitized actual pre-call input, effective application instructions and validated
+typed output/refinement, with explicit modification flags, not raw payload logging.
+Concept input is the actual query and output the typed concept card; lore and art
+inputs are their actual preceding card snapshots, with outputs restricted to
+`name`/`flavorText` and `artBrief` respectively. Instructions mean trusted shared
+rules + stage task + schema, bound to their version/digest, never hidden reasoning.
+Inspect per-view and aggregate flags: modified input/output uses
+`validation=modified`, while instruction-only truncation can leave it `validated`.
+See the [exact field contract](operational-monitoring.md#exact-record-fields-and-modification-meaning);
+neither status promises complete verbatim content.
+
+HOSTED releases these records after `completed`, allowed `pre_prompt`, `concept`,
+`lore`, `final_text` and `final_art_prompt` application evidence, independent
+candidate checks, successful resource closure and actual business-response
+serialization/revalidation. The complete eligible batch must pass before any
+content is attached. Pre-release HOSTED refusal, held/routing-deferred outcome,
+invalid evidence/candidate, failure, timeout or cancellation suppresses all pending
+content, including earlier successful stages. Once released,
+later WEB/image refusal, partial success, persistence/delivery failure or HOSTED
+HTTP delivery failure cannot retract it. HOSTED ON / WEB OFF and standalone
+HOSTED calls can export eligible content. This explicitly changes #159's WEB-wide
+suppression guarantee for new HOSTED records only.
+
+At most three pending original handles preserve IDs/parentage and actual stage
+start/end/duration while delaying export until HOSTED acceptance. Structural
+art-direction moderation can remain `unvalidated` while the later record is
+`allowed`; no earlier approval is implied. There is no past trace backfill.
+HOSTED reports guardrails `unavailable` and post-image checks `not_applicable`;
+neither is an executed safety check.
+Process death may lose pending spans; exporter delivery is best-effort and
+non-atomic. The 2 KiB field / 8 KiB record / 24 KiB HOSTED and three-record bounds,
+16 HOSTED custom spans and 16 active buffers per process remain unchanged.
+WEB has a separate 24 KiB/five-record/16-span budget; no borrowing is allowed.
+OFF or nonrecording execution must skip capture-only work/retention, without
+altering baseline monitoring or reviving sampled-out spans.
+Buffers and permits are acquired only after an actual specialist span is recording
+and sampled, not from an assumption about its parent's sampler decision. An
+ineligible span ends at stage exit without retained candidates. Capacity rejection
+ends the first eligible span content-free and skips further detail in that operation.
+
+One absolute HOSTED deadline covers execution, resource closure, serialization,
+revalidation, preflight and finalization. Clock checks after synchronous work and
+before export suppress expired candidates and preserve the business timeout error;
+acceptance never starts a fresh budget. Blocking synchronous callbacks cannot be
+preempted, so elapsed time may exceed the budget by the callback plus mandatory
+cleanup. Previously exported records cannot be retracted. Structural-attribute
+errors and cancellation also run context restoration and exactly-once owned-span
+end attempts before propagation.
+
+New HOSTED omits `metadata.agentDetail`; new WEB creates no HOSTED-detail copies.
+New HOSTED / old WEB accepts absent optional metadata; old HOSTED / new WEB keeps
+the legacy bounded parser and WEB-terminal full-success gate; old/old is unchanged.
+WEB invocation/image detail keeps that same full WEB success/delivery gate.
+The [mixed-version table](operational-monitoring.md#mixed-version-compatibility-and-legacy-detail)
+and [mixed-flag table](operational-monitoring.md#startup-setting-and-process-local-off)
+distinguish these paths. There is no persisted trace UI or business-response addition,
+new flag, custom `AGENT_*` / `FOUNDRY_*` name or SDK payload unmute.
+
+`store:false` / `NoResponseStore` do not prove provider/system metadata non-retention.
+Rollback is prospective only: old running versions and in-flight requests still
+use their startup setting, and an older artifact may not recognize the current
+flag. Verify effective settings across serving versions; neither an azd-state edit
+nor reverting to the carrier design retracts historical disclosure. Card/account deletion
+does not automatically delete telemetry or downstream copies; sanitization is not
+a universal PII guarantee. Platform forwarding/non-persistence, original-span
+portal acceptance, approved readers/inherited RBAC, retention/export/deletion and
+ingestion headroom remain separately authorized delivery/rollout gates; no live
+validation was performed for this documentation update. See the
+[exact privacy and budget contract](operational-monitoring.md#privacy-exclusions-and-approved-162-r1-contract),
+[original-span KQL](operational-monitoring.md#original-hosted-content-162)
 and [root rollout procedure](agent-operational-ownership.md#detail-configuration-rollout).
+The existing 30-day retention, 0.25 GB/day shared cap and 100% parent-consistent
+sampling are defaults, not approval for content retention or cost. Obtain explicit
+privacy/operations acceptance of readers, downstream copies, deletion and retry-peak
+headroom before rollout. Use bounded omission reasons and content-free span counts
+for diagnostics; absent records do not prove refusal. Offline production-processor
+conversion, sampling/batching and memory/deadline evidence remain distinct from the
+separately authorized live gate. No command below is authorized by #162
+implementation approval alone.
+Historical dated execution reports below concern earlier changes, not #162
+deployment or live acceptance evidence.
 
 ### Deploy guards
 
@@ -1047,7 +1122,7 @@ The platform supplies `FOUNDRY_PROJECT_ENDPOINT`, `FOUNDRY_AGENT_NAME`,
 Do **not** redeclare reserved values in service `environmentVariables`.
 Only non-secret runtime switches are supplied by this manifest:
 `AZURE_AI_MODEL_DEPLOYMENT_NAME`, `CARD_ORCHESTRATOR_VERSION`,
-`TELEMETRY_ENABLED`, `TELEMETRY_ENVIRONMENT`, and the experimental
+`TELEMETRY_ENABLED`, `FCG_AGENT_TRACE_ENABLED`, `TELEMETRY_ENVIRONMENT`, and the experimental
 `AZURE_EXPERIMENTAL_ENABLE_GENAI_TRACING=true` SDK tracing opt-in. The version is
 the full immutable application Git commit, not a Foundry version number. Runtime
 timeout/policy defaults belong to the runtime; inspect their bounded values during
@@ -1203,11 +1278,13 @@ Require a separately reviewed repository-scoped ABAC policy, not a wider role or
 a registry mode change. Also stop if existing network restrictions prevent
 access; no public-access relaxation is authorized.
 
-Application Insights linkage is a prerequisite for end-to-end tracing, **not**
-hosted deployment. The existing-project template and deployment validation do
-not require it. This runtime disables instrumentation, host observability and
-SDK/access logging; proceed without telemetry IaC changes. This is not a promise
-about platform retention or evidence that monitoring is configured.
+**Historical 2026-09-08 package behavior, not the current telemetry contract:**
+Application Insights linkage was a prerequisite for end-to-end tracing, **not**
+hosted deployment. That existing-project template and deployment validation did
+not require it; that runtime disabled instrumentation, host observability and
+SDK/access logging. This was not a promise about platform retention or evidence
+that monitoring was configured. Current mandatory monitoring and approved #162
+detail behavior are described above and in the operational ownership runbook.
 
 ## Bounded prerequisite preview, then separate approvals
 

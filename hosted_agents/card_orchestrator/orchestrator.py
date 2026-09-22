@@ -5,6 +5,7 @@ import time
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from enum import StrEnum
+from functools import wraps
 from typing import Literal
 
 from agent_framework.exceptions import (
@@ -287,6 +288,24 @@ class _Stop(Exception):
         self.reason = reason
 
 
+def _bounded_operation(function):
+    @wraps(function)
+    async def wrapped(self, *args, **kwargs):
+        deadline = asyncio.get_running_loop().time() + self.settings.timeout_seconds
+        with agent_detail.operation_deadline(deadline):
+            try:
+                async with asyncio.timeout_at(deadline):
+                    result = await function(self, *args, **kwargs)
+                    agent_detail.check_deadline(deadline)
+                    return result
+            except TimeoutError:
+                raise RuntimeFailure(
+                    RuntimeFailureStage.ORCHESTRATION, RuntimeFailureReason.TIMEOUT
+                ) from None
+
+    return wrapped
+
+
 class CardOrchestrator:
     def __init__(
         self,
@@ -305,6 +324,7 @@ class CardOrchestrator:
         )
 
     @instrument_generation("generate")
+    @_bounded_operation
     @agent_detail.operation("hosted")
     async def generate(
         self, request: GenerateCardAgentRequest, *, hosted_version: str | None = None
@@ -319,7 +339,7 @@ class CardOrchestrator:
             metadata["hostedVersion"] = hosted_version
         failure_stage = RuntimeFailureStage.ORCHESTRATION
         try:
-            async with asyncio.timeout(self.settings.timeout_seconds):
+            async with asyncio.timeout_at(agent_detail.current_deadline()):
                 await self._gate(
                     request.query,
                     "pre_prompt",
@@ -468,6 +488,11 @@ class CardOrchestrator:
             response = GenerateCardAgentResponse(
                 schemaVersion=1, status=stop.status, safetyHints=[stop.reason]
             )
+        except asyncio.CancelledError:
+            deadline = agent_detail.current_deadline()
+            if deadline is not None and asyncio.get_running_loop().time() >= deadline:
+                raise RuntimeFailure(failure_stage, RuntimeFailureReason.TIMEOUT) from None
+            raise
         except Exception as exc:
             raise classify_runtime_failure(exc, failure_stage) from None
 

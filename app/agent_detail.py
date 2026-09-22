@@ -1,10 +1,8 @@
-"""Bounded, ephemeral diagnostics. Only WEB's terminal boundary can release content.
+"""Bounded, ephemeral diagnostics with runtime-specific release boundaries.
 
-The authenticated hosted application, not model output, owns the private carrier.
-Transporting that carrier is not evidence of provider non-retention.
-WEB checks its invocation context, the shared application instruction/schema, and
-every projection before release. Modified views are labelled separately; oversized
-projections are omitted rather than transporting unverifiable partial JSON.
+HOSTED releases on its original specialist spans after business acceptance.
+WEB's terminal gate still owns WEB diagnostics and legacy private carriers.
+Modified views are labelled; oversized projections omit unverifiable partial JSON.
 """
 
 from __future__ import annotations
@@ -34,6 +32,8 @@ from pydantic import (
 )
 
 if TYPE_CHECKING:
+    from opentelemetry.trace import SpanContext
+
     from app.foundry_agent_client import FoundryAgentInvocationResult
 
 SCOPE = "fantasy_cards_generator.agent_detail"
@@ -42,6 +42,7 @@ RECORD_BYTES = 8192
 RUNTIME_BYTES = 24576
 MAX_BUFFERS = 16
 MAX_SPANS = 16
+MAX_HOSTED_SPANS = 3
 MAX_TEXT_CHARS = 16384
 STAGES = {"concept", "lore", "art_direction", "hosted_invocation", "image"}
 NAMES = {
@@ -96,8 +97,17 @@ _capacity = threading.BoundedSemaphore(MAX_BUFFERS)
 _current: contextvars.ContextVar[Capture | None] = contextvars.ContextVar(
     "agent_detail_capture", default=None
 )
+_admission: contextvars.ContextVar[Admission | None] = contextvars.ContextVar(
+    "agent_detail_admission", default=None
+)
+_deadline: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "agent_detail_deadline", default=None
+)
 _boundary: contextvars.ContextVar[ReleaseBoundary | None] = contextvars.ContextVar(
     "agent_detail_boundary", default=None
+)
+_ending: contextvars.ContextVar[dict[int, tuple[PendingSpan, str | None, bytes | None]] | None] = (
+    contextvars.ContextVar("agent_detail_ending", default=None)
 )
 
 
@@ -203,6 +213,48 @@ class Envelope(Closed):
     records: tuple[Record, ...] = Field(max_length=3)
 
 
+def _validate_safety_evidence(value: Any) -> None:
+    required = {"pre_prompt", "concept", "lore", "final_text", "final_art_prompt"}
+    if type(value) is not list or len(value) != 7 or not _bounded_tree(value):
+        raise ValueError("invalid_safety")
+    seen = set()
+    for item in value:
+        if type(item) is not dict or set(item) != {"stage", "policy", "decision", "reason"}:
+            raise ValueError("invalid_safety")
+        stage = item["stage"]
+        if type(stage) is not str or stage in seen:
+            raise ValueError("invalid_safety")
+        seen.add(stage)
+        expected = (
+            {
+                "stage": stage,
+                "policy": "original-fantasy-v1",
+                "decision": "allowed",
+                "reason": "allowed",
+            }
+            if stage in required
+            else (
+                {
+                    "stage": "hosted_guardrails",
+                    "policy": "hosted_guardrails",
+                    "decision": "unavailable",
+                    "reason": "not_observed",
+                }
+                if stage == "hosted_guardrails"
+                else {
+                    "stage": "post_image",
+                    "policy": "post_image",
+                    "decision": "not_applicable",
+                    "reason": "text_only",
+                }
+            )
+        )
+        if item != expected:
+            raise ValueError("invalid_safety")
+    if seen != required | {"hosted_guardrails", "post_image"}:
+        raise ValueError("invalid_safety")
+
+
 def _bounded_tree(value: Any, depth: int = 0, budget: list[int] | None = None) -> bool:
     if budget is None:
         budget = [512, 4 * RUNTIME_BYTES]
@@ -245,50 +297,9 @@ def parse_envelope(
         if not _bounded_tree(value) or len(encoded(value)) > RUNTIME_BYTES:
             diagnostic("omitted_budget")
             return None
-        required = {"pre_prompt", "concept", "lore", "final_text", "final_art_prompt"}
-        if (
-            type(safety_evidence) is not list
-            or len(safety_evidence) != 7
-            or not _bounded_tree(safety_evidence)
-        ):
-            diagnostic("invalid_safety")
-            return None
-        seen_evidence = set()
-        for item in safety_evidence:
-            if type(item) is not dict or set(item) != {"stage", "policy", "decision", "reason"}:
-                diagnostic("invalid_safety")
-                return None
-            stage = item["stage"]
-            if not isinstance(stage, str) or stage in seen_evidence:
-                diagnostic("invalid_safety")
-                return None
-            seen_evidence.add(stage)
-            if stage in required:
-                valid = (
-                    item["policy"] == "original-fantasy-v1"
-                    and item["decision"] == "allowed"
-                    and item["reason"] == "allowed"
-                )
-            else:
-                valid = item == (
-                    {
-                        "stage": "hosted_guardrails",
-                        "policy": "hosted_guardrails",
-                        "decision": "unavailable",
-                        "reason": "not_observed",
-                    }
-                    if stage == "hosted_guardrails"
-                    else {
-                        "stage": "post_image",
-                        "policy": "post_image",
-                        "decision": "not_applicable",
-                        "reason": "text_only",
-                    }
-                )
-            if not valid:
-                diagnostic("invalid_safety")
-                return None
-        if seen_evidence != required | {"hosted_guardrails", "post_image"}:
+        try:
+            _validate_safety_evidence(safety_evidence)
+        except ValueError:
             diagnostic("invalid_safety")
             return None
         if type(value) is not dict or type(value.get("version")) is not int:
@@ -494,7 +505,7 @@ def _source(span: Any) -> Source | None:
     if span is None or not span.is_recording():
         return None
     context = span.get_span_context() if span is not None else None
-    if context is None or not context.is_valid:
+    if context is None or not context.is_valid or not context.trace_flags.sampled:
         return None
     return Source(trace_id=f"{context.trace_id:032x}", span_id=f"{context.span_id:016x}")
 
@@ -503,6 +514,7 @@ def _source(span: Any) -> Source | None:
 class Execution:
     span: Any = None
     source: Source | None = None
+    identity: SpanIdentity | None = None
     started: float = field(default_factory=time.perf_counter)
     duration_ms: int = 0
     outcome: str = "failed"
@@ -511,6 +523,103 @@ class Execution:
     reason: str = "dependency_error"
     attempt: int = 1
     instruction: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SpanIdentity:
+    name: str
+    context: tuple[Any, ...] | None
+    parent: tuple[Any, ...] | None
+    start_time: int
+    scope: tuple[Any, ...]
+
+
+def _context_identity(context: SpanContext | None) -> tuple[Any, ...] | None:
+    if context is None:
+        return None
+    return (
+        context.trace_id,
+        context.span_id,
+        context.is_remote,
+        int(context.trace_flags),
+        tuple(context.trace_state.items()),
+    )
+
+
+def _span_identity(span: Any) -> SpanIdentity:
+    scope = span.instrumentation_scope
+    return SpanIdentity(
+        span.name,
+        _context_identity(span.get_span_context()),
+        _context_identity(span.parent),
+        span.start_time,
+        (
+            scope.name,
+            scope.version,
+            scope.schema_url,
+            tuple(sorted((scope.attributes or {}).items())),
+        ),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class PendingSpan:
+    span: Any
+    source: Source
+    stage: Stage
+    end_time: int
+    attributes: tuple[tuple[str, str | int], ...]
+    identity: SpanIdentity
+    deadline: float | None = None
+
+
+class DeadlineExceeded(TimeoutError):
+    """The original operation budget expired, including synchronous acceptance work."""
+
+
+def check_deadline(deadline: float | None) -> None:
+    if deadline is not None:
+        if asyncio.get_running_loop().time() >= deadline:
+            raise DeadlineExceeded
+        task = asyncio.current_task()
+        if task is not None and task.cancelling():
+            raise asyncio.CancelledError
+
+
+@contextmanager
+def operation_deadline(deadline: float):
+    token = _deadline.set(deadline)
+    try:
+        yield
+    finally:
+        _deadline.reset(token)
+
+
+def current_deadline() -> float | None:
+    return _deadline.get()
+
+
+def _validate_pending(owned: PendingSpan, span: Any, *, ending: bool = False) -> None:
+    if (
+        span is not owned.span
+        or _span_identity(span) != owned.identity
+        or owned.identity.name != NAMES[owned.stage]
+        or owned.identity.scope[0] != SCOPE
+        or span.end_time != (owned.end_time if ending else None)
+        or owned.end_time < owned.identity.start_time
+    ):
+        raise ValueError("invalid_detail_context")
+    for key, expected in owned.attributes:
+        actual = span.attributes.get(key)
+        if type(actual) is not type(expected) or actual != expected:
+            raise ValueError("invalid_detail_context")
+
+
+def _end_span(span: Any, end_time: int) -> None:
+    try:
+        span.end(end_time=end_time)
+    except Exception:
+        diagnostic("instrumentation_failure")
 
 
 def invocation_outcome(
@@ -574,17 +683,72 @@ class Capture:
     eligible: bool = True
     execution: Execution | None = None
     omissions: set[str] = field(default_factory=set)
+    pending: list[PendingSpan] = field(default_factory=list)
+    deployment_version: str = ""
+    deadline: float | None = None
+    _approved_records: dict[str, bytes] = field(default_factory=dict)
 
     def deny(self) -> None:
         self.eligible = False
         self.records.clear()
+        self._approved_records.clear()
 
     def close(self) -> None:
         if not self.closed:
             self.closed = True
             self.eligible = False
             self.records.clear()
-            _capacity.release()
+            self._approved_records.clear()
+            try:
+                self.finish_hosted()
+            finally:
+                self.execution = None
+                _capacity.release()
+
+    def finish_hosted(self, batch: dict[str, str] | None = None) -> None:
+        pending, self.pending = self.pending, []
+        cancelled = None
+        expired = None
+        for owned in pending:
+            try:
+                if batch is not None:
+                    check_deadline(self.deadline)
+            except DeadlineExceeded as exc:
+                expired, batch = exc, None
+            except asyncio.CancelledError as exc:
+                cancelled, batch = exc, None
+            value = batch.get(owned.source.span_id) if batch is not None else None
+            # The SDK calls _on_ending with this exact object, before ReadableSpan creation.
+            authorization = {
+                id(owned.span): (owned, value, self._approved_records.get(owned.source.span_id))
+            }
+            token = _ending.set(authorization)
+            try:
+                if value is not None:
+                    owned.span.set_attribute("fcg.detail.record", value)
+                    check_deadline(self.deadline)
+            except DeadlineExceeded as exc:
+                expired, batch = exc, None
+                authorization[id(owned.span)] = (owned, None, None)
+            except asyncio.CancelledError as exc:
+                cancelled, batch = exc, None
+                authorization[id(owned.span)] = (owned, None, None)
+            except Exception:
+                diagnostic("instrumentation_failure")
+            finally:
+                try:
+                    _end_span(owned.span, owned.end_time)
+                except asyncio.CancelledError as exc:
+                    cancelled, batch = exc, None
+                finally:
+                    # Clear the shared holder too: copied contexts must not retain authorization.
+                    authorization.clear()
+                    _ending.reset(token)
+        # Cancellation still propagates, but cannot orphan later owned spans.
+        if cancelled is not None:
+            raise cancelled
+        if expired is not None:
+            raise expired
 
     def append(self, record: Record) -> None:
         if self.closed:
@@ -609,13 +773,59 @@ class Capture:
     def release(self) -> None:
         try:
             self._release()
+        except DeadlineExceeded:
+            raise
         except Exception:
             diagnostic("export_failure")
 
     def _release(self) -> None:
-        if self.closed or self.released or not self.eligible or self.runtime != "web":
+        if self.closed or self.released or not self.eligible:
             return
         self.released = True
+        if self.runtime == "hosted":
+            check_deadline(self.deadline)
+            # Nothing is attached until every candidate and original identity passes.
+            batch = {}
+            stages = set()
+            owned = {p.source.span_id: p for p in self.pending}
+            if len(owned) != len(self.pending) or len(owned) > MAX_HOSTED_SPANS:
+                raise ValueError("invalid_detail_context")
+            for pending in self.pending:
+                _validate_pending(pending, pending.span)
+                check_deadline(self.deadline)
+            for record in self.records:
+                wire = encoded(record.model_dump(mode="json"))
+                if (
+                    len(wire) > RECORD_BYTES
+                    or self._approved_records.get(record.source.span_id)
+                    != hashlib.sha256(wire).digest()
+                ):
+                    raise ValueError("invalid_detail_record")
+                checked = Record.model_validate_json(wire, strict=True)
+                pending = owned[checked.source.span_id]
+                if checked.stage in stages or _source(pending.span) != pending.source:
+                    raise ValueError("invalid_detail_context")
+                _validate_original(
+                    checked, pending.span.name, pending.source, pending.span.attributes
+                )
+                stages.add(checked.stage)
+                batch[checked.source.span_id] = wire.decode("utf-8")
+                check_deadline(self.deadline)
+            if (
+                len(
+                    encoded(
+                        {"version": 1, "records": [r.model_dump(mode="json") for r in self.records]}
+                    )
+                )
+                > RUNTIME_BYTES
+            ):
+                raise ValueError("invalid_detail_record")
+            check_deadline(self.deadline)
+            self.finish_hosted(batch)
+            self.records.clear()
+            self._approved_records.clear()
+            check_deadline(self.deadline)
+            return
         from opentelemetry.trace import Link, SpanContext, TraceFlags
 
         from app import telemetry
@@ -660,15 +870,58 @@ def _tracer() -> Any:
 
 def current() -> Capture | None:
     capture = _current.get()
+    if capture is None and (admission := _admission.get()) is not None:
+        capture = admission.capture
     return capture if capture is not None and not capture.closed else None
+
+
+@dataclass(slots=True)
+class Admission:
+    runtime: Runtime
+    operation: Literal["generate", "artwork_retry"]
+    deployment_version: str
+    capture: Capture | None = None
+    disabled: bool = False
+    failed: bool = False
+    spans: int = 0
+
+    def admit(self) -> Capture | None:
+        if self.disabled:
+            return None
+        if self.capture is None:
+            if not _capacity.acquire(blocking=False):
+                self.disabled = True
+                diagnostic("capture_capacity")
+                return None
+            try:
+                self.capture = Capture(
+                    self.runtime,
+                    operation=self.operation,
+                    deployment_version=self.deployment_version,
+                    deadline=_deadline.get() if self.runtime == "hosted" else None,
+                    eligible=not self.failed,
+                    spans=self.spans,
+                )
+            except BaseException:
+                _capacity.release()
+                raise
+        return self.capture
 
 
 @contextmanager
 def execution(stage: Stage, *, attempt: int = 1):
     capture = current()
-    if capture is None or capture.spans >= MAX_SPANS:
+    admission = _admission.get()
+    owner = capture if capture is not None else admission
+    if owner is None or (capture is None and admission is not None and admission.disabled):
+        yield None
+        return
+    if owner.spans >= (MAX_HOSTED_SPANS if owner.runtime == "hosted" else MAX_SPANS):
         if capture is not None:
-            diagnostic("omitted_budget")
+            capture.deny()
+        elif admission is not None:
+            admission.disabled = True
+        diagnostic("omitted_budget")
         yield None
         return
     from app import telemetry
@@ -676,36 +929,66 @@ def execution(stage: Stage, *, attempt: int = 1):
     if not telemetry._enabled or telemetry._tracer is None:
         yield None
         return
-    capture.spans += 1
-    state = Execution(attempt=attempt)
+    from opentelemetry import context as otel_context
+    from opentelemetry.trace import use_span
+
+    span = None
+    state = None
     manager = None
+    started = time.perf_counter()
+    previous = capture.execution if capture is not None else None
+    # This outer token also restores context if instrumentation fails after attaching.
+    context_token = otel_context.attach(otel_context.get_current())
     try:
-        manager = _tracer().start_as_current_span(
-            NAMES[stage],
-            record_exception=False,
-            set_status_on_exception=False,
-        )
-        state.span = manager.__enter__()
-        state.source = _source(state.span)
-    except Exception:
-        diagnostic("instrumentation_failure")
-    previous = capture.execution
-    capture.execution = state
-    try:
+        try:
+            owner.spans += 1
+            span = _tracer().start_span(NAMES[stage])
+            source = _source(span)
+            if source is not None:
+                if capture is None and admission is not None:
+                    capture = admission.admit()
+                if capture is not None:
+                    state = Execution(
+                        span=span,
+                        source=source,
+                        identity=_span_identity(span),
+                        attempt=attempt,
+                        started=started,
+                    )
+            manager = use_span(
+                span, end_on_exit=False, record_exception=False, set_status_on_exception=False
+            )
+            manager.__enter__()
+        except Exception:
+            if admission is not None:
+                admission.failed = True
+            if capture is not None:
+                capture.deny()
+            diagnostic("instrumentation_failure")
+            state = None
+        if capture is not None:
+            capture.execution = state
         yield state
     except asyncio.CancelledError:
-        state.outcome = "cancelled"
-        state.reason = "cancelled"
+        if capture is not None:
+            capture.deny()
+        if state is not None:
+            state.outcome = "cancelled"
+            state.reason = "cancelled"
         raise
     except TimeoutError:
-        state.reason = "timeout"
+        if state is not None:
+            state.reason = "timeout"
         raise
     finally:
-        capture.execution = previous
-        state.duration_ms = min(3600000, int((time.perf_counter() - state.started) * 1000))
-        if state.span is not None:
-            try:
-                for key, value in {
+        end_time = time.time_ns()
+        attributes = {}
+        try:
+            if capture is not None:
+                capture.execution = previous
+            if state is not None and capture is not None:
+                state.duration_ms = min(3600000, int((time.perf_counter() - state.started) * 1000))
+                attributes = {
                     "runtime": capture.runtime,
                     "stage": stage,
                     "agent": AGENTS[stage],
@@ -716,16 +999,65 @@ def execution(stage: Stage, *, attempt: int = 1):
                     "validation": state.validation,
                     "moderation": state.moderation,
                     "duration_ms": state.duration_ms,
-                }.items():
-                    state.span.set_attribute(f"fcg.detail.{key}", value)
-                manager.__exit__(None, None, None)
+                    "deployment_version": capture.deployment_version,
+                }
+                attributes = {f"fcg.detail.{key}": value for key, value in attributes.items()}
+                span.set_attributes(attributes)
+        except asyncio.CancelledError:
+            if capture is not None:
+                capture.deny()
+            raise
+        except Exception:
+            if capture is not None:
+                capture.deny()
+            diagnostic("instrumentation_failure")
+        finally:
+            try:
+                if manager is not None:
+                    manager.__exit__(None, None, None)
+            except asyncio.CancelledError:
+                if capture is not None:
+                    capture.deny()
+                raise
             except Exception:
+                if capture is not None:
+                    capture.deny()
                 diagnostic("instrumentation_failure")
+            finally:
+                try:
+                    otel_context.detach(context_token)
+                finally:
+                    if span is not None:
+                        if (
+                            capture is not None
+                            and capture.runtime == "hosted"
+                            and state is not None
+                            and state.source is not None
+                            and state.identity is not None
+                        ):
+                            capture.pending.append(
+                                PendingSpan(
+                                    span,
+                                    state.source,
+                                    stage,
+                                    end_time,
+                                    tuple(attributes.items()),
+                                    state.identity,
+                                    capture.deadline,
+                                )
+                            )
+                        else:
+                            _end_span(span, end_time)
 
 
 def set_instruction(instruction: str) -> None:
     capture = current()
-    if capture is not None and capture.execution is not None:
+    if (
+        capture is not None
+        and capture.eligible
+        and capture.execution is not None
+        and capture.execution.source is not None
+    ):
         capture.execution.instruction = instruction
 
 
@@ -742,16 +1074,19 @@ async def candidate(
     deployment_version: str = "",
 ) -> None:
     capture = current()
-    if capture is None or state is None:
+    if capture is None or not capture.eligible or state is None:
         return
     if state.source is None:
         diagnostic("not_recording")
         return
     try:
+        check_deadline(capture.deadline)
         if instruction is None:
+            capture.deny()
             diagnostic("unvalidated_instruction")
             return
         if len(instruction) > MAX_TEXT_CHARS:
+            capture.deny()
             diagnostic("omitted_budget")
             return
         trusted_instruction, input_schema, output_schema = _contracts(stage)
@@ -775,6 +1110,7 @@ async def candidate(
             projection_view(input_payload, fields=input_fields),
             projection_view(output_payload, fields=output_fields),
         ]
+        check_deadline(capture.deadline)
         moderation = HeuristicModerationService("original-fantasy-v1", record_telemetry=False)
         for payload in (input_payload, output_payload):
             if type(payload) is not dict or len(payload) > 16:
@@ -786,6 +1122,7 @@ async def candidate(
                         diagnostic("omitted_budget")
                         return
                     decision = await moderation.moderate_text(value, stage="post_text")
+                    check_deadline(capture.deadline)
                     if not decision.allowed or decision.reasonCode != "allowed":
                         diagnostic("suppressed_policy")
                         capture.deny()
@@ -823,7 +1160,16 @@ async def candidate(
         if len(encoded(record.model_dump(mode="json"))) > RECORD_BYTES:
             diagnostic("omitted_budget")
             return
+        check_deadline(capture.deadline)
         capture.append(record)
+        if capture.runtime == "hosted" and any(item is record for item in capture.records):
+            capture._approved_records[record.source.span_id] = hashlib.sha256(
+                encoded(record.model_dump(mode="json"))
+            ).digest()
+        check_deadline(capture.deadline)
+    except DeadlineExceeded:
+        capture.deny()
+        raise
     except (ValueError, TypeError):
         capture.deny()
         diagnostic("unvalidated")
@@ -892,33 +1238,44 @@ def operation(runtime: Runtime):
             if not settings.agent_trace_enabled:
                 # Also isolate OFF when an in-process test transport nests runtimes.
                 token = _current.set(None)
+                admission_token = _admission.set(None)
                 try:
                     return await function(self, *args, **kwargs)
                 finally:
+                    _admission.reset(admission_token)
                     _current.reset(token)
-            if not _capacity.acquire(blocking=False):
-                diagnostic("capture_capacity")
-                token = _current.set(None)
-                try:
-                    return await function(self, *args, **kwargs)
-                finally:
-                    _current.reset(token)
-            capture = Capture(
+            admission = Admission(
                 runtime,
                 operation="artwork_retry" if function.__name__ == "retry_artwork" else "generate",
+                deployment_version=(
+                    kwargs.get("hosted_version") or settings.version if runtime == "hosted" else ""
+                ),
             )
-            token = _current.set(capture)
+            token = _current.set(None)
+            admission_token = _admission.set(admission)
             handed_off = False
             try:
                 result = await function(self, *args, **kwargs)
-                if getattr(result, "status", None) == "completed" and capture.eligible:
+                capture = admission.capture
+                if (
+                    capture is not None
+                    and getattr(result, "status", None) == "completed"
+                    and capture.eligible
+                    and capture.records
+                ):
                     try:
                         # Validate and serialize the actual business result before release.
-                        type(result).model_validate_json(result.model_dump_json())
+                        check_deadline(capture.deadline)
+                        wire = result.model_dump_json()
+                        check_deadline(capture.deadline)
+                        validated = type(result).model_validate_json(wire)
+                        check_deadline(capture.deadline)
+                        if validated.status != "completed":
+                            raise ValueError("response_unvalidated")
                         if runtime == "hosted":
-                            envelope = Envelope(records=tuple(capture.records))
-                            if envelope.records:
-                                result.metadata["agentDetail"] = envelope.model_dump(mode="json")
+                            _validate_safety_evidence(validated.metadata.get("safetyEvidence"))
+                            check_deadline(capture.deadline)
+                            capture.release()
                         elif (boundary := _boundary.get()) is not None:
                             if boundary.capture is None:
                                 boundary.capture = capture
@@ -927,13 +1284,22 @@ def operation(runtime: Runtime):
                                 diagnostic("duplicate_operation")
                         else:
                             capture.release()
+                    except DeadlineExceeded:
+                        capture.deny()
+                        raise
                     except Exception:
                         diagnostic("response_unvalidated")
+                        check_deadline(capture.deadline)
                 return result
             finally:
-                _current.reset(token)
-                if not handed_off:
-                    capture.close()
+                try:
+                    if not handed_off and admission.capture is not None:
+                        admission.capture.close()
+                finally:
+                    admission.capture = None
+                    admission.disabled = True
+                    _admission.reset(admission_token)
+                    _current.reset(token)
 
         return wrapped
 
@@ -982,9 +1348,36 @@ class DetailReleaseMiddleware:
             if status == 200 and complete and not disconnected and boundary.capture is not None:
                 boundary.capture.release()
         finally:
-            if boundary.capture is not None:
-                boundary.capture.close()
-            _boundary.reset(token)
+            try:
+                if boundary.capture is not None:
+                    boundary.capture.close()
+            finally:
+                _boundary.reset(token)
+
+
+def _validate_original(record: Record, name: str, source: Source, attributes: Any) -> None:
+    if (
+        record.stage not in {"concept", "lore", "art_direction"}
+        or name != NAMES[record.stage]
+        or record.source != source
+        or record.source_runtime != "hosted"
+        or attributes.get("fcg.detail.result") != "completed"
+        or attributes.get("fcg.detail.reason") != "none"
+        or attributes.get("fcg.detail.validation") != "validated"
+    ):
+        raise ValueError("invalid_detail_context")
+    for key, expected in {
+        "runtime": record.source_runtime,
+        "stage": record.stage,
+        "agent": record.agent_name,
+        "operation": record.operation,
+        "attempt": record.attempt,
+        "duration_ms": record.duration_ms,
+        "deployment_version": record.deployment_version,
+    }.items():
+        actual = attributes.get(f"fcg.detail.{key}")
+        if type(actual) is not type(expected) or actual != expected:
+            raise ValueError("invalid_detail_context")
 
 
 def export_attributes(span: Any) -> dict[str, Any]:
@@ -993,7 +1386,8 @@ def export_attributes(span: Any) -> dict[str, Any]:
         return {}
     attributes = getattr(span, "_attributes", {}) or {}
     name = getattr(span, "name", "")
-    if name == "fcg.agent.detail":
+    authorization = (_ending.get() or {}).get(id(span))
+    if name == "fcg.agent.detail" and authorization is None:
         value = attributes.get("fcg.detail.record")
         if type(value) is str and len(value) <= RECORD_BYTES:
             try:
@@ -1018,7 +1412,7 @@ def export_attributes(span: Any) -> dict[str, Any]:
     }
     for key, values in enums.items():
         value = attributes.get(f"fcg.detail.{key}")
-        if value in values:
+        if type(value) is str and value in values:
             result[f"fcg.detail.{key}"] = value
     duration = attributes.get("fcg.detail.duration_ms")
     if type(duration) is int and 0 <= duration <= 3600000:
@@ -1026,4 +1420,41 @@ def export_attributes(span: Any) -> dict[str, Any]:
     attempt = attributes.get("fcg.detail.attempt")
     if type(attempt) is int and 1 <= attempt <= 16:
         result["fcg.detail.attempt"] = attempt
+    version = attributes.get("fcg.detail.deployment_version")
+    if (
+        type(version) is str
+        and len(version) <= 64
+        and re.fullmatch(r"[A-Za-z0-9._-]*", version)
+        and text_view(version) == View(text=version)
+    ):
+        result["fcg.detail.deployment_version"] = version
+    value = attributes.get("fcg.detail.record")
+    if value is not None:
+        try:
+            if type(value) is not str or len(value) > RECORD_BYTES:
+                raise ValueError("invalid_detail_record")
+            if len(value.encode("utf-8")) > RECORD_BYTES:
+                raise ValueError("invalid_detail_record")
+            if authorization is None:
+                raise ValueError("invalid_detail_context")
+            owned, accepted, approved_digest = authorization
+            check_deadline(owned.deadline)
+            if (
+                accepted is None
+                or value != accepted
+                or hashlib.sha256(value.encode("utf-8")).digest() != approved_digest
+            ):
+                raise ValueError("invalid_detail_record")
+            _validate_pending(owned, span, ending=True)
+            record = Record.model_validate_json(value, strict=True)
+            context = span.get_span_context()
+            source = Source(trace_id=f"{context.trace_id:032x}", span_id=f"{context.span_id:016x}")
+            _validate_original(record, name, source, attributes)
+            wire = encoded(record.model_dump(mode="json")).decode("utf-8")
+            check_deadline(owned.deadline)
+            result["fcg.detail.record"] = wire
+        except DeadlineExceeded:
+            diagnostic("omitted_budget")
+        except (ValueError, TypeError, AttributeError, UnicodeError, RecursionError):
+            diagnostic("invalid_export")
     return result

@@ -50,28 +50,59 @@ versions pass through closed allowlists or bounded identifier validation.
 
 The runtime never adds prompts, responses, card fields, art prompts, user or session
 identifiers, tokens, URLs, endpoints, exception messages, or arbitrary caller values
-to these measurements. Named HOSTED execution spans also remain content-free.
-The approved #159 r1 exception is limited to bounded sanitized candidates in private,
-optional, independently versioned response metadata, released as **WEB-owned linked
-detail only after terminal full business success**. Every candidate needs its own
-privacy/safety acceptance; a safe final card does not approve rejected intermediates.
-All later refusals, partial/held/deferred/unknown outcomes, errors, cancellations,
-and validation, image, persistence or response failures suppress all content.
-There is no UI, endpoint, business-response field, or card/audit persistence.
+to these measurements. **Approved #162 r1 changes new HOSTED versions only:** the
+original `card_concept`, `card_lore`, and `card_art_direction` spans carry strict
+JSON `fcg.detail.record` in Application Insights custom properties, not a promised
+built-in Foundry input/output panel. This is the new-version contract, not evidence
+of deployment or live portal acceptance. Old #159/#160 HOSTED originals remain
+content-free and use WEB-gated linked detail.
+
+HOSTED now releases its three records only after `completed`, allowed `pre_prompt`,
+`concept`, `lore`, `final_text` and `final_art_prompt` evidence, successful resource
+closure, independent candidate privacy/validation/moderation and actual business
+response serialization/revalidation. Preflight the whole eligible batch before
+release; a safe final card never approves rejected intermediates. Before acceptance,
+a HOSTED refusal/held/deferred/invalid-evidence/error/timeout/cancellation suppresses
+all pending content. **After acceptance, later WEB/image refusal, partial success,
+persistence/delivery failure or HOSTED HTTP send failure cannot retract it.**
+Standalone HOSTED calls and HOSTED ON / WEB OFF can export eligible content.
+WEB-owned invocation/image detail and old HOSTED carriers retain terminal full WEB
+success, including successful response delivery. Business behavior is unchanged;
+there is no UI, endpoint, business-response addition or card/audit persistence.
+
+At most three original span handles wait for HOSTED acceptance. Original IDs,
+parentage and actual stage start/end/duration are preserved: export is delayed,
+execution time is not extended. Structural art-direction moderation may remain
+`unvalidated` at stage end while record `moderation=allowed` means later release
+acceptance. HOSTED guardrails are reported unavailable and post-image checks not
+applicable, not successful checks. There is no historical backfill. Process death
+can lose pending spans; best-effort, non-atomic export can deliver only some records.
 
 The strict business request/response boundary is unchanged. Framework payload
 instrumentation and SDK payload-bearing logs remain disabled in both flag states.
-`store:false` / `NoResponseStore` do not prove provider non-retention of internally
-transported metadata before WEB's decision. Standalone HOSTED calls export no
-diagnostic content; platform non-persistence and forwarding evidence remain
-separately authorized delivery gates, not claims of this implementation.
+New HOSTED omits `metadata.agentDetail`; new WEB makes no duplicate specialist
+records. New HOSTED / old WEB supports the missing optional carrier; old HOSTED /
+new WEB retains the bounded legacy parser and WEB gate; old/old behavior is unchanged.
+`store:false` / `NoResponseStore` do not prove provider non-retention of legacy
+carriers or provider/system metadata. Platform non-persistence, forwarding and live
+portal evidence remain separately authorized delivery gates, not verified outcomes.
 
-See [the exact privacy, flag and budget contract](operational-monitoring.md#privacy-exclusions-and-approved-159-r1-exception)
-for the four mixed runtime states, closed versions/statuses, actual trusted
-application instruction (shared rules + stage + schema), UTF-8 limits and residual
-PII risk. Oversized structured projections omit their entire payload, never
+See [the exact privacy, flag and budget contract](operational-monitoring.md#privacy-exclusions-and-approved-162-r1-contract)
+and [the combined version/flag matrix](operational-monitoring.md#mixed-version-compatibility-and-legacy-detail)
+for every old/new and ON/OFF combination. The
+[field contract](operational-monitoring.md#exact-record-fields-and-modification-meaning)
+distinguishes concept query/card, lore's pre-call card and `name`/`flavorText`
+refinement, and art's pre-call card and `artBrief` refinement. Effective instructions
+are shared rules + stage task + schema, bound to a trusted version/digest; none of
+these views is reconstructed from the final card or promised verbatim.
+Oversized structured projections omit their entire payload, never
 partial JSON. Redacted or omitted input/output projections carry
 `validation='modified'`, not `validation='validated'`.
+Instruction-only truncation may retain `validation='validated'`; always inspect
+`input.flags`, `instruction.flags`, `output.flags` and aggregate `flags`.
+The limits are 2 KiB UTF-8 per field, 8 KiB per record, 24 KiB/three HOSTED records,
+16 HOSTED custom spans and 16 active buffers per process. WEB retains its separate
+24 KiB/five-record and 16-span budgets; no borrowing is permitted.
 Both runtimes parse trimmed case-insensitive true/false at startup,
 default ON when unset and reject invalid/empty values. OFF suppresses only new
 process-local detail spans/capture-only work; baseline spans/metrics/safe errors,
@@ -141,11 +172,22 @@ references, not supported entrypoints. Set
 4. Confirm model capacity and alert routing approval; satisfy the diagnostic
    access/retention/export/deletion and retry-peak ingestion gates in
    [operational monitoring](operational-monitoring.md#rollout-access-retention-and-deletion-gates).
-5. Run offline tests and Bicep compilation.
+5. Run offline tests and Bicep compilation. For #162, require production privacy
+   processing plus Azure exporter conversion, batching/parent-sampling regressions,
+   all version/flag combinations, exact timing/source identity and cleanup under
+   cancellation/end/export failures. Record measured memory/lifetime and
+   seventeenth-buffer admission evidence, not just serialized size assertions.
+   Verify lazy admission from actual span recording/sampling decisions and expiry
+   during synchronous acceptance work, using the original operation deadline.
+   Blocking callbacks are not preemptible; report their overrun separately from
+   release authorization and cleanup rather than claiming a hard elapsed-time cap.
 6. Obtain separate authorization for platform non-persistence, SDK suppression,
-   cross-runtime correlation and synthetic terminal-success/refusal verification.
+   cross-runtime correlation and synthetic HOSTED-acceptance/WEB-terminal verification,
+   including later WEB refusal and HOSTED/WEB delivery failure after HOSTED release.
+   Verify original-span properties, identities/timing, role/version and portal
+   discoverability; offline exporter conversion does not prove live acceptance.
    Local injection tests are not evidence of Foundry forwarding. Failure returns
-   to intake; no new resources/grants/retention changes are approved by #159.
+   to intake; no new resources/grants/retention changes are approved by #159 or #162.
 
 ```bash
 git rev-parse HEAD
@@ -234,18 +276,31 @@ and restart. A mere web image deploy does not apply Bicep parameter changes.
 Verify the effective value in **both** processes, their exact artifact/version
 binding, and baseline monitoring health. Restore ON using the same procedure
 only after the privacy/operations gates are satisfied.
+Account for older versions/replicas and in-flight operations still using their
+startup configuration; changing the setting does not revoke their capture.
+For an older rollback artifact, verify that it actually supports the intended
+flag contract before relying on OFF. A rollback to the carrier design may restore
+WEB-gated legacy transport for future requests, but cannot remove new HOSTED
+records already exported.
 
 Mixed deployments are not globally OFF: WEB false suppresses its processing and
-release but HOSTED true can still capture/transport private candidates; HOSTED
-false with WEB true permits WEB-only detail. Neither setting disables platform
+release but new HOSTED true can still export original-span content (old HOSTED
+transports private candidates); HOSTED false with WEB true permits WEB-only detail.
+#162 adds no flag or custom `AGENT_*` / `FOUNDRY_*` names.
+Neither setting disables platform
 `invoke_agent` or erases exported data. Do not set `TELEMETRY_ENABLED=false` or
 bypass mandatory hosted initialization to suppress detail.
+Disabling or rolling back is prospective only: it cannot retract already-released
+HOSTED records, including records for a later failed WEB operation.
 
 Current 30-day retention, 0.25 GB/day shared cap and 100% sampling are baseline
 defaults, not consent to content retention. Confirm actual readers/inherited RBAC,
 downstream exports, deletion and cost headroom before rollout. Card/account deletion
 does not remove operational telemetry automatically. Sanitization/truncation is
 explicit, bounded and not a universal PII guarantee.
+Use the [content-free triage guidance](operational-monitoring.md#original-hosted-content-162)
+before opening record content. Missing records can mean sampling, omission,
+delayed export or loss, not refusal; never unmute SDK payload logs as a workaround.
 
 ## Restore-first rollback
 
@@ -314,10 +369,10 @@ optional cleanup after approval and is never part of service restoration.
   representative dev traffic.
 - Project monitoring linkage is deployed by root Bicep; the deprecated nested
   agent infra is not a supported alternative entrypoint.
-- #159 implementation approval is not rollout approval. No live platform
-  non-persistence, payload-suppression or forwarding validation was performed for
-  this change; these remain delivery gates alongside approved content
-  retention/access and baseline ingestion headroom.
+- #159 and #162 implementation approval is not rollout approval. No live platform
+  non-persistence, payload-suppression, forwarding or original-span portal validation
+  was performed for this documentation update; these remain delivery gates alongside
+  approved content retention/access and baseline ingestion headroom.
 
 Authoritative platform references:
 
