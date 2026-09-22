@@ -508,6 +508,14 @@ as `metadata.hostedVersion`; it is not the application-version check.
 
 ### Bounded orchestration and safety
 
+Approved [#164 r1](architecture-agents-foundry.md#approved-workflow-engine-contract-164-r1)
+moves the following stages into a real per-request `WorkflowBuilder` graph, with
+three `AgentExecutor` specialists executed via `WorkflowAgent` and deterministic
+typed decode/merge/safety nodes. This describes the current r1 PR candidate,
+not evidence of a deployed graph. `ResponsesAgentServerHost` and
+the pinned dependencies above remain; the sample's `ResponsesHostServer` is not
+adopted. Inputs are accumulated validated cards, not raw `last_agent` output.
+
 1. Heuristically moderate the original input.
 2. A fresh MAF Concept agent produces `GeneratedCardModel`; validate and moderate it.
 3. A fresh Lore agent receives that validated card and returns **only** `name` and
@@ -520,12 +528,24 @@ as `metadata.hostedVersion`; it is not the application-version check.
 Maximum **three model requests**, with model retries and function-invocation loops
 disabled, no repair loops and no automatic fallback. All agents/sessions are fresh
 per stage and clients are owned/closed per invocation, including cancellation.
+The graph, executors and mutable evidence/card state are also request-local;
+no Workflow conversations, checkpoints, persistent state or fan-out are enabled.
+Pre-prompt rejection acquires no specialist clients. The request task owns client
+acquisition/closure through graph event handshakes; closure precedes final safety
+and mandatory terminal serialization, and cancellation drains owned graph work.
 The 20-second stage / 65-second orchestration budgets fit inside the web client's
 bounded 70-second hosted-agent timeout. The complete card-generation request
 remains bounded by the 225-second outer deadline.
+The same absolute HOSTED deadline covers scheduling, acquisition, closure,
+serialization/revalidation and diagnostic preflight. The
+[requester performance waiver](https://github.com/bmoussaud/fantasy-cards-generator/issues/164#issuecomment-5778665499)
+does not relax these limits or privacy/capture bounds. No r2 startup preparation
+is implemented.
 
 Completed domain JSON is returned in the SDK's `TextResponse`, inside a genuine
-Responses API envelope. `refused`, `held` and `routing_defer` always omit content
+Responses API envelope. Only the deterministic terminal envelope is output-eligible;
+internal messages, graph events and intermediate JSON must never reach the wire,
+including when a later stage fails. `refused`, `held` and `routing_defer` always omit content
 (`card: null`, `artPrompt: null`). Reasons are bounded codes, not rejected content.
 Schema failures or invalid/missing local safety evidence are held. Observed model
 refusal/content-filter evidence takes precedence over generated JSON. Dependency
@@ -552,12 +572,20 @@ keys and duplicate JSON keys are rejected. Request bodies are capped at 8192 byt
 Model calls also use `store:false`. An explicit fail-closed response provider
 replaces SDK 2.1.0's default file/Foundry-backed storage. Durable tasks, background
 recovery and steering are not enabled. Response retrieval/cancel/history routes
-are inaccessible; no application caches, file writes or conversation retrieval
-are used. HTTP disconnect and shutdown cancellation propagate to owned model work.
+are inaccessible; no request/response caches, file writes or conversation retrieval
+are used. The lazy static-contract cache contains only immutable application-owned
+schema/instruction strings, with a fresh schema dictionary for every Agent.
+HTTP disconnect and shutdown cancellation propagate to owned model work.
 
 The SDK host defaults can capture sensitive telemetry; this runtime explicitly
-disables host observability setup, MAF instrumentation and SDK/access logging.
-It does not export prompts, model outputs, tokens, raw exceptions or user content.
+disables host observability setup, automatic MAF payload instrumentation and
+SDK/access payload logging. Baseline telemetry remains content-free. The narrow
+#162 exception permits only bounded, sanitized, accepted application-owned detail
+on the three original specialist spans, after resource closure, serialization and
+whole-batch preflight; it is not raw prompt/output logging. #164 preserves those
+original spans and their measured boundaries across SDK task contexts, rather than
+substituting Workflow/provider spans. See the
+[exact release and privacy contract](operational-monitoring.md#release-ownership-source-links-and-compatibility).
 This application-layer behavior is **not** a promise that the hosted platform or
 model provider retains no service telemetry.
 
@@ -566,10 +594,14 @@ model provider retains no service telemetry.
 ```bash
 uv run --frozen --extra hosted-agent pytest \
   tests/test_card_orchestrator.py tests/test_card_orchestrator_models.py \
-  tests/test_foundry_agent_client.py -q
+  tests/test_foundry_agent_client.py tests/test_workflow_integration.py -q
 ```
 
 These tests exercise the installed stable SDK host through the existing operator
 parser and real MAF/Foundry/OpenAI clients over mocked model HTTP, plus moderation,
 refusal precedence, invariants, cancellation, timeouts and request isolation.
 They make no live Azure requests and are not deployment or creative-quality evidence.
+For #164, fake-specialist tests or import checks alone are insufficient: the
+[additional acceptance requirements](agent-evaluation.md#workflow-migration-acceptance-164-r1)
+require real scheduler/edge execution and preserve the #162 privacy/lifecycle
+regressions. No passing result for the new graph is asserted here.

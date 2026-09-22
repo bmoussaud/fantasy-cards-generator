@@ -347,6 +347,44 @@ uv run pytest tests/ -v --tb=short
 | Card schema compatibility | `expected_card_fields` reference only real `GeneratedCardModel` fields |
 | Malformed fixture detection | Unit tests confirm that bad rows are rejected by the checks |
 
+### Workflow migration acceptance (#164 r1)
+
+The [approved graph contract](architecture-agents-foundry.md#approved-workflow-engine-contract-164-r1)
+requires separate implementation evidence, not changes to this synthetic corpus
+or an assumption of improved creative quality. Fixture validation and fake-Agent
+tests do not prove Workflow execution.
+
+The requester [approved keeping the current r1 implementation and creating the PR
+without a performance acceptance gate](https://github.com/bmoussaud/fantasy-cards-generator/issues/164#issuecomment-5778665499).
+The offline first-ready-wave observation of **11.71 seconds / 9.54 MiB** exceeded
+the former **5 seconds / 8 MiB** thresholds. Disclose these as nonproduction,
+nonblocking observations, not passing benchmarks. No further performance work or
+r2 startup preparation is required by this PR. Runtime limits (65 seconds overall,
+20 seconds per model stage) and privacy/capture/admission bounds remain unchanged.
+
+Before acceptance, run the pinned real Workflow/AgentExecutor/Agent stack against
+deterministic mocked model HTTP, without mocking the scheduler. Removing a required
+edge must prevent downstream execution/completion. Verify exact merged typed
+inputs, strict per-stage schemas/options, exactly three success-path model calls,
+zero deterministic-node calls/retries, and only one terminal output. Pre-prompt
+rejection makes zero calls; failures at stages 1/2/3 make exactly 1/2/3, with no
+intermediate content leak. Barrier-interleave at least eight requests to prove
+independent workflow/executor/session/state and cancellation/refusal isolation.
+
+Retain original-span object/ID/parent/timing assertions (including the existing
+`<5 ms` duration tolerance), whole-batch safe release after closure/serialization,
+privacy canaries, flag/sampling/capacity/byte boundaries and deadline/cleanup
+regressions. Frozen hosted packaging and nonstream host-to-client compatibility
+must be evidenced without unexpected skipped functional hosted tests. The single
+current-source frozen build refresh stopped at an uncached dependency download
+with build networking disabled; current-image import/startup/readiness are
+unverified, and older pre-cache packaging proof is historical only.
+See #164 for the functional/safety acceptance matrix, as amended by the waiver,
+and the [operator gates](agent-operational-ownership.md#pre-rollout-gates).
+These are required evidence, not results recorded here. Historical #162 dev-v9
+traces do not validate the graph; live runs still require separate authorization.
+No portal-graph, quality, cost or latency benefit is implied.
+
 ### Lint and format (new Python files only)
 
 ```bash

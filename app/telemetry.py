@@ -300,6 +300,9 @@ class PrivacySpanProcessor:
 class PrivacyLogRecordProcessor:
     def on_emit(self, log_data: Any) -> None:
         log_record = getattr(log_data, "log_record", log_data)
+        scope = getattr(getattr(log_data, "instrumentation_scope", None), "name", "")
+        if _framework_scope(scope):
+            log_record.body = "agent_framework.diagnostic"
         attributes = getattr(log_record, "attributes", None)
         if attributes is None or not hasattr(attributes, "clear"):
             return
@@ -1127,6 +1130,10 @@ def _normalize_exception_type(value: Any) -> str:
 
 
 def _sanitize_span_name(span: Any) -> None:
+    scope = getattr(getattr(span, "instrumentation_scope", None), "name", "")
+    if _framework_scope(scope):
+        span._name = "agent_framework.operation"
+        return
     kind_name = str(getattr(getattr(span, "kind", None), "name", "")).upper()
     attributes = getattr(span, "_attributes", {}) or {}
     if kind_name == "SERVER":
@@ -1142,3 +1149,10 @@ def _sanitize_span_name(span: Any) -> None:
             span._name = "Database dependency"
         else:
             span._name = "Dependency"
+
+
+def _framework_scope(name: str) -> bool:
+    return any(
+        name == prefix or name.startswith(prefix + ".")
+        for prefix in ("agent_framework", "agent_framework_foundry", "agent_framework_openai")
+    )

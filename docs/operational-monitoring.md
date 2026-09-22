@@ -274,6 +274,47 @@ span ending and is cleared even on failure; no persistent span/content registry
 or repeated exporter-side moderation is used.
 Local W3C tests cannot prove Foundry gateway forwarding or a continuous trace tree.
 
+### Workflow task contexts and #164 acceptance
+
+The approved [#164 graph](architecture-agents-foundry.md#approved-workflow-engine-contract-164-r1)
+does not replace the three original specialist spans with Workflow, executor or
+provider instrumentation. Preserve the exact owned span objects, trace/span IDs,
+parentage and stage start/end timestamps, including parsing, whole-card validation
+and applicable moderation. `StageBoundary` supplies the captured request parent
+context explicitly; span activation/cleanup stay in the invoking executor task,
+without an attach/detach token shared across sibling tasks.
+
+HOSTED still delays the whole eligible batch until resource/task closure,
+business-response serialization/revalidation and complete candidate/original
+preflight. An unsafe intermediate, invalid final candidate, closure/serialization
+failure, cancellation or expired deadline releases zero pending HOSTED content.
+Mandatory terminal serialization/adapter validation failures remain business
+failures; a diagnostic-only serialization/preflight fault suppresses detail
+without replacing an otherwise safe business result.
+The original absolute operation deadline also covers Workflow scheduling;
+the synchronous blocking-work overrun caveat below remains unchanged.
+
+All existing default-ON/OFF, sampled/nonrecording, lazy-admission, 16-buffer,
+three-original and byte/span bounds remain binding, as do legacy WEB terminal
+gating and late WEB-failure semantics. Inspect actual framework span
+names/attributes/events/links/statuses, logs and workflow/wire outputs using
+synthetic privacy canaries; enabling Workflow is not permission for blanket
+payload capture or broad telemetry suppression. The privacy processor normalizes
+recognized MAF instrumentation span names to `agent_framework.operation` and OTel
+log bodies to `agent_framework.diagnostic`, retaining existing payload
+sanitization rather than suppressing unrelated application telemetry.
+These are offline acceptance
+requirements for the new graph. Historical #162 dev-v9 telemetry and offline
+exporter conversion do not prove its deployment, forwarding or portal acceptance.
+
+The [requester waiver](https://github.com/bmoussaud/fantasy-cards-generator/issues/164#issuecomment-5778665499)
+removes #164 performance acceptance, not the original-span identity/timing,
+single-deadline lifecycle or privacy/capture requirements. The offline first-ready
+wave of 11.71 seconds / 9.54 MiB exceeded the former 5 seconds / 8 MiB study
+thresholds; it is a nonproduction, nonblocking observation, not production
+telemetry or a passing benchmark. No timeout, buffer, byte, sampling or admission
+limit is changed by the waiver.
+
 ### Mixed-version compatibility and legacy detail
 
 Here, **new** means #162-capable and **old** means the #159/#160 carrier contract

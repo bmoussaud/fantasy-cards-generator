@@ -76,6 +76,18 @@ class FakeSpecialists:
             return result
         return SpecialistResult("completed", text=json.dumps(result))
 
+    def agent(self, stage, middleware):
+        from app.specialist_contract import effective_instructions
+        from tests.workflow_fakes import OfflineAgent, ResultBoundary
+
+        return OfflineAgent(
+            self.run,
+            name=f"card_{stage}",
+            instructions=effective_instructions(stage),
+            middleware=[ResultBoundary(middleware, self.run)],
+            default_options={},
+        )
+
     @asynccontextmanager
     async def factory(self, _settings):
         try:
@@ -400,11 +412,11 @@ def test_timeout_closes_owned_invocation(overall):
     orchestrator = CardOrchestrator(config, specialist_factory=fake.factory)
     with pytest.raises(RuntimeFailure, match="dependency_failure") as exc:
         asyncio.run(orchestrator.generate(GenerateCardAgentRequest(query="drake")))
-    assert exc.value.stage == "concept"
+    assert exc.value.stage == ("orchestration" if overall else "concept")
     assert exc.value.reason == "timeout"
     assert exc.value.http_type == "none"
     assert exc.value.http_status == "none"
-    assert fake.closed
+    assert fake.closed or (overall and not fake.calls)
 
 
 def test_cancellation_propagates_and_closes():
@@ -473,6 +485,7 @@ def test_actual_sdk_host_roundtrip_through_existing_operator_parser():
             foundry_project_endpoint=settings().project_endpoint,
             foundry_agent_name="card-orchestrator",
             foundry_agent_expected_version="candidate-1",
+            foundry_agent_timeout_seconds=5,
         )
         async with FoundryAgentClient(
             config, credential=Credential(), transport=httpx.MockTransport(forward)
@@ -851,7 +864,7 @@ def test_host_never_writes_response_store(monkeypatch):
 
 
 def test_derived_art_prompt_has_independent_local_gate(monkeypatch):
-    from hosted_agents.card_orchestrator import orchestrator as module
+    from hosted_agents.card_orchestrator import workflow as module
 
     monkeypatch.setattr(module, "derive_art_prompt", lambda card: "A copyrighted logo.")
     orchestrator, fake = runtime()

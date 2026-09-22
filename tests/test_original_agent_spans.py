@@ -6,7 +6,6 @@ import contextvars
 import json
 import threading
 import time
-import tracemalloc
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timezone
@@ -35,8 +34,9 @@ from app.foundry_agent_client import (
 )
 from app.generation import CardGenerationService, ModerationDecision
 from hosted_agents.card_orchestrator import specialists
-from hosted_agents.card_orchestrator.orchestrator import RuntimeFailure
+from hosted_agents.card_orchestrator.orchestrator import CardOrchestrator, RuntimeFailure
 from hosted_agents.card_orchestrator.server import create_host
+from hosted_agents.card_orchestrator.workflow import StageBoundary
 from tests.test_agent_detail_telemetry import (
     PROMPT,
     capture,
@@ -48,7 +48,8 @@ from tests.test_agent_detail_telemetry import (
     stack,
 )
 from tests.test_agentic_generation import _client, _generate
-from tests.test_card_orchestrator import ART, CARD, LORE, wire
+from tests.test_card_orchestrator import ART, CARD, LORE, settings, wire
+from tests.test_card_orchestrator_models import model_response, model_transport  # noqa: F401
 
 
 @contextmanager
@@ -87,14 +88,14 @@ def test_original_identity_stage_time_and_azure_batch_conversion(monkeypatch):
     with batched_provider(monkeypatch) as (provider, exporter, _):
         _, runtime, _, _ = stack(monkeypatch)
         stage_contexts, completed, finalized, captures = [], [], [], []
-        original_run = specialists.FoundrySpecialists.run
+        original_run = StageBoundary.invoke
         original_candidate = detail.candidate
         original_end = Span.end
 
-        async def run(self, stage, payload):
+        async def run(self, context, call_next):
             stage_contexts.append(trace.get_current_span().get_span_context())
             await asyncio.sleep(0.002)
-            return await original_run(self, stage, payload)
+            return await original_run(self, context, call_next)
 
         async def candidate(*args, **kwargs):
             state = detail.current()
@@ -113,7 +114,7 @@ def test_original_identity_stage_time_and_azure_batch_conversion(monkeypatch):
                 finalized.append((self.get_span_context(), end_time, time.time_ns()))
             return original_end(self, end_time=end_time)
 
-        monkeypatch.setattr(specialists.FoundrySpecialists, "run", run)
+        monkeypatch.setattr(StageBoundary, "invoke", run)
         monkeypatch.setattr(detail, "candidate", candidate)
         monkeypatch.setattr(Span, "end", end)
         with provider.get_tracer("baseline").start_as_current_span("parent") as parent:
@@ -383,13 +384,12 @@ def assert_owned_lifecycle_drained(observed):
         "remaining_budget",
     ],
 )
+@pytest.mark.parametrize("phase", ["whole_request", "late_boundary"])
 def test_original_deadline_covers_sync_acceptance_preflight(
-    monkeypatch, exported, record_property, boundary
+    monkeypatch, exported, record_property, boundary, phase, model_transport
 ):
-    _, runtime, _, _ = stack(monkeypatch)
-    runtime.settings = runtime.settings.model_copy(
-        update={"timeout_seconds": 0.3 if boundary == "remaining_budget" else 0.1}
-    )
+    budget = 2 if phase == "late_boundary" else (0.3 if boundary == "remaining_budget" else 0.1)
+    runtime = CardOrchestrator(settings(timeout_seconds=budget))
     observed = observe_hosted_lifecycle(monkeypatch)
     events = []
     in_release = False
@@ -397,6 +397,16 @@ def test_original_deadline_covers_sync_acceptance_preflight(
     original_validate = GenerateCardAgentResponse.model_validate_json
     original_pending, original_record = detail._validate_pending, detail._validate_original
     original_encoded, original_release = detail.encoded, detail.Capture._release
+    deadlines = []
+    original_factory = runtime.specialist_factory
+
+    @asynccontextmanager
+    async def factory(config):
+        deadlines.append(detail.current_deadline())
+        async with original_factory(config) as owned:
+            yield owned
+
+    runtime.specialist_factory = factory
 
     if boundary == "remaining_budget":
         original_gate = runtime._gate
@@ -415,6 +425,17 @@ def test_original_deadline_covers_sync_acceptance_preflight(
         assert len(observed["created"]) == 3
         assert not observed["attached"]
         assert not content(exported)
+        state = detail.current()
+        assert len(state.records) == len(state.pending) == 3
+        assert state.deadline == detail.current_deadline() == deadlines[0]
+        assert all(p.deadline == deadlines[0] for p in state.pending)
+        if phase == "late_boundary":
+            remaining = deadlines[0] - asyncio.get_running_loop().time()
+            assert remaining > 0.1
+            time.sleep(remaining - 0.1)
+            record_property(
+                "target_remaining_seconds", deadlines[0] - asyncio.get_running_loop().time()
+            )
         events.append((name, time.monotonic()))
         # Blocking work need not be preempted, but cannot authorize an expired release.
         time.sleep(0.18 if boundary == "remaining_budget" else 0.2)
@@ -478,6 +499,12 @@ def test_original_deadline_covers_sync_acceptance_preflight(
             finally:
                 finished = time.monotonic()
                 record_property("elapsed_seconds", finished - started)
+                if phase == "whole_request":
+                    assert finished - started < 0.5
+                else:
+                    assert finished - started >= budget
+                    record_property("target_to_cleanup_seconds", finished - events[0][1])
+                    assert finished - events[0][1] < 0.5
                 record_property(
                     "lifecycle",
                     [(name, at - started) for name, at in events]
@@ -489,29 +516,44 @@ def test_original_deadline_covers_sync_acceptance_preflight(
                 assert detail.current() is None
 
     asyncio.run(scenario())
-    assert len(events) == 2
-    assert events[-1][1] - events[0][1] >= (0.18 if boundary == "remaining_budget" else 0.2)
+    if phase == "late_boundary":
+        assert len(events) == 2
+        assert events[-1][1] - events[0][1] >= (0.18 if boundary == "remaining_budget" else 0.2)
+        assert len(model_transport[0]) == len(new_spans(exported)) == 3
+        assert_owned_lifecycle_drained(observed)
+    else:
+        assert not events
+        assert all(c.closed and not c.pending and not c.records for c in observed["captures"])
+        assert_capacity_recovered()
     assert not observed["attached"]
     assert not converted_records(exported)
-    assert len(new_spans(exported)) == 3
-    assert_owned_lifecycle_drained(observed)
 
 
+@pytest.mark.parametrize("phase", ["whole_request", "late_boundary"])
 def test_original_deadline_covers_async_resource_finalization(
-    monkeypatch, exported, record_property
+    monkeypatch, exported, record_property, phase, model_transport
 ):
-    _, runtime, _, _ = stack(monkeypatch)
-    runtime.settings = runtime.settings.model_copy(update={"timeout_seconds": 0.1})
+    runtime = CardOrchestrator(settings(timeout_seconds=2 if phase == "late_boundary" else 0.1))
     observed = observe_hosted_lifecycle(monkeypatch)
     events = []
 
+    original_factory = runtime.specialist_factory
+
     @asynccontextmanager
-    async def factory(_):
+    async def factory(config):
+        deadline = detail.current_deadline()
         try:
-            yield specialists.FoundrySpecialists(None)
-            assert len(detail.current().pending) == len(detail.current().records) == 3
-            events.append(("finalization_entered", time.monotonic()))
-            await asyncio.sleep(10)
+            async with original_factory(config) as owned:
+                yield owned
+                state = detail.current()
+                assert len(state.pending) == len(state.records) == 3
+                assert state.deadline == deadline == detail.current_deadline()
+                assert all(p.deadline == deadline for p in state.pending)
+                remaining = deadline - asyncio.get_running_loop().time()
+                assert remaining > 0.1
+                await asyncio.sleep(remaining - 0.1)
+                events.append(("finalization_entered", time.monotonic()))
+                await asyncio.sleep(10)
         finally:
             events.append(("finalization_exited", time.monotonic()))
 
@@ -526,15 +568,26 @@ def test_original_deadline_covers_async_resource_finalization(
             record_property("elapsed_seconds", elapsed)
             record_property("lifecycle", [(name, at - started) for name, at in events])
             assert failure.value.reason.value == "timeout"
-            assert elapsed < 1
+            if phase == "whole_request":
+                assert elapsed < 1
+            else:
+                assert elapsed >= 2
+                tail = time.monotonic() - events[0][1]
+                record_property("target_to_cleanup_seconds", tail)
+                assert tail < 1
             assert trace.get_current_span() is outer
             assert detail.current() is None
 
     asyncio.run(scenario())
-    assert [name for name, _ in events] == ["finalization_entered", "finalization_exited"]
+    if phase == "late_boundary":
+        assert [name for name, _ in events] == ["finalization_entered", "finalization_exited"]
+        assert len(model_transport[0]) == 3
+        assert_owned_lifecycle_drained(observed)
+    else:
+        assert all(name != "finalization_entered" for name, _ in events)
+        assert_capacity_recovered()
     assert not observed["attached"]
     assert not converted_records(exported)
-    assert_owned_lifecycle_drained(observed)
 
 
 @pytest.mark.parametrize("stage", ["concept", "lore", "art_direction"])
@@ -711,22 +764,23 @@ def test_late_recording_stage_uses_actual_sampler_decision_before_capture(monkey
     with batched_provider(monkeypatch, DropConceptSampler(ALWAYS_ON)) as (provider, exporter, _):
         _, runtime, _, _ = stack(monkeypatch)
         observed = observe_hosted_lifecycle(monkeypatch)
-        original_run, original_candidate = specialists.FoundrySpecialists.run, detail.candidate
+        original_run, original_candidate = StageBoundary.invoke, detail.candidate
         stages, candidates = [], []
 
-        async def run(self, stage, payload):
+        async def run(self, context, call_next):
+            stage = self.stage
             span = trace.get_current_span()
             stages.append((stage, span.is_recording(), detail.current()))
             if stage == "concept":
                 assert not observed["captures"]
                 assert_capacity_recovered()
-            return await original_run(self, stage, payload)
+            return await original_run(self, context, call_next)
 
         async def candidate(stage, *args, **kwargs):
             candidates.append(stage)
             return await original_candidate(stage, *args, **kwargs)
 
-        monkeypatch.setattr(specialists.FoundrySpecialists, "run", run)
+        monkeypatch.setattr(StageBoundary, "invoke", run)
         monkeypatch.setattr(detail, "candidate", candidate)
 
         async def scenario():
@@ -1129,34 +1183,46 @@ def test_hosted_acceptance_includes_closure_and_business_serialization(
 
         runtime.specialist_factory = factory
     elif failure == "serialization":
+        original = GenerateCardAgentResponse.model_dump_json
 
         def fail(self, *args, **kwargs):
-            raise ValueError("SYNTHETIC-PRIVATE-FAILURE")
+            if self.metadata.get("safetyEvidence"):
+                raise ValueError("SYNTHETIC-PRIVATE-FAILURE")
+            return original(self, *args, **kwargs)
 
         monkeypatch.setattr(GenerateCardAgentResponse, "model_dump_json", fail)
     elif failure == "revalidation":
+        original = GenerateCardAgentResponse.model_validate_json
 
         def fail(*args, **kwargs):
-            raise ValueError("SYNTHETIC-PRIVATE-FAILURE")
+            result = original(*args, **kwargs)
+            if result.metadata.get("safetyEvidence"):
+                raise ValueError("SYNTHETIC-PRIVATE-FAILURE")
+            return result
 
         monkeypatch.setattr(GenerateCardAgentResponse, "model_validate_json", fail)
     elif failure == "serialized_status":
         original = GenerateCardAgentResponse.model_dump_json
 
         def serialize(self, *args, **kwargs):
-            return original(self.model_copy(update={"status": "held"}), *args, **kwargs)
+            value = (
+                self.model_copy(update={"status": "held"})
+                if self.metadata.get("safetyEvidence")
+                else self
+            )
+            return original(value, *args, **kwargs)
 
         monkeypatch.setattr(GenerateCardAgentResponse, "model_dump_json", serialize)
     else:
-        original = runtime._gate
+        original = GenerateCardAgentResponse.model_dump_json
 
-        async def gate(*args):
-            await original(*args)
-            if args[2] == "final_art_prompt":
-                # Preserve the set of allowed stages but invalidate authoritative evidence.
-                args[3][0] = args[3][0].model_copy(update={"reason": "invalid_evidence"})
+        def serialize(self, *args, **kwargs):
+            value = json.loads(original(self, *args, **kwargs))
+            if value["metadata"].get("safetyEvidence"):
+                value["metadata"]["safetyEvidence"][0]["reason"] = "invalid_evidence"
+            return json.dumps(value)
 
-        runtime._gate = gate
+        monkeypatch.setattr(GenerateCardAgentResponse, "model_dump_json", serialize)
     if failure == "closure":
         with pytest.raises(RuntimeFailure):
             asyncio.run(runtime.generate(GenerateCardAgentRequest(query=PROMPT)))
@@ -1339,14 +1405,10 @@ def test_business_closure_serialization_and_batch_preflight_precede_first_attach
 
     def attribute(self, key, value):
         if key == "fcg.detail.record":
-            assert events[:6] == [
-                "closed",
-                "serialized",
-                "revalidated",
-                "concept",
-                "lore",
-                "art_direction",
-            ]
+            assert events[0] == "closed"
+            first_pending = events.index("concept")
+            assert events[1:first_pending] == ["serialized", "revalidated"] * 2
+            assert events[first_pending : first_pending + 3] == ["concept", "lore", "art_direction"]
             events.append("attached")
         return original_set(self, key, value)
 
@@ -1358,7 +1420,7 @@ def test_business_closure_serialization_and_batch_preflight_precede_first_attach
     assert (
         asyncio.run(runtime.generate(GenerateCardAgentRequest(query=PROMPT))).status == "completed"
     )
-    assert events[6:] == ["attached"] * 3
+    assert events[events.index("attached") :] == ["attached"] * 3
     assert len(converted_records(exported)) == 3
     assert_capacity_recovered()
 
@@ -1374,7 +1436,7 @@ def test_every_hosted_await_boundary_finalizes_and_restores(
     _, runtime, _, _ = stack(monkeypatch)
     states, ended = [], []
     original_run, original_candidate, original_gate = (
-        specialists.FoundrySpecialists.run,
+        StageBoundary.invoke,
         detail.candidate,
         runtime._gate,
     )
@@ -1383,11 +1445,11 @@ def test_every_hosted_await_boundary_finalizes_and_restores(
     def fail():
         raise asyncio.CancelledError if failure == "cancel" else TimeoutError
 
-    async def run(self, stage, payload):
+    async def run(self, context, call_next):
         states.append(detail.current())
-        if stage == boundary:
+        if self.stage == boundary:
             fail()
-        return await original_run(self, stage, payload)
+        return await original_run(self, context, call_next)
 
     async def candidate(*args, **kwargs):
         if boundary == "candidate" and args[0] == "art_direction":
@@ -1410,7 +1472,7 @@ def test_every_hosted_await_boundary_finalizes_and_restores(
             ended.append(self.get_span_context().span_id)
         return original_end(self, end_time=end_time)
 
-    monkeypatch.setattr(specialists.FoundrySpecialists, "run", run)
+    monkeypatch.setattr(StageBoundary, "invoke", run)
     monkeypatch.setattr(detail, "candidate", candidate)
     monkeypatch.setattr(Span, "end", end)
     runtime._gate, runtime.specialist_factory = gate, factory
@@ -1555,18 +1617,35 @@ def test_legacy_producer_mixed_flags_keep_web_as_release_authority(
 
 
 @pytest.mark.parametrize("boundary", ["final_text", "candidate"])
-def test_hosted_retained_capacity_and_peak_memory_with_real_deadline(
-    monkeypatch, exported, record_property, boundary
+@pytest.mark.parametrize("phase", ["whole_request", "late_boundary"])
+def test_hosted_retained_capacity_with_real_deadline(
+    monkeypatch, exported, record_property, boundary, phase, model_transport
 ):
-    _, runtime, _, _ = stack(monkeypatch)
-    runtime.settings = runtime.settings.model_copy(update={"timeout_seconds": 0.1})
+    runtime = CardOrchestrator(settings(timeout_seconds=2 if phase == "late_boundary" else 0.1))
     captures = []
+    targets = []
+    deadlines = []
     original_gate = runtime._gate
+    original_factory = runtime.specialist_factory
+
+    @asynccontextmanager
+    async def factory(config):
+        deadlines.append(detail.current_deadline())
+        async with original_factory(config) as owned:
+            yield owned
+
+    runtime.specialist_factory = factory
 
     async def wait():
         captures.append(detail.current())
         assert len(detail.current().pending) == 3
         assert len(detail.current().records) == 3
+        assert detail.current().deadline == deadlines[0] == detail.current_deadline()
+        assert all(p.deadline == deadlines[0] for p in detail.current().pending)
+        remaining = deadlines[0] - asyncio.get_running_loop().time()
+        assert remaining > 0.1
+        await asyncio.sleep(remaining - 0.1)
+        targets.append(time.monotonic())
         await asyncio.sleep(1)
 
     async def gate(*args):
@@ -1584,21 +1663,21 @@ def test_hosted_retained_capacity_and_peak_memory_with_real_deadline(
                 await wait()
 
         monkeypatch.setattr(detail, "candidate", candidate)
-    tracemalloc.start()
     start = time.monotonic()
-    try:
-        with pytest.raises(RuntimeFailure):
-            asyncio.run(runtime.generate(GenerateCardAgentRequest(query=PROMPT)))
-        _, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
+    with pytest.raises(RuntimeFailure):
+        asyncio.run(runtime.generate(GenerateCardAgentRequest(query=PROMPT)))
     elapsed = time.monotonic() - start
     record_property("elapsed_seconds", elapsed)
-    record_property("peak_bytes", peak)
-    assert elapsed < 0.5
-    assert peak < 2 * 1024 * 1024
-    assert captures and all(c.closed and not c.pending and not c.records for c in captures)
-    assert len(new_spans(exported)) == 3
+    if phase == "whole_request":
+        assert elapsed < 0.5
+        assert not captures
+    else:
+        assert elapsed >= 2
+        tail = time.monotonic() - targets[0]
+        record_property("target_to_cleanup_seconds", tail)
+        assert tail < 0.5
+        assert len(model_transport[0]) == len(new_spans(exported)) == 3
+        assert captures and all(c.closed and not c.pending and not c.records for c in captures)
     assert not content(exported)
     assert_capacity_recovered()
 
@@ -1618,7 +1697,7 @@ def test_nested_hosted_span_admission_never_retains_more_than_three(exported):
 
 @pytest.mark.parametrize("maximum_fields", [False, True])
 def test_seventeenth_real_hosted_request_cannot_allocate_retained_spans(
-    monkeypatch, exported, record_property, maximum_fields
+    monkeypatch, exported, record_property, maximum_fields, model_transport
 ):
     glyph = "\U0001f9d9"
     outputs = (
@@ -1636,7 +1715,22 @@ def test_seventeenth_real_hosted_request_cannot_allocate_retained_spans(
         if maximum_fields
         else None
     )
-    _, runtime, _, _ = stack(monkeypatch, outputs=outputs)
+    from app.specialist_contract import SCHEMAS
+
+    runtime = CardOrchestrator(settings())
+    # Hang watchdog, not a performance SLO; the runtime's own deadlines remain active.
+    watchdog_seconds = 2 * runtime.settings.timeout_seconds
+    stage_outputs = dict(zip(SCHEMAS, outputs or [CARD, LORE, ART], strict=True))
+
+    def respond(call):
+        stage = next(
+            stage
+            for stage, schema in SCHEMAS.items()
+            if schema.__name__ == call["text"]["format"]["name"]
+        )
+        return model_response(stage_outputs[stage])
+
+    model_transport[1][:] = [respond]
     observed = observe_hosted_lifecycle(monkeypatch)
     original_gate = runtime._gate
     original_acquire = detail._capacity.acquire
@@ -1652,10 +1746,22 @@ def test_seventeenth_real_hosted_request_cannot_allocate_retained_spans(
 
     async def scenario():
         gate = asyncio.Event()
+        admitted_ready = asyncio.Event()
+        all_ready = asyncio.Event()
+        other_admitted_ready = asyncio.Event()
 
         async def wait(*args):
             if args[2] == "final_text":
+                # Graph completion order need not match capture allocation order.
+                if detail.current() is observed["captures"][0]:
+                    await other_admitted_ready.wait()
                 captures.append(detail.current())
+                if len(captures) == 15:
+                    other_admitted_ready.set()
+                if len(captures) == 16:
+                    admitted_ready.set()
+                if len(captures) == 17:
+                    all_ready.set()
                 await gate.wait()
             return await original_gate(*args)
 
@@ -1666,16 +1772,25 @@ def test_seventeenth_real_hosted_request_cannot_allocate_retained_spans(
                     GenerateCardAgentRequest(query=glyph * 400 if maximum_fields else PROMPT)
                 )
             )
-            for _ in range(17)
+            for _ in range(16)
         ]
         try:
-            async with asyncio.timeout(5):
-                while len(captures) != 17:
-                    await asyncio.sleep(0)
+            await asyncio.wait_for(admitted_ready.wait(), watchdog_seconds)
+            tasks.append(
+                asyncio.create_task(
+                    runtime.generate(
+                        GenerateCardAgentRequest(query=glyph * 400 if maximum_fields else PROMPT)
+                    )
+                )
+            )
+            await asyncio.wait_for(all_ready.wait(), watchdog_seconds)
             active = [c for c in captures if c is not None]
             assert len(active) == 16
             assert captures[-1] is None
-            assert observed["captures"] == active
+            assert len(observed["captures"]) == 16
+            assert {id(c) for c in observed["captures"]} == {id(c) for c in active}
+            assert len({id(c) for c in active}) == 16
+            assert [id(c) for c in observed["captures"]] != [id(c) for c in active]
             assert acquisitions == [True] * 16 + [False]
             assert all(len(c.pending) == len(c.records) == 3 for c in active)
             assert all(c.spans == 3 and not c.closed for c in active)
@@ -1691,8 +1806,6 @@ def test_seventeenth_real_hosted_request_cannot_allocate_retained_spans(
             assert "fcg.detail.record" not in rejected.attributes
             assert not observed["attached"]
             assert not content(exported)
-            retained, _ = tracemalloc.get_traced_memory()
-            record_property("retained_bytes_at_capacity", retained)
             record_property(
                 "capacity",
                 {
@@ -1716,15 +1829,11 @@ def test_seventeenth_real_hosted_request_cannot_allocate_retained_spans(
         assert isinstance(results[0], asyncio.CancelledError)
         assert all(r.status == "completed" for r in results[1:])
 
-    tracemalloc.start()
-    try:
-        asyncio.run(scenario())
-        _, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
-    record_property("peak_bytes", peak)
-    assert peak < 8 * 1024 * 1024
+    asyncio.run(scenario())
     assert len(new_spans(exported)) == 49
+    assert len(model_transport[0]) == 51
+    assert all(client.is_closed() for client in model_transport[2])
+    assert all(credential.closed for credential in model_transport[3])
     assert len(content(exported)) == len(observed["attached"]) == 45
     assert acquisitions == [True] * 16 + [False]
     assert all(c is None or (c.closed and not c.pending and not c.records) for c in captures)
@@ -1862,11 +1971,15 @@ def test_context_lifecycle_failures_are_content_free_and_business_safe(
 
     @contextmanager
     def activate(span, *args, **kwargs):
-        if span.name == "card_lore" and failure == "activate":
+        ours = (
+            getattr(span, "name", None) == "card_lore"
+            and getattr(getattr(span, "instrumentation_scope", None), "name", None) == detail.SCOPE
+        )
+        if ours and failure == "activate":
             raise RuntimeError("SYNTHETIC-PRIVATE-CREATION")
         with original_use(span, *args, **kwargs):
             yield span
-        if span.name == "card_lore" and failure == "detach":
+        if ours and failure == "detach":
             raise RuntimeError("SYNTHETIC-PRIVATE-CREATION")
 
     monkeypatch.setattr(tracer, "start_span", start)
