@@ -27,6 +27,7 @@ from azure.identity import (
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from app.agent_detail import Envelope, Source, current, parse_envelope
+from app.completion_diagnostics import CompletionDiagnostics
 from app.generation import GeneratedCardModel
 from app.settings import AppSettings, SettingsError, load_app_settings
 
@@ -143,6 +144,7 @@ class FoundryAgentInvocationResult:
     card: GeneratedCardModel | None = None
     art_prompt: str | None = None
     error_code: str | None = None
+    completion_diagnostics: CompletionDiagnostics | None = None
     runtime_failure_stage: (
         Literal["specialist_setup", "concept", "lore", "art_direction", "orchestration"] | None
     ) = None
@@ -783,6 +785,11 @@ def _parse_success_envelope(
             agent_version=_metadata_version(agent_response.metadata),
             error_code=_safe_identifier_or_none(f"agent_{agent_response.status}"),
             message="Foundry agent returned a non-success status.",
+            completion_diagnostics=(
+                CompletionDiagnostics.parse(agent_response.metadata.get("completionDiagnostics"))
+                if agent_response.status == "held"
+                else None
+            ),
         )
 
     agent_version = _metadata_version(agent_response.metadata)

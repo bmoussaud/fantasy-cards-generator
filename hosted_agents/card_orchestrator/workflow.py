@@ -27,6 +27,7 @@ from opentelemetry import context as otel_context
 from pydantic import ValidationError
 
 from app import agent_detail
+from app.completion_diagnostics import CompletionDiagnostics
 from app.foundry_agent_client import GenerateCardAgentRequest, GenerateCardAgentResponse
 from app.generation import GeneratedCardModel, derive_art_prompt
 from app.specialist_contract import Stage
@@ -106,6 +107,7 @@ class RequestState:
     resource_failure: RuntimeFailure | None = None
     terminal_failure: RuntimeFailure | None = None
     terminal_emitted: bool = False
+    completion_diagnostics: CompletionDiagnostics | None = None
     parent_context: otel_context.Context = field(default_factory=otel_context.get_current)
 
     async def close_resources(self) -> None:
@@ -218,8 +220,17 @@ class StageBoundary(AgentMiddleware):
                 return SpecialistResult("refused", reason="model_content_filter")
             raise
         if not isinstance(context.result, AgentResponse):
-            return SpecialistResult("held", reason="model_incomplete")
-        return specialist_result(context.result)
+            result = SpecialistResult(
+                "held",
+                reason="model_incomplete",
+                completion_diagnostics=CompletionDiagnostics(
+                    stage=self.stage, checker="unexpected_agent_response"
+                ),
+            )
+        else:
+            result = specialist_result(context.result, self.stage)
+        self.state.completion_diagnostics = result.completion_diagnostics
+        return result
 
 
 class DecodeTypedRequest(Executor):

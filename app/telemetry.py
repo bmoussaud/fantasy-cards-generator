@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from functools import wraps
 from typing import Any, Awaitable, Callable, ParamSpec, TypeVar
 
+from app.completion_diagnostics import COMPLETION_ATTRIBUTE_KEYS, completion_attribute
 from app.settings import TelemetrySettings, load_telemetry_settings
 
 LOGGER_NAME = "fantasy_cards_generator.telemetry"
@@ -198,6 +199,7 @@ SAFE_ERROR_CODES = {
     "photo_moderation_unconfigured",
 }
 SAFE_ATTRIBUTE_KEYS = {
+    *COMPLETION_ATTRIBUTE_KEYS,
     "fcg.detail.omission",
     "app.request_id",
     "fcg.operation",
@@ -787,7 +789,11 @@ def safe_attributes(attributes: dict[str, Any]) -> dict[str, Any]:
     for key, value in attributes.items():
         if key not in SAFE_ATTRIBUTE_KEYS:
             continue
-        if key == "fcg.detail.omission":
+        if key in COMPLETION_ATTRIBUTE_KEYS:
+            projected = completion_attribute(key, value)
+            if projected is not None:
+                safe[key] = projected
+        elif key == "fcg.detail.omission":
             safe[key] = _bounded_value(
                 value,
                 {

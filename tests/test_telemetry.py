@@ -22,6 +22,86 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SENSITIVE_SENTINEL = "NEVER-EXPORT-user@example.com-secret-token"
 
 
+@pytest.mark.parametrize(
+    "checker",
+    ["unexpected_agent_response", "missing_raw_response", "non_stop_finish", "non_text_content"],
+)
+def test_completion_diagnostics_survive_final_span_event_and_log_sanitizers(monkeypatch, checker):
+    monkeypatch.delenv("OTEL_SDK_DISABLED", raising=False)
+    attributes = {
+        "fcg.stage": "art_direction",
+        "fcg.completion_reason": checker,
+        "fcg.provider_finish_reason": "length",
+        "fcg.provider_incomplete_reason": "max_output_tokens",
+        "fcg.usage.input_tokens": 0,
+        "fcg.usage.output_tokens": 2147483647,
+        "fcg.usage.total_tokens": 9,
+    }
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(telemetry.PrivacySpanProcessor())
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    with provider.get_tracer("diagnostic-test").start_as_current_span("operation") as span:
+        # Bypass the producer sanitizer to exercise the last-mile boundary.
+        span.set_attributes(attributes | {"private.payload": SENSITIVE_SENTINEL})
+        span.add_event("agent.invocation", attributes | {"private.payload": SENSITIVE_SENTINEL})
+    exported = exporter.get_finished_spans()[0]
+    assert dict(exported.attributes) == attributes
+    assert dict(exported.events[0].attributes) == attributes
+    record = SimpleNamespace(
+        attributes={
+            key.replace(".", "_"): value
+            for key, value in (attributes | {"private.payload": SENSITIVE_SENTINEL}).items()
+        }
+    )
+    telemetry.PrivacyLogRecordProcessor().on_emit(record)
+    assert record.attributes == attributes
+    assert SENSITIVE_SENTINEL not in repr(exported) + repr(record)
+    provider.shutdown()
+
+
+@pytest.mark.parametrize(
+    "value",
+    [True, False, -1, 2147483648, 1.2, float("nan"), float("inf"), SENSITIVE_SENTINEL, [], {}],
+)
+def test_completion_sink_rejects_malformed_counts_without_coercion(value):
+    attributes = {
+        key: value
+        for key in ("fcg.usage.input_tokens", "fcg.usage.output_tokens", "fcg.usage.total_tokens")
+    }
+    assert telemetry.safe_attributes(attributes) == {}
+    record = SimpleNamespace(
+        attributes={key.replace(".", "_"): value for key, value in attributes.items()}
+    )
+    telemetry.PrivacyLogRecordProcessor().on_emit(record)
+    assert record.attributes == {}
+
+
+def test_completion_final_export_closes_unknown_reasons_and_drops_invalid_fields(monkeypatch):
+    monkeypatch.delenv("OTEL_SDK_DISABLED", raising=False)
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(telemetry.PrivacySpanProcessor())
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    with provider.get_tracer("diagnostic-test").start_as_current_span("operation") as span:
+        values = {
+            "fcg.completion_reason": SENSITIVE_SENTINEL,
+            "fcg.provider_finish_reason": SENSITIVE_SENTINEL,
+            "fcg.provider_incomplete_reason": SENSITIVE_SENTINEL,
+            "fcg.usage.input_tokens": True,
+            "fcg.usage.output_tokens": -1,
+            "fcg.usage.total_tokens": 2147483648,
+            "private.payload": SENSITIVE_SENTINEL,
+        }
+        span.set_attributes(values)
+        span.add_event("agent.invocation", values)
+    result = exporter.get_finished_spans()[0]
+    expected = {"fcg.provider_finish_reason": "other", "fcg.provider_incomplete_reason": "other"}
+    assert dict(result.attributes) == dict(result.events[0].attributes) == expected
+    assert SENSITIVE_SENTINEL not in repr(result)
+    provider.shutdown()
+
+
 def test_callback_access_log_redaction_keeps_route_and_status(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

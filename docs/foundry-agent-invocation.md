@@ -552,6 +552,61 @@ refusal/content-filter evidence takes precedence over generated JSON. Dependency
 errors and timeouts produce an outer `response.failed`/`server_error`, not a
 completed domain result. Malformed/unsupported requests return sanitized HTTP 400.
 
+### Completion diagnostics (#166)
+
+For the four existing completion-check failures only, HOSTED may add
+`metadata.completionDiagnostics`. It is built from immutable, validated,
+request-local state after resource closure and metadata replacement, never by
+forwarding arbitrary SDK or terminal metadata. WEB validates this optional member
+after domain-schema validation and before its held-result return; it remains on
+the internal invocation result and the existing `agent.invocation` event only.
+Older responses without it remain valid. Public held behavior is unchanged:
+HOSTED HTTP 200 with `held` maps to WEB HTTP 502 / `invalid_model_output`, with the
+same generic error body and audit/replay behavior.
+The existing ACA identity probe's in-memory parser bundle includes the same closed
+diagnostic definitions, so it does not require this new module on an older serving
+image. Its result-marker contract does not expose completion diagnostics.
+
+Required `stage` is `concept|lore|art_direction`; required `checker` is
+`unexpected_agent_response|missing_raw_response|non_stop_finish|non_text_content`.
+An invalid required value discards diagnostics only. Optional `finishReason` is
+`stop|length|content_filter|tool_calls|function_call|other`; optional
+`incompleteReason` is `max_output_tokens|content_filter|other`. Optional `usage`
+contains only `inputTokens`, `outputTokens`, `totalTokens`, each an exact integer
+(not bool) in 0..2147483647. Invalid counts are omitted independently, without
+coercion, clamping or inferred totals. Unknown strings in verified reason fields
+map to `other`; absent or malformed ancillary fields are omitted. Unknown keys
+never survive projection, including nested usage extras.
+
+Offline source/type verification against `agent-framework-core==1.17.0`,
+`agent-framework-foundry==1.12.0`, its locked `agent-framework-openai==1.14.1`,
+`azure-ai-agentserver-responses==2.1.0`, `azure-ai-projects==2.3.0` and
+`openai==2.54.0` established these public paths:
+
+- `AgentResponse.finish_reason` is the framework's string finish reason.
+  The Responses adapter maps `max_output_tokens` to `length`, `content_filter`
+  to `content_filter`, completed function calls to `tool_calls`, and otherwise
+  completed responses to `stop`. Unrecognized/noncompleted status may yield no
+  finish reason. `function_call` is an allowed diagnostic bucket, not a claim
+  that this adapter produces it.
+- `AgentResponse.usage_details` copies `ChatResponse.usage_details`, with
+  `input_token_count`, `output_token_count`, `total_token_count` copied from the
+  public OpenAI `Response.usage` token fields. Only these three keys are read.
+- `AgentResponse.raw_representation` wraps a `ChatResponse`, whose public
+  `raw_representation` is the OpenAI `Response`; its typed `incomplete_details`
+  (`IncompleteDetails`) exposes `reason`. This optional extraction requires those
+  verified types. Unsupported wrappers are not traversed and no private payload
+  fallback is used.
+
+Refusal/content-filter and provider-error precedence are unchanged. Missing raw
+response still wins over non-stop finish; non-stop finish still precedes
+non-text content. Completed-text acceptance and subsequent JSON/schema checks
+are unchanged. These observations do not establish truncation, token exhaustion,
+a framework defect, or the cause of any historical trace. No original content,
+provider identifiers, errors or raw provider strings are retained by diagnostics.
+For the closed telemetry keys and capture guards, see
+[operational monitoring](operational-monitoring.md#content-free-completion-diagnostics-166).
+
 `metadata.safetyEvidence` records bounded stage/policy/decision/reason codes for
 the local gates. Completion requires allowed evidence for pre-prompt, concept,
 lore, final-text and final-art-prompt checks. Hosted guardrails are recorded as

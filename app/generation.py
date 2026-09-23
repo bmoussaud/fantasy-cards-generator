@@ -2099,6 +2099,11 @@ class CardGenerationService:
                 "fcg.duration_ms": int(duration_ms),
                 "fcg.generation_path": "agent",
                 **({"fcg.agent_version": agent_version} if agent_version else {}),
+                **(
+                    agent_result.completion_diagnostics.attributes()
+                    if agent_result.completion_diagnostics is not None
+                    else {}
+                ),
             },
         )
 

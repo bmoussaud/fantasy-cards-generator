@@ -437,6 +437,10 @@ class CardOrchestrator:
             ]
         )
         response.metadata = metadata | {"safetyEvidence": [e.model_dump() for e in evidence]}
+        if response.status == "held" and state.completion_diagnostics is not None:
+            response.metadata["completionDiagnostics"] = state.completion_diagnostics.model_dump(
+                exclude_none=True
+            )
         return response
 
     async def _run_stage(

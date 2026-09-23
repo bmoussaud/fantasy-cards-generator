@@ -43,10 +43,10 @@ def parser_source():
         "_parse_runtime_failure_code",
     }
     source = (root / "app/foundry_agent_client.py").read_text()
+    diagnostics = (root / "app/completion_diagnostics.py").read_text()
     nodes = [node for node in ast.parse(source).body if getattr(node, "name", None) in names]
     assert {node.name for node in nodes} == names
     imports = (
-        "from __future__ import annotations\n"
         "import json\nimport re\n"
         "from collections.abc import Mapping\nfrom dataclasses import dataclass, field\n"
         "from typing import Any, Literal\n"
@@ -55,7 +55,9 @@ def parser_source():
     )
     lines = source.splitlines()
     return (
-        imports
+        diagnostics
+        + "\n"
+        + imports
         + "\n\n".join(
             "\n".join(
                 lines[
@@ -65,7 +67,9 @@ def parser_source():
             )
             for node in nodes
         )
-        + "\nGenerateCardAgentRequest.model_rebuild(_types_namespace=globals())\n"
+        + "\nCompletionUsage.model_rebuild(_types_namespace=globals())\n"
+        + "CompletionDiagnostics.model_rebuild(_types_namespace=globals())\n"
+        + "GenerateCardAgentRequest.model_rebuild(_types_namespace=globals())\n"
         + "GenerateCardAgentResponse.model_rebuild(_types_namespace=globals())\n"
     )
 

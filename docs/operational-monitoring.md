@@ -137,6 +137,37 @@ it must be sanitized, length-bounded, and excluded from metrics.
 
 ### Startup setting and process-local OFF
 
+#### Content-free completion diagnostics (#166)
+
+The existing WEB `agent.invocation` event can include the following structural
+attributes for a HOSTED held-completion result. These describe the failed checker,
+**not a proven provider root cause**, and are unrelated to original-content detail:
+
+| Attribute | Allowed values |
+|---|---|
+| `fcg.stage` | `concept`, `lore`, `art_direction` (existing stage attribute) |
+| `fcg.completion_reason` | `unexpected_agent_response`, `missing_raw_response`, `non_stop_finish`, `non_text_content` |
+| `fcg.provider_finish_reason` | `stop`, `length`, `content_filter`, `tool_calls`, `function_call`, `other` |
+| `fcg.provider_incomplete_reason` | `max_output_tokens`, `content_filter`, `other` |
+| `fcg.usage.input_tokens`, `fcg.usage.output_tokens`, `fcg.usage.total_tokens` | Exact integers, including zero, from 0 through 2147483647; never booleans |
+
+Provider fields are optional. Unknown strings become `other`; missing or
+non-string reasons and invalid counts are omitted without coercion. Totals are
+never inferred. Span/event/log final sanitizers enforce the same closed vocabulary
+and bounds; extra fields are dropped. Usage here is an event attribute, not a new
+metric dimension or another increment of aggregate token counters.
+
+This internal projection does not change HTTP errors, card output, audit/replay
+bodies, deadlines, model limits or retries. It remains independent of
+`FCG_AGENT_TRACE_ENABLED` (default ON; explicit false still disables detail),
+while respecting the existing telemetry recording/sampling behavior. There is no
+unsampled fallback or new exporter. Held, failed and refused requests still
+release no original-content records or earlier-stage candidates. SDK/MAF payload
+and HTTP-header capture suppression remain unchanged. See the
+[pinned SDK fields and internal contract](foundry-agent-invocation.md#completion-diagnostics-166).
+
+#### Detail capture setting
+
 The application setting is `FCG_AGENT_TRACE_ENABLED`. Foundry reserves all
 `AGENT_*` and `FOUNDRY_*` names for platform use, so the previous custom name
 `AGENT_TRACE_ENABLED` cannot be supplied to the hosted container and is no longer
