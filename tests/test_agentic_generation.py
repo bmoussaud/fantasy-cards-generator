@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import replace
 from typing import Any
 
@@ -141,6 +142,94 @@ def _generate(client: TestClient, *, key: str = "agent-only-test"):
             "csrfToken": csrf_token,
         },
     )
+
+
+@pytest.mark.parametrize("with_diagnostics", [False, True])
+def test_held_completion_diagnostics_stay_private_with_identical_public_audit_replay(
+    monkeypatch, with_diagnostics
+):
+    from app import telemetry
+    from tests.test_foundry_agent_client import FakeCredential, responses_envelope
+
+    metadata = {}
+    if with_diagnostics:
+        metadata["completionDiagnostics"] = {
+            "stage": "lore",
+            "checker": "non_stop_finish",
+            "finishReason": "length",
+            "incompleteReason": "max_output_tokens",
+            "usage": {"inputTokens": 0, "outputTokens": 8, "totalTokens": 8},
+            "private": "PRIVATE_CANARY",
+        }
+    calls, events = [], []
+
+    def handle(request):
+        calls.append(request)
+        return httpx.Response(
+            200,
+            json=responses_envelope({"schemaVersion": 1, "status": "held", "metadata": metadata}),
+        )
+
+    def event(name, attributes):
+        events.append((name, telemetry.safe_attributes(attributes)))
+
+    monkeypatch.setattr(generation_module, "add_event", event)
+    services = _services(monkeypatch, None)
+    services.agent_client = FoundryAgentClient(
+        services.settings, credential=FakeCredential(), transport=httpx.MockTransport(handle)
+    )
+    client = _client(monkeypatch, services)
+    response = _generate(client)
+    replay = _generate(client)
+    assert response.status_code == replay.status_code == 502
+    body = response.json()
+    assert body == {
+        "type": "/problems/invalid-model-output",
+        "title": "Bad Gateway",
+        "status": 502,
+        "detail": "The card generation agent returned invalid output.",
+        "instance": "/api/v1/cards/generate",
+        "errorCode": "invalid_model_output",
+        "requestId": body["requestId"],
+    }
+    assert {key: value for key, value in body.items() if key != "requestId"} == {
+        key: value for key, value in replay.json().items() if key != "requestId"
+    }
+    # Sequential pre-reservation failures are regenerated, not cached card replays.
+    assert len(calls) == 2
+    assert len(services.audit_repository._records) == 1
+    audit = next(iter(services.audit_repository._records.values()))
+    with pytest.raises(ProblemDetails) as replayed:
+        asyncio.run(
+            CardGenerationService(services)._replay_existing_or_wait(audit.owner_id, audit.id)
+        )
+    assert replayed.value == ProblemDetails(
+        status_code=502,
+        title="Bad Gateway",
+        detail="The card generation agent returned invalid output.",
+        type="/problems/invalid-model-output",
+        error_code="invalid_model_output",
+    )
+    private_surface = response.text + replay.text + repr(services.audit_repository._records)
+    assert all(
+        value not in private_surface
+        for value in (
+            "completionDiagnostics",
+            "non_stop_finish",
+            "max_output_tokens",
+            "PRIVATE_CANARY",
+        )
+    )
+    invocation = [attributes for name, attributes in events if name == "agent.invocation"]
+    assert len(invocation) == 2
+    if with_diagnostics:
+        assert invocation[0]["fcg.completion_reason"] == "non_stop_finish"
+        assert invocation[0]["fcg.stage"] == "lore"
+        assert invocation[0]["fcg.usage.input_tokens"] == 0
+    else:
+        assert "fcg.completion_reason" not in invocation[0]
+    assert "PRIVATE_CANARY" not in json.dumps(events)
+    asyncio.run(services.agent_client.aclose())
 
 
 class StageModeration:

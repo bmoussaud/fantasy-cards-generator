@@ -10,6 +10,8 @@ import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from dataclasses import replace
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -39,6 +41,184 @@ from tests.test_original_agent_spans import (
 )
 
 STAGES = ("concept", "lore", "art_direction")
+
+
+@pytest.mark.parametrize("stage_index", range(3))
+@pytest.mark.parametrize(
+    "checker",
+    ["unexpected_agent_response", "missing_raw_response", "non_stop_finish", "non_text_content"],
+)
+def test_completion_checker_survives_graph_close_metadata_host_and_web(
+    monkeypatch, model_transport, exported, stage_index, checker
+):
+    from agent_framework import Content
+
+    from app.foundry_agent_client import _parse_success_envelope
+
+    original = workflow.StageBoundary.invoke
+    original_outcome = workflow.TerminalOutcome.from_exception
+
+    def outcome(cls, exc, state):
+        result = original_outcome(exc, state)
+        if result.response is not None:
+            result.response.metadata = {
+                "private": "PRIVATE_METADATA",
+                "completionDiagnostics": {"stage": "PRIVATE_STAGE", "checker": "PRIVATE_CHECKER"},
+            }
+        return result
+
+    async def invoke(self, context, call_next):
+        async def complete():
+            await call_next()
+            if self.stage != STAGES[stage_index]:
+                return
+            if checker == "unexpected_agent_response":
+                context.result = None
+            elif checker == "missing_raw_response":
+                context.result.raw_representation = None
+                context.result.finish_reason = "length"
+            elif checker == "non_stop_finish":
+                context.result.finish_reason = "length"
+            else:
+                context.result.messages[0].contents.append(
+                    Content(
+                        "function_call",
+                        name="PRIVATE_TOOL",
+                        call_id="PRIVATE_ID",
+                        arguments="PRIVATE_ARGUMENTS",
+                    )
+                )
+
+        return await original(self, context, complete)
+
+    monkeypatch.setattr(workflow.StageBoundary, "invoke", invoke)
+    monkeypatch.setattr(workflow.TerminalOutcome, "from_exception", classmethod(outcome))
+    result = asyncio.run(post(create_host(settings()), wire()))
+    assert result.status_code == 200
+    envelope = result.json()
+    domain = json.loads(envelope["output"][0]["content"][0]["text"])
+    assert domain["status"] == "held"
+    assert domain["card"] is domain["artPrompt"] is None
+    diagnostic = domain["metadata"]["completionDiagnostics"]
+    assert diagnostic["stage"] == STAGES[stage_index] and diagnostic["checker"] == checker
+    parsed = _parse_success_envelope(envelope, request_id=None, expected_version=None)
+    assert parsed.status == "held" and parsed.error_code == "agent_held"
+    assert parsed.completion_diagnostics.model_dump(exclude_none=True) == diagnostic
+    assert parsed.agent_detail is None
+    assert len(model_transport[0]) == stage_index + 1
+    assert_closed(model_transport)
+    assert not content(exported)
+    assert "agentDetail" not in domain["metadata"]
+    assert "PRIVATE" not in result.text + repr(exported.get_finished_spans())
+
+
+@pytest.mark.parametrize("mode", ["on", "off", "drop", "record_only", "remote_unsampled"])
+def test_completion_diagnostics_do_not_enable_capture_or_release_failed_batch(
+    monkeypatch, model_transport, mode
+):
+    from opentelemetry.trace import NonRecordingSpan
+
+    from app.foundry_agent_client import FoundryAgentClient
+    from app.generation import CardGenerationService
+    from app.problems import ProblemDetails
+    from tests.test_agent_detail_telemetry import LocalHostedTransport, generate
+    from tests.test_agentic_generation import _services
+    from tests.test_telemetry import CapturingInstrument
+
+    sampler = (
+        StaticSampler(Decision.DROP)
+        if mode == "drop"
+        else StaticSampler(Decision.RECORD_ONLY) if mode == "record_only" else None
+    )
+    with batched_provider(monkeypatch, sampler) as (provider, exporter, _):
+        if mode != "on":
+
+            def forbidden(*args, **kwargs):
+                pytest.fail("ineligible completion diagnostics activated content capture")
+
+            for name in ("candidate", "projection_view", "_contracts", "parse_envelope"):
+                monkeypatch.setattr(detail, name, forbidden)
+        raw = model_transport[1][2]
+        raw["status"] = "incomplete"
+        raw["incomplete_details"] = {"reason": "max_output_tokens"}
+        config = settings(agent_trace_enabled=mode != "off")
+        transport = LocalHostedTransport(create_host(config))
+        services = _services(monkeypatch, None)
+        services.settings = replace(
+            services.settings,
+            agent_trace_enabled=mode != "off",
+            foundry_agent_timeout_seconds=5,
+            retry=replace(services.settings.retry, overall_timeout_seconds=10),
+        )
+        services.agent_client = FoundryAgentClient(
+            services.settings,
+            credential=SimpleNamespace(get_token=lambda *_: "offline-token"),
+            transport=transport,
+        )
+        tokens = CapturingInstrument()
+        monkeypatch.setattr(telemetry, "_token_counter", tokens)
+
+        async def scenario():
+            parent = NonRecordingSpan(SpanContext(123, 456, True, TraceFlags(0)))
+            with (
+                trace.use_span(parent)
+                if mode == "remote_unsampled"
+                else telemetry._tracer.start_as_current_span("parent")
+            ):
+                with pytest.raises(ProblemDetails) as caught:
+                    await generate(CardGenerationService(services))
+                assert caught.value.status_code == 502
+                assert caught.value.error_code == "invalid_model_output"
+            await services.agent_client.aclose()
+
+        asyncio.run(scenario())
+        assert provider.force_flush()
+        assert len(model_transport[0]) == 3
+        assert_closed(model_transport)
+        assert not content(exporter)
+        assert not tokens.measurements
+        body = transport.responses[0]
+        domain = json.loads(body["output"][0]["content"][0]["text"])
+        assert "agentDetail" not in domain["metadata"]
+        assert domain["metadata"]["completionDiagnostics"]["stage"] == "art_direction"
+        events = [
+            event
+            for span in exporter.get_finished_spans()
+            for event in span.events
+            if event.name == "agent.invocation"
+        ]
+        if mode in {"on", "off"}:
+            assert len(events) == 1
+            assert events[0].attributes["fcg.completion_reason"] == "non_stop_finish"
+            assert events[0].attributes["fcg.provider_incomplete_reason"] == "max_output_tokens"
+            assert events[0].attributes["fcg.usage.total_tokens"] == 2
+        else:
+            assert not events
+        assert_capacity_recovered()
+
+
+@pytest.mark.parametrize("stage_index", range(3))
+def test_real_provider_max_output_tokens_is_held_with_verified_diagnostics(
+    model_transport, exported, stage_index
+):
+    raw = model_transport[1][stage_index]
+    raw["status"] = "incomplete"
+    raw["incomplete_details"] = {"reason": "max_output_tokens"}
+    raw["usage"]["input_tokens"] = 0
+    result = asyncio.run(
+        CardOrchestrator(settings()).generate(GenerateCardAgentRequest(query="mountain drake"))
+    )
+    assert result.status == "held" and result.safetyHints == ["model_incomplete"]
+    assert result.metadata["completionDiagnostics"] == {
+        "stage": STAGES[stage_index],
+        "checker": "non_stop_finish",
+        "finishReason": "length",
+        "incompleteReason": "max_output_tokens",
+        "usage": {"inputTokens": 0, "outputTokens": 1, "totalTokens": 2},
+    }
+    assert len(model_transport[0]) == stage_index + 1
+    assert_closed(model_transport)
+    assert not content(exported)
 
 
 def user_payload(call):

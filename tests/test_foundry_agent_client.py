@@ -22,12 +22,146 @@ from app.foundry_agent_client import (
     FOUNDRY_AGENT_TOKEN_SCOPE,
     FoundryAgentClient,
     _build_responses_url,
+    _parse_success_envelope,
     _TransportAwareChainedCredential,
 )
 from app.settings import SettingsError, load_app_settings
 
 PROJECT_ENDPOINT = "https://cards.services.ai.azure.com/api/projects/fellowship"
 AGENT_NAME = "card-orchestrator"
+
+
+@pytest.mark.parametrize("capture_details", [False, True])
+@pytest.mark.parametrize("stage", ["concept", "lore", "art_direction"])
+@pytest.mark.parametrize(
+    "checker",
+    ["unexpected_agent_response", "missing_raw_response", "non_stop_finish", "non_text_content"],
+)
+def test_completion_diagnostics_closed_projection_before_held_return(
+    stage, checker, capture_details
+):
+    diagnostics = {
+        "stage": stage,
+        "checker": checker,
+        "finishReason": "PRIVATE_PROVIDER",
+        "incompleteReason": "max_output_tokens",
+        "usage": {"inputTokens": 0, "outputTokens": 2147483647, "private": "PRIVATE_USAGE"},
+        "payload": {"secret": "PRIVATE_PAYLOAD"},
+    }
+    result = _parse_success_envelope(
+        responses_envelope(
+            {
+                "schemaVersion": 1,
+                "status": "held",
+                "metadata": {
+                    "completionDiagnostics": diagnostics,
+                    "agentDetail": {"secret": "PRIVATE_DETAIL"},
+                },
+            }
+        ),
+        request_id=None,
+        expected_version=None,
+        capture_details=capture_details,
+    )
+    assert result.status == "held" and result.error_code == "agent_held"
+    assert result.schema_valid and not result.success
+    assert result.card is result.art_prompt is result.agent_detail is None
+    assert result.completion_diagnostics.model_dump(exclude_none=True) == {
+        "stage": stage,
+        "checker": checker,
+        "finishReason": "other",
+        "incompleteReason": "max_output_tokens",
+        "usage": {"inputTokens": 0, "outputTokens": 2147483647},
+    }
+    assert "PRIVATE" not in repr(result)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        [],
+        "PRIVATE",
+        {},
+        {"stage": [], "checker": "non_stop_finish"},
+        {"stage": "concept", "checker": {"PRIVATE": 1}},
+        {"stage": "PRIVATE", "checker": "non_stop_finish"},
+        {"stage": "concept", "checker": "PRIVATE"},
+    ],
+)
+def test_invalid_or_absent_completion_diagnostics_do_not_change_held_result(value):
+    payload = {"schemaVersion": 1, "status": "held", "metadata": {}}
+    baseline = _parse_success_envelope(
+        responses_envelope(payload), request_id=None, expected_version=None
+    )
+    payload["metadata"]["completionDiagnostics"] = value
+    assert (
+        _parse_success_envelope(responses_envelope(payload), request_id=None, expected_version=None)
+        == baseline
+    )
+
+
+@pytest.mark.parametrize("status", ["completed", "refused", "routing_defer"])
+def test_completion_diagnostics_not_carried_for_unrelated_outcomes(status):
+    payload = completed_agent_payload(status=status)
+    payload["metadata"]["completionDiagnostics"] = {
+        "stage": "concept",
+        "checker": "non_stop_finish",
+    }
+    result = _parse_success_envelope(
+        responses_envelope(payload), request_id=None, expected_version=None
+    )
+    assert result.completion_diagnostics is None
+
+
+@pytest.mark.parametrize("field", ["inputTokens", "outputTokens", "totalTokens"])
+@pytest.mark.parametrize(
+    "invalid", [True, False, -1, 2147483648, 1.5, float("inf"), float("nan"), "12", [], {}]
+)
+def test_completion_usage_omits_invalid_counts_independently(field, invalid):
+    from app.completion_diagnostics import CompletionDiagnostics
+
+    usage = {"inputTokens": 0, "outputTokens": 2, "totalTokens": 3}
+    usage[field] = invalid
+    value = CompletionDiagnostics.parse(
+        {"stage": "concept", "checker": "non_stop_finish", "usage": usage}
+    )
+    assert value.usage.model_dump(exclude_none=True) == {
+        key: count for key, count in usage.items() if key != field
+    }
+
+
+def test_completion_projection_never_traverses_or_stringifies_ancillary_payloads():
+    from app.completion_diagnostics import CompletionDiagnostics
+
+    class Hostile:
+        def __str__(self):
+            raise AssertionError("must not stringify")
+
+        def __repr__(self):
+            raise AssertionError("must not retain")
+
+        def __getattr__(self, name):
+            raise AssertionError("must not inspect arbitrary payload")
+
+    value = CompletionDiagnostics.parse(
+        {
+            "stage": "lore",
+            "checker": "missing_raw_response",
+            "finishReason": Hostile(),
+            "incompleteReason": {"nested": Hostile()},
+            "usage": {"inputTokens": Hostile(), "private": Hostile()},
+            "raw": Hostile(),
+        }
+    )
+    assert value.model_dump(exclude_none=True) == {
+        "stage": "lore",
+        "checker": "missing_raw_response",
+    }
+    assert value.attributes() == {
+        "fcg.stage": "lore",
+        "fcg.completion_reason": "missing_raw_response",
+    }
 
 
 class FakeAccessToken:

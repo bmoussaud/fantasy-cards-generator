@@ -19,6 +19,118 @@ from hosted_agents.card_orchestrator.orchestrator import (  # noqa: E402
 from tests.test_card_orchestrator import ART, CARD, LORE, settings  # noqa: E402
 
 
+@pytest.mark.parametrize(
+    "finish,expected",
+    [
+        ("stop", "stop"),
+        ("length", "length"),
+        ("tool_calls", "tool_calls"),
+        ("function_call", "function_call"),
+        ("PRIVATE_REASON", "other"),
+        (None, None),
+    ],
+)
+def test_pinned_public_completion_fields_are_projected_without_payload(finish, expected):
+    from agent_framework import AgentResponse, ChatResponse, Message
+    from openai.types.responses import Response
+
+    raw = Response.model_validate(model_response(CARD, incomplete=True))
+    raw.incomplete_details.reason = "max_output_tokens"
+    response = AgentResponse(
+        messages=[Message("assistant", ["PRIVATE_CARD"])],
+        finish_reason=finish,
+        usage_details={
+            "input_token_count": 0,
+            "output_token_count": 3,
+            "total_token_count": 3,
+            "PRIVATE_EXTRA": 123,
+        },
+        raw_representation=ChatResponse(raw_representation=raw),
+    )
+    result = specialists.specialist_result(response, "lore")
+    if finish == "stop":
+        assert result.status == "completed" and result.text == "PRIVATE_CARD"
+        assert result.completion_diagnostics is None
+    else:
+        assert result.status == "held" and result.text == ""
+        expected_value = {
+            "stage": "lore",
+            "checker": "non_stop_finish",
+            "incompleteReason": "max_output_tokens",
+            "usage": {"inputTokens": 0, "outputTokens": 3, "totalTokens": 3},
+        }
+        if expected is not None:
+            expected_value["finishReason"] = expected
+        assert result.completion_diagnostics.model_dump(exclude_none=True) == expected_value
+        assert "PRIVATE" not in repr(result)
+
+
+@pytest.mark.parametrize("kind", ["filter", "refusal", "error", "failed"])
+def test_completion_checker_preserves_refusal_and_error_precedence(kind):
+    from agent_framework import AgentResponse, ChatResponse, Content, Message
+    from openai.types.responses import Response
+    from openai.types.responses.response_output_refusal import ResponseOutputRefusal
+
+    raw = model_response(CARD)
+    if kind in {"error", "failed"}:
+        raw["status"] = "failed"
+    if kind == "error":
+        raw["error"] = {"code": "server_error", "message": "PRIVATE_ERROR"}
+    response = AgentResponse(
+        messages=[
+            Message(
+                "assistant",
+                [
+                    Content(
+                        "text",
+                        text="PRIVATE_TEXT",
+                        raw_representation=(
+                            ResponseOutputRefusal(type="refusal", refusal="PRIVATE_REFUSAL")
+                            if kind == "refusal"
+                            else None
+                        ),
+                    )
+                ],
+            )
+        ],
+        finish_reason="content_filter" if kind == "filter" else "length",
+        raw_representation=ChatResponse(raw_representation=Response.model_validate(raw)),
+    )
+    if kind in {"error", "failed"}:
+        with pytest.raises(RuntimeError, match="^model_failed$"):
+            specialists.specialist_result(response, "concept")
+    else:
+        result = specialists.specialist_result(response, "concept")
+        assert result.status == "refused" and result.completion_diagnostics is None
+
+
+@pytest.mark.parametrize(
+    "reason,expected",
+    [
+        ("max_output_tokens", "max_output_tokens"),
+        ("PRIVATE_UNKNOWN", "other"),
+        (None, None),
+        ({"PRIVATE": "payload"}, None),
+    ],
+)
+def test_public_incomplete_reason_has_no_private_payload_fallback(reason, expected):
+    from agent_framework import AgentResponse, ChatResponse
+    from openai.types.responses import Response
+    from openai.types.responses.response import IncompleteDetails
+
+    raw = Response.model_validate(model_response(CARD))
+    raw.incomplete_details = IncompleteDetails.model_construct(reason=reason)
+    result = specialists.specialist_result(
+        AgentResponse(
+            finish_reason="length", raw_representation=ChatResponse(raw_representation=raw)
+        ),
+        "art_direction",
+    )
+    assert result.completion_diagnostics.incompleteReason == expected
+    assert result.completion_diagnostics.usage is None
+    assert "PRIVATE" not in repr(result)
+
+
 def model_response(output, *, refusal=False, incomplete=False):
     content = [{"type": "output_text", "text": json.dumps(output), "annotations": []}]
     if refusal:
@@ -47,7 +159,7 @@ def model_response(output, *, refusal=False, incomplete=False):
             "input_tokens": 1,
             "output_tokens": 1,
             "total_tokens": 2,
-            "input_tokens_details": {"cached_tokens": 0},
+            "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
             "output_tokens_details": {"reasoning_tokens": 0},
         },
     }

@@ -1063,7 +1063,8 @@ def test_forged_session_marker_is_discarded(modules, changes):
 
 
 @pytest.mark.parametrize("status", ["completed", "refused", "held", "routing_defer"])
-def test_single_invocation_real_parser_and_versions(modules, monkeypatch, status):
+@pytest.mark.parametrize("with_diagnostics", [False, True])
+def test_single_invocation_real_parser_and_versions(modules, monkeypatch, status, with_diagnostics):
     payload, wrapper = modules
     invocation_parser(payload, wrapper, monkeypatch)
     build, version, session = "a" * 40, "1", SESSION
@@ -1086,6 +1087,15 @@ def test_single_invocation_real_parser_and_versions(modules, monkeypatch, status
         "artPrompt": "Original woodland guardian." if status == "completed" else None,
         "metadata": {"agentVersion": build, "hostedVersion": version},
     }
+    if with_diagnostics:
+        domain["metadata"]["completionDiagnostics"] = {
+            "stage": "concept",
+            "checker": "non_stop_finish",
+            "finishReason": "PRIVATE_PROVIDER",
+            "usage": {"inputTokens": 0, "totalTokens": True},
+            "private": "PRIVATE_PAYLOAD",
+        }
+    assert "from app.completion_diagnostics" not in wrapper.parser_source()
     body = json.dumps(
         {
             "id": "resp-test",
@@ -1129,6 +1139,8 @@ def test_single_invocation_real_parser_and_versions(modules, monkeypatch, status
     assert wrapper.extract_result(payload.MARKER + json.dumps(result)) == result
     assert "Lantern Guardian" not in json.dumps(result)
     assert "artPrompt" not in json.dumps(result)
+    assert "completionDiagnostics" not in json.dumps(result)
+    assert "PRIVATE" not in json.dumps(result)
 
 
 def test_invocation_timeout_consumes_attempt_without_retry(modules, monkeypatch):

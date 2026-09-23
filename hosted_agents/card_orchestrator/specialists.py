@@ -5,13 +5,16 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
-from agent_framework import Agent, AgentMiddleware, AgentResponse
+from agent_framework import Agent, AgentMiddleware, AgentResponse, ChatResponse
 from agent_framework.exceptions import ChatClientContentFilterException
 from agent_framework.foundry import FoundryChatClient
 from azure.ai.projects.aio import AIProjectClient
 from azure.identity.aio import DefaultAzureCredential
 from openai import APIStatusError
+from openai.types.responses import Response
+from openai.types.responses.response import IncompleteDetails
 
+from app.completion_diagnostics import Checker, CompletionDiagnostics
 from app.specialist_contract import SCHEMAS, Stage, effective_instructions, effective_schema
 from hosted_agents.card_orchestrator.settings import RuntimeSettings
 
@@ -21,6 +24,7 @@ class SpecialistResult:
     status: Literal["completed", "refused", "held", "routing_defer"]
     text: str = ""
     reason: str = "model_output"
+    completion_diagnostics: CompletionDiagnostics | None = None
 
 
 class Specialists(Protocol):
@@ -53,7 +57,32 @@ class FoundrySpecialists:
         )
 
 
-def specialist_result(response: AgentResponse) -> SpecialistResult:
+def _incomplete_result(response: AgentResponse, stage: Stage, checker: Checker) -> SpecialistResult:
+    value: dict[str, object] = {
+        "stage": stage,
+        "checker": checker,
+        "finishReason": response.finish_reason,
+    }
+    usage = response.usage_details
+    if type(usage) is dict:
+        value["usage"] = {
+            "inputTokens": usage.get("input_token_count"),
+            "outputTokens": usage.get("output_token_count"),
+            "totalTokens": usage.get("total_token_count"),
+        }
+    chat = response.raw_representation
+    if isinstance(chat, ChatResponse) and isinstance(chat.raw_representation, Response):
+        incomplete = chat.raw_representation.incomplete_details
+        if isinstance(incomplete, IncompleteDetails):
+            value["incompleteReason"] = incomplete.reason
+    return SpecialistResult(
+        "held",
+        reason="model_incomplete",
+        completion_diagnostics=CompletionDiagnostics.parse(value),
+    )
+
+
+def specialist_result(response: AgentResponse, stage: Stage) -> SpecialistResult:
     # Provider refusal remains authoritative even when valid JSON is also present.
     raw_response = getattr(response.raw_representation, "raw_representation", None)
     error = getattr(raw_response, "error", None)
@@ -67,10 +96,12 @@ def specialist_result(response: AgentResponse) -> SpecialistResult:
                 return SpecialistResult("refused", reason="model_refusal")
     if error is not None or getattr(raw_response, "status", None) == "failed":
         raise RuntimeError("model_failed")
-    if raw_response is None or str(response.finish_reason) != "stop":
-        return SpecialistResult("held", reason="model_incomplete")
+    if raw_response is None:
+        return _incomplete_result(response, stage, "missing_raw_response")
+    if str(response.finish_reason) != "stop":
+        return _incomplete_result(response, stage, "non_stop_finish")
     if any(content.type != "text" for message in response.messages for content in message.contents):
-        return SpecialistResult("held", reason="model_incomplete")
+        return _incomplete_result(response, stage, "non_text_content")
     return SpecialistResult("completed", text=response.text)
 
 
