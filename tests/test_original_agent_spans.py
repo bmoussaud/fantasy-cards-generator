@@ -8,7 +8,9 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, contextmanager
+from dataclasses import replace
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -28,6 +30,7 @@ from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags
 from app import agent_detail as detail
 from app import telemetry
 from app.foundry_agent_client import (
+    FoundryAgentClient,
     GenerateCardAgentRequest,
     GenerateCardAgentResponse,
     _parse_success_envelope,
@@ -39,6 +42,7 @@ from hosted_agents.card_orchestrator.server import create_host
 from hosted_agents.card_orchestrator.workflow import StageBoundary
 from tests.test_agent_detail_telemetry import (
     PROMPT,
+    LocalHostedTransport,
     capture,
     content,
     exported,  # noqa: F401
@@ -47,9 +51,13 @@ from tests.test_agent_detail_telemetry import (
     record,
     stack,
 )
-from tests.test_agentic_generation import _client, _generate
+from tests.test_agentic_generation import _client, _generate, _services
 from tests.test_card_orchestrator import CARD, settings, wire
-from tests.test_card_orchestrator_models import model_response, model_transport  # noqa: F401
+from tests.test_card_orchestrator_models import (  # noqa: F401
+    model_response,
+    model_transport,
+    reasoning_response_item,
+)
 
 HOSTED_STAGES = tuple(specialists.SCHEMAS)
 HOSTED_SPAN_COUNT = len(HOSTED_STAGES)
@@ -1610,6 +1618,88 @@ def test_v1_web_consumer_accepts_both_producers_without_duplicate_specialists(
         )
         assert parsed.success and not parsed.agent_detail_rejected
         assert (parsed.agent_detail is not None) == legacy
+
+
+def test_real_parser_excludes_reasoning_sentinels_from_public_and_app_capture(
+    monkeypatch, exported, caplog, model_transport
+):
+    calls, responses, *_ = model_transport
+    summary_sentinel = "SUMMARY_SENTINEL_170_REASONING"
+    encrypted_sentinel = "ENCRYPTED_SENTINEL_170_REASONING"
+    responses[0] = model_response(CARD)
+    responses[0]["output"].insert(
+        0,
+        reasoning_response_item(
+            summary_text=summary_sentinel,
+            encrypted_content=encrypted_sentinel,
+        ),
+    )
+    hosted_settings = settings(agent_trace_enabled=True)
+    runtime = CardOrchestrator(hosted_settings)
+    transport = LocalHostedTransport(
+        create_host(hosted_settings, orchestrator=runtime),
+        legacy=True,
+    )
+    services = _services(monkeypatch, None)
+    services.settings = replace(
+        services.settings,
+        agent_trace_enabled=True,
+        foundry_agent_timeout_seconds=5,
+        retry=replace(services.settings.retry, overall_timeout_seconds=10),
+    )
+    services.agent_client = FoundryAgentClient(
+        services.settings,
+        credential=SimpleNamespace(get_token=lambda *_: "offline-token"),
+        transport=transport,
+    )
+
+    caplog.set_level("DEBUG")
+    response = _generate(_client(monkeypatch, services), key="reasoning-sentinel-170")
+    assert response.status_code == 200
+    assert response.json()["status"] == "completed"
+    assert len(calls) == 1
+    assert "agentDetail" in json.dumps(transport.responses)
+
+    invocation = next(s for s in new_spans(exported) if s.name == "fcg.agent.invoke")
+    parsed = _parse_success_envelope(
+        transport.responses[0],
+        request_id=None,
+        expected_version="candidate-1",
+        capture_details=True,
+        detail_source=detail.Source(
+            trace_id=f"{invocation.context.trace_id:032x}",
+            span_id=f"{invocation.context.span_id:016x}",
+        ),
+    )
+    assert parsed.success and parsed.agent_detail is not None
+    assert not parsed.agent_detail_rejected
+    assert any("fcg.detail.record" in span.attributes for span in new_spans(exported))
+
+    records_dump = json.dumps(content(exported))
+    spans_dump = json.dumps(
+        [
+            {
+                "name": span.name,
+                "attributes": dict(span.attributes),
+                "events": [
+                    {"name": event.name, "attributes": dict(event.attributes)}
+                    for event in span.events
+                ],
+            }
+            for span in new_spans(exported)
+        ],
+        default=str,
+    )
+    detail_dump = parsed.agent_detail.model_dump_json()
+    transport_dump = json.dumps(transport.responses)
+
+    for sentinel in (summary_sentinel, encrypted_sentinel):
+        assert sentinel not in response.text
+        assert sentinel not in records_dump
+        assert sentinel not in detail_dump
+        assert sentinel not in spans_dump
+        assert sentinel not in transport_dump
+        assert sentinel not in caplog.text
 
 
 @pytest.mark.parametrize(

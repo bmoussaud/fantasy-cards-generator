@@ -165,6 +165,19 @@ def model_response(output, *, refusal=False, incomplete=False):
     }
 
 
+def reasoning_response_item(
+    *,
+    summary_text: str | None = None,
+    encrypted_content: str | None = None,
+) -> dict[str, object]:
+    item: dict[str, object] = {"type": "reasoning", "id": "rs_offline", "summary": []}
+    if summary_text is not None:
+        item["summary"] = [{"type": "summary_text", "text": summary_text}]
+    if encrypted_content is not None:
+        item["encrypted_content"] = encrypted_content
+    return item
+
+
 @pytest.fixture
 def model_transport(monkeypatch):
     calls, clients, credentials, projects = [], [], [], []
@@ -282,6 +295,148 @@ def test_real_model_schema_failure_is_held(model_transport):
         CardOrchestrator(settings()).generate(GenerateCardAgentRequest(query="mountain drake"))
     )
     assert result.status == "held"
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    "reasoning_item",
+    [
+        reasoning_response_item(),
+        reasoning_response_item(summary_text="REASONING_SENTINEL"),
+        reasoning_response_item(encrypted_content="encrypted-reasoning"),
+    ],
+)
+def test_supported_reasoning_metadata_is_ignored_for_final_text_eligibility(
+    model_transport, reasoning_item
+):
+    calls, responses, *_ = model_transport
+    responses[0] = model_response(CARD)
+    responses[0]["output"].insert(0, reasoning_item)
+    result = asyncio.run(
+        CardOrchestrator(settings()).generate(GenerateCardAgentRequest(query="mountain drake"))
+    )
+    assert result.status == "completed"
+    assert result.card is not None and result.card.model_dump() == CARD
+    assert "REASONING_SENTINEL" not in result.model_dump_json()
+    assert len(calls) == 1
+
+
+def test_reasoning_without_valid_final_json_is_held(model_transport):
+    calls, responses, *_ = model_transport
+    responses[0] = {
+        **model_response(CARD),
+        "output": [reasoning_response_item(summary_text="reasoning only")],
+    }
+    result = asyncio.run(
+        CardOrchestrator(settings()).generate(GenerateCardAgentRequest(query="mountain drake"))
+    )
+    assert result.status == "held"
+    assert len(calls) == 1
+
+
+def test_invalid_json_remains_held_even_with_reasoning_metadata(model_transport):
+    calls, responses, *_ = model_transport
+    responses[0] = model_response({"schemaVersion": 1, "status": "completed"})
+    responses[0]["output"].insert(0, reasoning_response_item(summary_text="reasoning sentinel"))
+    result = asyncio.run(
+        CardOrchestrator(settings()).generate(GenerateCardAgentRequest(query="mountain drake"))
+    )
+    assert result.status == "held"
+    assert len(calls) == 1
+
+
+def test_refusal_precedence_remains_authoritative_when_reasoning_is_present(model_transport):
+    calls, responses, *_ = model_transport
+    responses[0] = model_response(CARD, refusal=True)
+    responses[0]["output"].insert(0, reasoning_response_item(summary_text="reasoning sentinel"))
+    result = asyncio.run(
+        CardOrchestrator(settings()).generate(GenerateCardAgentRequest(query="mountain drake"))
+    )
+    assert result.status == "refused"
+    assert len(calls) == 1
+
+
+def test_tool_and_reasoning_mixed_with_valid_json_still_fails_closed(model_transport):
+    calls, responses, *_ = model_transport
+    responses[0] = model_response(CARD)
+    responses[0]["output"].insert(0, reasoning_response_item(summary_text="reasoning sentinel"))
+    responses[0]["output"].append(
+        {
+            "type": "function_call",
+            "id": "fc_test",
+            "call_id": "call_test",
+            "name": "unavailable",
+            "arguments": "{}",
+            "status": "completed",
+        }
+    )
+    result = asyncio.run(
+        CardOrchestrator(settings()).generate(GenerateCardAgentRequest(query="mountain drake"))
+    )
+    assert result.status == "held"
+    assert len(calls) == 1
+
+
+def test_checker_rejects_spoofed_reasoning_objects_outside_sdk_content_type():
+    from agent_framework import AgentResponse, ChatResponse, Content, Message
+    from openai.types.responses import Response
+
+    class SpoofedReasoning:
+        type = "text_reasoning"
+
+    response = AgentResponse(
+        messages=[Message("assistant", [Content.from_text(json.dumps(CARD))])],
+        finish_reason="stop",
+        raw_representation=ChatResponse(
+            raw_representation=Response.model_validate(model_response(CARD))
+        ),
+    )
+    response.messages[0].contents.append(SpoofedReasoning())  # type: ignore[arg-type]
+    result = specialists.specialist_result(response, "generation")
+    assert result.status == "held"
+    assert result.text == ""
+    assert result.completion_diagnostics is not None
+    assert result.completion_diagnostics.checker == "non_text_content"
+
+
+def test_checker_rejects_sdk_content_with_unknown_type_as_non_text_content():
+    from agent_framework import AgentResponse, ChatResponse, Content, Message
+    from openai.types.responses import Response
+
+    response = AgentResponse(
+        messages=[
+            Message(
+                "assistant",
+                [
+                    Content.from_text(json.dumps(CARD)),
+                    Content("unknown_type", text="PRIVATE_UNKNOWN"),
+                ],
+            )
+        ],
+        finish_reason="stop",
+        raw_representation=ChatResponse(
+            raw_representation=Response.model_validate(model_response(CARD))
+        ),
+    )
+    result = specialists.specialist_result(response, "generation")
+    assert result.status == "held"
+    assert result.text == ""
+    assert result.completion_diagnostics is not None
+    assert result.completion_diagnostics.checker == "non_text_content"
+    assert "PRIVATE_UNKNOWN" not in repr(result)
+
+
+def test_unknown_response_output_subtype_is_silently_dropped_by_sdk_parser_boundary(
+    model_transport,
+):
+    calls, responses, *_ = model_transport
+    responses[0] = model_response(CARD)
+    responses[0]["output"].insert(0, {"type": "unknown_output", "id": "PRIVATE_UNKNOWN"})
+    result = asyncio.run(
+        CardOrchestrator(settings()).generate(GenerateCardAgentRequest(query="mountain drake"))
+    )
+    assert result.status == "completed"
+    assert "PRIVATE_UNKNOWN" not in result.model_dump_json()
     assert len(calls) == 1
 
 

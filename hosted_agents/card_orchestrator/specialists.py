@@ -5,7 +5,7 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
-from agent_framework import Agent, AgentMiddleware, AgentResponse, ChatResponse
+from agent_framework import Agent, AgentMiddleware, AgentResponse, ChatResponse, Content
 from agent_framework.exceptions import ChatClientContentFilterException
 from agent_framework.foundry import FoundryChatClient
 from azure.ai.projects.aio import AIProjectClient
@@ -92,7 +92,10 @@ def specialist_result(response: AgentResponse, stage: Stage) -> SpecialistResult
         return SpecialistResult("refused", reason="model_content_filter")
     for message in response.messages:
         for content in message.contents:
-            if getattr(content.raw_representation, "type", None) == "refusal":
+            if (
+                type(content) is Content
+                and getattr(content.raw_representation, "type", None) == "refusal"
+            ):
                 return SpecialistResult("refused", reason="model_refusal")
     if error is not None or getattr(raw_response, "status", None) == "failed":
         raise RuntimeError("model_failed")
@@ -100,7 +103,11 @@ def specialist_result(response: AgentResponse, stage: Stage) -> SpecialistResult
         return _incomplete_result(response, stage, "missing_raw_response")
     if str(response.finish_reason) != "stop":
         return _incomplete_result(response, stage, "non_stop_finish")
-    if any(content.type != "text" for message in response.messages for content in message.contents):
+    if any(
+        type(content) is not Content or content.type not in {"text", "text_reasoning"}
+        for message in response.messages
+        for content in message.contents
+    ):
         return _incomplete_result(response, stage, "non_text_content")
     return SpecialistResult("completed", text=response.text)
 

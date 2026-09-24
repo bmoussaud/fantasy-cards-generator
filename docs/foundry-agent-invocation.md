@@ -594,6 +594,14 @@ non-text content. Completed-text acceptance and subsequent JSON/schema checks
 are unchanged. These observations do not establish truncation, token exhaustion,
 a framework defect, or the cause of any historical trace. No original content,
 provider identifiers, errors or raw provider strings are retained by diagnostics.
+Compatibility note (#170): Responses that include SDK `Content(type="text_reasoning")`
+metadata alongside valid final JSON text are accepted, while reasoning is ignored
+for final-text eligibility and never released/logged as card content. Unknown/tool
+content still fails closed.
+Limitation: unknown raw provider output subtypes are not validated by this fix; the
+pinned SDK parser silently drops unrecognized response.output items, so such a
+response can still complete on its remaining valid text. Raw-output prevalidation is
+out of scope.
 N-1 compatibility: legacy runtime stage markers `concept|lore|art_direction` are
 normalized to public `generation` for current parser output, but that mapping does
 not rewrite historical event semantics. Legacy seven-entry completion diagnostics /
