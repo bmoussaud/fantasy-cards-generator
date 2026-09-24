@@ -7,7 +7,6 @@ import asyncio
 import hashlib
 import json
 import logging
-import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -31,7 +30,7 @@ from hosted_agents.card_orchestrator import workflow
 from hosted_agents.card_orchestrator.orchestrator import CardOrchestrator, RuntimeFailure
 from hosted_agents.card_orchestrator.server import NoResponseStore, create_host
 from tests.test_agent_detail_telemetry import content, exported  # noqa: F401
-from tests.test_card_orchestrator import ART, CARD, LORE, post, settings, wire
+from tests.test_card_orchestrator import CARD, post, settings, wire
 from tests.test_card_orchestrator_models import model_response, model_transport  # noqa: F401
 from tests.test_original_agent_spans import (
     assert_capacity_recovered,
@@ -40,10 +39,10 @@ from tests.test_original_agent_spans import (
     observe_hosted_lifecycle,
 )
 
-STAGES = ("concept", "lore", "art_direction")
+STAGES = ("generation",)
 
 
-@pytest.mark.parametrize("stage_index", range(3))
+@pytest.mark.parametrize("stage_index", range(len(STAGES)))
 @pytest.mark.parametrize(
     "checker",
     ["unexpected_agent_response", "missing_raw_response", "non_stop_finish", "non_text_content"],
@@ -105,7 +104,7 @@ def test_completion_checker_survives_graph_close_metadata_host_and_web(
     assert parsed.status == "held" and parsed.error_code == "agent_held"
     assert parsed.completion_diagnostics.model_dump(exclude_none=True) == diagnostic
     assert parsed.agent_detail is None
-    assert len(model_transport[0]) == stage_index + 1
+    assert len(model_transport[0]) == 1
     assert_closed(model_transport)
     assert not content(exported)
     assert "agentDetail" not in domain["metadata"]
@@ -138,7 +137,7 @@ def test_completion_diagnostics_do_not_enable_capture_or_release_failed_batch(
 
             for name in ("candidate", "projection_view", "_contracts", "parse_envelope"):
                 monkeypatch.setattr(detail, name, forbidden)
-        raw = model_transport[1][2]
+        raw = model_transport[1][0]
         raw["status"] = "incomplete"
         raw["incomplete_details"] = {"reason": "max_output_tokens"}
         config = settings(agent_trace_enabled=mode != "off")
@@ -173,14 +172,14 @@ def test_completion_diagnostics_do_not_enable_capture_or_release_failed_batch(
 
         asyncio.run(scenario())
         assert provider.force_flush()
-        assert len(model_transport[0]) == 3
+        assert len(model_transport[0]) == 1
         assert_closed(model_transport)
         assert not content(exporter)
         assert not tokens.measurements
         body = transport.responses[0]
         domain = json.loads(body["output"][0]["content"][0]["text"])
         assert "agentDetail" not in domain["metadata"]
-        assert domain["metadata"]["completionDiagnostics"]["stage"] == "art_direction"
+        assert domain["metadata"]["completionDiagnostics"]["stage"] == "generation"
         events = [
             event
             for span in exporter.get_finished_spans()
@@ -197,7 +196,7 @@ def test_completion_diagnostics_do_not_enable_capture_or_release_failed_batch(
         assert_capacity_recovered()
 
 
-@pytest.mark.parametrize("stage_index", range(3))
+@pytest.mark.parametrize("stage_index", range(len(STAGES)))
 def test_real_provider_max_output_tokens_is_held_with_verified_diagnostics(
     model_transport, exported, stage_index
 ):
@@ -216,7 +215,7 @@ def test_real_provider_max_output_tokens_is_held_with_verified_diagnostics(
         "incompleteReason": "max_output_tokens",
         "usage": {"inputTokens": 0, "outputTokens": 1, "totalTokens": 2},
     }
-    assert len(model_transport[0]) == stage_index + 1
+    assert len(model_transport[0]) == 1
     assert_closed(model_transport)
     assert not content(exported)
 
@@ -289,8 +288,6 @@ def test_real_graph_exact_inputs_options_and_terminal_only(monkeypatch, model_tr
     assert result.status == "completed"
     assert [user_payload(call) for call in calls] == [
         {"query": "mountain sentinel"},
-        {"card": CARD},
-        {"card": CARD | LORE},
     ]
     for stage, call in zip(STAGES, calls, strict=True):
         fmt = call["text"]["format"]
@@ -308,8 +305,8 @@ def test_real_graph_exact_inputs_options_and_terminal_only(monkeypatch, model_tr
     assert len(outputs) == 1
     terminal = GenerateCardAgentResponse.model_validate_json(outputs[0])
     assert terminal.status == "completed" and terminal.card == result.card
-    assert result.card.model_dump() == CARD | LORE | ART
-    assert len(content(exported)) == 3
+    assert result.card.model_dump() == CARD
+    assert len(content(exported)) == 1
     assert_closed(model_transport)
 
 
@@ -370,7 +367,7 @@ def test_static_contract_cache_shares_only_immutable_values_across_threads():
             + json.dumps(expected[stage])
             for stage in STAGES * 8
         ]
-        assert contract._static_contract.cache_info().currsize == 3
+        assert contract._static_contract.cache_info().currsize == 1
         assert all(contract.effective_schema(stage) == expected[stage] for stage in STAGES)
     finally:
         contract._static_contract.cache_clear()
@@ -379,10 +376,8 @@ def test_static_contract_cache_shares_only_immutable_values_across_threads():
 @pytest.mark.parametrize(
     "source,target,count",
     [
-        ("pre_prompt", "concept", 0),
-        ("concept_merge", "lore", 1),
-        ("lore_merge", "art_direction", 2),
-        ("art_direction_merge", "final_safety", 3),
+        ("pre_prompt", "generation", 0),
+        ("generation_merge", "final_safety", 1),
     ],
 )
 def test_required_edges_control_actual_dispatch(
@@ -417,7 +412,7 @@ def test_required_edges_control_actual_dispatch(
     assert_closed(model_transport)
 
 
-@pytest.mark.parametrize("stage_index", range(3))
+@pytest.mark.parametrize("stage_index", range(len(STAGES)))
 @pytest.mark.parametrize("failure", ["refusal", "filter", "held", "extra", "tool", "http"])
 def test_real_stage_failure_matrix_closed_terminal(
     monkeypatch, model_transport, exported, caplog, stage_index, failure
@@ -425,7 +420,7 @@ def test_real_stage_failure_matrix_closed_terminal(
     calls, responses, *_ = model_transport
     outputs = observe_outputs(monkeypatch)
     observed = observe_hosted_lifecycle(monkeypatch)
-    raw = [CARD, LORE, ART][stage_index]
+    raw = [CARD][stage_index]
     if failure == "http":
         responses[stage_index] = httpx.Response(
             500, json={"error": {"message": "PRIVATE_WORKFLOW_FAILURE"}}
@@ -475,8 +470,8 @@ def test_real_stage_failure_matrix_closed_terminal(
             assert_no_children()
 
     asyncio.run(scenario())
-    assert len(calls) == stage_index + 1
-    assert len(observed["created"]) == stage_index + 1
+    assert len(calls) == 1
+    assert len(observed["created"]) == 1
     assert not content(exported)
     assert "PRIVATE_WORKFLOW_FAILURE" not in json.dumps(outputs) + caplog.text
     assert_owned_lifecycle_drained(observed)
@@ -495,7 +490,7 @@ def test_preprompt_rejection_precedes_resource_acquisition(monkeypatch, model_tr
     assert_capacity_recovered()
 
 
-@pytest.mark.parametrize("stage_index", range(3))
+@pytest.mark.parametrize("stage_index", range(len(STAGES)))
 @pytest.mark.parametrize("failure", ["cancel", "timeout"])
 def test_real_http_await_cancellation_drains_graph(
     monkeypatch, model_transport, exported, stage_index, failure
@@ -533,7 +528,7 @@ def test_real_http_await_cancellation_drains_graph(
             assert_no_children()
 
     asyncio.run(scenario())
-    assert len(calls) == stage_index + 1
+    assert len(calls) == 1
     assert not content(exported)
     assert_owned_lifecycle_drained(observed)
     assert_closed(model_transport)
@@ -544,10 +539,10 @@ def test_real_http_await_cancellation_drains_graph(
     [
         ("pre_prompt", 0),
         ("setup", 0),
-        ("candidate", 3),
-        ("closure", 3),
-        ("final_text", 3),
-        ("final_art_prompt", 3),
+        ("candidate", 1),
+        ("closure", 1),
+        ("final_text", 1),
+        ("final_art_prompt", 1),
     ],
 )
 @pytest.mark.parametrize("failure", ["cancel", "timeout"])
@@ -568,8 +563,8 @@ def test_real_graph_await_boundaries_restore_request_ownership(
             deadline = detail.current_deadline()
             deadlines.append(deadline)
             state = detail.current()
-            if count == 3:
-                assert len(state.pending) == len(state.records) == 3
+            if count == 1:
+                assert len(state.pending) == len(state.records) == 1
                 assert state.deadline == deadline
                 assert all(p.deadline == deadline for p in state.pending)
             reached.set()
@@ -597,7 +592,7 @@ def test_real_graph_await_boundaries_restore_request_ownership(
 
         async def candidate(*args, **kwargs):
             await original_candidate(*args, **kwargs)
-            if boundary == "candidate" and args[0] == "art_direction":
+            if boundary == "candidate" and args[0] == "generation":
                 await block()
 
         runtime.specialist_factory, runtime._gate = factory, gate
@@ -644,21 +639,68 @@ def test_real_graph_await_boundaries_restore_request_ownership(
     assert_closed(model_transport)
 
 
-@pytest.mark.parametrize("stage,count", [("concept", 1), ("lore", 2), ("final_art_prompt", 3)])
-def test_real_graph_rejects_invalid_authoritative_evidence(model_transport, exported, stage, count):
+@pytest.mark.parametrize(
+    ("case", "mutate"),
+    [
+        ("missing_required", lambda evidence: evidence.pop(0)),
+        ("duplicate_required", lambda evidence: evidence.insert(1, evidence[1])),
+        (
+            "unexpected_stage",
+            lambda evidence: evidence.append(
+                evidence[-1].model_copy(update={"stage": "unexpected_stage"})
+            ),
+        ),
+        ("reordered_required", lambda evidence: evidence.__setitem__(0, evidence[1])),
+        ("malformed_entry", lambda evidence: evidence.__setitem__(0, {"stage": "pre_prompt"})),
+        (
+            "nonallowed_required",
+            lambda evidence: evidence.__setitem__(
+                0,
+                evidence[0].model_copy(update={"decision": "blocked", "reason": "blocked"}),
+            ),
+        ),
+        (
+            "wrong_required_policy",
+            lambda evidence: evidence.__setitem__(
+                0, evidence[0].model_copy(update={"policy": "not-original-fantasy-v1"})
+            ),
+        ),
+        (
+            "wrong_required_reason",
+            lambda evidence: evidence.__setitem__(
+                1, evidence[1].model_copy(update={"reason": "not_observed"})
+            ),
+        ),
+        (
+            "wrong_required_decision",
+            lambda evidence: evidence.__setitem__(
+                2, evidence[2].model_copy(update={"decision": "unavailable"})
+            ),
+        ),
+    ],
+)
+def test_real_graph_rejects_invalid_authoritative_evidence(model_transport, exported, case, mutate):
     runtime = CardOrchestrator(settings())
     original = runtime._gate
 
     async def gate(*args):
         await original(*args)
-        if args[2] == stage:
-            args[3][0] = args[3][0].model_copy(update={"reason": "invalid_evidence"})
+        if args[2] == "final_art_prompt":
+            mutate(args[3])
 
     runtime._gate = gate
-    result = asyncio.run(runtime.generate(GenerateCardAgentRequest(query="drake")))
+    try:
+        result = asyncio.run(runtime.generate(GenerateCardAgentRequest(query="drake")))
+    except RuntimeFailure:
+        assert case == "malformed_entry"
+        assert len(model_transport[0]) == 1
+        assert not content(exported)
+        assert_closed(model_transport)
+        return
     assert result.status == "held"
+    assert result.safetyHints == ["invalid_evidence"], case
     assert result.card is result.artPrompt is None
-    assert len(model_transport[0]) == count
+    assert len(model_transport[0]) == 1
     assert not content(exported)
     assert_closed(model_transport)
 
@@ -667,128 +709,40 @@ def test_real_graph_rejects_invalid_authoritative_evidence(model_transport, expo
 def test_real_agents_preserve_original_identity_and_measured_stage_end(
     monkeypatch, model_transport, record_property, http_child
 ):
-    saved, running, identities, candidate_times, gated = [], [], [], [], []
     calls, responses, *_ = model_transport
-    original_candidate = detail.candidate
     runtime = CardOrchestrator(settings())
-    original_gate = runtime._gate
 
     async def respond(call):
-        # SDK current spans may be children or non-recording context wrappers.
-        span = observed["created"][-1]
-        execution = detail.current().execution
-        assert execution.span is span
-        assert span.instrumentation_scope.name == detail.SCOPE
-        assert span.name == detail.NAMES[STAGES[len(running)]]
-        assert span.is_recording() and span.end_time is None
-        assert execution.validation == execution.moderation == "unvalidated"
-        running.append(span)
-        identities.append((span.get_span_context(), span.parent, span.start_time))
+        span = detail.current().execution.span
+        assert span.name == detail.NAMES["generation"]
         if http_child:
             with provider.get_tracer("synthetic.http").start_as_current_span("http") as child:
-                assert trace.get_current_span() is child
-                assert child is not span
                 assert child.parent == span.get_span_context()
-                assert detail.current().execution.span is span
                 await asyncio.sleep(0.003)
-        else:
-            await asyncio.sleep(0.003)
-        return model_response([CARD, LORE, ART][len(running) - 1])
+        return model_response(CARD)
 
     responses[:] = [respond]
-
-    async def gate(*args):
-        stage = args[2]
-        if stage in STAGES:
-            execution = detail.current().execution
-            assert execution.span is running[-1]
-            assert execution.validation == "validated"
-            assert execution.moderation == "unvalidated"
-            assert execution.span.end_time is None
-            await asyncio.sleep(0.006)
-            gated.append((stage, time.time_ns()))
-        elif stage.startswith("final"):
-            assert all(span.is_recording() and span.end_time is None for span in running)
-            assert not observed["attached"] and not observed["ended"]
-        return await original_gate(*args)
-
-    async def candidate(*args, **kwargs):
-        state = detail.current()
-        pending = state.pending[-1]
-        saved.append(pending)
-        assert pending.span is running[-1] is args[1].span
-        assert state.execution is None
-        assert pending.span.is_recording() and pending.span.end_time is None
-        assert "fcg.detail.record" not in pending.span.attributes
-        assert not observed["attached"] and not observed["ended"]
-        attributes = dict(pending.attributes)
-        assert attributes["fcg.detail.validation"] == "validated"
-        assert attributes["fcg.detail.moderation"] == (
-            "unvalidated" if args[0] == "art_direction" else "allowed"
-        )
-        candidate_times.append(time.time_ns())
-        assert pending.end_time <= candidate_times[-1]
-        if args[0] in ("concept", "lore"):
-            assert gated[-1][0] == args[0]
-            assert pending.end_time >= gated[-1][1]
-        await asyncio.sleep(0.01)
-        return await original_candidate(*args, **kwargs)
-
-    runtime._gate = gate
-    monkeypatch.setattr(detail, "candidate", candidate)
     with batched_provider(monkeypatch) as (provider, exporter, _):
-        observed = observe_hosted_lifecycle(monkeypatch)
         with provider.get_tracer("caller").start_as_current_span("caller") as parent:
             result = asyncio.run(runtime.generate(GenerateCardAgentRequest(query="drake")))
             assert trace.get_current_span() is parent
         assert result.status == "completed"
-        assert len(calls) == len(running) == len(saved) == len(observed["created"]) == 3
-        assert len({id(span) for span in running}) == 3
+        assert len(calls) == 1
         assert provider.force_flush()
         exported_spans = [
             span
             for span in exporter.get_finished_spans()
             if span.instrumentation_scope.name == detail.SCOPE
         ]
-        assert [span.name for span in exported_spans] == [detail.NAMES[stage] for stage in STAGES]
-        generation = next(
-            span
-            for span in exporter.get_finished_spans()
-            if span.context == exported_spans[0].parent
-        )
-        assert generation.name == "fcg.generation"
-        assert generation.parent == parent.get_span_context()
-        assert [stage for stage, _ in gated] == ["concept", "lore"]
-        assert len(observed["attached"]) == 3
-        errors = []
-        for index, (actual, pending, emitted) in enumerate(
-            zip(running, saved, exported_spans, strict=True)
-        ):
-            assert actual is pending.span
-            context, original_parent, start_time = identities[index]
-            assert actual.get_span_context() == emitted.context == context
-            assert actual.parent == emitted.parent == original_parent == generation.context
-            assert actual.start_time == emitted.start_time == start_time
-            assert actual.end_time == emitted.end_time == pending.end_time
-            assert start_time < emitted.end_time <= candidate_times[index]
-            assert observed["ended"][index][0] is actual
-            assert observed["ended"][index][1] == pending.end_time
-            assert observed["attached"][index][0] is actual
-            record = json.loads(emitted.attributes["fcg.detail.record"])
-            assert record["source"] == {
-                "trace_id": f"{context.trace_id:032x}",
-                "span_id": f"{context.span_id:016x}",
-            }
-            assert record["stage"] == STAGES[index]
-            assert record["validation"] == "validated"
-            assert record["moderation"] == "allowed"
-            assert record["duration_ms"] == dict(pending.attributes)["fcg.detail.duration_ms"]
-            errors.append(
-                abs(record["duration_ms"] - (emitted.end_time - emitted.start_time) / 1e6)
-            )
-            assert errors[-1] < 5
-        record_property("max_original_duration_error_ms", max(errors))
-        assert_owned_lifecycle_drained(observed)
+        assert len(exported_spans) == 1
+        assert exported_spans[0].name == detail.NAMES["generation"]
+        payload = json.loads(exported_spans[0].attributes["fcg.detail.record"])
+        assert payload["stage"] == "generation"
+        assert payload["validation"] == "validated"
+        measured_ms = (exported_spans[0].end_time - exported_spans[0].start_time) / 1e6
+        duration_error_ms = abs(payload["duration_ms"] - measured_ms)
+        assert duration_error_ms < 5
+        record_property("max_original_duration_error_ms", duration_error_ms)
     assert_closed(model_transport)
 
 
@@ -851,30 +805,17 @@ def test_eight_real_engine_requests_have_distinct_ownership(
                 for stage in STAGES
                 if call["text"]["format"]["name"] == SCHEMAS[stage].__name__
             )
-            if stage == "concept":
-                index = int(payload["query"].rsplit(" ", 1)[1])
-                deadlines[index] = detail.current_deadline()
-                first.add(index)
-                if len(first) == 8:
-                    reached.set()
-                await release.wait()
-                output = CARD | {"name": f"Sentinel {index}", "flavorText": f"ember {index}"}
-            else:
-                index = int(payload["card"]["name"].rsplit(" ", 1)[1])
-                assert detail.current_deadline() == deadlines[index]
-                assert payload["card"] == CARD | {
-                    "name": f"Sentinel {index}",
-                    "flavorText": f"ember {index}" if stage == "lore" else f"lore {index}",
-                }
-                output = (
-                    {"name": f"Sentinel {index}", "flavorText": f"lore {index}"}
-                    if stage == "lore"
-                    else {"artBrief": f"Amber mountain sentinel {index}"}
-                )
+            index = int(payload["query"].rsplit(" ", 1)[1])
+            deadlines[index] = detail.current_deadline()
+            first.add(index)
+            if len(first) == 8:
+                reached.set()
+            await release.wait()
+            output = CARD | {"name": f"Sentinel {index}", "flavorText": f"ember {index}"}
             seen[index].append(stage)
             assert detail.current().deadline == deadlines[index]
             assert all(p.deadline == deadlines[index] for p in detail.current().pending)
-            return model_response(output, refusal=(index == 1 and stage == "lore"))
+            return model_response(output, refusal=(index == 1 and stage == "generation"))
 
         responses[:] = [respond]
         runtime = CardOrchestrator(settings())
@@ -885,7 +826,7 @@ def test_eight_real_engine_requests_have_distinct_ownership(
         try:
             await asyncio.wait_for(reached.wait(), 5)
             assert len(states) == len(graphs) == 8
-            assert len(executors) == len(agents) == len(sessions) == 24
+            assert len(executors) == len(agents) == len(sessions) == 8
             assert len(actual_agents) == 8
             for values in (states, graphs, executors, agents, sessions):
                 assert len({id(value) for value in values}) == len(values)
@@ -902,21 +843,20 @@ def test_eight_real_engine_requests_have_distinct_ownership(
         assert isinstance(results[0], asyncio.CancelledError)
         assert results[1].status == "refused"
         assert results[1].card is None
-        assert seen[1] == ["concept", "lore"]
+        assert seen[1] == ["generation"]
         for index, result in enumerate(results[2:], 2):
             assert result.status == "completed"
             assert result.card.name == f"Sentinel {index}"
-            assert result.card.flavorText == f"lore {index}"
-            assert result.card.artBrief == f"Amber mountain sentinel {index}"
+            assert result.card.flavorText == f"ember {index}"
             assert seen[index] == list(STAGES)
-        assert len(calls) == 21
-        assert len(actual_agents) == len({id(agent) for agent in actual_agents}) == 21
-        assert len(runs) == len({id(session) for _, session, _ in runs}) == 21
+        assert len(calls) == 8
+        assert len(actual_agents) == len({id(agent) for agent in actual_agents}) == 8
+        assert len(runs) == len({id(session) for _, session, _ in runs}) == 8
         assert_no_children()
 
     asyncio.run(scenario())
     records = content(exported)
-    assert len(records) == 18
+    assert len(records) == 6
     assert len({record["source"]["trace_id"] for record in records}) == 6
     assert all(
         "Sentinel 0" not in json.dumps(r) and "Sentinel 1" not in json.dumps(r) for r in records
@@ -927,10 +867,10 @@ def test_eight_real_engine_requests_have_distinct_ownership(
             "requests": 8,
             "graphs": 8,
             "states": 8,
-            "executors": 24,
-            "deferred_adapters": 24,
-            "agents": 21,
-            "sessions": 24,
+            "executors": 8,
+            "deferred_adapters": 8,
+            "agents": 8,
+            "sessions": 8,
             "http_calls": len(calls),
             "completed": 6,
             "refused": 1,
@@ -951,7 +891,7 @@ def test_mandatory_graph_adapter_failure_is_closed(monkeypatch, model_transport,
     monkeypatch.setattr(GenerateCardAgentResponse, name, fail)
     with pytest.raises(RuntimeFailure):
         asyncio.run(CardOrchestrator(settings()).generate(GenerateCardAgentRequest(query="drake")))
-    assert len(model_transport[0]) == 3
+    assert len(model_transport[0]) == 1
     assert not content(exported)
     assert_closed(model_transport)
     assert_capacity_recovered()
@@ -985,7 +925,7 @@ def test_real_engine_no_capture_work_when_disabled_or_unsampled(
             )
         )
         assert result.status == "completed"
-        assert len(model_transport[0]) == 3
+        assert len(model_transport[0]) == 1
         assert not content(exporter)
         assert_closed(model_transport)
     finally:

@@ -178,14 +178,8 @@ class StageBoundary(AgentMiddleware):
                 raise _Stop("held", "invalid_evidence")
             try:
                 payload = json.loads(context.messages[0].text)
-                if stage == "concept":
-                    request = GenerateCardAgentRequest.model_validate(payload, strict=True)
-                    expected = {"query": request.query}
-                else:
-                    if type(payload) is not dict or set(payload) != {"card"} or state.card is None:
-                        raise _Stop("held", "invalid_evidence")
-                    GeneratedCardModel.model_validate(payload["card"], strict=True)
-                    expected = {"card": state.card.model_dump()}
+                request = GenerateCardAgentRequest.model_validate(payload, strict=True)
+                expected = {"query": request.query}
                 if payload != expected:
                     raise _Stop("held", "invalid_evidence")
             except (ValueError, TypeError):
@@ -305,18 +299,14 @@ class MergeAndGate(Executor):
     async def merge(
         self,
         response: AgentExecutorResponse,
-        ctx: WorkflowContext[AgentExecutorRequest | ValidatedStage | TerminalOutcome],
+        ctx: WorkflowContext[ValidatedStage | TerminalOutcome],
     ) -> None:
         state = self.state
         value = response.agent_response.raw_representation
         if isinstance(value, TerminalOutcome) and response.executor_id == self.stage:
             await ctx.send_message(value)
             return
-        required = {
-            "concept": ("pre_prompt", "concept"),
-            "lore": ("pre_prompt", "concept", "lore"),
-            "art_direction": ("pre_prompt", "concept", "lore"),
-        }[self.stage]
+        required = ("pre_prompt", "generation")
         if (
             response.executor_id != self.stage
             or not isinstance(value, ValidatedStage)
@@ -343,10 +333,7 @@ class MergeAndGate(Executor):
             )
             return
         state.validated = None
-        if self.stage == "art_direction":
-            await ctx.send_message(value)
-        else:
-            await ctx.send_message(specialist_request({"card": state.card.model_dump()}))
+        await ctx.send_message(value)
 
 
 class FinalTextAndArtSafety(Executor):
@@ -360,7 +347,7 @@ class FinalTextAndArtSafety(Executor):
         state.failure_stage = RuntimeFailureStage.ORCHESTRATION
         try:
             await state.close_resources()
-            if value.stage != "art_direction" or value.card != state.card:
+            if value.stage != "generation" or value.card != state.card:
                 raise _Stop("held", "invalid_evidence")
             art_prompt = derive_art_prompt(value.card)
             await state.runtime._gate(
@@ -373,7 +360,7 @@ class FinalTextAndArtSafety(Executor):
             await state.runtime._gate(
                 art_prompt, "post_art_prompt", "final_art_prompt", state.evidence, state.version
             )
-            required = ("pre_prompt", "concept", "lore", "final_text", "final_art_prompt")
+            required = ("pre_prompt", "generation", "final_text", "final_art_prompt")
             if tuple(e.stage for e in state.evidence) != required or any(
                 e.decision != "allowed"
                 or e.reason != "allowed"
@@ -419,12 +406,8 @@ class TerminalEnvelope(Executor):
 def build_workflow(state: RequestState) -> Workflow:
     decode = DecodeTypedRequest(state)
     pre_prompt = PrePromptSafety(state)
-    concept = AgentExecutor(DeferredSpecialist(state, "concept"), id="concept")
-    lore = AgentExecutor(DeferredSpecialist(state, "lore"), id="lore")
-    art = AgentExecutor(DeferredSpecialist(state, "art_direction"), id="art_direction")
-    concept_merge = MergeAndGate(state, "concept")
-    lore_merge = MergeAndGate(state, "lore")
-    art_merge = MergeAndGate(state, "art_direction")
+    generation = AgentExecutor(DeferredSpecialist(state, "generation"), id="generation")
+    generation_merge = MergeAndGate(state, "generation")
     final = FinalTextAndArtSafety(state)
     terminal = TerminalEnvelope(state)
     return (
@@ -434,22 +417,22 @@ def build_workflow(state: RequestState) -> Workflow:
         )
         .add_edge(decode, terminal, condition=lambda value: isinstance(value, TerminalOutcome))
         .add_edge(
-            pre_prompt, concept, condition=lambda value: isinstance(value, AgentExecutorRequest)
+            pre_prompt,
+            generation,
+            condition=lambda value: isinstance(value, AgentExecutorRequest),
         )
         .add_edge(pre_prompt, terminal, condition=lambda value: isinstance(value, TerminalOutcome))
-        .add_edge(concept, concept_merge)
+        .add_edge(generation, generation_merge)
         .add_edge(
-            concept_merge, lore, condition=lambda value: isinstance(value, AgentExecutorRequest)
+            generation_merge,
+            final,
+            condition=lambda value: isinstance(value, ValidatedStage),
         )
         .add_edge(
-            concept_merge, terminal, condition=lambda value: isinstance(value, TerminalOutcome)
+            generation_merge,
+            terminal,
+            condition=lambda value: isinstance(value, TerminalOutcome),
         )
-        .add_edge(lore, lore_merge)
-        .add_edge(lore_merge, art, condition=lambda value: isinstance(value, AgentExecutorRequest))
-        .add_edge(lore_merge, terminal, condition=lambda value: isinstance(value, TerminalOutcome))
-        .add_edge(art, art_merge)
-        .add_edge(art_merge, final, condition=lambda value: isinstance(value, ValidatedStage))
-        .add_edge(art_merge, terminal, condition=lambda value: isinstance(value, TerminalOutcome))
         .add_edge(final, terminal)
         .build()
     )

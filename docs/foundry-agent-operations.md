@@ -7,24 +7,27 @@ The root `azure.yaml` is now the single entry point for both `web-nat` and
 and `deployments/card-orchestrator/deploy.py` are retained as legacy references
 only.
 
-### Workflow engine migration (#164 r1)
+### Single-call workflow candidate (#168 r2 current scope, #164 historical baseline)
 
 [Approved #164 r1](https://github.com/bmoussaud/fantasy-cards-generator/issues/164#issuecomment-5775375929)
-replaces application-owned specialist sequencing with per-request
-`WorkflowBuilder`/`AgentExecutor` execution through `WorkflowAgent`.
-It retains `ResponsesAgentServerHost`, the frozen hosted-extra pins, port 8088,
-stateless nonstream Responses contract, version identity and readiness behavior.
+introduced the historical multi-stage Workflow migration baseline. The current
+approved scope is [#168 r2 single-call](https://github.com/bmoussaud/fantasy-cards-generator/issues/168):
+per-request `WorkflowBuilder` execution with one `AgentExecutor` generation stage,
+`generation_merge`, and terminal-only output. It retains
+`ResponsesAgentServerHost`, the frozen hosted-extra pins, port 8088, stateless
+nonstream Responses contract, version identity and readiness behavior.
 The upstream sample's `ResponsesHostServer` is a different host adapter requiring
 separately qualified dependency and contract changes; see the
-[immutable references and graph contract](architecture-agents-foundry.md#approved-workflow-engine-contract-164-r1).
+[immutable references and graph contract](architecture-agents-foundry.md#historical-workflow-engine-contract-164-r1-superseded-by-168-current-contract).
 
-This is the current r1 PR candidate, not a new deployed version or live
-verification. The last recorded dev deployment remains hosted v9 at `7d68e4e`.
+This is the current #168 documentation/implementation candidate, not a deployed
+or live-evaluated acceptance result. The last recorded dev deployment remains
+hosted v9 at `7d68e4e`.
 Historical #162 dev-v9 original-span evidence does not
 validate Workflow execution, task-context ownership or release timing.
 The root commands, endpoint stamping, image-preserving WEB configuration and
 restore-first rollback below are unchanged. No new flag, host, deployment or
-live invocation is authorized by #164 implementation approval. Require the
+live invocation is authorized by #168 scope approval alone. Require the
 [Workflow acceptance gates](agent-operational-ownership.md#pre-rollout-gates)
 before a separately authorized rollout; do not infer a portal graph, quality,
 cost or latency improvement from engine adoption.
@@ -66,23 +69,24 @@ hooks. A web image-only deploy does not apply changed Bicep parameters. Set fals
 in both processes to stop all new application-owned detail; one process cannot
 disable the other's capture, nor SDK/platform `invoke_agent` spans.
 
-Approved #162 r1 specifies new-version behavior, not a claim about existing
-deployments: original `card_concept`, `card_lore` and `card_art_direction` spans
-gain strict JSON `fcg.detail.record` in Application Insights custom properties.
+Approved #162 r1 specifies historical original-span detail behavior for the
+then-three-stage runtime, not a claim about existing deployments. Under current
+#168 single-call runtime, the original `card_generation` span
+gains strict JSON `fcg.detail.record` in Application Insights custom properties.
 Built-in Foundry input/output panel rendering is not promised. The record contains
 sanitized actual pre-call input, effective application instructions and validated
-typed output/refinement, with explicit modification flags, not raw payload logging.
-Concept input is the actual query and output the typed concept card; lore and art
-inputs are their actual preceding card snapshots, with outputs restricted to
-`name`/`flavorText` and `artBrief` respectively. Instructions mean trusted shared
+typed output, with explicit modification flags, not raw payload logging.
+Generation input is the actual query and output the complete typed card.
+Current #168 capture has no separate lore/art refinement pass records; #164
+multi-stage examples remain historical-only evidence. Instructions mean trusted shared
 rules + stage task + schema, bound to their version/digest, never hidden reasoning.
 Inspect per-view and aggregate flags: modified input/output uses
 `validation=modified`, while instruction-only truncation can leave it `validated`.
 See the [exact field contract](operational-monitoring.md#exact-record-fields-and-modification-meaning);
 neither status promises complete verbatim content.
 
-HOSTED releases these records after `completed`, allowed `pre_prompt`, `concept`,
-`lore`, `final_text` and `final_art_prompt` application evidence, independent
+HOSTED releases this record after `completed`, allowed `pre_prompt`, `generation`,
+`final_text` and `final_art_prompt` application evidence, independent
 candidate checks, successful resource closure and actual business-response
 serialization/revalidation. The complete eligible batch must pass before any
 content is attached. Pre-release HOSTED refusal, held/routing-deferred outcome,
@@ -93,14 +97,15 @@ HTTP delivery failure cannot retract it. HOSTED ON / WEB OFF and standalone
 HOSTED calls can export eligible content. This explicitly changes #159's WEB-wide
 suppression guarantee for new HOSTED records only.
 
-At most three pending original handles preserve IDs/parentage and actual stage
+At most one pending original handle preserves IDs/parentage and actual stage
 start/end/duration while delaying export until HOSTED acceptance. Structural
-art-direction moderation can remain `unvalidated` while the later record is
+generation moderation can remain `unvalidated` while the later record is
 `allowed`; no earlier approval is implied. There is no past trace backfill.
 HOSTED reports guardrails `unavailable` and post-image checks `not_applicable`;
 neither is an executed safety check.
 Process death may lose pending spans; exporter delivery is best-effort and
-non-atomic. The 2 KiB field / 8 KiB record / 24 KiB HOSTED and three-record bounds,
+non-atomic. The 2 KiB field / 8 KiB record / 24 KiB current single HOSTED record
+(historical #162 used three HOSTED records) bounds,
 16 HOSTED custom spans and 16 active buffers per process remain unchanged.
 WEB has a separate 24 KiB/five-record/16-span budget; no borrowing is allowed.
 OFF or nonrecording execution must skip capture-only work/retention, without
@@ -580,6 +585,21 @@ typed result exists. Budgets remain three stages, 20 seconds and 1800 output
 tokens per stage, 65 seconds overall, managed identity, `store:false`, and no
 retry.
 
+### Current #168 single-call contract — not part of the 2026-09-09 record above
+
+The dated candidate, markers, stage enum and three-stage budgets above are the
+historical 2026-09-09 record and are not rewritten. Under the separately approved
+#168 single-call scope the current hosted runtime emits `runtimeStage`:
+`specialist_setup|generation|orchestration`; the web boundary parser still accepts
+legacy `concept|lore|art_direction` values and normalizes them to `generation` for
+current markers, without changing the stage semantics of archived historical
+records. Current budgets are one generation stage (20 seconds, 1800 output tokens)
+within the unchanged 65 seconds overall, managed identity, `store:false` and no
+retry, and the operational flow is one request, one model dependency call and four
+required moderation checks (`pre_prompt`, `generation`, `final_text`,
+`final_art_prompt`). This paragraph states the current contract only; it is not a
+reclassification of the dated result.
+
 ## Exact-source runtime failure — 2026-09-09
 
 Working as Gimli (DevOps / Infra), exact reviewed source
@@ -983,7 +1003,7 @@ PR #122 is not merged by this operation.
 | HTTP | `/responses` and non-model `/readiness` on port 8088 |
 | Protocol declaration | `responses`, version `2.0.0` (not REST `api-version=v1`) |
 | Initial reviewed allocation | 0.5 CPU / 1GiB; not automatically provisioned |
-| Model | Existing text deployment; three bounded concept/lore/art-direction specialists |
+| Model | Existing text deployment; one bounded generation specialist |
 | Excluded | Image generation, persistence, web activation, scheduled evaluation/probes |
 
 At the web boundary, a hosted-agent policy refusal and every authoritative
@@ -1551,8 +1571,8 @@ and can continue incurring storage charges.
 **One ACA exec invocation was dispatched; whether its Responses POST reached
 Foundry is unknown (0 or 1), and its allowance is consumed.** No retry, developer
 inference call or model repair was attempted. Model-call/token usage is
-unobserved, not zero; code limits remain three calls, 1800 output tokens/stage,
-20 seconds/stage and 65 seconds overall. The earlier explicit-MI access probe
+unobserved, not zero; at that time the #164-era source limits were three calls,
+1800 output tokens/stage, 20 seconds/stage and 65 seconds overall. The earlier explicit-MI access probe
 proved the expected ACA principal, but this invocation exported no new identity
 or schema evidence and must not be called an end-to-end success.
 
@@ -1651,8 +1671,8 @@ runtime/model failure is established. HTTP 403 is not a domain policy refusal.
 Do not send another prompt to diagnose it without another explicit approval.
 
 The allowance is now consumed. Model-call and token usage are unobserved, not
-asserted zero; enforced source bounds remain three calls, 1800 output tokens per
-stage, 20 seconds per stage and 65 seconds overall. No evaluations, image
+asserted zero; at that time enforced source bounds remained three calls, 1800
+output tokens per stage, 20 seconds per stage and 65 seconds overall. No evaluations, image
 generation, production changes, new capacity, manual roles, network relaxation,
 secret changes, app persistence or endpoint injection occurred. Agent-image
 dependencies remain governed by the existing frozen lockfile; no host dependency

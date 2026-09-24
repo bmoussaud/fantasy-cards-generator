@@ -37,7 +37,7 @@ agent (issue #100). It provides:
 - **offline `pytest` checks** that validate the corpus itself (structure, coverage, safety
   labelling, schema compatibility) without any network, model, or Azure SDK calls
 
-The corpus intentionally covers the three creative specialist paths (concept, lore, art-prompt),
+The corpus intentionally covers creative prompt categories (concept, lore, art-prompt),
 plus format edges, multi-step coherence, scope boundaries, prompt-injection attempts, and safety
 refusal/indeterminate outcomes — all without including graphic harmful content, personal data,
 copyrighted characters, or living-artist imitations.
@@ -67,8 +67,8 @@ copyrighted characters, or living-artist imitations.
 | Category | Count | Description |
 |---|---|---|
 | `concept` | 4 | Basic happy-path prompts covering all four card types |
-| `lore` | 3 | Lore/flavor-emphasis prompts exercising the lore specialist |
-| `art-prompt` | 2 | Art-description-first prompts exercising the art-prompt specialist |
+| `lore` | 3 | Lore/flavor-emphasis prompts for creative quality review |
+| `art-prompt` | 2 | Art-description-first prompts for creative quality review |
 | `ambiguity-format` | 3 | Edge cases: minimal prompt, conflicting constraints, mixed-language input |
 | `multi-step-coherence` | 2 | Prompts requiring multi-step reasoning for mechanic consistency |
 | `scope-boundary` | 2 | Out-of-scope requests (image bytes, free-form story) |
@@ -87,7 +87,7 @@ Each JSONL row contains:
   "source": "synthetic",        // Always "synthetic" for this corpus
   "query": "...",               // The prompt sent to the card-orchestrator agent
   "category": "concept",        // One of the nine categories above
-  "routing_specialists": ["concept", "lore", "art-prompt"],  // Expected specialist paths
+  "routing_specialists": ["generation"],  // Current runtime route; VALID_SPECIALISTS = {"generation"}
   "expected_behavior": {
     "should_complete": true,    // Whether the agent should produce a card response
     "expected_status": "completed",  // "completed" | "refused" | "routing_defer" | "held"
@@ -336,7 +336,7 @@ uv run pytest tests/ -v --tb=short
 | Fixture file presence and parse | JSONL is readable; every line is a valid JSON object |
 | Coverage requirements | Exactly 20 entries, 20 unique IDs, 20 unique queries |
 | Category coverage | All nine categories present |
-| Routing path coverage | All three specialist paths appear in `routing_specialists` |
+| Routing path coverage | All 20 seed rows validate `routing_specialists: ["generation"]` (`VALID_SPECIALISTS={"generation"}`); historical three-stage routing is comparison context only |
 | Schema integrity | Shared validator rejects malformed rows, missing metadata, bad enums, and status/schema cross-check failures |
 | Safety labelling | Refusal, routing-defer, injection, and indeterminate entries use consistent proposed evaluator statuses |
 | Inactive/applicability contract | Active required layers map missing evidence to `indeterminate`; inactive/non-required layers are `not_applicable` |
@@ -347,12 +347,18 @@ uv run pytest tests/ -v --tb=short
 | Card schema compatibility | `expected_card_fields` reference only real `GeneratedCardModel` fields |
 | Malformed fixture detection | Unit tests confirm that bad rows are rejected by the checks |
 
-### Workflow migration acceptance (#164 r1)
+### Single-call migration acceptance (#168 r2)
 
-The [approved graph contract](architecture-agents-foundry.md#approved-workflow-engine-contract-164-r1)
-requires separate implementation evidence, not changes to this synthetic corpus
-or an assumption of improved creative quality. Fixture validation and fake-Agent
-tests do not prove Workflow execution.
+The approved #168 scope requires separate implementation evidence while
+preserving this synthetic corpus, categories, and quality thresholds. The
+three-stage #164 routing baseline remains historical comparison context only.
+Fixture validation and fake-Agent tests do not prove live single-call behavior.
+
+#### Historical #164 r1 evidence and waiver (not #168 verification)
+
+The measurements, waiver and build observations in this subsection were recorded
+for the #164 r1 implementation. They are inherited historical evidence and must
+not be reported as #168 verification, acceptance or performance results.
 
 The requester [approved keeping the current r1 implementation and creating the PR
 without a performance acceptance gate](https://github.com/bmoussaud/fantasy-cards-generator/issues/164#issuecomment-5778665499).
@@ -362,28 +368,39 @@ nonblocking observations, not passing benchmarks. No further performance work or
 r2 startup preparation is required by this PR. Runtime limits (65 seconds overall,
 20 seconds per model stage) and privacy/capture/admission bounds remain unchanged.
 
-Before acceptance, run the pinned real Workflow/AgentExecutor/Agent stack against
-deterministic mocked model HTTP, without mocking the scheduler. Removing a required
-edge must prevent downstream execution/completion. Verify exact merged typed
-inputs, strict per-stage schemas/options, exactly three success-path model calls,
-zero deterministic-node calls/retries, and only one terminal output. Pre-prompt
-rejection makes zero calls; failures at stages 1/2/3 make exactly 1/2/3, with no
-intermediate content leak. Barrier-interleave at least eight requests to prove
-independent workflow/executor/session/state and cancellation/refusal isolation.
+The single current-source frozen build refresh stopped at an uncached dependency
+download with build networking disabled; that #164-era current image's
+import/startup/readiness were unverified, and older pre-cache packaging proof is
+historical only.
+
+#### Current #168 local structural validation
+
+The only #168 evidence in this repository is local, offline and structural: the
+seed corpus validates `routing_specialists: ["generation"]` against
+`VALID_SPECIALISTS`, and the documentation/runbook and monitoring assertions run
+under `uv run --extra hosted-agent pytest`. No #168 live invocation, deployment,
+hosted image build, startup/readiness check, latency, memory, token, cost or
+quality measurement exists. Nothing recorded here may be presented as a #168
+performance result or acceptance pass.
+
+#### Required #168 acceptance evidence (not yet produced)
+
+Before acceptance, run the pinned hosted stack against deterministic mocked
+model HTTP and verify one generation-stage model call on success, strict schema
+options, and one terminal output. Preserve pre-prompt rejection behavior, safety
+ordering, and request isolation checks. Legolas handles fixture/test runtime
+migration details; this document keeps corpus/prompt/category thresholds unchanged.
 
 Retain original-span object/ID/parent/timing assertions (including the existing
 `<5 ms` duration tolerance), whole-batch safe release after closure/serialization,
 privacy canaries, flag/sampling/capacity/byte boundaries and deadline/cleanup
 regressions. Frozen hosted packaging and nonstream host-to-client compatibility
-must be evidenced without unexpected skipped functional hosted tests. The single
-current-source frozen build refresh stopped at an uncached dependency download
-with build networking disabled; current-image import/startup/readiness are
-unverified, and older pre-cache packaging proof is historical only.
-See #164 for the functional/safety acceptance matrix, as amended by the waiver,
-and the [operator gates](agent-operational-ownership.md#pre-rollout-gates).
-These are required evidence, not results recorded here. Historical #162 dev-v9
-traces do not validate the graph; live runs still require separate authorization.
-No portal-graph, quality, cost or latency benefit is implied.
+must be evidenced without unexpected skipped functional hosted tests.
+Any quality/cost/latency claim still requires matched comparison runs using the
+same version, model deployment, and budgets before attribution. Current status
+remains no live comparison conclusion (`INCONCLUSIVE`/no benefit claim). See #168
+acceptance + [operator gates](agent-operational-ownership.md#pre-rollout-gates).
+These are required evidence, not results recorded here.
 
 ### Lint and format (new Python files only)
 

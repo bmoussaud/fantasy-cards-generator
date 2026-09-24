@@ -145,9 +145,7 @@ class FoundryAgentInvocationResult:
     art_prompt: str | None = None
     error_code: str | None = None
     completion_diagnostics: CompletionDiagnostics | None = None
-    runtime_failure_stage: (
-        Literal["specialist_setup", "concept", "lore", "art_direction", "orchestration"] | None
-    ) = None
+    runtime_failure_stage: Literal["specialist_setup", "generation", "orchestration"] | None = None
     runtime_failure_reason: (
         Literal[
             "timeout",
@@ -913,7 +911,7 @@ def _parse_runtime_failure_code(
         return None
     match = re.fullmatch(
         r"card_runtime:"
-        r"(specialist_setup|concept|lore|art_direction|orchestration):"
+        r"(specialist_setup|generation|concept|lore|art_direction|orchestration):"
         r"(timeout|authentication|authorization|resource_not_found|invalid_request|"
         r"rate_limited|service_error|transport_error|invalid_response|dependency_error):"
         r"(none|bad_request|authentication|permission_denied|not_found|conflict|"
@@ -924,7 +922,10 @@ def _parse_runtime_failure_code(
     )
     if match is None:
         return None
-    return match.groups()
+    stage, reason, http_type, http_status = match.groups()
+    if stage in {"concept", "lore", "art_direction"}:
+        stage = "generation"
+    return stage, reason, http_type, http_status
 
 
 def _parser() -> argparse.ArgumentParser:

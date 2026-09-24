@@ -1199,7 +1199,7 @@ def test_runtime_failure_diagnostic_reaches_strict_aca_marker(modules, monkeypat
     assert result["status"] == "failed"
     assert result["outcome"] == "failed"
     assert result["schemaValid"] is False
-    assert result["runtimeStage"] == "concept"
+    assert result["runtimeStage"] == "generation"
     assert result["runtimeReason"] == "authorization"
     assert result["runtimeHttpType"] == "permission_denied"
     assert result["runtimeHttpStatus"] == "http_403"

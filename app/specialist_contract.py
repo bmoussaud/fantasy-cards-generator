@@ -8,29 +8,16 @@ from functools import lru_cache
 from types import MappingProxyType
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel
 
 from app.generation import GeneratedCardModel
 
-Stage = Literal["concept", "lore", "art_direction"]
-
-
-class LoreRefinement(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-    name: str = Field(min_length=3, max_length=80)
-    flavorText: str = Field(max_length=280)
-
-
-class ArtRefinement(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-    artBrief: str = Field(min_length=12, max_length=300)
+Stage = Literal["generation"]
 
 
 SCHEMAS: Mapping[Stage, type[BaseModel]] = MappingProxyType(
     {
-        "concept": GeneratedCardModel,
-        "lore": LoreRefinement,
-        "art_direction": ArtRefinement,
+        "generation": GeneratedCardModel,
     }
 )
 INSTRUCTIONS = (
@@ -44,14 +31,15 @@ INSTRUCTIONS = (
 )
 TASKS: Mapping[Stage, str] = MappingProxyType(
     {
-        "concept": "Create the entire card using the query as inspiration.",
-        "lore": "Refine ONLY name and flavorText of the validated card. Preserve its concept.",
-        "art_direction": "Refine ONLY artBrief of the validated card. No text or logos in artwork.",
+        "generation": (
+            "Create the complete card using the query as inspiration. "
+            "Return one valid GeneratedCardModel object."
+        ),
     }
 )
 
 
-@lru_cache(maxsize=3)
+@lru_cache(maxsize=1)
 def _static_contract(stage: Stage) -> tuple[str, str]:
     # Cache only immutable, application-owned text; never SDK options or request state.
     schema = json.dumps(SCHEMAS[stage].model_json_schema())

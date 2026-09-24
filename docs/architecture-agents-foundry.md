@@ -6,7 +6,7 @@ implementation contract from the historical agent-architecture proposal below.
 The direction is intentionally conservative: keep authentication, rate limiting, persistence, and HTTP/UI behavior in the existing web application, and add a Foundry-hosted agent layer only where agent reasoning adds value.
 
 > **Current implementation:** the required `hosted_agents/card_orchestrator`
-> runtime implements three sequential MAF specialists under one Responses host.
+> runtime now applies the approved #168 single-call contract: one generation-stage request and one model dependency call per invocation.
 > The web backend uses it for every live card-text request. The legacy direct
 > text implementation, feature gate, and automatic fallback have been removed.
 > See the [implemented architecture and diagram](architecture.md) and
@@ -15,13 +15,44 @@ The direction is intentionally conservative: keep authentication, rate limiting,
 > they are not fresh live verification. The proposal and earlier inventories
 > below are historical design context, not the current implementation inventory.
 > The runtime's 20-second model stages / 65-second overall deadline remain
-> enforced. Historical latency proposals below are not #164 PR acceptance gates.
+> enforced. Historical latency proposals below are not current-runtime acceptance gates.
 
-## Approved Workflow engine contract (#164 r1)
+## Current #168 single-call workflow contract (implemented)
+
+The executable graph in `hosted_agents/card_orchestrator/workflow.py` is now:
+`decode -> pre_prompt -> generation -> generation_merge -> final_safety -> terminal`.
+These are the concrete `build_workflow()` node IDs (`decode`, `pre_prompt`,
+`generation`, `generation_merge`, `final_safety`, `terminal`), with conditional
+early-stop edges to `terminal` from `decode`, `pre_prompt`, and
+`generation_merge`.
+
+- `decode` validates one typed `GenerateCardAgentRequest`.
+- `pre_prompt` runs moderation and emits exactly one specialist payload:
+  `{"query": request.query}`.
+- `generation` is the only `AgentExecutor`; it performs one model dependency
+  call with strict schema output, `store=false`, `stream=false`, tools disabled,
+  SDK retries disabled, and `max_tokens=1800`.
+- `generation_merge` validates executor identity/evidence, revalidates the full
+  `GeneratedCardModel`, and blocks invalid/missing evidence before terminal.
+- `final_safety` enforces required ordered allow evidence for
+  `pre_prompt`, `generation`, `final_text`, `final_art_prompt`, derives
+  `artPrompt`, and produces the final schemaVersion 1 response envelope.
+- `terminal` is the only `output_from` node and serializes either a valid domain
+  envelope or the bounded runtime-failure marker.
+
+Execution invariants: one request-local workflow, one request-local specialist
+resource scope, one model call on success, one absolute 65-second request
+deadline, 20-second model-stage timeout, and no cross-request mutable state.
+Current detail-release bounds are one HOSTED record and five WEB records; #164
+multi-stage concept/lore/art graphs remain historical context only.
+
+## Historical Workflow engine contract (#164 r1, superseded by #168 current contract)
 
 [Requester approval on 2026-09-22](https://github.com/bmoussaud/fantasy-cards-generator/issues/164#issuecomment-5775375929)
-authorizes the internal engine migration only. This section describes the current
-r1 PR candidate, not deployed behavior or a claim that all release gates passed.
+authorized the historical internal engine migration track. This section is kept as
+labeled #164 context. Current runtime documentation is superseded by approved #168
+single-call generation behavior and should not be interpreted as today's execution
+contract.
 The requester subsequently
 [approved keeping the current implementation and creating the PR without performance acceptance](https://github.com/bmoussaud/fantasy-cards-generator/issues/164#issuecomment-5778665499).
 No r2 startup preparation or host migration is included. The pre-#164 runtime used
@@ -95,7 +126,7 @@ pre-prompt and the three merge nodes lead directly to terminal.
   acceptance. One absolute 65-second deadline covers scheduling, acquisition,
   closure, serialization/revalidation and batch preflight; model-stage calls
   retain their 20-second limit. No node starts a fresh operation deadline. The
-  [original-span and release contract](operational-monitoring.md#workflow-task-contexts-and-164-acceptance)
+  [original-span and release contract](operational-monitoring.md#workflow-task-contexts-164-historical-168-current)
   remains binding.
 
 Exactly three model calls occur on success, with strict per-stage schemas,
@@ -105,7 +136,7 @@ policy change or API/UI addition. Image generation, artwork retry, auth,
 idempotency and persistence remain WEB-owned. Workflow/provider telemetry is not
 the three original custom spans and does not authorize payload logging.
 
-The [offline acceptance requirements](agent-evaluation.md#workflow-migration-acceptance-164-r1)
+The [offline acceptance requirements](agent-evaluation.md#single-call-migration-acceptance-168-r2)
 must prove real edge execution, isolation, lifecycle and public compatibility.
 There is no promise of an automatic Foundry portal graph, better quality, lower
 cost or lower latency. Root deployment/rollback procedures are unchanged and need

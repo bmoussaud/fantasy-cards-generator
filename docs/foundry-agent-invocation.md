@@ -397,7 +397,7 @@ The latest bounded dev diagnostic deployed exact reviewed source
 readiness succeeded, and the single ACA-MI Responses POST returned HTTP 200 with
 a failed envelope carrying the closed runtime tuple
 `art_direction/rate_limited/rate_limit/http_429`. This precisely identifies a
-provider HTTP 429 at the art-direction stage, not an authorization,
+provider HTTP 429 at the historical art-direction stage marker, not an authorization,
 configuration, routing or schema failure. No POST retry, RBAC change, production
 operation or evaluation occurred. The owned session and hosted version were
 deleted; exact GETs returned 404; the unchanged web baseline returned
@@ -508,34 +508,24 @@ as `metadata.hostedVersion`; it is not the application-version check.
 
 ### Bounded orchestration and safety
 
-Approved [#164 r1](architecture-agents-foundry.md#approved-workflow-engine-contract-164-r1)
-moves the following stages into a real per-request `WorkflowBuilder` graph, with
-three `AgentExecutor` specialists executed via `WorkflowAgent` and deterministic
-typed decode/merge/safety nodes. This describes the current r1 PR candidate,
-not evidence of a deployed graph. `ResponsesAgentServerHost` and
-the pinned dependencies above remain; the sample's `ResponsesHostServer` is not
-adopted. Inputs are accumulated validated cards, not raw `last_agent` output.
+Approved #168 migration scope supersedes #164 runtime execution for current
+behavior: one generation-stage agent request performs one model dependency call,
+with deterministic validation and safety gates still enforced by the hosted
+boundary and web integration. `ResponsesAgentServerHost` and pinned dependencies
+remain unchanged.
 
-1. Heuristically moderate the original input.
-2. A fresh MAF Concept agent produces `GeneratedCardModel`; validate and moderate it.
-3. A fresh Lore agent receives that validated card and returns **only** `name` and
-   `flavorText`; merge, revalidate and moderate before art direction.
-4. A fresh Art Direction agent receives the lore-refined validated card and returns
-   **only** `artBrief`; merge/revalidate without changing mechanics.
-5. Derive `artPrompt` using the existing `derive_art_prompt()` and moderate both the
-   final card text and the derived prompt.
+1. Heuristically moderate the original input (`pre_prompt`).
+2. Run one generation-stage model call that returns `GeneratedCardModel`; validate and
+   moderate the complete card (`generation`, `final_text`).
+3. Derive `artPrompt` using existing `derive_art_prompt()` and moderate the derived
+   prompt (`final_art_prompt`).
 
-Maximum **three model requests**, with model retries and function-invocation loops
-disabled, no repair loops and no automatic fallback. All agents/sessions are fresh
-per stage and clients are owned/closed per invocation, including cancellation.
-The graph, executors and mutable evidence/card state are also request-local;
-no Workflow conversations, checkpoints, persistent state or fan-out are enabled.
-Pre-prompt rejection acquires no specialist clients. The request task owns client
-acquisition/closure through graph event handshakes; closure precedes final safety
-and mandatory terminal serialization, and cancellation drains owned graph work.
-The 20-second stage / 65-second orchestration budgets fit inside the web client's
-bounded 70-second hosted-agent timeout. The complete card-generation request
-remains bounded by the 225-second outer deadline.
+Maximum **one model request** per invocation, with model retries and
+function-invocation loops disabled, no repair loop, and no automatic fallback.
+Clients/sessions are owned and closed per invocation, including cancellation.
+The request task still owns closure before final safety and terminal
+serialization. Budgets remain 20 seconds for the model stage, 65 seconds hosted
+orchestration ceiling, and 225 seconds for the outer web request.
 The same absolute HOSTED deadline covers scheduling, acquisition, closure,
 serialization/revalidation and diagnostic preflight. The
 [requester performance waiver](https://github.com/bmoussaud/fantasy-cards-generator/issues/164#issuecomment-5778665499)
@@ -567,7 +557,7 @@ The existing ACA identity probe's in-memory parser bundle includes the same clos
 diagnostic definitions, so it does not require this new module on an older serving
 image. Its result-marker contract does not expose completion diagnostics.
 
-Required `stage` is `concept|lore|art_direction`; required `checker` is
+Required `stage` is `generation`; required `checker` is
 `unexpected_agent_response|missing_raw_response|non_stop_finish|non_text_content`.
 An invalid required value discards diagnostics only. Optional `finishReason` is
 `stop|length|content_filter|tool_calls|function_call|other`; optional
@@ -604,12 +594,20 @@ non-text content. Completed-text acceptance and subsequent JSON/schema checks
 are unchanged. These observations do not establish truncation, token exhaustion,
 a framework defect, or the cause of any historical trace. No original content,
 provider identifiers, errors or raw provider strings are retained by diagnostics.
-For the closed telemetry keys and capture guards, see
+N-1 compatibility: legacy runtime stage markers `concept|lore|art_direction` are
+normalized to public `generation` for current parser output, but that mapping does
+not rewrite historical event semantics. Legacy seven-entry completion diagnostics /
+safety traces are rejected during #168 diagnostic release capture as
+`invalid_safety`; coordinated hosted+web rollout is required before accepting that
+legacy shape again. No executed rollout is claimed here. For the closed telemetry
+keys and capture guards, see
 [operational monitoring](operational-monitoring.md#content-free-completion-diagnostics-166).
 
 `metadata.safetyEvidence` records bounded stage/policy/decision/reason codes for
-the local gates. Completion requires allowed evidence for pre-prompt, concept,
-lore, final-text and final-art-prompt checks. Hosted guardrails are recorded as
+the local gates. Current #168 release capture requires exactly six ordered entries:
+`pre_prompt=allowed`, `generation=allowed`, `final_text=allowed`,
+`final_art_prompt=allowed`, then `hosted_guardrails=unavailable`,
+`post_image=not_applicable`. Hosted guardrails are recorded as
 **unavailable/not observed**, never falsely passed; post-image is **not applicable**.
 The reused heuristics are narrow pattern checks, **not comprehensive safety,
 copyright detection, or prompt-injection protection**. Live guardrail integration,
@@ -636,10 +634,10 @@ The SDK host defaults can capture sensitive telemetry; this runtime explicitly
 disables host observability setup, automatic MAF payload instrumentation and
 SDK/access payload logging. Baseline telemetry remains content-free. The narrow
 #162 exception permits only bounded, sanitized, accepted application-owned detail
-on the three original specialist spans, after resource closure, serialization and
-whole-batch preflight; it is not raw prompt/output logging. #164 preserves those
-original spans and their measured boundaries across SDK task contexts, rather than
-substituting Workflow/provider spans. See the
+on application-owned generation detail spans after resource closure, serialization
+and whole-batch preflight; it is not raw prompt/output logging. Historical #162
+used three original specialist spans; current #168 capture uses the single
+`card_generation` diagnostic release path. See the
 [exact release and privacy contract](operational-monitoring.md#release-ownership-source-links-and-compatibility).
 This application-layer behavior is **not** a promise that the hosted platform or
 model provider retains no service telemetry.
@@ -657,6 +655,6 @@ parser and real MAF/Foundry/OpenAI clients over mocked model HTTP, plus moderati
 refusal precedence, invariants, cancellation, timeouts and request isolation.
 They make no live Azure requests and are not deployment or creative-quality evidence.
 For #164, fake-specialist tests or import checks alone are insufficient: the
-[additional acceptance requirements](agent-evaluation.md#workflow-migration-acceptance-164-r1)
+[additional acceptance requirements](agent-evaluation.md#single-call-migration-acceptance-168-r2)
 require real scheduler/edge execution and preserve the #162 privacy/lifecycle
 regressions. No passing result for the new graph is asserted here.

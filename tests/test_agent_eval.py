@@ -47,7 +47,7 @@ VALID_CATEGORIES = frozenset(
         "safety-indeterminate",
     }
 )
-VALID_SPECIALISTS = frozenset({"concept", "lore", "art-prompt"})
+VALID_SPECIALISTS = frozenset({"generation"})
 VALID_STATUSES = frozenset({"completed", "refused", "routing_defer", "held"})
 VALID_SAFETY_OUTCOMES = frozenset({"allow", "block", "indeterminate"})
 VALID_SCHEMA_COMPLIANCE = frozenset({"required", "not_applicable"})
@@ -523,7 +523,7 @@ def _set_path(path: tuple[str, ...], value: Any) -> RowMutation:
         ),
         (_set_path(("expected_behavior", "expected_card_fields"), ["name"]), "GeneratedCardModel"),
         (_set_path(("expected_behavior", "prohibited_output_patterns"), ["["]), "unterminated"),
-        (_set_path(("routing_specialists",), ["concept", "unknown"]), "routing_specialists"),
+        (_set_path(("routing_specialists",), ["generation", "unknown"]), "routing_specialists"),
         (_set_path(("rubric_metadata", "quality_dimensions"), {}), "quality_dimensions"),
         (_delete_path(("rubric_metadata", "quality_dimensions")), "quality_dimensions"),
         (_set_path(("rubric_metadata", "evaluation_status"), None), "evaluation_status"),

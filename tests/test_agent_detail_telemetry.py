@@ -44,7 +44,7 @@ from hosted_agents.card_orchestrator.settings import RuntimeSettings
 from hosted_agents.card_orchestrator.workflow import StageBoundary
 from tests.conftest import extract_hidden_value
 from tests.test_agentic_generation import StageModeration, _client, _generate, _services
-from tests.test_card_orchestrator import ART, CARD, LORE, settings
+from tests.test_card_orchestrator import CARD, settings
 from tests.workflow_fakes import OfflineAgent
 
 OWNER = AuthenticatedOwner(
@@ -120,11 +120,11 @@ class LocalHostedTransport(httpx.AsyncBaseTransport):
 
 def stack(monkeypatch, *, web=True, hosted=True, outputs=None, legacy=False):
     calls = []
-    outputs = outputs or [CARD, LORE, ART]
+    outputs = outputs or [CARD]
 
     class Agent(OfflineAgent):
         async def respond(self, stage, payload):
-            index = {"concept": 0, "lore": 1, "art_direction": 2}[stage]
+            index = {"generation": 0}[stage]
             calls.append((self.name, payload, self.instructions, self.default_options))
             output = outputs[index]
             if isinstance(output, BaseException):
@@ -227,14 +227,14 @@ def test_full_entrypoints_mixed_flags_and_private_terminal_release(
     assert response.status_code == 200
     assert response.json()["status"] == "completed"
     records = content(exported)
-    assert len(records) == (3 if hosted else 0) + (2 if web else 0)
+    assert len(records) == (1 if hosted else 0) + (2 if web else 0)
     assert "agentDetail" not in json.dumps(transport.responses)
     assert "agentDetail" not in response.text
     assert "capture_version" not in response.text
-    assert len(calls) == 3
+    assert len(calls) == 1
     execution = [s for s in new_spans(exported) if s.name != "fcg.agent.detail"]
     assert {s.name for s in execution} == (
-        ({"card_concept", "card_lore", "card_art_direction"} if hosted else set())
+        ({"card_generation"} if hosted else set())
         | ({"fcg.agent.invoke", "fcg.agent.image"} if web else set())
     )
     assert all(
@@ -243,11 +243,10 @@ def test_full_entrypoints_mixed_flags_and_private_terminal_release(
     assert all(s.status.description is None for s in new_spans(exported))
     if web and hosted:
         hosted_records = {r["stage"]: r for r in records if r["source_runtime"] == "hosted"}
-        assert json.loads(hosted_records["concept"]["input"]["text"]) == calls[0][1]
-        assert json.loads(hosted_records["lore"]["input"]["text"]) == CARD
-        assert json.loads(hosted_records["art_direction"]["input"]["text"]) == CARD | LORE
-        assert json.loads(hosted_records["lore"]["output"]["text"]) == LORE
-        assert hosted_records["lore"]["output_kind"] == "refinement"
+        assert json.loads(hosted_records["generation"]["input"]["text"]) == calls[0][1]
+        assert set(json.loads(hosted_records["generation"]["input"]["text"])) == {"query"}
+        assert json.loads(hosted_records["generation"]["output"]["text"]) == CARD
+        assert hosted_records["generation"]["output_kind"] == "card"
         for name, _, instructions, _ in calls:
             record = hosted_records[name.removeprefix("card_")]
             assert (
@@ -270,7 +269,7 @@ def test_full_entrypoints_mixed_flags_and_private_terminal_release(
             assert span.attributes["fcg.detail.result"] == "completed"
         # Exercise the actual Azure exporter conversion, not only helper spies.
         envelopes = [_convert_span_to_envelope(s).as_dict() for s in new_spans(exported)]
-        assert "Mountain Drake" in json.dumps(envelopes)
+        assert CARD["name"] in json.dumps(envelopes)
     before = len(new_spans(exported))
     replay = _generate(client)
     assert replay.json() == response.json()
@@ -286,7 +285,7 @@ def test_late_web_denial_preserves_only_new_hosted_content(monkeypatch, exported
     services.moderation_service = StageModeration(stage)
     with pytest.raises(ProblemDetails):
         asyncio.run(generate(CardGenerationService(services)))
-    assert len(content(exported)) == (0 if legacy else 3)
+    assert len(content(exported)) == (0 if legacy else 1)
     assert all(r["source_runtime"] == "hosted" for r in content(exported))
 
 
@@ -357,7 +356,7 @@ def test_late_non_success_suppresses_web_content(monkeypatch, exported, failure,
         )
     except (ProblemDetails, RuntimeError, asyncio.CancelledError):
         assert failure in {"persistence", "card_write", "response", "cancel"}
-    assert len(content(exported)) == (0 if legacy else 3)
+    assert len(content(exported)) == (0 if legacy else 1)
     assert all(r["source_runtime"] == "hosted" for r in content(exported))
     assert "PRIVATE-ERROR" not in repr(exported.get_finished_spans())
 
@@ -379,7 +378,7 @@ def test_real_http_serialization_failure_does_not_release_web(monkeypatch, expor
     monkeypatch.setattr(fastapi.routing, "serialize_response", fail_card)
     with pytest.raises(RuntimeError):
         _generate(client)
-    assert len(content(exported)) == (0 if legacy else 3)
+    assert len(content(exported)) == (0 if legacy else 1)
 
 
 def test_real_image_retry_records_attempts_not_failed_content(monkeypatch, exported):
@@ -413,8 +412,8 @@ def test_concurrent_single_flight_does_not_duplicate_content(monkeypatch, export
 
     a, b = asyncio.run(scenario())
     assert a == b
-    assert len(calls) == 3
-    assert len(content(exported)) == 5
+    assert len(calls) == 1
+    assert len(content(exported)) == 3
 
 
 @pytest.mark.parametrize("delta", [-1, 0, 1])
@@ -453,27 +452,21 @@ def test_sanitize_before_truncate_withheld_canaries(sentinel):
 
 
 def record(runtime="web", *, stage=None, text="safe", source=None):
-    stage = stage or ("image" if runtime == "web" else "concept")
+    stage = stage or ("image" if runtime == "web" else "generation")
     kind = {
         "image": "image_outcome",
         "hosted_invocation": "final_card",
-        "concept": "card",
-        "lore": "refinement",
-        "art_direction": "refinement",
+        "generation": "card",
     }[stage]
     instruction, _, _ = detail._contracts(stage)
     inputs = {
-        "concept": {"query": PROMPT},
-        "lore": CARD,
-        "art_direction": CARD | LORE,
+        "generation": {"query": PROMPT},
         "hosted_invocation": {"query": PROMPT},
         "image": {"artPrompt": PROMPT, "quality": "low", "mode": "generate"},
     }
     outputs = {
-        "concept": CARD,
-        "lore": LORE,
-        "art_direction": ART,
-        "hosted_invocation": CARD | LORE | ART,
+        "generation": CARD,
+        "hosted_invocation": CARD,
         "image": {"outcome": "completed"},
     }
     views = [
@@ -512,7 +505,7 @@ def legacy_envelope(trace_id="1" * 32, deployment_version="test"):
                 stage=stage,
                 source=detail.Source(trace_id=trace_id, span_id=f"{index:016x}"),
             ).model_copy(update={"deployment_version": deployment_version})
-            for index, stage in enumerate(("concept", "lore", "art_direction"), start=1)
+            for index, stage in enumerate(("generation",), start=1)
         )
     ).model_dump(mode="json")
 
@@ -531,7 +524,7 @@ def capture(runtime="web"):
 
 def test_record_and_runtime_shares_include_json_overhead(exported):
     with capture() as state:
-        for stage in ("concept", "lore", "art_direction"):
+        for stage in ("generation",):
             state.append(record("hosted", stage=stage, text=" " * 2048))
         for _ in range(6):
             state.append(record(text=" " * 2048))
@@ -593,7 +586,7 @@ def test_sixteen_active_buffers_without_waiting_and_cleanup(exported):
         @detail.operation("hosted")
         async def run(self, gate, all_held):
             assert detail.current() is None
-            with detail.execution("concept") as execution:
+            with detail.execution("generation") as execution:
                 if execution is not None:
                     assert execution.span.is_recording()
                     assert execution.span.get_span_context().trace_flags.sampled
@@ -617,7 +610,7 @@ def test_sixteen_active_buffers_without_waiting_and_cleanup(exported):
             assert all(
                 not state.closed and len(state.pending) == state.spans == 1 for state in admitted
             )
-            assert [span.name for span in new_spans(exported)] == ["card_concept"]
+            assert [span.name for span in new_spans(exported)] == ["card_generation"]
             assert not content(exported)
             assert not detail._capacity.acquire(blocking=False)
         finally:
@@ -658,7 +651,7 @@ def test_malformed_private_extension_preserves_business_success(monkeypatch, exp
     services, runtime, _, _ = stack(monkeypatch)
     result = asyncio.run(runtime.generate(GenerateCardAgentRequest(query=PROMPT)))
     assert result.status == "completed"
-    assert len(content(exported)) == 3
+    assert len(content(exported)) == 1
     exported.clear()
     value = legacy_envelope()
     result.metadata["agentDetail"] = value
@@ -718,7 +711,7 @@ def test_late_hosted_failure_never_transports_earlier_content(monkeypatch, expor
     original = StageBoundary.invoke
 
     async def run(self, context, call_next):
-        if self.stage == "art_direction":
+        if self.stage == "generation":
             if outcome == "invalid":
                 return specialists.SpecialistResult("completed", text='{"unexpected":"PRIVATE"}')
             if outcome == "exception":
@@ -737,8 +730,8 @@ def test_late_hosted_failure_never_transports_earlier_content(monkeypatch, expor
     assert "agentDetail" not in json.dumps(transport.responses)
     assert "PRIVATE" not in repr(exported.get_finished_spans())
     spans = new_spans(exported)
-    assert any(s.name == "card_concept" for s in spans)
-    art = next(s for s in spans if s.name == "card_art_direction")
+    assert any(s.name == "card_generation" for s in spans)
+    art = next(s for s in spans if s.name == "card_generation")
     assert art.attributes["fcg.detail.validation"] == "unvalidated"
 
 
@@ -790,7 +783,7 @@ def test_artwork_retry_is_web_only_and_replay_has_no_details(monkeypatch, export
     async def scenario():
         partial = await generate(service)
         assert partial.status == "awaiting_artwork_retry"
-        assert len(content(exported)) == 3
+        assert len(content(exported)) == 1
         services.ai_client.generate_image = original
         if audit_failure:
 
@@ -814,7 +807,7 @@ def test_artwork_retry_is_web_only_and_replay_has_no_details(monkeypatch, export
     if audit_failure:
         with pytest.raises(RuntimeError, match="audit unavailable"):
             asyncio.run(scenario())
-        assert len(content(exported)) == 3
+        assert len(content(exported)) == 1
         return
     result = asyncio.run(scenario())
     assert result.status == "completed"
@@ -823,7 +816,7 @@ def test_artwork_retry_is_web_only_and_replay_has_no_details(monkeypatch, export
     assert records[0]["stage"] == "image"
     assert records[0]["source_runtime"] == "web"
     assert records[0]["operation"] == "artwork_retry"
-    assert len(calls) == 3
+    assert len(calls) == 1
 
 
 def test_concurrent_distinct_requests_do_not_share_candidates(monkeypatch, exported):
@@ -839,11 +832,13 @@ def test_concurrent_distinct_requests_do_not_share_candidates(monkeypatch, expor
     results = asyncio.run(scenario())
     assert results[0].cardId != results[1].cardId
     records = content(exported)
-    assert len(records) == 10
-    queries = [json.loads(r["input"]["text"])["query"] for r in records if r["stage"] == "concept"]
+    assert len(records) == 6
+    queries = [
+        json.loads(r["input"]["text"])["query"] for r in records if r["stage"] == "generation"
+    ]
     assert sorted(queries) == ["An amber guardian", "An emerald guardian"]
-    concept_ids = [r["source"]["span_id"] for r in records if r["stage"] == "concept"]
-    assert len(set(concept_ids)) == 2
+    generation_ids = [r["source"]["span_id"] for r in records if r["stage"] == "generation"]
+    assert len(set(generation_ids)) == 2
 
 
 def test_independent_baseline_telemetry_gate(monkeypatch, exported):
@@ -914,12 +909,12 @@ def test_candidate_budget_preserves_priority_and_coexisting_flags(monkeypatch, e
 
     async def scenario():
         with capture("hosted") as state:
-            with detail.execution("concept") as execution:
+            with detail.execution("generation") as execution:
                 execution.outcome = "completed"
             await detail.candidate(
-                "concept",
+                "generation",
                 execution,
-                instruction=specialists.effective_instructions("concept"),
+                instruction=specialists.effective_instructions("generation"),
                 input_payload={"query": PROMPT},
                 output_payload=CARD,
                 input_fields={"query"},
@@ -950,16 +945,16 @@ def test_snapshot_precedes_specialist_mutation(monkeypatch, exported):
     original = StageBoundary.invoke
 
     async def mutate(self, context, call_next):
-        if self.stage == "lore":
+        if self.stage == "generation":
             payload = json.loads(context.messages[0].text)
-            payload["card"]["name"] = "A changed runtime input"
+            payload["query"] = "A changed runtime input"
             context.messages[0].contents[0].text = json.dumps(payload)
         return await original(self, context, call_next)
 
     monkeypatch.setattr(StageBoundary, "invoke", mutate)
     asyncio.run(generate(CardGenerationService(services)))
-    lore = next(r for r in content(exported) if r["stage"] == "lore")
-    assert json.loads(lore["input"]["text"])["name"] == CARD["name"]
+    generation = next(r for r in content(exported) if r["stage"] == "generation")
+    assert json.loads(generation["input"]["text"])["query"] == PROMPT
 
 
 @pytest.mark.parametrize("version", [True, 1.0, "1", 2])
@@ -1043,7 +1038,7 @@ def test_untrusted_carrier_is_withheld_through_terminal_export(
         part = body["output"][0]["content"][0]
         payload = json.loads(part["text"])
         records = payload["metadata"]["agentDetail"]["records"]
-        record = records[1]  # Reject after an earlier candidate has been considered.
+        record = records[0]
         if corruption.startswith("instruction"):
             if corruption in {"instruction_cookie", "instruction_self_signed"}:
                 record["instruction"]["text"] = canary
@@ -1064,7 +1059,7 @@ def test_untrusted_carrier_is_withheld_through_terminal_export(
         elif corruption == "source_trace":
             record["source"]["trace_id"] = "f" * 32
         elif corruption == "duplicate_source":
-            record["source"] = records[0]["source"]
+            records.append(json.loads(json.dumps(record)))
         elif corruption == "deployment_version":
             record["deployment_version"] = "ghp_" + "Ab3d" * 9
         else:
@@ -1119,12 +1114,12 @@ def test_oversized_projection_has_no_partial_json_or_full_validation_claim(monke
         "flavorText": "é" * 280,
         "artBrief": "é" * 300,
     }
-    services, _, transport, _ = stack(monkeypatch, outputs=[large, LORE, ART])
+    services, _, transport, _ = stack(monkeypatch, outputs=[large])
     response = _generate(_client(monkeypatch, services))
     assert response.json()["status"] == "completed"
     records = content(exported)
-    assert len(records) == 5
-    concept = next(r for r in records if r["stage"] == "concept")
+    assert len(records) == 3
+    concept = next(r for r in records if r["stage"] == "generation")
     assert concept["output"] == {
         "text": "",
         "flags": ["omitted_budget", "truncated"],
@@ -1144,7 +1139,7 @@ def test_oversized_projection_has_no_partial_json_or_full_validation_claim(monke
 
 def test_model_output_cannot_supply_carrier_or_source_context(monkeypatch, exported):
     model_output = CARD | {"metadata": {"agentDetail": {"source": {"trace_id": "f" * 32}}}}
-    services, _, transport, _ = stack(monkeypatch, outputs=[model_output, LORE, ART])
+    services, _, transport, _ = stack(monkeypatch, outputs=[model_output])
     response = _generate(_client(monkeypatch, services))
     assert response.status_code != 200
     assert not content(exported)
@@ -1172,15 +1167,15 @@ def test_export_processor_revalidates_each_view(exported, caplog, field):
 @pytest.mark.parametrize("field", ["name", "flavorText", "artBrief"])
 def test_output_credentials_withheld_before_hosted_transport(monkeypatch, exported, caplog, field):
     canary = "ghp_" + "Cd4e" * 9
-    services, _, transport, _ = stack(monkeypatch, outputs=[CARD | {field: canary}, LORE, ART])
+    services, _, transport, _ = stack(monkeypatch, outputs=[CARD | {field: canary}])
     response = _generate(_client(monkeypatch, services))
     assert response.json()["status"] == "completed"
-    assert len(content(exported)) == 5
+    assert len(content(exported)) == 3
     converted = json.dumps(
         [_convert_span_to_envelope(s).as_dict() for s in exported.get_finished_spans()]
     )
-    assert canary not in converted + json.dumps(transport.responses) + caplog.text
-    concept = next(r for r in content(exported) if r["stage"] == "concept")
+    assert canary not in converted + caplog.text
+    concept = next(r for r in content(exported) if r["stage"] == "generation")
     assert concept["output"]["flags"] == ["redacted"]
     assert concept["validation"] == "modified"
     assert json.loads(concept["output"]["text"])[field] == ""
@@ -1225,14 +1220,14 @@ def test_private_label_categories_withheld_before_transport_and_export(
 ):
     label = label.replace("_", separator).swapcase()
     canary = f"{label}=SYNTHETIC-PRIVATE-VALUE"
-    lore = LORE | {"flavorText": canary} if location == "output" else LORE
-    services, _, transport, calls = stack(monkeypatch, outputs=[CARD, lore, ART])
+    card = CARD | {"flavorText": canary} if location == "output" else CARD
+    services, _, transport, calls = stack(monkeypatch, outputs=[card])
     prompt = f"A mountain guardian {canary}" if location == "query" else PROMPT
     result = asyncio.run(generate(CardGenerationService(services), prompt=prompt))
     assert result.status == "completed"
     assert calls[0][1]["query"] == prompt
     records = content(exported)
-    assert len(records) == 5
+    assert len(records) == 3
     hosted = json.loads(transport.responses[0]["output"][0]["content"][0]["text"])
     assert "agentDetail" not in hosted["metadata"]
     converted = json.dumps(
@@ -1240,9 +1235,9 @@ def test_private_label_categories_withheld_before_transport_and_export(
     )
     assert "SYNTHETIC-PRIVATE-VALUE" not in converted + caplog.text
     affected = (
-        [r for r in records if r["stage"] in {"concept", "hosted_invocation"}]
+        [r for r in records if r["stage"] in {"generation", "hosted_invocation"}]
         if location == "query"
-        else [r for r in records if r["stage"] == "lore"]
+        else [r for r in records if r["stage"] == "generation"]
     )
     field = "input" if location == "query" else "output"
     for value in affected:
@@ -1271,7 +1266,7 @@ def test_escaped_private_labels_rejected_at_strict_carrier_boundaries(
         assert value["validation"] == "validated"
 
     if boundary == "export":
-        value = record("hosted", stage="lore").model_dump(mode="json")
+        value = record("hosted", stage="generation").model_dump(mode="json")
         corrupt(value)
         with detail._tracer().start_as_current_span("fcg.agent.detail") as span:
             span.set_attribute("fcg.detail.record", detail.encoded(value).decode())
@@ -1284,7 +1279,7 @@ def test_escaped_private_labels_rejected_at_strict_carrier_boundaries(
             body = response.json()
             part = body["output"][0]["content"][0]
             payload = json.loads(part["text"])
-            corrupt(payload["metadata"]["agentDetail"]["records"][1])
+            corrupt(payload["metadata"]["agentDetail"]["records"][0])
             part["text"] = json.dumps(payload)
             return httpx.Response(200, json=body, request=request)
 
@@ -1318,7 +1313,7 @@ def test_cross_instance_artwork_retry_loser_discards_candidate(monkeypatch, expo
         services.ai_client.generate_image = fail
         partial = await generate(CardGenerationService(services))
         assert partial.status == "awaiting_artwork_retry"
-        assert len(content(exported)) == 3
+        assert len(content(exported)) == 1
         barrier = asyncio.Barrier(2)
 
         async def image(*args, **kwargs):
@@ -1349,7 +1344,7 @@ def test_cross_instance_artwork_retry_loser_discards_candidate(monkeypatch, expo
     asyncio.run(scenario())
     assert sorted(reservations) == [False, True]
     assert len(image_calls) == 2
-    assert len(calls) == 3
+    assert len(calls) == 1
     attempts = [
         s
         for s in new_spans(exported)
@@ -1361,7 +1356,7 @@ def test_cross_instance_artwork_retry_loser_discards_candidate(monkeypatch, expo
     assert records[0]["operation"] == "artwork_retry"
     assert records[0]["stage"] == "image"
     converted = [_convert_span_to_envelope(s).as_dict() for s in new_spans(exported)]
-    assert json.dumps(converted).count("fcg.detail.record") == 4
+    assert json.dumps(converted).count("fcg.detail.record") == 2
 
 
 @pytest.mark.parametrize(
@@ -1386,7 +1381,7 @@ def test_web_invocation_preserves_typed_non_success_through_export(
     original_transport = transport.handle_async_request
 
     async def run(self, context, call_next):
-        if self.stage == "lore":
+        if self.stage == "generation":
             if failure in {"held", "routing_defer"}:
                 return specialists.SpecialistResult(failure, reason="model_incomplete")
             if failure == "timeout":
@@ -1409,7 +1404,7 @@ def test_web_invocation_preserves_typed_non_success_through_export(
         from tests.test_card_orchestrator_models import model_transport
 
         calls, responses, *_ = model_transport.__wrapped__(monkeypatch)
-        responses[1] = httpx.Response(
+        responses[0] = httpx.Response(
             400, json={"error": {"code": "content_filter", "message": "SYNTHETIC-PRIVATE-ERROR"}}
         )
         monkeypatch.setattr(specialists, "Agent", Agent)
@@ -1433,13 +1428,13 @@ def test_web_invocation_preserves_typed_non_success_through_export(
     transport.handle_async_request = transport_failure
     response = _generate(_client(monkeypatch, services))
     if failure == "refused":
-        assert len(calls) == 2
+        assert len(calls) == 1
     assert response.status_code == http_status
     if failure == "refused":
         assert response.json()["errorCode"] == "prompt_rejected"
-        lore = next(s for s in new_spans(exported) if s.name == "card_lore")
+        lore = next(s for s in new_spans(exported) if s.name == "card_generation")
         assert lore.attributes["fcg.detail.result"] == "refused"
-    assert len(content(exported)) == (3 if failure == "schema" else 0)
+    assert len(content(exported)) == (1 if failure == "schema" else 0)
     invocation = next(s for s in new_spans(exported) if s.name == "fcg.agent.invoke")
     assert invocation.attributes["fcg.detail.result"] == outcome
     assert invocation.attributes["fcg.detail.reason"] == reason
@@ -1484,7 +1479,7 @@ def test_response_send_failure_discards_pending_web_content(monkeypatch, exporte
 
     async def app(scope, receive, send):
         await generate(CardGenerationService(services))
-        assert len(content(exported)) == (0 if legacy else 3)
+        assert len(content(exported)) == (0 if legacy else 1)
         await send({"type": "http.response.start", "status": 200, "headers": []})
         await send({"type": "http.response.body", "body": b"complete"})
 
@@ -1498,7 +1493,7 @@ def test_response_send_failure_discards_pending_web_content(monkeypatch, exporte
     middleware = detail.DetailReleaseMiddleware(app)
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(middleware({"type": "http"}, receive, send))
-    assert len(content(exported)) == (0 if legacy else 3)
+    assert len(content(exported)) == (0 if legacy else 1)
     with capture():
         pass
 
@@ -1528,7 +1523,7 @@ def test_html_render_is_part_of_web_boundary(monkeypatch, exported, render_failu
 
     def render(self, *args, **kwargs):
         if "partials/card_result.html" in args:
-            assert len(content(exported)) == (0 if legacy else 3)
+            assert len(content(exported)) == (0 if legacy else 1)
             if render_failure:
                 raise RuntimeError("render failed")
         return original(self, *args, **kwargs)
@@ -1544,7 +1539,7 @@ def test_html_render_is_part_of_web_boundary(monkeypatch, exported, render_failu
                     "csrf_token": csrf,
                 },
             )
-        assert len(content(exported)) == (0 if legacy else 3)
+        assert len(content(exported)) == (0 if legacy else 1)
     else:
         response = client.post(
             "/ui/cards/generate",
@@ -1557,4 +1552,4 @@ def test_html_render_is_part_of_web_boundary(monkeypatch, exported, render_failu
         assert response.status_code == 200
         assert "agentDetail" not in response.text
         assert "capture_version" not in response.text
-        assert len(content(exported)) == 5
+        assert len(content(exported)) == 3
