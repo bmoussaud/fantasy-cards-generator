@@ -16,7 +16,7 @@ from hosted_agents.card_orchestrator.orchestrator import (  # noqa: E402
     CardOrchestrator,
     RuntimeFailure,
 )
-from tests.test_card_orchestrator import ART, CARD, LORE, settings  # noqa: E402
+from tests.test_card_orchestrator import CARD, settings  # noqa: E402
 
 
 @pytest.mark.parametrize(
@@ -47,14 +47,14 @@ def test_pinned_public_completion_fields_are_projected_without_payload(finish, e
         },
         raw_representation=ChatResponse(raw_representation=raw),
     )
-    result = specialists.specialist_result(response, "lore")
+    result = specialists.specialist_result(response, "generation")
     if finish == "stop":
         assert result.status == "completed" and result.text == "PRIVATE_CARD"
         assert result.completion_diagnostics is None
     else:
         assert result.status == "held" and result.text == ""
         expected_value = {
-            "stage": "lore",
+            "stage": "generation",
             "checker": "non_stop_finish",
             "incompleteReason": "max_output_tokens",
             "usage": {"inputTokens": 0, "outputTokens": 3, "totalTokens": 3},
@@ -98,9 +98,9 @@ def test_completion_checker_preserves_refusal_and_error_precedence(kind):
     )
     if kind in {"error", "failed"}:
         with pytest.raises(RuntimeError, match="^model_failed$"):
-            specialists.specialist_result(response, "concept")
+            specialists.specialist_result(response, "generation")
     else:
-        result = specialists.specialist_result(response, "concept")
+        result = specialists.specialist_result(response, "generation")
         assert result.status == "refused" and result.completion_diagnostics is None
 
 
@@ -124,7 +124,7 @@ def test_public_incomplete_reason_has_no_private_payload_fallback(reason, expect
         AgentResponse(
             finish_reason="length", raw_representation=ChatResponse(raw_representation=raw)
         ),
-        "art_direction",
+        "generation",
     )
     assert result.completion_diagnostics.incompleteReason == expected
     assert result.completion_diagnostics.usage is None
@@ -168,7 +168,7 @@ def model_response(output, *, refusal=False, incomplete=False):
 @pytest.fixture
 def model_transport(monkeypatch):
     calls, clients, credentials, projects = [], [], [], []
-    responses = [model_response(CARD), model_response(LORE), model_response(ART)]
+    responses = [model_response(CARD)]
     original_openai = specialists.AIProjectClient.get_openai_client
     original_exit = specialists.AIProjectClient.__aexit__
 
@@ -222,14 +222,14 @@ def model_transport(monkeypatch):
     return calls, responses, clients, credentials, projects
 
 
-def test_real_maf_three_model_calls_are_project_scoped_and_nonpersistent(model_transport):
+def test_real_maf_single_model_call_is_project_scoped_and_nonpersistent(model_transport):
     calls, _, clients, credentials, projects = model_transport
     result = asyncio.run(
         CardOrchestrator(settings()).generate(GenerateCardAgentRequest(query="mountain drake"))
     )
     assert result.status == "completed", result
-    assert result.card.model_dump() == CARD | LORE | ART
-    assert len(calls) == 3
+    assert result.card.model_dump() == CARD
+    assert len(calls) == 1
     for call in calls:
         assert call["model"] == "test"
         assert call["store"] is False
@@ -315,7 +315,7 @@ def test_real_model_http_errors_do_not_retry_or_leak(
             CardOrchestrator(settings()).generate(GenerateCardAgentRequest(query="mountain drake"))
         )
     failure = exc.value
-    assert failure.stage == "concept"
+    assert failure.stage == "generation"
     assert failure.reason == reason
     assert failure.http_type == http_type
     assert failure.http_status == http_status

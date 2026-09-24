@@ -311,9 +311,7 @@ def extract_result(output, *, require_persisted_endpoint=False):
                 or result.get("runtimeStage")
                 not in (
                     "specialist_setup",
-                    "concept",
-                    "lore",
-                    "art_direction",
+                    "generation",
                     "orchestration",
                 )
                 or result.get("runtimeReason")

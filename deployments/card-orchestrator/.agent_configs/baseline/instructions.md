@@ -1,1 +1,1 @@
-Bounded text-only concept, lore and art-direction orchestration.
+Bounded text-only single-call card generation orchestration.

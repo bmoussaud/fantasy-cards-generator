@@ -58,7 +58,7 @@ class CompletionUsage(BaseModel):
 class CompletionDiagnostics(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    stage: Literal["concept", "lore", "art_direction"]
+    stage: Literal["generation"]
     checker: Checker
     finishReason: FinishReason | None = None
     incompleteReason: IncompleteReason | None = None
@@ -71,7 +71,7 @@ class CompletionDiagnostics(BaseModel):
         stage, checker = value.get("stage"), value.get("checker")
         if (
             type(stage) is not str
-            or stage not in ("concept", "lore", "art_direction")
+            or stage != "generation"
             or type(checker) is not str
             or checker not in get_args(Checker)
         ):

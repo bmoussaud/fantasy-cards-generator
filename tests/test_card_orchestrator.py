@@ -48,8 +48,6 @@ CARD = {
     "flavorText": "A spark in the mountain's heart.",
     "artBrief": "An orange scaled drake soaring over a mountain at dusk.",
 }
-LORE = {"name": "Mountain Drake", "flavorText": "It guards the last ember."}
-ART = {"artBrief": "An amber drake guarding a glowing ember under snowy peaks."}
 
 
 def settings(**kwargs):
@@ -63,7 +61,7 @@ def settings(**kwargs):
 
 class FakeSpecialists:
     def __init__(self, outputs=None):
-        self.outputs = outputs or [CARD, LORE, ART]
+        self.outputs = outputs or [CARD]
         self.calls = []
         self.closed = False
 
@@ -158,17 +156,14 @@ def test_sequential_validation_and_mechanics_invariant():
     orchestrator, fake = runtime()
     result = asyncio.run(orchestrator.generate(GenerateCardAgentRequest(query="  drake  ")))
     assert result.status == "completed"
-    assert fake.calls[0] == ("concept", {"query": "drake"})
-    assert fake.calls[1] == ("lore", {"card": CARD})
-    assert fake.calls[2] == ("art_direction", {"card": CARD | LORE})
-    assert result.card.model_dump() == CARD | LORE | ART
-    assert result.artPrompt.endswith(ART["artBrief"])
+    assert fake.calls[0] == ("generation", {"query": "drake"})
+    assert result.card.model_dump() == CARD
+    assert result.artPrompt.endswith(CARD["artBrief"])
     assert fake.closed
     evidence = result.metadata["safetyEvidence"]
     assert [e["stage"] for e in evidence] == [
         "pre_prompt",
-        "concept",
-        "lore",
+        "generation",
         "final_text",
         "final_art_prompt",
         "hosted_guardrails",
@@ -179,7 +174,7 @@ def test_sequential_validation_and_mechanics_invariant():
     assert all(e["decision"] == "allowed" for e in evidence[:-2])
 
 
-def test_success_emits_one_request_three_dependencies_and_five_moderation_decisions(
+def test_success_emits_one_request_one_dependency_and_four_moderation_decisions(
     hosted_metrics,
 ):
     orchestrator, _ = runtime()
@@ -202,11 +197,9 @@ def test_success_emits_one_request_three_dependencies_and_five_moderation_decisi
         )
     ]
     dependencies = hosted_metrics["_dependency_counter"].measurements
-    assert len(dependencies) == 3
+    assert len(dependencies) == 1
     assert [attributes["fcg.stage"] for _, attributes in dependencies] == [
-        "concept",
-        "lore",
-        "art_direction",
+        "generation",
     ]
     assert all(
         attributes
@@ -222,11 +215,10 @@ def test_success_emits_one_request_three_dependencies_and_five_moderation_decisi
         for _, attributes in dependencies
     )
     moderation = hosted_metrics["_moderation_counter"].measurements
-    assert len(moderation) == 5
+    assert len(moderation) == 4
     assert [attributes["fcg.stage"] for _, attributes in moderation] == [
         "pre_prompt",
-        "concept",
-        "lore",
+        "generation",
         "final_text",
         "final_art_prompt",
     ]
@@ -270,7 +262,7 @@ def test_held_and_refused_paths_emit_bounded_outcomes_once(
 
 def test_rate_limited_dependency_emits_throttle_and_failed_request_once(hosted_metrics):
     failure = RuntimeFailure(
-        RuntimeFailureStage.CONCEPT,
+        RuntimeFailureStage.GENERATION,
         RuntimeFailureReason.RATE_LIMITED,
         RuntimeFailureHttpType.RATE_LIMIT,
         RuntimeFailureHttpStatus.HTTP_429,
@@ -296,7 +288,7 @@ def test_rate_limited_dependency_emits_throttle_and_failed_request_once(hosted_m
         "fcg.outcome": "throttled",
         "fcg.error_code": "rate_limited",
         "fcg.retryable": False,
-        "fcg.stage": "concept",
+        "fcg.stage": "generation",
         "fcg.agent_version": "44",
     }
     assert hosted_metrics["_dependency_throttle_counter"].measurements == [
@@ -341,50 +333,48 @@ def test_input_block_stops_all_model_calls(query):
 
 
 @pytest.mark.parametrize(
-    "outputs,count",
+    "outputs",
     [
-        ([CARD | {"artBrief": "Include a copyrighted logo on the drake."}], 1),
-        ([CARD, LORE | {"flavorText": "Graphic gore."}], 2),
-        ([CARD, LORE, ART | {"artBrief": "In the style of a living artist."}], 3),
+        [CARD | {"artBrief": "Include a copyrighted logo on the drake."}],
+        [CARD | {"flavorText": "Graphic gore."}],
+        [CARD | {"artBrief": "In the style of a living artist."}],
     ],
 )
-def test_output_moderation_stops_downstream(outputs, count):
+def test_output_moderation_stops_downstream(outputs):
     orchestrator, fake = runtime(FakeSpecialists(outputs))
     result = asyncio.run(orchestrator.generate(GenerateCardAgentRequest(query="drake")))
     assert result.status == "refused"
     assert result.card is result.artPrompt is None
-    assert len(fake.calls) == count
+    assert len(fake.calls) == 1
     assert fake.closed
 
 
 @pytest.mark.parametrize(
-    "outputs,count",
+    "outputs",
     [
-        ([CARD | {"attack": 100}], 1),
-        ([CARD, LORE | {"attack": 10}], 2),
-        ([CARD, LORE, ART | {"name": "Replaced name"}], 3),
-        ([SpecialistResult("completed", text="not json")], 1),
+        [CARD | {"attack": 100}],
+        [CARD | {"cardType": "villain"}],
+        [SpecialistResult("completed", text="not json")],
     ],
 )
-def test_schema_failure_held_without_repair(outputs, count):
+def test_schema_failure_held_without_repair(outputs):
     orchestrator, fake = runtime(FakeSpecialists(outputs))
     result = asyncio.run(orchestrator.generate(GenerateCardAgentRequest(query="drake")))
     assert result.status == "held"
     assert result.safetyHints == ["schema_invalid"]
     assert result.card is result.artPrompt is None
-    assert len(fake.calls) == count
+    assert len(fake.calls) == 1
 
 
 @pytest.mark.parametrize("status", ["refused", "held", "routing_defer"])
-@pytest.mark.parametrize("stage", [0, 1, 2])
-def test_noncompleted_propagates(status, stage):
-    outputs = [CARD, LORE, ART]
-    outputs[stage] = SpecialistResult(status, text="REJECTED_CONTENT", reason="user-controlled")
+def test_noncompleted_propagates(status):
+    outputs = [CARD]
+    outputs[0] = SpecialistResult(status, text="REJECTED_CONTENT", reason="user-controlled")
     orchestrator, fake = runtime(FakeSpecialists(outputs))
     result = asyncio.run(orchestrator.generate(GenerateCardAgentRequest(query="drake")))
     assert result.status == status
     assert result.card is result.artPrompt is None
-    assert len(fake.calls) == stage + 1
+    assert len(fake.calls) == 1
     assert "REJECTED_CONTENT" not in result.model_dump_json()
     assert "user-controlled" not in result.model_dump_json()
 
@@ -412,7 +402,7 @@ def test_timeout_closes_owned_invocation(overall):
     orchestrator = CardOrchestrator(config, specialist_factory=fake.factory)
     with pytest.raises(RuntimeFailure, match="dependency_failure") as exc:
         asyncio.run(orchestrator.generate(GenerateCardAgentRequest(query="drake")))
-    assert exc.value.stage == ("orchestration" if overall else "concept")
+    assert exc.value.stage == ("orchestration" if overall else "generation")
     assert exc.value.reason == "timeout"
     assert exc.value.http_type == "none"
     assert exc.value.http_status == "none"
@@ -462,7 +452,7 @@ def test_concurrent_invocations_are_isolated():
         assert len(invocations) == 8
         assert len({id(result.card) for result in results}) == 8
         assert {f.calls[0][1]["query"] for f in invocations} == {f"drake {i}" for i in range(8)}
-        assert all(len(fake.calls) == 3 for fake in invocations)
+        assert all(len(fake.calls) == 1 for fake in invocations)
 
     asyncio.run(scenario())
 
@@ -493,7 +483,7 @@ def test_actual_sdk_host_roundtrip_through_existing_operator_parser():
             result = await client.invoke("drake")
         assert result.success, result
         assert result.schema_valid
-        assert result.card == GeneratedCardModel.model_validate(CARD | LORE | ART)
+        assert result.card == GeneratedCardModel.model_validate(CARD)
         assert fake.closed
 
     asyncio.run(scenario())
@@ -547,13 +537,13 @@ def test_dependency_failure_is_genuine_failed_response_not_completed(caplog):
     assert response.status_code == 200
     envelope = response.json()
     assert envelope["status"] == "failed"
-    assert envelope["error"]["code"] == ("card_runtime:concept:dependency_error:none:none")
+    assert envelope["error"]["code"] == ("card_runtime:generation:dependency_error:none:none")
     assert "PRIVATE_PAYLOAD" not in response.text + caplog.text
     result = _parse_success_envelope(envelope, request_id=None, expected_version=None)
     assert result.status == "failed"
     assert not result.success
     assert result.error_code == "card_runtime_failure"
-    assert result.runtime_failure_stage == "concept"
+    assert result.runtime_failure_stage == "generation"
     assert result.runtime_failure_reason == "dependency_error"
     assert result.runtime_http_type == "none"
     assert result.runtime_http_status == "none"
@@ -562,28 +552,28 @@ def test_dependency_failure_is_genuine_failed_response_not_completed(caplog):
 
 def test_runtime_failure_rejects_unknown_diagnostic_values():
     with pytest.raises(ValueError):
-        RuntimeFailure(RuntimeFailureStage.CONCEPT, "private-reason")
+        RuntimeFailure(RuntimeFailureStage.GENERATION, "private-reason")
     with pytest.raises(ValueError):
         RuntimeFailure(
-            RuntimeFailureStage.CONCEPT,
+            RuntimeFailureStage.GENERATION,
             RuntimeFailureReason.DEPENDENCY_ERROR,
             "private-http-type",
         )
     with pytest.raises(ValueError):
         RuntimeFailure(
-            RuntimeFailureStage.CONCEPT,
+            RuntimeFailureStage.GENERATION,
             RuntimeFailureReason.DEPENDENCY_ERROR,
             RuntimeFailureHttpType.NONE,
             "http_418",
         )
     failure = RuntimeFailure(
-        RuntimeFailureStage.CONCEPT,
+        RuntimeFailureStage.GENERATION,
         RuntimeFailureReason.AUTHORIZATION,
         RuntimeFailureHttpType.PERMISSION_DENIED,
         RuntimeFailureHttpStatus.HTTP_403,
     )
     assert failure.response_code == (
-        "card_runtime:concept:authorization:permission_denied:http_403"
+        "card_runtime:generation:authorization:permission_denied:http_403"
     )
 
 
@@ -685,7 +675,7 @@ def test_platform_version_is_distinct_and_metadata_cannot_instruct(monkeypatch):
     payload = json.loads(envelope["output"][0]["content"][0]["text"])
     assert payload["metadata"]["agentVersion"] == "candidate-1"
     assert payload["metadata"]["hostedVersion"] == "42"
-    assert fake.calls[0] == ("concept", {"query": "x"})
+    assert fake.calls[0] == ("generation", {"query": "x"})
     assert "request-123" not in json.dumps(fake.calls)
 
 
@@ -723,8 +713,8 @@ def test_actual_probe_body_roundtrips_without_session_state(monkeypatch, caplog)
         response.json(), request_id=None, expected_version="candidate-1"
     )
     assert parsed.success and parsed.schema_valid
-    assert parsed.card == GeneratedCardModel.model_validate(CARD | LORE | ART)
-    assert fake.calls[0] == ("concept", {"query": payload.SYNTHETIC_QUERY})
+    assert parsed.card == GeneratedCardModel.model_validate(CARD)
+    assert fake.calls[0] == ("generation", {"query": payload.SYNTHETIC_QUERY})
     observed = json.dumps(fake.calls) + response.text + caplog.text
     assert session not in observed
     assert agent_reference["name"] not in observed
@@ -813,7 +803,7 @@ def test_supported_agent_reference_is_routing_only(agent_reference, caplog):
         )
     )
     assert response.status_code == 200
-    assert fake.calls[0] == ("concept", {"query": "x"})
+    assert fake.calls[0] == ("generation", {"query": "x"})
     observed = json.dumps(fake.calls) + response.text + caplog.text
     assert agent_reference["name"] not in observed
     if agent_reference.get("version"):
@@ -871,7 +861,7 @@ def test_derived_art_prompt_has_independent_local_gate(monkeypatch):
     response = asyncio.run(orchestrator.generate(GenerateCardAgentRequest(query="drake")))
     assert response.status == "refused"
     assert response.card is response.artPrompt is None
-    assert len(fake.calls) == 3
+    assert len(fake.calls) == 1
     assert response.metadata["safetyEvidence"][-3]["stage"] == "final_art_prompt"
 
 

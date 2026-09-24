@@ -48,8 +48,11 @@ from tests.test_agent_detail_telemetry import (
     stack,
 )
 from tests.test_agentic_generation import _client, _generate
-from tests.test_card_orchestrator import ART, CARD, LORE, settings, wire
+from tests.test_card_orchestrator import CARD, settings, wire
 from tests.test_card_orchestrator_models import model_response, model_transport  # noqa: F401
+
+HOSTED_STAGES = tuple(specialists.SCHEMAS)
+HOSTED_SPAN_COUNT = len(HOSTED_STAGES)
 
 
 @contextmanager
@@ -125,8 +128,8 @@ def test_original_identity_stage_time_and_azure_batch_conversion(monkeypatch):
             assert "agentDetail" not in result.metadata
         assert provider.force_flush()
         spans = new_spans(exporter)
-        assert [s.name for s in spans] == ["card_concept", "card_lore", "card_art_direction"]
-        assert len(finalized) == 3
+        assert [s.name for s in spans] == ["card_generation"]
+        assert len(finalized) == HOSTED_SPAN_COUNT
         generation_context = spans[0].parent
         generation = next(
             s for s in exporter.get_finished_spans() if s.context == generation_context
@@ -158,7 +161,7 @@ def test_original_identity_stage_time_and_azure_batch_conversion(monkeypatch):
                 span.start_time / 1e9, tz=timezone.utc
             )
         art = spans[-1]
-        assert art.attributes["fcg.detail.moderation"] == "unvalidated"
+        assert art.attributes["fcg.detail.moderation"] == "allowed"
         assert json.loads(art.attributes["fcg.detail.record"])["moderation"] == "allowed"
         assert all(
             c.closed and not c.pending and not c.records and c.execution is None for c in captures
@@ -177,7 +180,7 @@ def test_unsampled_has_no_capture_processing_or_sampling_resurrection(monkeypatc
         for name in ("candidate", "projection_view", "_contracts", "parse_envelope"):
             monkeypatch.setattr(detail, name, forbidden)
         assert asyncio.run(generate(CardGenerationService(services))).status == "completed"
-        assert len(calls) == 3
+        assert len(calls) == HOSTED_SPAN_COUNT
         assert provider.force_flush()
         assert not content(exporter)
         assert_capacity_recovered()
@@ -210,7 +213,7 @@ def test_parent_sampled_decision_is_preserved_when_root_sampling_is_off(monkeypa
         assert response.status == "completed"
         provider.force_flush()
         spans = new_spans(exporter)
-        assert len(spans) == len(converted_records(exporter)) == 3
+        assert len(spans) == len(converted_records(exporter)) == HOSTED_SPAN_COUNT
         assert all(s.context.trace_id == 123 and s.context.trace_flags.sampled for s in spans)
         assert_capacity_recovered()
 
@@ -242,18 +245,18 @@ def test_original_export_rejects_mismatched_identity_and_content(monkeypatch, ex
         provider.add_span_processor(telemetry.PrivacySpanProcessor())
         provider.add_span_processor(SimpleSpanProcessor(exported))
         tracer = provider.get_tracer("untrusted.sdk")
-    span = tracer.start_span("invoke_agent" if mutation == "foreign_name" else "card_concept")
+    span = tracer.start_span("invoke_agent" if mutation == "foreign_name" else "card_generation")
     value = record("hosted", source=detail._source(span))
     attributes = {
         "fcg.detail.runtime": "hosted",
-        "fcg.detail.stage": "concept",
-        "fcg.detail.agent": "card_concept",
+        "fcg.detail.stage": "generation",
+        "fcg.detail.agent": "card_generation",
         "fcg.detail.operation": "generate",
         "fcg.detail.attempt": 1,
         "fcg.detail.duration_ms": 1,
         "fcg.detail.deployment_version": "test",
         "fcg.detail.result": "completed",
-        "fcg.detail.reason": "none",
+        "fcg.detail.reason": "allowed",
         "fcg.detail.validation": "validated",
         "fcg.detail.moderation": "allowed",
     }
@@ -301,7 +304,7 @@ def test_whole_hosted_batch_preflight_rejects_last_candidate(monkeypatch, export
     result = asyncio.run(runtime.generate(GenerateCardAgentRequest(query=PROMPT)))
     assert result.status == "completed"
     assert not content(exported)
-    assert len(new_spans(exported)) == 3
+    assert len(new_spans(exported)) == HOSTED_SPAN_COUNT
     assert all(c.closed and not c.pending and not c.records for c in captures)
     assert_capacity_recovered()
 
@@ -422,11 +425,11 @@ def test_original_deadline_covers_sync_acceptance_preflight(
         target = "serialization" if boundary == "remaining_budget" else boundary
         if name != target or events:
             return
-        assert len(observed["created"]) == 3
+        assert len(observed["created"]) == HOSTED_SPAN_COUNT
         assert not observed["attached"]
         assert not content(exported)
         state = detail.current()
-        assert len(state.records) == len(state.pending) == 3
+        assert len(state.records) == len(state.pending) == HOSTED_SPAN_COUNT
         assert state.deadline == detail.current_deadline() == deadlines[0]
         assert all(p.deadline == deadlines[0] for p in state.pending)
         if phase == "late_boundary":
@@ -453,13 +456,13 @@ def test_original_deadline_covers_sync_acceptance_preflight(
 
     def pending(owned, span, *, ending=False):
         result = original_pending(owned, span, ending=ending)
-        if not ending and owned.stage == "art_direction":
+        if not ending and owned.stage == "generation":
             delay("last_pending")
         return result
 
     def record_check(record, *args, **kwargs):
         result = original_record(record, *args, **kwargs)
-        if in_release and record.stage == "art_direction":
+        if in_release and record.stage == "generation":
             delay("last_record")
         return result
 
@@ -469,7 +472,7 @@ def test_original_deadline_covers_sync_acceptance_preflight(
             in_release
             and type(value) is dict
             and value.keys() == {"version", "records"}
-            and len(value["records"]) == 3
+            and len(value["records"]) == HOSTED_SPAN_COUNT
         ):
             delay("aggregate")
         return result
@@ -519,7 +522,7 @@ def test_original_deadline_covers_sync_acceptance_preflight(
     if phase == "late_boundary":
         assert len(events) == 2
         assert events[-1][1] - events[0][1] >= (0.18 if boundary == "remaining_budget" else 0.2)
-        assert len(model_transport[0]) == len(new_spans(exported)) == 3
+        assert len(model_transport[0]) == len(new_spans(exported)) == HOSTED_SPAN_COUNT
         assert_owned_lifecycle_drained(observed)
     else:
         assert not events
@@ -546,7 +549,7 @@ def test_original_deadline_covers_async_resource_finalization(
             async with original_factory(config) as owned:
                 yield owned
                 state = detail.current()
-                assert len(state.pending) == len(state.records) == 3
+                assert len(state.pending) == len(state.records) == HOSTED_SPAN_COUNT
                 assert state.deadline == deadline == detail.current_deadline()
                 assert all(p.deadline == deadline for p in state.pending)
                 remaining = deadline - asyncio.get_running_loop().time()
@@ -581,7 +584,7 @@ def test_original_deadline_covers_async_resource_finalization(
     asyncio.run(scenario())
     if phase == "late_boundary":
         assert [name for name, _ in events] == ["finalization_entered", "finalization_exited"]
-        assert len(model_transport[0]) == 3
+        assert len(model_transport[0]) == HOSTED_SPAN_COUNT
         assert_owned_lifecycle_drained(observed)
     else:
         assert all(name != "finalization_entered" for name, _ in events)
@@ -590,7 +593,7 @@ def test_original_deadline_covers_async_resource_finalization(
     assert not converted_records(exported)
 
 
-@pytest.mark.parametrize("stage", ["concept", "lore", "art_direction"])
+@pytest.mark.parametrize("stage", ["generation"])
 @pytest.mark.parametrize("boundary", ["before_attributes", "after_attributes"])
 @pytest.mark.parametrize("failure", ["cancel", "exception"])
 def test_stage_exit_structural_failure_finalizes_and_restores_same_task_context(
@@ -646,7 +649,7 @@ def test_stage_exit_structural_failure_finalizes_and_restores_same_task_context(
 
     asyncio.run(scenario())
     assert len(interrupted) == 1
-    expected = ["concept", "lore", "art_direction"].index(stage) + 1 if failure == "cancel" else 3
+    expected = ["generation"].index(stage) + 1 if failure == "cancel" else HOSTED_SPAN_COUNT
     assert len(observed["created"]) == expected
     assert not observed["attached"]
     assert not converted_records(exported)
@@ -726,12 +729,8 @@ def test_nonrecording_requests_cannot_starve_sampled_hosted_capture(
                         "sampled_records": len(converted_records(exporter)),
                     },
                 )
-                assert [s.name for s in spans] == [
-                    "card_concept",
-                    "card_lore",
-                    "card_art_direction",
-                ]
-                assert len(converted_records(exporter)) == 3
+                assert [s.name for s in spans] == ["card_generation"] * HOSTED_SPAN_COUNT
+                assert len(converted_records(exporter)) == HOSTED_SPAN_COUNT
                 assert all(s.context.trace_id == 999 for s in spans)
                 assert not allocations_while_held
                 assert held_buffers == [None] * 16
@@ -746,16 +745,16 @@ def test_nonrecording_requests_cannot_starve_sampled_hosted_capture(
 
         asyncio.run(scenario())
         assert provider.force_flush()
-        assert len(converted_records(exporter)) == 3
+        assert len(converted_records(exporter)) == HOSTED_SPAN_COUNT
         assert len(observed["captures"]) == 1
-        assert len(observed["created"]) == 3
+        assert len(observed["created"]) == HOSTED_SPAN_COUNT
         assert_owned_lifecycle_drained(observed)
 
 
 def test_late_recording_stage_uses_actual_sampler_decision_before_capture(monkeypatch):
     class DropConceptSampler(ParentBased):
         def should_sample(self, parent_context, trace_id, name, *args, **kwargs):
-            if name == "card_concept":
+            if name == "card_generation":
                 return StaticSampler(Decision.DROP).should_sample(
                     parent_context, trace_id, name, *args, **kwargs
                 )
@@ -771,7 +770,7 @@ def test_late_recording_stage_uses_actual_sampler_decision_before_capture(monkey
             stage = self.stage
             span = trace.get_current_span()
             stages.append((stage, span.is_recording(), detail.current()))
-            if stage == "concept":
+            if stage == "generation":
                 assert not observed["captures"]
                 assert_capacity_recovered()
             return await original_run(self, context, call_next)
@@ -791,19 +790,14 @@ def test_late_recording_stage_uses_actual_sampler_decision_before_capture(monkey
                 assert trace.get_current_span() is parent
 
         asyncio.run(scenario())
-        assert [(stage, recording) for stage, recording, _ in stages] == [
-            ("concept", False),
-            ("lore", True),
-            ("art_direction", True),
-        ]
+        assert [(stage, recording) for stage, recording, _ in stages] == [("generation", False)]
         assert stages[0][2] is None
-        assert stages[1][2] is stages[2][2] is observed["captures"][0]
-        assert len(observed["captures"]) == 1
-        assert candidates == ["lore", "art_direction"]
+        assert not observed["captures"]
+        assert candidates == []
         assert provider.force_flush()
-        assert [s.name for s in new_spans(exporter)] == ["card_lore", "card_art_direction"]
-        assert [r["stage"] for r in converted_records(exporter)] == ["lore", "art_direction"]
-        assert_owned_lifecycle_drained(observed)
+        assert not new_spans(exporter)
+        assert not converted_records(exporter)
+        assert not observed["created"] and not observed["ended"] and not observed["attached"]
 
 
 @pytest.mark.parametrize(
@@ -840,7 +834,9 @@ def test_last_live_original_corruption_preflights_entire_batch(monkeypatch, expo
         retained.extend(self.pending)
         span = self.pending[-1].span
         if mutation in {"name", "legacy_name"}:
-            span.update_name("card_concept" if mutation == "name" else "fcg.agent.detail")
+            span.update_name(
+                "card_generation_invalid" if mutation == "name" else "fcg.agent.detail"
+            )
         elif mutation == "parent":
             span._parent = SpanContext(span.context.trace_id, 987, False, TraceFlags(1))
         elif mutation == "start_time":
@@ -861,7 +857,27 @@ def test_last_live_original_corruption_preflights_entire_batch(monkeypatch, expo
         else:
             key = f"fcg.detail.{mutation}"
             current = span.attributes[key]
-            span.set_attribute(key, current + 1 if type(current) is int else "allowed")
+            invalid = {
+                "duration_ms": current + 1,
+                "moderation": "blocked",
+                "stage": "hosted_invocation",
+                "runtime": "web",
+                "agent": "card_orchestrator",
+                "operation": "artwork_retry",
+                "deployment_version": "",
+                "result": "failed",
+                "reason": "not_allowed",
+                "validation": "modified",
+                "attempt": 2,
+            }.get(mutation)
+            span.set_attribute(
+                key,
+                (
+                    invalid
+                    if invalid is not None
+                    else (current + 1 if type(current) is int else "invalid")
+                ),
+            )
         return original_release(self)
 
     def end(self, end_time=None):
@@ -875,7 +891,7 @@ def test_last_live_original_corruption_preflights_entire_batch(monkeypatch, expo
     assert response.status == "completed"
     assert not converted_records(exported)
     assert not content(exported)
-    assert len(ended) == 3
+    assert len(ended) == HOSTED_SPAN_COUNT
     assert all(ended[i] == (saved.span, saved.end_time) for i, saved in enumerate(retained))
     assert all(not saved.span.is_recording() for saved in retained)
     assert_capacity_recovered()
@@ -885,7 +901,7 @@ def test_last_live_original_corruption_preflights_entire_batch(monkeypatch, expo
 def test_unowned_original_lookalike_never_exports_content(exported, unsafe):
     from app.generation import HeuristicModerationService
 
-    span = detail._tracer().start_span("card_concept")
+    span = detail._tracer().start_span("card_generation")
     value = record("hosted", source=detail._source(span))
     if unsafe:
         query = "graphic gore"
@@ -908,7 +924,7 @@ def test_unowned_original_lookalike_never_exports_content(exported, unsafe):
             "fcg.detail.duration_ms": value.duration_ms,
             "fcg.detail.deployment_version": value.deployment_version,
             "fcg.detail.result": "completed",
-            "fcg.detail.reason": "none",
+            "fcg.detail.reason": "allowed",
             "fcg.detail.validation": "validated",
             "fcg.detail.moderation": "allowed",
             "fcg.detail.record": wire_value,
@@ -941,7 +957,7 @@ def test_schema_valid_record_replacement_is_not_candidate_approval(monkeypatch, 
         asyncio.run(runtime.generate(GenerateCardAgentRequest(query=PROMPT))).status == "completed"
     )
     assert not converted_records(exported)
-    assert len(new_spans(exported)) == 3
+    assert len(new_spans(exported)) == HOSTED_SPAN_COUNT
     assert_capacity_recovered()
 
 
@@ -959,7 +975,7 @@ def test_preflight_checks_retained_span_even_without_a_candidate(monkeypatch, ex
         asyncio.run(runtime.generate(GenerateCardAgentRequest(query=PROMPT))).status == "completed"
     )
     assert not converted_records(exported)
-    assert len(new_spans(exported)) == 3
+    assert len(new_spans(exported)) == HOSTED_SPAN_COUNT
     assert_capacity_recovered()
 
 
@@ -986,7 +1002,7 @@ def test_ending_rechecks_exact_record_identity_and_frozen_times(monkeypatch, exp
         return original_finish(self, batch)
 
     def end(self, end_time=None):
-        if self.name == "card_concept":
+        if self.name == "card_generation":
             authorization = detail._ending.get()
             assert list(authorization) == [id(self)]
             authorizations.append(authorization)
@@ -1010,7 +1026,7 @@ def test_ending_rechecks_exact_record_identity_and_frozen_times(monkeypatch, exp
     assert (
         asyncio.run(runtime.generate(GenerateCardAgentRequest(query=PROMPT))).status == "completed"
     )
-    assert [item["stage"] for item in converted_records(exported)] == ["lore", "art_direction"]
+    assert not converted_records(exported)
     assert all(not value for value in authorizations)
     assert all(not context.run(detail._ending.get) for context in contexts)
     assert all(not c._approved_records and not c.pending and not c.records for c in captures)
@@ -1045,7 +1061,7 @@ def test_matching_context_clone_cannot_borrow_active_original_authorization(monk
     assert (
         asyncio.run(runtime.generate(GenerateCardAgentRequest(query=PROMPT))).status == "completed"
     )
-    assert len(originals) == len(clones) == len(converted_records(exported)) == 3
+    assert len(originals) == len(clones) == len(converted_records(exported)) == HOSTED_SPAN_COUNT
     assert all("fcg.detail.record" not in clone.attributes for clone in clones)
     assert all("fcg.detail.record" in original.attributes for original in originals)
     assert all(
@@ -1066,7 +1082,7 @@ def test_release_authorization_is_cleared_on_instrumentation_failure(
     authorizations, contexts = [], []
 
     def fail(span):
-        if span.name == "card_concept":
+        if span.name == "card_generation":
             authorization = detail._ending.get()
             assert list(authorization) == [id(span)]
             authorizations.append(authorization)
@@ -1096,7 +1112,7 @@ def test_release_authorization_is_cleared_on_instrumentation_failure(
     )
     assert authorizations and all(not value for value in authorizations)
     assert all(not context.run(detail._ending.get) for context in contexts)
-    assert len(converted_records(exported)) == 2
+    assert not converted_records(exported)
     assert "SYNTHETIC-PRIVATE-FAILURE" not in caplog.text
     assert_capacity_recovered()
 
@@ -1108,7 +1124,7 @@ def test_simultaneous_threads_cannot_share_release_authorization(monkeypatch, ex
     authorizations = []
 
     def process(self, span):
-        if span.name == "card_concept":
+        if span.name == "card_generation":
             authorization = detail._ending.get()
             assert list(authorization) == [id(span)]
             authorizations.append(authorization)
@@ -1128,7 +1144,7 @@ def test_simultaneous_threads_cannot_share_release_authorization(monkeypatch, ex
         assert [future.result(timeout=20) for future in futures] == ["completed", "completed"]
     assert len(authorizations) == 2 and authorizations[0] is not authorizations[1]
     assert all(not value for value in authorizations)
-    assert len(converted_records(exported)) == 6
+    assert len(converted_records(exported)) == 2 * HOSTED_SPAN_COUNT
     assert_capacity_recovered()
 
 
@@ -1162,7 +1178,7 @@ def test_child_task_cannot_reuse_inherited_ending_authorization(monkeypatch, exp
 
     monkeypatch.setattr(telemetry.PrivacySpanProcessor, "_on_ending", process)
     asyncio.run(scenario())
-    assert len(children) == len(converted_records(exported)) == 3
+    assert len(children) == len(converted_records(exported)) == HOSTED_SPAN_COUNT
     assert all(not holder for holder in holders)
     assert_capacity_recovered()
 
@@ -1232,12 +1248,12 @@ def test_hosted_acceptance_includes_closure_and_business_serialization(
             == "completed"
         )
     assert not content(exported)
-    assert len(new_spans(exported)) == 3
+    assert len(new_spans(exported)) == HOSTED_SPAN_COUNT
     assert_capacity_recovered()
 
 
 def test_unsafe_intermediate_cannot_be_authorized_by_safe_final_card(monkeypatch, exported):
-    _, runtime, _, _ = stack(monkeypatch, outputs=[CARD | {"name": "graphic gore"}, LORE, ART])
+    _, runtime, _, _ = stack(monkeypatch, outputs=[CARD | {"name": "graphic gore"}])
 
     async def permissive(text, *, stage):
         return ModerationDecision(
@@ -1247,9 +1263,9 @@ def test_unsafe_intermediate_cannot_be_authorized_by_safe_final_card(monkeypatch
     runtime.moderation.moderate_text = permissive
     result = asyncio.run(runtime.generate(GenerateCardAgentRequest(query=PROMPT)))
     assert result.status == "completed"
-    assert result.card.name == LORE["name"]
+    assert result.card.name == "graphic gore"
     assert not content(exported)
-    assert len(new_spans(exported)) == 3
+    assert len(new_spans(exported)) == HOSTED_SPAN_COUNT
     assert_capacity_recovered()
 
 
@@ -1269,7 +1285,7 @@ def test_last_hosted_policy_gate_suppresses_all_original_content(monkeypatch, ex
     runtime._gate = gate
     response = asyncio.run(runtime.generate(GenerateCardAgentRequest(query=PROMPT)))
     assert response.status == "refused"
-    assert len(new_spans(exported)) == 3
+    assert len(new_spans(exported)) == HOSTED_SPAN_COUNT
     assert not content(exported)
     assert_capacity_recovered()
 
@@ -1295,7 +1311,7 @@ def test_hosted_release_and_close_are_exactly_once(monkeypatch, exported):
     assert (
         asyncio.run(runtime.generate(GenerateCardAgentRequest(query=PROMPT))).status == "completed"
     )
-    assert len(content(exported)) == len(set(finalized)) == len(finalized) == 3
+    assert len(content(exported)) == len(set(finalized)) == len(finalized) == HOSTED_SPAN_COUNT
     assert_capacity_recovered()
 
 
@@ -1313,7 +1329,7 @@ def test_cancellation_during_finalization_drains_all_owned_spans(
     ended, captures, holders = [], [], []
 
     def interrupt(span):
-        if span.name == "card_concept":
+        if span.name == "card_generation":
             holders.append(detail._ending.get())
             raise asyncio.CancelledError
 
@@ -1361,7 +1377,7 @@ def test_cancellation_during_finalization_drains_all_owned_spans(
     else:
         with pytest.raises(asyncio.CancelledError):
             asyncio.run(runtime.generate(GenerateCardAgentRequest(query=PROMPT)))
-    assert len(ended) == len(set(ended)) == 3
+    assert len(ended) == len(set(ended)) == HOSTED_SPAN_COUNT
     assert all(
         c.closed and not c.pending and not c.records and not c._approved_records for c in captures
     )
@@ -1406,9 +1422,9 @@ def test_business_closure_serialization_and_batch_preflight_precede_first_attach
     def attribute(self, key, value):
         if key == "fcg.detail.record":
             assert events[0] == "closed"
-            first_pending = events.index("concept")
+            first_pending = events.index("generation")
             assert events[1:first_pending] == ["serialized", "revalidated"] * 2
-            assert events[first_pending : first_pending + 3] == ["concept", "lore", "art_direction"]
+            assert events[first_pending : first_pending + 1] == ["generation"]
             events.append("attached")
         return original_set(self, key, value)
 
@@ -1420,14 +1436,14 @@ def test_business_closure_serialization_and_batch_preflight_precede_first_attach
     assert (
         asyncio.run(runtime.generate(GenerateCardAgentRequest(query=PROMPT))).status == "completed"
     )
-    assert events[events.index("attached") :] == ["attached"] * 3
-    assert len(converted_records(exported)) == 3
+    assert events[events.index("attached") :] == ["attached"] * 1
+    assert len(converted_records(exported)) == HOSTED_SPAN_COUNT
     assert_capacity_recovered()
 
 
 @pytest.mark.parametrize(
     "boundary",
-    ["concept", "lore", "art_direction", "candidate", "closure", "final_text", "final_art_prompt"],
+    ["generation", "candidate", "closure", "final_text", "final_art_prompt"],
 )
 @pytest.mark.parametrize("failure", ["cancel", "timeout"])
 def test_every_hosted_await_boundary_finalizes_and_restores(
@@ -1452,7 +1468,7 @@ def test_every_hosted_await_boundary_finalizes_and_restores(
         return await original_run(self, context, call_next)
 
     async def candidate(*args, **kwargs):
-        if boundary == "candidate" and args[0] == "art_direction":
+        if boundary == "candidate" and args[0] == "generation":
             fail()
         return await original_candidate(*args, **kwargs)
 
@@ -1506,17 +1522,17 @@ def test_instrumentation_failure_cannot_strand_other_originals(
     def end(self, end_time=None):
         if self.instrumentation_scope.name == detail.SCOPE:
             ended.append(self.name)
-            if self.name == "card_concept" and failure == "end":
+            if self.name == "card_generation" and failure == "end":
                 raise RuntimeError("SYNTHETIC-PRIVATE-FAILURE")
         return original_end(self, end_time=end_time)
 
     def attributes(self, values):
-        if self.name == "card_concept" and failure == "attributes":
+        if self.name == "card_generation" and failure == "attributes":
             raise RuntimeError("SYNTHETIC-PRIVATE-FAILURE")
         return original_set(self, values)
 
     def process(self, span):
-        if span.name == "card_concept" and failure == "processor":
+        if span.name == "card_generation" and failure == "processor":
             raise RuntimeError("SYNTHETIC-PRIVATE-FAILURE")
         return original_processor(self, span)
 
@@ -1526,8 +1542,8 @@ def test_instrumentation_failure_cannot_strand_other_originals(
     monkeypatch.setattr(telemetry.PrivacySpanProcessor, "_on_ending", process)
     result = asyncio.run(runtime.generate(GenerateCardAgentRequest(query=PROMPT)))
     assert result.status == "completed"
-    assert ended == ["card_concept", "card_lore", "card_art_direction"]
-    assert len(content(exported)) == (0 if failure == "attributes" else 2)
+    assert ended == ["card_generation"]
+    assert not content(exported)
     assert "SYNTHETIC-PRIVATE-FAILURE" not in caplog.text
     assert all(c.closed and not c.pending and not c.records for c in captures)
     assert_capacity_recovered()
@@ -1542,7 +1558,7 @@ def test_hosted_send_failure_does_not_retract_originals(monkeypatch, exported):
     async def failing_send_app(scope, receive, send):
         async def fail(message):
             if message["type"] == "http.response.body":
-                assert len(content(exported)) == 3
+                assert len(content(exported)) == HOSTED_SPAN_COUNT
                 raise RuntimeError("synthetic delivery failure")
             await send(message)
 
@@ -1556,7 +1572,7 @@ def test_hosted_send_failure_does_not_retract_originals(monkeypatch, exported):
 
     with pytest.raises(RuntimeError, match="synthetic delivery failure"):
         asyncio.run(request())
-    assert len(content(exported)) == 3
+    assert len(content(exported)) == HOSTED_SPAN_COUNT
     assert_capacity_recovered()
 
 
@@ -1568,14 +1584,14 @@ def test_v1_web_consumer_accepts_both_producers_without_duplicate_specialists(
     services, _, transport, _ = stack(monkeypatch, legacy=legacy)
     response = _generate(_client(monkeypatch, services))
     assert response.json()["status"] == "completed"
-    assert len(content(exported)) == 5
+    assert len(content(exported)) == 2 + HOSTED_SPAN_COUNT
     hosted = [
         s
         for s in new_spans(exported)
         if "fcg.detail.record" in s.attributes
         and json.loads(s.attributes["fcg.detail.record"])["source_runtime"] == "hosted"
     ]
-    assert len(hosted) == 3
+    assert len(hosted) == HOSTED_SPAN_COUNT
     assert all((s.name == "fcg.agent.detail") == legacy for s in hosted)
     assert ("agentDetail" in json.dumps(transport.responses)) == legacy
     assert "agentDetail" not in response.text
@@ -1596,6 +1612,86 @@ def test_v1_web_consumer_accepts_both_producers_without_duplicate_specialists(
         assert (parsed.agent_detail is not None) == legacy
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing_entry",
+        "duplicate_required",
+        "unexpected_entry",
+        "reordered_suffix",
+        "malformed_entry",
+        "nonallowed_required",
+        "wrong_required_policy",
+        "wrong_required_reason",
+        "wrong_required_decision",
+        "wrong_guardrails_decision",
+        "wrong_guardrails_reason",
+        "wrong_post_image_decision",
+        "wrong_post_image_reason",
+    ],
+)
+def test_release_validator_fail_closed_safety_evidence_matrix(monkeypatch, exported, mutation):
+    services, _, transport, _ = stack(monkeypatch, legacy=True)
+    response = _generate(_client(monkeypatch, services))
+    assert response.json()["status"] == "completed"
+    invocation = next(s for s in new_spans(exported) if s.name == "fcg.agent.invoke")
+    payload = json.loads(transport.responses[0]["output"][0]["content"][0]["text"])
+    evidence = payload["metadata"]["safetyEvidence"]
+    assert len(evidence) == 6
+
+    match mutation:
+        case "missing_entry":
+            evidence.pop()
+        case "duplicate_required":
+            evidence.insert(2, dict(evidence[1]))
+        case "unexpected_entry":
+            evidence.append(
+                {
+                    "stage": "unexpected_stage",
+                    "policy": "original-fantasy-v1",
+                    "decision": "allowed",
+                    "reason": "allowed",
+                }
+            )
+        case "reordered_suffix":
+            evidence[4], evidence[5] = evidence[5], evidence[4]
+        case "malformed_entry":
+            evidence[0] = {"stage": "pre_prompt"}
+        case "nonallowed_required":
+            evidence[0] = evidence[0] | {"decision": "blocked", "reason": "blocked"}
+        case "wrong_required_policy":
+            evidence[1] = evidence[1] | {"policy": "not-original-fantasy-v1"}
+        case "wrong_required_reason":
+            evidence[2] = evidence[2] | {"reason": "not_observed"}
+        case "wrong_required_decision":
+            evidence[3] = evidence[3] | {"decision": "unavailable"}
+        case "wrong_guardrails_decision":
+            evidence[4] = evidence[4] | {"decision": "not_applicable"}
+        case "wrong_guardrails_reason":
+            evidence[4] = evidence[4] | {"reason": "text_only"}
+        case "wrong_post_image_decision":
+            evidence[5] = evidence[5] | {"decision": "unavailable"}
+        case "wrong_post_image_reason":
+            evidence[5] = evidence[5] | {"reason": "not_observed"}
+        case _:
+            raise AssertionError(f"Unhandled mutation {mutation}")
+    transport.responses[0]["output"][0]["content"][0]["text"] = json.dumps(payload)
+
+    parsed = _parse_success_envelope(
+        transport.responses[0],
+        request_id=None,
+        expected_version="candidate-1",
+        capture_details=True,
+        detail_source=detail.Source(
+            trace_id=f"{invocation.context.trace_id:032x}",
+            span_id=f"{invocation.context.span_id:016x}",
+        ),
+    )
+    assert parsed.success
+    assert parsed.agent_detail is None
+    assert parsed.agent_detail_rejected
+
+
 @pytest.mark.parametrize("web", [False, True])
 @pytest.mark.parametrize("hosted", [False, True])
 def test_legacy_producer_mixed_flags_keep_web_as_release_authority(
@@ -1605,7 +1701,7 @@ def test_legacy_producer_mixed_flags_keep_web_as_release_authority(
     response = _generate(_client(monkeypatch, services))
     assert response.json()["status"] == "completed"
     records = converted_records(exported)
-    assert len(records) == (2 + (3 if hosted else 0) if web else 0)
+    assert len(records) == (2 + (HOSTED_SPAN_COUNT if hosted else 0) if web else 0)
     assert ("agentDetail" in json.dumps(transport.responses)) == hosted
     assert "agentDetail" not in response.text
     assert all(
@@ -1638,8 +1734,8 @@ def test_hosted_retained_capacity_with_real_deadline(
 
     async def wait():
         captures.append(detail.current())
-        assert len(detail.current().pending) == 3
-        assert len(detail.current().records) == 3
+        assert len(detail.current().pending) == HOSTED_SPAN_COUNT
+        assert len(detail.current().records) == HOSTED_SPAN_COUNT
         assert detail.current().deadline == deadlines[0] == detail.current_deadline()
         assert all(p.deadline == deadlines[0] for p in detail.current().pending)
         remaining = deadlines[0] - asyncio.get_running_loop().time()
@@ -1659,7 +1755,7 @@ def test_hosted_retained_capacity_with_real_deadline(
 
         async def candidate(*args, **kwargs):
             await original_candidate(*args, **kwargs)
-            if args[0] == "art_direction":
+            if args[0] == "generation":
                 await wait()
 
         monkeypatch.setattr(detail, "candidate", candidate)
@@ -1676,22 +1772,20 @@ def test_hosted_retained_capacity_with_real_deadline(
         tail = time.monotonic() - targets[0]
         record_property("target_to_cleanup_seconds", tail)
         assert tail < 0.5
-        assert len(model_transport[0]) == len(new_spans(exported)) == 3
+        assert len(model_transport[0]) == len(new_spans(exported)) == HOSTED_SPAN_COUNT
         assert captures and all(c.closed and not c.pending and not c.records for c in captures)
     assert not content(exported)
     assert_capacity_recovered()
 
 
-def test_nested_hosted_span_admission_never_retains_more_than_three(exported):
+def test_nested_hosted_span_admission_never_retains_more_than_one(exported):
     with capture("hosted") as state:
-        with detail.execution("concept"):
-            with detail.execution("lore"):
-                with detail.execution("art_direction"):
-                    with detail.execution("concept") as rejected:
-                        assert rejected is None
-        assert len(state.pending) == 3
+        with detail.execution("generation"):
+            with detail.execution("generation") as rejected:
+                assert rejected is None
+        assert len(state.pending) == HOSTED_SPAN_COUNT
         assert not state.eligible
-    assert len(new_spans(exported)) == 3
+    assert len(new_spans(exported)) == HOSTED_SPAN_COUNT
     assert_capacity_recovered()
 
 
@@ -1708,9 +1802,7 @@ def test_seventeenth_real_hosted_request_cannot_allocate_retained_spans(
                 "rulesText": glyph * 400,
                 "flavorText": glyph * 280,
                 "artBrief": glyph * 300,
-            },
-            {"name": glyph * 80, "flavorText": glyph * 280},
-            {"artBrief": glyph * 300},
+            }
         ]
         if maximum_fields
         else None
@@ -1720,7 +1812,7 @@ def test_seventeenth_real_hosted_request_cannot_allocate_retained_spans(
     runtime = CardOrchestrator(settings())
     # Hang watchdog, not a performance SLO; the runtime's own deadlines remain active.
     watchdog_seconds = 2 * runtime.settings.timeout_seconds
-    stage_outputs = dict(zip(SCHEMAS, outputs or [CARD, LORE, ART], strict=True))
+    stage_outputs = dict(zip(SCHEMAS, outputs or [CARD], strict=True))
 
     def respond(call):
         stage = next(
@@ -1792,14 +1884,16 @@ def test_seventeenth_real_hosted_request_cannot_allocate_retained_spans(
             assert len({id(c) for c in active}) == 16
             assert [id(c) for c in observed["captures"]] != [id(c) for c in active]
             assert acquisitions == [True] * 16 + [False]
-            assert all(len(c.pending) == len(c.records) == 3 for c in active)
-            assert all(c.spans == 3 and not c.closed for c in active)
-            assert len({p.source.span_id for c in active for p in c.pending}) == 48
-            assert len(observed["created"]) == 49
+            assert all(len(c.pending) == len(c.records) == HOSTED_SPAN_COUNT for c in active)
+            assert all(c.spans == HOSTED_SPAN_COUNT and not c.closed for c in active)
+            assert (
+                len({p.source.span_id for c in active for p in c.pending}) == 16 * HOSTED_SPAN_COUNT
+            )
+            assert len(observed["created"]) == 17
             assert len(observed["ended"]) == 1
             rejected = observed["ended"][0][0]
             assert rejected is observed["created"][-1]
-            assert rejected.name == "card_concept"
+            assert rejected.name == "card_generation"
             assert not rejected.is_recording()
             assert all(p.span is not rejected for c in active for p in c.pending)
             assert [s.context for s in new_spans(exported)] == [rejected.get_span_context()]
@@ -1820,7 +1914,7 @@ def test_seventeenth_real_hosted_request_cannot_allocate_retained_spans(
                     "omitted_budget" in record.output.flags
                     for c in active
                     for record in c.records
-                    if record.stage == "concept"
+                    if record.stage == "generation"
                 )
             tasks[0].cancel()
         finally:
@@ -1830,11 +1924,11 @@ def test_seventeenth_real_hosted_request_cannot_allocate_retained_spans(
         assert all(r.status == "completed" for r in results[1:])
 
     asyncio.run(scenario())
-    assert len(new_spans(exported)) == 49
-    assert len(model_transport[0]) == 51
+    assert len(new_spans(exported)) == 17 * HOSTED_SPAN_COUNT
+    assert len(model_transport[0]) == 17 * HOSTED_SPAN_COUNT
     assert all(client.is_closed() for client in model_transport[2])
     assert all(credential.closed for credential in model_transport[3])
-    assert len(content(exported)) == len(observed["attached"]) == 45
+    assert len(content(exported)) == len(observed["attached"]) == 15 * HOSTED_SPAN_COUNT
     assert acquisitions == [True] * 16 + [False]
     assert all(c is None or (c.closed and not c.pending and not c.records) for c in captures)
     assert_owned_lifecycle_drained(observed)
@@ -1943,13 +2037,13 @@ def test_batch_export_loss_is_best_effort_and_releases_all_handles(
             assert entered.wait(5)
         response = asyncio.run(runtime.generate(GenerateCardAgentRequest(query=PROMPT)))
         assert response.status == "completed"
-        assert len(ended) == len(set(ended)) == 3
+        assert len(ended) == len(set(ended)) == HOSTED_SPAN_COUNT
         assert all(c.closed and not c.pending and not c.records for c in captures)
     finally:
         unblock.set()
         provider.force_flush()
         provider.shutdown()
-    assert len(content(exporter)) < 3
+    assert len(content(exporter)) <= HOSTED_SPAN_COUNT
     assert_capacity_recovered()
 
 
@@ -1965,14 +2059,14 @@ def test_context_lifecycle_failures_are_content_free_and_business_safe(
 
     def start(name, *args, **kwargs):
         calls.append(name)
-        if name == "card_lore" and failure == "create":
+        if name == "card_generation" and failure == "create":
             raise RuntimeError("SYNTHETIC-PRIVATE-CREATION")
         return original(name, *args, **kwargs)
 
     @contextmanager
     def activate(span, *args, **kwargs):
         ours = (
-            getattr(span, "name", None) == "card_lore"
+            getattr(span, "name", None) == "card_generation"
             and getattr(getattr(span, "instrumentation_scope", None), "name", None) == detail.SCOPE
         )
         if ours and failure == "activate":
@@ -1988,8 +2082,8 @@ def test_context_lifecycle_failures_are_content_free_and_business_safe(
     assert (
         asyncio.run(runtime.generate(GenerateCardAgentRequest(query=PROMPT))).status == "completed"
     )
-    assert calls == ["card_concept", "card_lore", "card_art_direction"]
-    assert len(new_spans(exported)) == (2 if failure == "create" else 3)
+    assert calls == ["card_generation"]
+    assert len(new_spans(exported)) == (0 if failure == "create" else HOSTED_SPAN_COUNT)
     assert not content(exported)
     assert "SYNTHETIC-PRIVATE-CREATION" not in caplog.text
     assert_capacity_recovered()
