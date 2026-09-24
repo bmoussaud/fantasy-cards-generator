@@ -2,17 +2,23 @@
 
 ## Architecture
 
-[![Implemented architecture: FastAPI on Azure Container Apps, Foundry hosted-agent
-orchestration, and private data services](docs/images/architecture.png)](docs/images/architecture.svg)
+[![Image-generation call flow: FastAPI, HTTP, MAF workflow, specialist agents,
+text and image models, and persistence](docs/images/architecture.png)](docs/images/architecture.svg)
 
-FastAPI owns authentication, moderation, image generation, and persistence.
+The generation diagram distinguishes local Python calls from HTTP boundaries.
+The web framework is **FastAPI, not Flask**. FastAPI owns authentication,
+moderation, image generation, and persistence.
 All live card-text generation uses the Foundry hosted `card-orchestrator`;
-there is no direct-model path or automatic fallback. Cosmos DB, Blob Storage,
+its MAF workflow runs three specialist Agents against the text model. The
+backend then calls `gpt-image-2` directly with the resulting art prompt
+(and an optional reference photo). The agents do not generate image pixels.
+There is no direct card-text model path or automatic fallback. Cosmos DB, Blob Storage,
 and Key Vault are reached through private endpoints; browsers receive artwork
 through the backend.
 
 [Editable draw.io source](docs/architecture.drawio) |
 [Self-contained SVG](docs/images/architecture.svg) |
+[Infrastructure overview](docs/images/architecture-overview.svg) |
 [Architecture details and source evidence](docs/architecture.md)
 
 ## Prerequisites
