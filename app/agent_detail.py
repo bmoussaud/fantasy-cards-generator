@@ -43,20 +43,16 @@ RECORD_BYTES = 8192
 RUNTIME_BYTES = 24576
 MAX_BUFFERS = 16
 MAX_SPANS = 16
-MAX_HOSTED_SPANS = 3
+MAX_HOSTED_SPANS = 1
 MAX_TEXT_CHARS = 16384
-STAGES = {"concept", "lore", "art_direction", "hosted_invocation", "image"}
+STAGES = {"generation", "hosted_invocation", "image"}
 NAMES = {
-    "concept": "card_concept",
-    "lore": "card_lore",
-    "art_direction": "card_art_direction",
+    "generation": "card_generation",
     "hosted_invocation": "fcg.agent.invoke",
     "image": "fcg.agent.image",
 }
 AGENTS = {
-    "concept": "card_concept",
-    "lore": "card_lore",
-    "art_direction": "card_art_direction",
+    "generation": "card_generation",
     "hosted_invocation": "card_orchestrator",
     "image": "image_generation",
 }
@@ -74,7 +70,7 @@ CARD_FIELDS = {
 }
 FLAGS = Literal["redacted", "truncated", "suppressed_policy", "unvalidated", "omitted_budget"]
 Runtime = Literal["web", "hosted"]
-Stage = Literal["concept", "lore", "art_direction", "hosted_invocation", "image"]
+Stage = Literal["generation", "hosted_invocation", "image"]
 ExecutionOutcome = Literal["completed", "failed", "refused", "held", "routing_defer", "cancelled"]
 ExecutionReason = Literal[
     "none",
@@ -163,9 +159,7 @@ class Record(Closed):
     redaction_version: Literal[1] = 1
     source_runtime: Runtime
     stage: Stage
-    agent_name: Literal[
-        "card_concept", "card_lore", "card_art_direction", "card_orchestrator", "image_generation"
-    ]
+    agent_name: Literal["card_generation", "card_orchestrator", "image_generation"]
     operation: Literal["generate", "artwork_retry"] = "generate"
     attempt: int = Field(default=1, ge=1, le=16)
     source: Source
@@ -193,9 +187,7 @@ class Record(Closed):
     @model_validator(mode="after")
     def stage_contract(self) -> Record:
         expected = {
-            "concept": ("hosted", "card"),
-            "lore": ("hosted", "refinement"),
-            "art_direction": ("hosted", "refinement"),
+            "generation": ("hosted", "card"),
             "hosted_invocation": ("web", "final_card"),
             "image": ("web", "image_outcome"),
         }
@@ -215,17 +207,16 @@ class Envelope(Closed):
 
 
 def _validate_safety_evidence(value: Any) -> None:
-    required = {"pre_prompt", "concept", "lore", "final_text", "final_art_prompt"}
-    if type(value) is not list or len(value) != 7 or not _bounded_tree(value):
+    required = ("pre_prompt", "generation", "final_text", "final_art_prompt")
+    expected_sequence = (*required, "hosted_guardrails", "post_image")
+    if type(value) is not list or len(value) != len(expected_sequence) or not _bounded_tree(value):
         raise ValueError("invalid_safety")
-    seen = set()
-    for item in value:
+    for index, item in enumerate(value):
         if type(item) is not dict or set(item) != {"stage", "policy", "decision", "reason"}:
             raise ValueError("invalid_safety")
         stage = item["stage"]
-        if type(stage) is not str or stage in seen:
+        if type(stage) is not str or stage != expected_sequence[index]:
             raise ValueError("invalid_safety")
-        seen.add(stage)
         expected = (
             {
                 "stage": stage,
@@ -252,8 +243,6 @@ def _validate_safety_evidence(value: Any) -> None:
         )
         if item != expected:
             raise ValueError("invalid_safety")
-    if seen != required | {"hosted_guardrails", "post_image"}:
-        raise ValueError("invalid_safety")
 
 
 def _bounded_tree(value: Any, depth: int = 0, budget: list[int] | None = None) -> bool:
@@ -312,7 +301,7 @@ def parse_envelope(
         for record in envelope.records:
             if (
                 record.source_runtime != "hosted"
-                or record.stage not in {"concept", "lore", "art_direction"}
+                or record.stage != "generation"
                 or record.stage in seen
                 or len(encoded(record.model_dump(mode="json"))) > RECORD_BYTES
                 or len(record.flags) > 5
@@ -429,10 +418,10 @@ def _contracts(stage: Stage) -> tuple[str, type[BaseModel], type[BaseModel]]:
     from app.generation import GeneratedCardModel
     from app.specialist_contract import SCHEMAS, effective_instructions
 
-    if stage in ("concept", "lore", "art_direction"):
+    if stage == "generation":
         return (
             effective_instructions(stage),
-            QueryProjection if stage == "concept" else GeneratedCardModel,
+            QueryProjection,
             SCHEMAS[stage],
         )
     if stage == "hosted_invocation":
@@ -1365,7 +1354,7 @@ class DetailReleaseMiddleware:
 
 def _validate_original(record: Record, name: str, source: Source, attributes: Any) -> None:
     if (
-        record.stage not in {"concept", "lore", "art_direction"}
+        record.stage != "generation"
         or name != NAMES[record.stage]
         or record.source != source
         or record.source_runtime != "hosted"

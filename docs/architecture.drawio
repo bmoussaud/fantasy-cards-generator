@@ -7,7 +7,7 @@
         <mxCell id="g-title" value="Génération d'une image | composants et appels" style="text;html=0;align=left;fontSize=34;fontStyle=1;fontColor=#172B4D;" vertex="1" parent="1">
           <mxGeometry x="40" y="30" width="2260" height="55" as="geometry"/>
         </mxCell>
-        <mxCell id="g-subtitle" value="FastAPI (pas Flask) : les agents préparent la carte et le prompt ; le backend WEB demande ensuite les pixels au modèle d'image." style="text;html=0;align=left;fontSize=23;fontColor=#42526E;" vertex="1" parent="1">
+        <mxCell id="g-subtitle" value="FastAPI (pas Flask) : l'agent prépare la carte et le prompt ; le backend WEB demande ensuite les pixels au modèle d'image." style="text;html=0;align=left;fontSize=23;fontColor=#42526E;" vertex="1" parent="1">
           <mxGeometry x="40" y="95" width="2260" height="45" as="geometry"/>
         </mxCell>
         <mxCell id="g-legend" value="Bleu plein : appels locaux / enchaînement   |   Violet pointillé : HTTPS vers l'IA   |   Orange : résultat distant   |   Vert : stockage / restitution" style="text;html=0;align=left;fontSize=21;fontColor=#42526E;" vertex="1" parent="1">
@@ -61,34 +61,25 @@
         <mxCell id="g-host" value="3. ResponsesAgentServerHost (8088)&#10;StatelessBoundary → CardOrchestrator&#10;Un service hébergé, distinct du WEB" style="shape=label;rounded=0;fillColor=#E7D3F7;strokeColor=#8651B0;fontColor=#38214B;fontSize=21;align=center;verticalAlign=top;spacingTop=52;imageAlign=center;imageVerticalAlign=top;imageWidth=34;imageHeight=34;image=https://tomkiljo.github.io/ms-icons/icons/Azure_Public_Service_Icons/Icons/ai%20+%20machine%20learning/03513-icon-service-AI-Studio.svg;" vertex="1" parent="g-hosted">
           <mxGeometry x="30" y="70" width="580" height="130" as="geometry"/>
         </mxCell>
-        <mxCell id="g-workflow" value="WorkflowBuilder → WorkflowAgent&#10;Graphe neuf par requête ; décodage + pré-contrôle&#10;AgentExecutor pilote chaque Agent MAF" style="rounded=0;fillColor=#E4D9F5;strokeColor=#8651B0;fontColor=#38214B;fontSize=21;align=center;verticalAlign=middle;" vertex="1" parent="g-hosted">
-          <mxGeometry x="30" y="250" width="580" height="105" as="geometry"/>
+        <mxCell id="g-workflow" value="WorkflowBuilder → WorkflowAgent&#10;Graphe neuf par requête ; décodage + pré-contrôle&#10;AgentExecutor pilote l'unique Agent MAF&#10;Étapes : pre_prompt → generation → contrôles finaux" style="rounded=0;fillColor=#E4D9F5;strokeColor=#8651B0;fontColor=#38214B;fontSize=21;align=center;verticalAlign=middle;" vertex="1" parent="g-hosted">
+          <mxGeometry x="30" y="250" width="580" height="130" as="geometry"/>
         </mxCell>
-        <mxCell id="g-concept" value="4a. AgentExecutor → Agent card_concept&#10;Crée la carte structurée&#10;FoundryChatClient → SDK OpenAI Responses" style="shape=label;rounded=0;fillColor=#E7D3F7;strokeColor=#8651B0;fontColor=#38214B;fontSize=19;align=center;verticalAlign=top;spacingTop=40;imageAlign=center;imageVerticalAlign=top;imageWidth=30;imageHeight=30;image=https://tomkiljo.github.io/ms-icons/icons/Azure_Public_Service_Icons/Icons/ai%20+%20machine%20learning/10165-icon-service-Bot-Services.svg;" vertex="1" parent="g-hosted">
-          <mxGeometry x="30" y="400" width="580" height="110" as="geometry"/>
-        </mxCell>
-        <mxCell id="g-lore" value="4b. AgentExecutor → Agent card_lore&#10;Enrichit name / flavorText de la carte validée&#10;Même client et même modèle texte" style="shape=label;rounded=0;fillColor=#EBDCF7;strokeColor=#8651B0;fontColor=#38214B;fontSize=19;align=center;verticalAlign=top;spacingTop=40;imageAlign=center;imageVerticalAlign=top;imageWidth=30;imageHeight=30;image=https://tomkiljo.github.io/ms-icons/icons/Azure_Public_Service_Icons/Icons/ai%20+%20machine%20learning/10165-icon-service-Bot-Services.svg;" vertex="1" parent="g-hosted">
-          <mxGeometry x="30" y="565" width="580" height="110" as="geometry"/>
-        </mxCell>
-        <mxCell id="g-art" value="4c. AgentExecutor → Agent card_art_direction&#10;Enrichit artBrief de la carte validée&#10;Produit du texte, pas des pixels" style="shape=label;rounded=0;fillColor=#E4D9F5;strokeColor=#8651B0;fontColor=#38214B;fontSize=19;align=center;verticalAlign=top;spacingTop=40;imageAlign=center;imageVerticalAlign=top;imageWidth=30;imageHeight=30;image=https://tomkiljo.github.io/ms-icons/icons/Azure_Public_Service_Icons/Icons/ai%20+%20machine%20learning/10165-icon-service-Bot-Services.svg;" vertex="1" parent="g-hosted">
-          <mxGeometry x="30" y="730" width="580" height="110" as="geometry"/>
+        <mxCell id="g-generation" value="4. AgentExecutor &#8594; Agent card_generation&#10;Un seul appel de génération : concept,&#10;name / flavorText et artBrief en une passe&#10;FoundryChatClient &#8594; SDK OpenAI Responses&#10;Sortie JSON typée, décodée en strict" style="shape=label;rounded=0;fillColor=#E7D3F7;strokeColor=#8651B0;fontColor=#38214B;fontSize=19;align=center;verticalAlign=top;spacingTop=40;imageAlign=center;imageVerticalAlign=top;imageWidth=30;imageHeight=30;image=https://tomkiljo.github.io/ms-icons/icons/Azure_Public_Service_Icons/Icons/ai%20+%20machine%20learning/10165-icon-service-Bot-Services.svg;" vertex="1" parent="g-hosted">
+          <mxGeometry x="30" y="430" width="580" height="200" as="geometry"/>
         </mxCell>
         <mxCell id="g-merge1" value="Fusion typée + contrôles" style="text;html=0;align=right;fontSize=19;fontColor=#592C7A;" vertex="1" parent="g-hosted">
-          <mxGeometry x="50" y="517" width="255" height="40" as="geometry"/>
-        </mxCell>
-        <mxCell id="g-merge2" value="Fusion typée + contrôles" style="text;html=0;align=right;fontSize=19;fontColor=#592C7A;" vertex="1" parent="g-hosted">
-          <mxGeometry x="50" y="682" width="255" height="40" as="geometry"/>
+          <mxGeometry x="50" y="645" width="255" height="40" as="geometry"/>
         </mxCell>
         <mxCell id="g-final" value="5. Fusion + contrôles finaux → terminal&#10;derive_art_prompt(card) : fonction locale&#10;Seule sortie publique : carte + artPrompt&#10;ou arrêt structuré ; jamais de pixels" style="rounded=0;fillColor=#F0E4FA;strokeColor=#8651B0;fontColor=#38214B;fontSize=21;align=center;verticalAlign=middle;" vertex="1" parent="g-hosted">
-          <mxGeometry x="30" y="890" width="580" height="130" as="geometry"/>
+          <mxGeometry x="30" y="725" width="580" height="170" as="geometry"/>
         </mxCell>
-        <mxCell id="g-host-note" value="3 agents internes séquentiels ≠ 3 services déployés" style="text;html=0;align=center;fontSize=20;fontColor=#592C7A;" vertex="1" parent="g-hosted">
-          <mxGeometry x="30" y="1045" width="580" height="40" as="geometry"/>
+        <mxCell id="g-host-note" value="Un seul Agent MAF interne (card_generation)&#10;&#8800; un service déployé séparé&#10;Chaîne concept / lore / art : historique #164,&#10;remplacée par #168 (un seul appel)" style="text;html=0;align=center;fontSize=19;fontColor=#592C7A;" vertex="1" parent="g-hosted">
+          <mxGeometry x="30" y="925" width="580" height="105" as="geometry"/>
         </mxCell>
-        <mxCell id="g-model-note" value="Agent = instructions + schéma + client&#10;Modèle = service d'inférence distant&#10;&#10;3 appels texte sur le parcours complet.&#10;Aucun appel modèle pour les fusions,&#10;le graphe ou derive_art_prompt()." style="text;html=0;align=center;fontSize=22;fontColor=#704913;" vertex="1" parent="g-models">
+        <mxCell id="g-model-note" value="Agent = instructions + schéma + client&#10;Modèle = service d'inférence distant&#10;&#10;1 appel texte sur le parcours complet.&#10;Aucun appel modèle pour la fusion,&#10;le graphe ou derive_art_prompt()." style="text;html=0;align=center;fontSize=22;fontColor=#704913;" vertex="1" parent="g-models">
           <mxGeometry x="30" y="80" width="440" height="240" as="geometry"/>
         </mxCell>
-        <mxCell id="g-text-model" value="MODÈLE TEXTE&#10;gpt-5.5&#10;Déploiement : gpt-5-5&#10;&#10;Un même modèle partagé&#10;par les 3 spécialistes&#10;&#10;Réponses structurées JSON&#10;et filtrage côté modèle" style="shape=label;rounded=0;fillColor=#F8E3C6;strokeColor=#B07829;fontColor=#51370F;fontSize=23;align=center;verticalAlign=top;spacingTop=70;imageAlign=center;imageVerticalAlign=top;imageWidth=44;imageHeight=44;image=https://tomkiljo.github.io/ms-icons/icons/Azure_Public_Service_Icons/Icons/ai%20+%20machine%20learning/03438-icon-service-Azure-OpenAI.svg;" vertex="1" parent="g-models">
+        <mxCell id="g-text-model" value="MODÈLE TEXTE&#10;gpt-5.5&#10;Déploiement : gpt-5-5&#10;&#10;Un seul appel texte&#10;par génération de carte&#10;&#10;Réponses structurées JSON&#10;et filtrage côté modèle" style="shape=label;rounded=0;fillColor=#F8E3C6;strokeColor=#B07829;fontColor=#51370F;fontSize=23;align=center;verticalAlign=top;spacingTop=70;imageAlign=center;imageVerticalAlign=top;imageWidth=44;imageHeight=44;image=https://tomkiljo.github.io/ms-icons/icons/Azure_Public_Service_Icons/Icons/ai%20+%20machine%20learning/03438-icon-service-Azure-OpenAI.svg;" vertex="1" parent="g-models">
           <mxGeometry x="40" y="400" width="420" height="440" as="geometry"/>
         </mxCell>
         <mxCell id="g-image-model" value="MODÈLE IMAGE : gpt-image-2&#10;Texte seul ou texte + photo&#10;Base64 → PNG dans le backend WEB" style="shape=label;rounded=0;fillColor=#FBEACF;strokeColor=#B07829;fontColor=#51370F;fontSize=20;align=center;verticalAlign=top;spacingTop=52;imageAlign=center;imageVerticalAlign=top;imageWidth=34;imageHeight=34;image=https://tomkiljo.github.io/ms-icons/icons/Azure_Public_Service_Icons/Icons/ai%20+%20machine%20learning/03438-icon-service-Azure-OpenAI.svg;" vertex="1" parent="g-models">
@@ -124,29 +115,17 @@
         <mxCell id="g-e-workflow" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#286BA2;strokeWidth=3;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="g-host" target="g-workflow">
           <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="1340" y="445"/></Array></mxGeometry>
         </mxCell>
-        <mxCell id="g-e-concept" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#286BA2;strokeWidth=3;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="g-workflow" target="g-concept">
-          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="1340" y="597"/></Array></mxGeometry>
+        <mxCell id="g-e-generation" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#286BA2;strokeWidth=3;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="g-workflow" target="g-generation">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="1340" y="625"/></Array></mxGeometry>
         </mxCell>
-        <mxCell id="g-e-lore" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#286BA2;strokeWidth=3;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="g-concept" target="g-lore">
-          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="1340" y="758"/></Array></mxGeometry>
+        <mxCell id="g-e-final" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#286BA2;strokeWidth=3;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="g-generation" target="g-final">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="1340" y="900"/></Array></mxGeometry>
         </mxCell>
-        <mxCell id="g-e-art" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#286BA2;strokeWidth=3;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="g-lore" target="g-art">
-          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="1340" y="923"/></Array></mxGeometry>
-        </mxCell>
-        <mxCell id="g-e-final" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#286BA2;strokeWidth=3;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="g-art" target="g-final">
-          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="1340" y="1085"/></Array></mxGeometry>
-        </mxCell>
-        <mxCell id="g-e-text1" value="4a" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#8651B0;strokeWidth=3;dashed=1;exitX=1;exitY=0.5;entryX=0;entryY=0.125;fontSize=20;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="g-concept" target="g-text-model">
-          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="1720" y="675"/></Array><mxPoint y="-18" as="offset"/></mxGeometry>
-        </mxCell>
-        <mxCell id="g-e-text2" value="4b" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#8651B0;strokeWidth=3;dashed=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;fontSize=20;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="g-lore" target="g-text-model">
-          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="1720" y="840"/></Array><mxPoint y="-18" as="offset"/></mxGeometry>
-        </mxCell>
-        <mxCell id="g-e-text3" value="4c" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#8651B0;strokeWidth=3;dashed=1;exitX=1;exitY=0.5;entryX=0;entryY=0.875;fontSize=20;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="g-art" target="g-text-model">
-          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="1720" y="1005"/></Array><mxPoint y="-18" as="offset"/></mxGeometry>
+        <mxCell id="g-e-text1" value="4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#8651B0;strokeWidth=3;dashed=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;fontSize=20;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="g-generation" target="g-text-model">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="1720" y="750"/><mxPoint x="1720" y="840"/></Array><mxPoint y="-18" as="offset"/></mxGeometry>
         </mxCell>
         <mxCell id="g-e-return" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#BB621C;strokeWidth=3;exitX=0;exitY=0.5;entryX=1;entryY=0.5;" edge="1" parent="1" source="g-final" target="g-web-gate">
-          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="950" y="1175"/><mxPoint x="950" y="940"/></Array></mxGeometry>
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="950" y="1030"/><mxPoint x="950" y="940"/></Array></mxGeometry>
         </mxCell>
         <mxCell id="g-e-image-client" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#286BA2;strokeWidth=3;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="g-web-gate" target="g-image-client">
           <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="660" y="1030"/></Array></mxGeometry>
@@ -225,7 +204,7 @@
         <mxCell id="foundry" value="MICROSOFT FOUNDRY | AI Services account + project" style="rounded=0;dashed=1;fillColor=#F6F0FC;strokeColor=#8651B0;fontColor=#592C7A;align=left;verticalAlign=top;spacing=16;fontSize=20;fontStyle=1;container=1;collapsible=0;" vertex="1" parent="1">
           <mxGeometry x="1280" y="250" width="760" height="750" as="geometry"/>
         </mxCell>
-        <mxCell id="agent" value="Hosted card-orchestrator&#10;Required live text Responses&#10;MAF: concept &gt; lore &gt; art&#10;No image or data-store tools" style="shape=label;rounded=0;fillColor=#E7D3F7;strokeColor=#8651B0;fontColor=#38214B;fontSize=17;align=center;verticalAlign=top;spacingTop=52;imageAlign=center;imageVerticalAlign=top;imageWidth=34;imageHeight=34;image=https://tomkiljo.github.io/ms-icons/icons/Azure_Public_Service_Icons/Icons/ai%20+%20machine%20learning/10165-icon-service-Bot-Services.svg;" vertex="1" parent="foundry">
+        <mxCell id="agent" value="Hosted card-orchestrator&#10;Required live text Responses&#10;MAF: single generation stage&#10;No image or data-store tools" style="shape=label;rounded=0;fillColor=#E7D3F7;strokeColor=#8651B0;fontColor=#38214B;fontSize=17;align=center;verticalAlign=top;spacingTop=52;imageAlign=center;imageVerticalAlign=top;imageWidth=34;imageHeight=34;image=https://tomkiljo.github.io/ms-icons/icons/Azure_Public_Service_Icons/Icons/ai%20+%20machine%20learning/10165-icon-service-Bot-Services.svg;" vertex="1" parent="foundry">
           <mxGeometry x="30" y="90" width="320" height="150" as="geometry"/>
         </mxCell>
         <mxCell id="text-model" value="Azure OpenAI text&#10;gpt-5.5 / alias gpt-5-5&#10;Hosted-agent model deployment&#10;No direct web invocation" style="shape=label;rounded=0;fillColor=#E4D9F5;strokeColor=#8651B0;fontColor=#38214B;fontSize=17;align=center;verticalAlign=top;spacingTop=52;imageAlign=center;imageVerticalAlign=top;imageWidth=34;imageHeight=34;image=https://tomkiljo.github.io/ms-icons/icons/Azure_Public_Service_Icons/Icons/ai%20+%20machine%20learning/03438-icon-service-Azure-OpenAI.svg;" vertex="1" parent="foundry">
@@ -294,7 +273,7 @@
         <mxCell id="e-agent" value="Required card-text orchestration" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#8651B0;strokeWidth=2;exitX=1;exitY=0.15;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontSize=16;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="web" target="agent">
           <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="770" y="520"/><mxPoint x="770" y="210"/><mxPoint x="1250" y="210"/><mxPoint x="1250" y="415"/></Array><mxPoint y="20" as="offset"/></mxGeometry>
         </mxCell>
-        <mxCell id="e-specialists" value="3 calls" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#8651B0;strokeWidth=2;dashed=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontSize=15;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="agent" target="text-model">
+        <mxCell id="e-specialists" value="1 call" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#8651B0;strokeWidth=2;dashed=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontSize=15;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="agent" target="text-model">
           <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="1670" y="415"/></Array><mxPoint y="-15" as="offset"/></mxGeometry>
         </mxCell>
         <mxCell id="e-image" value="Artwork / reference-photo edits" style="edgeStyle=orthogonalEdgeStyle;rounded=0;endArrow=block;endFill=1;strokeColor=#8651B0;strokeWidth=2;exitX=0.8;exitY=1;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontSize=16;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="web" target="image-model">

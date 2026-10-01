@@ -17,7 +17,7 @@ services:
     language: docker
     kind: hosted
     name: card-orchestrator
-    description: "Bounded text-only concept, lore and art-direction orchestration."
+    description: "Bounded text-only generation orchestration (one model call)."
     docker:
       path: hosted_agents/card_orchestrator/Dockerfile
       context: .

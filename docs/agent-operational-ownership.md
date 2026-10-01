@@ -50,15 +50,18 @@ versions pass through closed allowlists or bounded identifier validation.
 
 The runtime never adds prompts, responses, card fields, art prompts, user or session
 identifiers, tokens, URLs, endpoints, exception messages, or arbitrary caller values
-to these measurements. **Approved #162 r1 changes new HOSTED versions only:** the
-original `card_concept`, `card_lore`, and `card_art_direction` spans carry strict
-JSON `fcg.detail.record` in Application Insights custom properties, not a promised
-built-in Foundry input/output panel. This is the new-version contract, not evidence
+to these measurements. **Approved #162 r1 changes new HOSTED versions only:** it
+introduced strict JSON `fcg.detail.record` in Application Insights custom
+properties on the then-current original specialist spans (`card_concept`,
+`card_lore`, `card_art_direction`); under the current #168 single-call runtime
+that record is carried by the single original `card_generation` span. Neither is a
+promised built-in Foundry input/output panel. This is the new-version contract,
+not evidence
 of deployment or live portal acceptance. Old #159/#160 HOSTED originals remain
 content-free and use WEB-gated linked detail.
 
-HOSTED now releases its three records only after `completed`, allowed `pre_prompt`,
-`concept`, `lore`, `final_text` and `final_art_prompt` evidence, successful resource
+HOSTED now releases its record only after `completed`, allowed `pre_prompt`,
+`generation`, `final_text` and `final_art_prompt` evidence, successful resource
 closure, independent candidate privacy/validation/moderation and actual business
 response serialization/revalidation. Preflight the whole eligible batch before
 release; a safe final card never approves rejected intermediates. Before acceptance,
@@ -70,9 +73,9 @@ WEB-owned invocation/image detail and old HOSTED carriers retain terminal full W
 success, including successful response delivery. Business behavior is unchanged;
 there is no UI, endpoint, business-response addition or card/audit persistence.
 
-At most three original span handles wait for HOSTED acceptance. Original IDs,
+At most one original span handle waits for HOSTED acceptance. Original IDs,
 parentage and actual stage start/end/duration are preserved: export is delayed,
-execution time is not extended. Structural art-direction moderation may remain
+execution time is not extended. Structural generation moderation may remain
 `unvalidated` at stage end while record `moderation=allowed` means later release
 acceptance. HOSTED guardrails are reported unavailable and post-image checks not
 applicable, not successful checks. There is no historical backfill. Process death
@@ -91,8 +94,9 @@ See [the exact privacy, flag and budget contract](operational-monitoring.md#priv
 and [the combined version/flag matrix](operational-monitoring.md#mixed-version-compatibility-and-legacy-detail)
 for every old/new and ON/OFF combination. The
 [field contract](operational-monitoring.md#exact-record-fields-and-modification-meaning)
-distinguishes concept query/card, lore's pre-call card and `name`/`flavorText`
-refinement, and art's pre-call card and `artBrief` refinement. Effective instructions
+distinguishes generation query input and full-card output for the current #168
+single-call contract. Historical #164 lore/art refinement records remain labeled
+historical evidence only. Effective instructions
 are shared rules + stage task + schema, bound to a trusted version/digest; none of
 these views is reconstructed from the final card or promised verbatim.
 Oversized structured projections omit their entire payload, never
@@ -100,7 +104,8 @@ partial JSON. Redacted or omitted input/output projections carry
 `validation='modified'`, not `validation='validated'`.
 Instruction-only truncation may retain `validation='validated'`; always inspect
 `input.flags`, `instruction.flags`, `output.flags` and aggregate `flags`.
-The limits are 2 KiB UTF-8 per field, 8 KiB per record, 24 KiB/three HOSTED records,
+The limits are 2 KiB UTF-8 per field, 8 KiB per record, 24 KiB/current single HOSTED record
+(historical #162 runtime used three HOSTED records),
 16 HOSTED custom spans and 16 active buffers per process. WEB retains its separate
 24 KiB/five-record and 16-span budgets; no borrowing is permitted.
 Both runtimes parse trimmed case-insensitive true/false at startup,
@@ -192,9 +197,10 @@ included. Last recorded dev remains hosted v9 at `7d68e4e`.
    during synchronous acceptance work, using the original operation deadline.
    Blocking callbacks are not preemptible; report their overrun separately from
    release authorization and cleanup rather than claiming a hard elapsed-time cap.
-   For #164, additionally execute the real Workflow/AgentExecutor/Agent stack over
-   mocked model HTTP: required edges must control dispatch, success makes exactly
-   three model calls and only one terminal envelope can escape. Verify merged
+   For #164 historical context and #168 current behavior, execute the real
+   Workflow/AgentExecutor/Agent stack over mocked model HTTP: required edges
+   must control dispatch. Current #168 acceptance requires exactly one model
+   call and only one terminal envelope can escape. Verify merged
    typed inputs, refusal at each stage, strict provider option translation and
    zero retries. Interleave at least eight requests with cancellation/refusal
    isolation; prove original span identity/timing and context cleanup across SDK

@@ -64,8 +64,7 @@ class SafetyEvidence(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     stage: Literal[
         "pre_prompt",
-        "concept",
-        "lore",
+        "generation",
         "final_text",
         "final_art_prompt",
         "hosted_guardrails",
@@ -90,9 +89,7 @@ class SafetyEvidence(BaseModel):
 
 class RuntimeFailureStage(StrEnum):
     SPECIALIST_SETUP = "specialist_setup"
-    CONCEPT = "concept"
-    LORE = "lore"
-    ART_DIRECTION = "art_direction"
+    GENERATION = "generation"
     ORCHESTRATION = "orchestration"
 
 
@@ -511,26 +508,28 @@ class CardOrchestrator:
                 raise _Stop(result.status, reason)
             try:
                 refinement = SCHEMAS[stage].model_validate_json(result.text, strict=True)
-                merged = (card.model_dump() if card else {}) | refinement.model_dump()
-                card = GeneratedCardModel.model_validate(merged, strict=True)
+                card = GeneratedCardModel.model_validate(refinement.model_dump(), strict=True)
             except (ValidationError, ValueError, TypeError):
                 if detail is not None:
                     detail.reason = "schema_invalid"
                 raise _Stop("held", "schema_invalid") from None
             if detail is not None:
                 detail.validation = "validated"
-            if stage in ("concept", "lore"):
-                try:
-                    await self._gate(
-                        card.model_dump_json(), "post_text", stage, evidence, telemetry_version
-                    )
-                except _Stop as stop:
-                    if detail is not None and stop.status == "refused":
-                        detail.moderation = "blocked"
-                        detail.reason = "suppressed_policy"
-                    raise
-                if detail is not None:
-                    detail.moderation = "allowed"
+            try:
+                await self._gate(
+                    card.model_dump_json(),
+                    "post_text",
+                    "generation",
+                    evidence,
+                    telemetry_version,
+                )
+            except _Stop as stop:
+                if detail is not None and stop.status == "refused":
+                    detail.moderation = "blocked"
+                    detail.reason = "suppressed_policy"
+                raise
+            if detail is not None:
+                detail.moderation = "allowed"
         if detail is not None:
             await agent_detail.candidate(
                 stage,
@@ -538,9 +537,9 @@ class CardOrchestrator:
                 instruction=detail.instruction,
                 input_payload=snapshot,
                 output_payload=refinement.model_dump(),
-                input_fields={"query"} if stage == "concept" else agent_detail.CARD_FIELDS,
+                input_fields={"query"},
                 output_fields=set(SCHEMAS[stage].model_fields),
-                output_kind="card" if stage == "concept" else "refinement",
+                output_kind="card",
                 deployment_version=telemetry_version,
             )
         return card

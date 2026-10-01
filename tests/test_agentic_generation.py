@@ -154,7 +154,7 @@ def test_held_completion_diagnostics_stay_private_with_identical_public_audit_re
     metadata = {}
     if with_diagnostics:
         metadata["completionDiagnostics"] = {
-            "stage": "lore",
+            "stage": "generation",
             "checker": "non_stop_finish",
             "finishReason": "length",
             "incompleteReason": "max_output_tokens",
@@ -224,7 +224,7 @@ def test_held_completion_diagnostics_stay_private_with_identical_public_audit_re
     assert len(invocation) == 2
     if with_diagnostics:
         assert invocation[0]["fcg.completion_reason"] == "non_stop_finish"
-        assert invocation[0]["fcg.stage"] == "lore"
+        assert invocation[0]["fcg.stage"] == "generation"
         assert invocation[0]["fcg.usage.input_tokens"] == 0
     else:
         assert "fcg.completion_reason" not in invocation[0]
@@ -435,7 +435,7 @@ def test_agent_success_preserves_card_contract_image_and_persistence(
             FoundryAgentInvocationResult(
                 status="failed",
                 error_code="card_runtime_failure",
-                runtime_failure_stage="concept",
+                runtime_failure_stage="generation",
                 runtime_failure_reason="timeout",
                 runtime_http_type="api_status",
                 runtime_http_status="http_504",
@@ -447,7 +447,7 @@ def test_agent_success_preserves_card_contract_image_and_persistence(
             FoundryAgentInvocationResult(
                 status="failed",
                 error_code="card_runtime_failure",
-                runtime_failure_stage="lore",
+                runtime_failure_stage="generation",
                 runtime_failure_reason="rate_limited",
                 runtime_http_type="rate_limit",
                 runtime_http_status="http_429",

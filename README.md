@@ -9,9 +9,9 @@ The generation diagram distinguishes local Python calls from HTTP boundaries.
 The web framework is **FastAPI, not Flask**. FastAPI owns authentication,
 moderation, image generation, and persistence.
 All live card-text generation uses the Foundry hosted `card-orchestrator`;
-its MAF workflow runs three specialist Agents against the text model. The
-backend then calls `gpt-image-2` directly with the resulting art prompt
-(and an optional reference photo). The agents do not generate image pixels.
+its MAF workflow runs a single `card_generation` Agent against the text model.
+The backend then calls `gpt-image-2` directly with the resulting art prompt
+(and an optional reference photo). The agent does not generate image pixels.
 There is no direct card-text model path or automatic fallback. Cosmos DB, Blob Storage,
 and Key Vault are reached through private endpoints; browsers receive artwork
 through the backend.

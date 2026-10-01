@@ -114,8 +114,9 @@ Baseline spans, metrics, logs, SDK payload instrumentation and arbitrary
 request/response bodies remain content-free. #159 r1 authorizes only a narrow
 application-owned, closed-schema diagnostic exception for bounded, sanitized
 stage input, effective application instruction, validated output and closed
-execution result. Approved #162 r1 changes the release authority and attribute
-location for the three original HOSTED specialist spans only. The contract below
+execution result. Approved #162 r1 changed release authority and attribute location for historical
+three-span HOSTED specialist capture. Current #168 runtime uses a single
+`card_generation` release record while preserving #162 history labels. The contract below
 applies to new #162-capable versions, not retroactively to #159/#160 deployments.
 [Requester approval](https://github.com/bmoussaud/fantasy-cards-generator/issues/162#issuecomment-5761213933)
 authorizes implementation, not deployment or merge; live portal acceptance remains
@@ -145,7 +146,7 @@ attributes for a HOSTED held-completion result. These describe the failed checke
 
 | Attribute | Allowed values |
 |---|---|
-| `fcg.stage` | `concept`, `lore`, `art_direction` (existing stage attribute) |
+| `fcg.stage` | `generation` (existing stage attribute) |
 | `fcg.completion_reason` | `unexpected_agent_response`, `missing_raw_response`, `non_stop_finish`, `non_text_content` |
 | `fcg.provider_finish_reason` | `stop`, `length`, `content_filter`, `tool_calls`, `function_call`, `other` |
 | `fcg.provider_incomplete_reason` | `max_output_tokens`, `content_filter`, `other` |
@@ -227,14 +228,15 @@ deploy does not apply changed Bicep environment parameters. See
 ### Release ownership, source links and compatibility
 
 New HOSTED attaches a canonical, strictly validated JSON string, `fcg.detail.record`,
-directly to each eligible original `card_concept`, `card_lore`, and
-`card_art_direction` span in Application Insights attributes/custom properties.
+directly to each eligible original `card_generation` span in Application Insights attributes/custom properties.
 This does **not** promise built-in Foundry input/output panel rendering. No replacement
 or parallel detail spans stand in for these originals.
 
-**HOSTED is the release authority for these three records.** Release requires
-`completed`, successful specialist/resource closure, allowed evidence for
-`pre_prompt`, `concept`, `lore`, `final_text`, and `final_art_prompt`, independent
+**HOSTED is the release authority for the current hosted release record.**
+Release requires `completed`, successful specialist/resource closure, and six
+ordered evidence entries: `pre_prompt=allowed`, `generation=allowed`,
+`final_text=allowed`, `final_art_prompt=allowed`, `hosted_guardrails=unavailable`,
+`post_image=not_applicable`, plus independent
 validation/privacy/moderation acceptance of every candidate, and
 serialization/revalidation of the actual business response. The complete eligible batch is
 preflighted before attaching any content or ending any content-bearing span.
@@ -253,7 +255,7 @@ not release an earlier rejected attempt.
 
 ### Original timing and later moderation
 
-At most three pending source span handles are retained request-locally. Each
+At most one pending source span handle is retained request-locally. Each
 original starts with its actual parent and is active only during its stage. At
 stage exit it is detached, with actual end timestamp, monotonic duration and
 stage-local result/validation/moderation frozen. After HOSTED acceptance it receives
@@ -264,7 +266,7 @@ not children of a retained earlier stage. No past trace backfill is possible:
 records are not retroactively attached to already-ended spans.
 
 Structural `fcg.detail.moderation` describes stage-time truth. In particular,
-`card_art_direction` may remain `unvalidated` at its actual end while the eventual
+`card_generation` may remain `unvalidated` at its actual end while the eventual
 record has `moderation=allowed`, representing the later HOSTED release decision.
 That is not backdated moderation. Current HOSTED evidence reports
 `hosted_guardrails=unavailable` and `post_image=not_applicable`; neither is a claim
@@ -274,8 +276,9 @@ Pre-release denial/error finalizes retained spans content-free, restores context
 and clears references/capacity. OFF or nonrecording/unsampled execution skips
 capture-only work and retention; sampled-out spans are not resurrected. Process
 death can lose pending spans; there is no durable recovery. Exporter delivery is
-best-effort and non-atomic: some of the three spans may arrive before an export
-failure, queue loss or shutdown. Missing content is not proof of refusal, and
+best-effort and non-atomic: the current single `card_generation` record (or
+historical three-span #162 exports) may be missing after an export failure, queue
+loss or shutdown. Missing content is not proof of refusal, and
 instrumentation/export failure must not fail otherwise valid business generation.
 
 Admission is lazy: the actual specialist span must be recording and sampled before
@@ -305,11 +308,11 @@ span ending and is cleared even on failure; no persistent span/content registry
 or repeated exporter-side moderation is used.
 Local W3C tests cannot prove Foundry gateway forwarding or a continuous trace tree.
 
-### Workflow task contexts and #164 acceptance
+### Workflow task contexts: #164 historical, #168 current
 
-The approved [#164 graph](architecture-agents-foundry.md#approved-workflow-engine-contract-164-r1)
-does not replace the three original specialist spans with Workflow, executor or
-provider instrumentation. Preserve the exact owned span objects, trace/span IDs,
+The approved [#164 graph](architecture-agents-foundry.md#historical-workflow-engine-contract-164-r1-superseded-by-168-current-contract)
+remains historical context. Current #168 instrumentation emits the single
+`card_generation` release record and does not promote workflow/provider spans. Preserve the exact owned span objects, trace/span IDs,
 parentage and stage start/end timestamps, including parsing, whole-card validation
 and applicable moderation. `StageBoundary` supplies the captured request parent
 context explicitly; span activation/cleanup stay in the invoking executor task,
@@ -360,7 +363,8 @@ Here, **new** means #162-capable and **old** means the #159/#160 carrier contrac
 
 The complete version/flag matrix below describes **eligible application-owned
 content**, not guaranteed delivery. `Originals` means HOSTED-accepted records on
-the three originals; `WEB` means WEB-owned invocation/image detail; `Legacy`
+current #168 single original `card_generation` (historical #162 used three originals);
+`WEB` means WEB-owned invocation/image detail; `Legacy`
 means WEB-linked specialist records from the old private carrier. Both `WEB` and
 `Legacy` require terminal full WEB success. `Carrier only` means private transport
 still occurs but neither runtime releases specialist diagnostic content to telemetry.
@@ -391,7 +395,11 @@ release. Earlier linked `fcg.agent.detail` queries remain relevant to historical
 records, legacy carriers and WEB's own detail, not new HOSTED original attributes.
 
 Carrier absence selects the no-legacy-import path; no capability negotiation or
-migration framework is added. Missing N-1 metadata is supported. Unknown/malformed
+migration framework is added. Missing N-1 metadata is supported. Legacy
+`concept|lore|art_direction` public runtime markers normalize to `generation` in
+current parsers, but legacy seven-entry completion diagnostics/safety traces are
+rejected for #168 diagnostic release capture (`invalid_safety`) until a coordinated
+hosted+web rollout is separately approved and executed. Unknown/malformed
 legacy carriers, versions or source links fail closed for diagnostics with bounded
 content-free reasons, without invalidating otherwise valid business responses.
 Business `schemaVersion=1`, application-version matching and browser/API shapes
@@ -413,12 +421,12 @@ delivery gates; failure returns to intake, not a new store or SDK payload unmute
 | Text field | 2 KiB UTF-8 |
 | Serialized record | 8 KiB |
 | Serialized detail per generation | 48 KiB: fixed 24 KiB HOSTED-source + 24 KiB WEB-source, no borrowing |
-| Content records | 8: at most 3 HOSTED-source + 5 WEB-source |
+| Content records | 6: at most 1 HOSTED-source + 5 WEB-source |
 | New execution/detail spans, including release spans | 32: fixed 16 HOSTED + 16 WEB |
-| Pending original specialist span handles | At most 3 HOSTED, within the existing 16-span ceiling |
+| Pending original specialist span handles | At most 1 HOSTED, within the existing 16-span ceiling |
 | Active request-scoped buffers per process | 16, no waiting, disk spill or cross-request reuse |
 
-New HOSTED has at most 24 KiB and three records; new WEB retains its separate
+New HOSTED has at most 24 KiB and one record; new WEB retains its separate
 24 KiB/five-record budget. With an old HOSTED carrier, WEB candidates may have at
 most 48 KiB serialized-equivalent data per active request across the fixed buckets.
 Bound traversal, transient memory and lifetime against the operation deadline too,
@@ -453,16 +461,15 @@ Redacted or omitted input/output projections carry `validation='modified'`, not
 
 | Original span | `input.text` before that specialist call | `output.text` after typed validation | `output_kind` |
 |---|---|---|---|
-| `card_concept` | Object containing only the actual `query` | The typed concept card | `card` |
-| `card_lore` | The preceding validated concept card snapshot | Only `name` and `flavorText` from the lore refinement | `refinement` |
-| `card_art_direction` | The preceding card snapshot with lore already applied | Only `artBrief` from the art refinement | `refinement` |
+| `card_generation` | Object containing only the actual `query` | The complete typed card | `card` |
 
 The closed card projection contains `schemaVersion`, `name`, `cardType`, `rarity`,
-`manaCost`, `attack`, `health`, `rulesText`, `flavorText` and `artBrief`. The snapshot
-is taken before the call, not reconstructed from the final card. For lore/art it
-projects the card inside the actual `{"card": ...}` application payload; it does
-not claim to reproduce transport wrapping. Outputs represent typed results, not
-the original response bytes or a substituted merged final card.
+`manaCost`, `attack`, `health`, `rulesText`, `flavorText` and `artBrief`.
+For #168 input, `input.text` projects the actual `{"query": ...}` payload captured
+before the model call, not a pre-call `{"card": ...}` snapshot, and does not claim
+to reproduce transport wrapping. The full card projection is `output.text`, taken
+from the validated typed output after that call. Outputs represent typed results,
+not the original response bytes or a substituted merged final card.
 
 `instruction.text` is the bounded safe view of the effective application
 instructions actually supplied: shared rules + stage task + that stage's schema.
@@ -495,12 +502,13 @@ Any modified input/output projection uses `validation=modified`. Inspect all
 three view flags even when validation is `validated`; none of these labels
 guarantees universal safety or PII detection.
 
-Synthetic operator example: a successful `card_lore` candidate for "a silver
+Synthetic operator example: a successful `card_generation` candidate for "a silver
 woodland guardian" can carry a sanitized input, bounded application instruction,
-validated lore refinement and a closed result. If its instruction is shortened,
+validated generation result and a closed record. If its instruction is shortened,
 `truncated` must be visible. A later HOSTED refusal before acceptance suppresses
-all three records. After new HOSTED acceptance, a subsequent WEB image refusal
-cannot retract the lore content; WEB-owned details remain suppressed. For an old
+the current single HOSTED record (historical #162 could suppress three records).
+After new HOSTED acceptance, a subsequent WEB image refusal
+cannot retract generated content; WEB-owned details remain suppressed. For an old
 HOSTED carrier, that image refusal still suppresses linked specialist content.
 Do not paste real requests or trace identifiers into runbooks or tickets.
 
@@ -553,7 +561,7 @@ linked detail copy. It needs no prompt or user-provided trace ID:
 AppDependencies
 | where TimeGenerated > ago(1h)
 | where AppRoleName == "card-orchestrator"
-| where Name in ("card_concept", "card_lore", "card_art_direction")
+| where Name in ("card_generation")
 | where isnotempty(tostring(Properties["fcg.detail.record"]))
 | extend Detail = parse_json(tostring(Properties["fcg.detail.record"]))
 | project TimeGenerated, Name, OperationId, Id, ParentId, DurationMs,
@@ -581,7 +589,7 @@ For example:
 dependencies
 | where timestamp > ago(1h)
 | where cloud_RoleName == "card-orchestrator"
-| where name in ("card_concept", "card_lore", "card_art_direction")
+| where name in ("card_generation")
 | where isnotempty(tostring(customDimensions["fcg.detail.record"]))
 | extend Detail = parse_json(tostring(customDimensions["fcg.detail.record"]))
 | project timestamp, name, operation_Id, id, operation_ParentId, duration,
@@ -609,7 +617,7 @@ For routine triage, start without content or correlation IDs:
 AppDependencies
 | where TimeGenerated > ago(1h)
 | where AppRoleName == "card-orchestrator"
-| where Name in ("card_concept", "card_lore", "card_art_direction")
+| where Name in ("card_generation")
 | summarize Spans=count(),
     WithRecord=countif(isnotempty(tostring(Properties["fcg.detail.record"]))),
     p95DurationMs=percentile(DurationMs, 95)

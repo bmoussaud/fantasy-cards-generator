@@ -29,7 +29,7 @@ SENSITIVE_SENTINEL = "NEVER-EXPORT-user@example.com-secret-token"
 def test_completion_diagnostics_survive_final_span_event_and_log_sanitizers(monkeypatch, checker):
     monkeypatch.delenv("OTEL_SDK_DISABLED", raising=False)
     attributes = {
-        "fcg.stage": "art_direction",
+        "fcg.stage": "generation",
         "fcg.completion_reason": checker,
         "fcg.provider_finish_reason": "length",
         "fcg.provider_incomplete_reason": "max_output_tokens",
@@ -612,7 +612,7 @@ def test_lifecycle_and_operational_signals_emit_bounded_events_and_metrics(
             request_id="request-42",
             error_code="arbitrary-upstream-code",
             retryable=True,
-            stage="concept",
+            stage="generation",
             agent_version="42",
         )
         telemetry.record_retry(dependency="foundry_text", attempt=2, request_id="request-42")

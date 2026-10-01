@@ -32,7 +32,7 @@ AGENT_NAME = "card-orchestrator"
 
 
 @pytest.mark.parametrize("capture_details", [False, True])
-@pytest.mark.parametrize("stage", ["concept", "lore", "art_direction"])
+@pytest.mark.parametrize("stage", ["generation"])
 @pytest.mark.parametrize(
     "checker",
     ["unexpected_agent_response", "missing_raw_response", "non_stop_finish", "non_text_content"],
@@ -76,6 +76,34 @@ def test_completion_diagnostics_closed_projection_before_held_return(
     assert "PRIVATE" not in repr(result)
 
 
+@pytest.mark.parametrize("legacy_stage", ["concept", "lore", "art_direction"])
+@pytest.mark.parametrize(
+    ("reason", "http_type", "http_status"),
+    [
+        ("timeout", "api_status", "http_504"),
+        ("rate_limited", "rate_limit", "http_429"),
+        ("authorization", "permission_denied", "http_403"),
+    ],
+)
+def test_legacy_runtime_failure_stages_map_to_generation(
+    legacy_stage, reason, http_type, http_status
+):
+    result = _parse_success_envelope(
+        responses_envelope(
+            completed_agent_payload(),
+            error={"code": f"card_runtime:{legacy_stage}:{reason}:{http_type}:{http_status}"},
+        ),
+        request_id="req",
+        expected_version=None,
+    )
+    assert result.status == "failed"
+    assert result.error_code == "card_runtime_failure"
+    assert result.runtime_failure_stage == "generation"
+    assert result.runtime_failure_reason == reason
+    assert result.runtime_http_type == http_type
+    assert result.runtime_http_status == http_status
+
+
 @pytest.mark.parametrize(
     "value",
     [
@@ -84,9 +112,9 @@ def test_completion_diagnostics_closed_projection_before_held_return(
         "PRIVATE",
         {},
         {"stage": [], "checker": "non_stop_finish"},
-        {"stage": "concept", "checker": {"PRIVATE": 1}},
+        {"stage": "generation", "checker": {"PRIVATE": 1}},
         {"stage": "PRIVATE", "checker": "non_stop_finish"},
-        {"stage": "concept", "checker": "PRIVATE"},
+        {"stage": "generation", "checker": "PRIVATE"},
     ],
 )
 def test_invalid_or_absent_completion_diagnostics_do_not_change_held_result(value):
@@ -105,7 +133,7 @@ def test_invalid_or_absent_completion_diagnostics_do_not_change_held_result(valu
 def test_completion_diagnostics_not_carried_for_unrelated_outcomes(status):
     payload = completed_agent_payload(status=status)
     payload["metadata"]["completionDiagnostics"] = {
-        "stage": "concept",
+        "stage": "generation",
         "checker": "non_stop_finish",
     }
     result = _parse_success_envelope(
@@ -124,7 +152,7 @@ def test_completion_usage_omits_invalid_counts_independently(field, invalid):
     usage = {"inputTokens": 0, "outputTokens": 2, "totalTokens": 3}
     usage[field] = invalid
     value = CompletionDiagnostics.parse(
-        {"stage": "concept", "checker": "non_stop_finish", "usage": usage}
+        {"stage": "generation", "checker": "non_stop_finish", "usage": usage}
     )
     assert value.usage.model_dump(exclude_none=True) == {
         key: count for key, count in usage.items() if key != field
@@ -146,7 +174,7 @@ def test_completion_projection_never_traverses_or_stringifies_ancillary_payloads
 
     value = CompletionDiagnostics.parse(
         {
-            "stage": "lore",
+            "stage": "generation",
             "checker": "missing_raw_response",
             "finishReason": Hostile(),
             "incompleteReason": {"nested": Hostile()},
@@ -155,11 +183,11 @@ def test_completion_projection_never_traverses_or_stringifies_ancillary_payloads
         }
     )
     assert value.model_dump(exclude_none=True) == {
-        "stage": "lore",
+        "stage": "generation",
         "checker": "missing_raw_response",
     }
     assert value.attributes() == {
-        "fcg.stage": "lore",
+        "fcg.stage": "generation",
         "fcg.completion_reason": "missing_raw_response",
     }
 

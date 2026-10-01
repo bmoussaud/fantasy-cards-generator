@@ -25,30 +25,34 @@ the model is the remote inference service.
 | 1 | Browser submits a prompt and optional photo through HTTPS to `/ui/cards/generate`, or a client uses `/api/v1/cards/generate`. FastAPI authenticates and checks CSRF. | [`app/main.py`](../app/main.py), `ui_generate_card` / `api_generate_card` |
 | 2 | `CardGenerationService` applies quotas, idempotency and local prompt moderation, then invokes `FoundryAgentClient`. | [`app/generation.py`](../app/generation.py), `generate_card` / `_run_generation` / `_generate_text` |
 | 3 | `httpx` sends a nonstream, stateless Responses request to the Foundry agent endpoint using an Entra token. Its `input_text` contains the application JSON request; it does **not** contain the photo. `ResponsesAgentServerHost` and `StatelessBoundary` dispatch to `CardOrchestrator`. | [`app/foundry_agent_client.py`](../app/foundry_agent_client.py), `_invoke_without_outer_timeout` / `_build_responses_url`; [`server.py`](../hosted_agents/card_orchestrator/server.py), `create_host` |
-| 4 | A fresh `WorkflowBuilder` graph, exposed as `WorkflowAgent`, runs concept, lore, then art direction through three `AgentExecutor` instances. Each reached specialist uses `Agent` + `FoundryChatClient` and the same configured text deployment. Typed merges and safety gates separate the stages. | [`workflow.py`](../hosted_agents/card_orchestrator/workflow.py), `build_workflow`; [`specialists.py`](../hosted_agents/card_orchestrator/specialists.py), `FoundrySpecialists.agent` / `create_specialists` |
+| 4 | A fresh `WorkflowBuilder` graph, exposed as `WorkflowAgent`, runs one `generation` stage through a single `AgentExecutor`. That stage uses `Agent` + `FoundryChatClient` (agent name `card_generation`) and the configured text deployment. A typed merge and safety gates bracket the stage. | [`workflow.py`](../hosted_agents/card_orchestrator/workflow.py), `build_workflow`; [`specialists.py`](../hosted_agents/card_orchestrator/specialists.py), `FoundrySpecialists.agent` / `create_specialists` |
 | 5 | The hosted runtime derives `artPrompt` locally from the validated card, closes resources, applies final checks and emits the terminal result. The successful result is text/JSON, not an image. | [`workflow.py`](../hosted_agents/card_orchestrator/workflow.py), `FinalTextAndArtSafety` / `TerminalEnvelope`; [`orchestrator.py`](../hosted_agents/card_orchestrator/orchestrator.py), `generate` |
 | 6 | WEB validates the hosted result and moderates the card text and art prompt. It proceeds to image generation only after successful agent completion and these gates. | [`app/generation.py`](../app/generation.py), `_generate_text` / `_run_generation` |
 | 7 | WEB's `AzureFoundryAIClient` calls `gpt-image-2` through `httpx`: JSON `images/generations` without a reference image, or multipart `images/edits` with one. It decodes the returned `b64_json` into PNG bytes. | [`app/generation.py`](../app/generation.py), `generate_image` / `generate_image_edit` / `_post` / `_post_multipart` |
 | 8 | WEB moderates the generated image, obtains the Cosmos persistence reservation, uploads the PNG to Blob Storage, then saves the card and permitted operational metadata in Cosmos DB. | [`app/generation.py`](../app/generation.py), `_run_generation` / `_persist_completed` |
 | 9 | WEB returns HTML or JSON with the image URL. A subsequent `GET /cards/{card_id}/image` checks ownership and proxies private Blob bytes to the browser. | [`app/main.py`](../app/main.py), `card_image`; [`app/generation.py`](../app/generation.py), `fetch_image` |
 
-The full three-stage text path makes three specialist model calls. The graph,
-typed merges, moderation gates and `derive_art_prompt()` do not make additional
-LLM calls. The text default is model `gpt-5.5`, deployment alias `gpt-5-5`;
-the image default is `gpt-image-2` ([`infra/main.bicep`](../infra/main.bicep)).
-These are repository configuration defaults, not a fresh live-resource query.
+Under the approved #168 single-call contract the text path makes one generation
+model call. The graph, typed merge, moderation gates and `derive_art_prompt()`
+do not make additional LLM calls. The evidence stages are `pre_prompt`,
+`generation`, `final_text` and `final_art_prompt`. The text default is model
+`gpt-5.5`, deployment alias `gpt-5-5`; the image default is `gpt-image-2`
+([`infra/main.bicep`](../infra/main.bicep)). These are repository configuration
+defaults, not a fresh live-resource query. The earlier concept/lore/art-direction
+chain is historical #164 design context, not current runtime behaviour.
 
 The diagram groups the deterministic merge/gate nodes for readability; it does
-not omit them from execution. **Three internal Agents are not three separately
-deployed services.** There is one hosted orchestrator, separate from the WEB
+not omit them from execution. **One internal Agent is not a separately deployed
+service.** There is one hosted orchestrator, separate from the WEB
 Container App, and it has no image-generation or data-store tools.
 
 ### HTTP boundaries and alternative outcomes
 
 WEB calls the project endpoint
 `/agents/{agent-name}/endpoint/protocols/openai/responses`.
-Specialists call the text model through `FoundryChatClient`, `AIProjectClient`
-and the OpenAI Responses SDK; they do not call the hosted orchestrator again.
+The generation stage calls the text model through `FoundryChatClient`,
+`AIProjectClient` and the OpenAI Responses SDK; it does not call the hosted
+orchestrator again.
 The WEB image calls use
 `/openai/deployments/{image-deployment}/images/generations` or `images/edits`.
 Diagram arrows identify the logical caller and callee; response legs are
@@ -66,7 +70,7 @@ reference-photo edit failure instead returns an error. Existing image retries,
 duplicate-request replay and failure audits are not expanded into separate
 arrows. Saving a new reference photo can also invoke Azure AI Content Safety
 before this path; loading a saved photo uses Blob Storage. Photos remain
-WEB-owned and are not sent to the text specialists.
+WEB-owned and are not sent to the hosted generation stage.
 
 ## Infrastructure overview
 
@@ -90,25 +94,18 @@ processing runs without durable request metadata. Cosmos card/retry reservations
 are acquired only after applicable moderation allows, immediately before safe
 completed/partial persistence.
 Every live text request invokes the separately deployed `card-orchestrator`
-through the Foundry project's Responses endpoint. The hosted runtime executes
-three sequential Microsoft Agent Framework specialists:
-concept, lore, and art direction. These are internal specialists, not three
-separate hosted services.
+through the Foundry project's Responses endpoint. Current #168 migration scope
+uses one generation-stage agent request and one model dependency call per
+invocation. `ResponsesAgentServerHost`, pinned dependencies, and the stateless,
+nonstream Responses API remain unchanged.
 
 Approved [#164 r1](https://github.com/bmoussaud/fantasy-cards-generator/issues/164#issuecomment-5775375929)
-changes the internal execution engine, not those service boundaries: per-request
-`WorkflowBuilder` edges dispatch three real `AgentExecutor` specialists through
-`WorkflowAgent`, with deterministic typed decode, merge and safety nodes and only
-a terminal envelope eligible for output. Lore and art receive the complete merged,
-validated card, not the previous agent's raw output. `ResponsesAgentServerHost`,
-the pinned dependencies and the stateless, nonstream Responses API remain unchanged.
-See the [approved graph contract](architecture-agents-foundry.md#approved-workflow-engine-contract-164-r1)
-for request isolation and acceptance requirements. This describes the merged
-implementation in the repository, not a claim about a freshly inspected deployment. The requester
-[approved retaining it without a performance acceptance gate](https://github.com/bmoussaud/fantasy-cards-generator/issues/164#issuecomment-5778665499);
-that waiver changes neither runtime deadlines nor privacy/capture limits.
-The runtime retains a lazy immutable static-contract cache with fresh mutable
-schema copies for each Agent; no r2 startup preparation is implemented.
+workflow details remain documented as historical design and acceptance context,
+but are superseded for current runtime behavior by the approved #168 single-call
+contract. Historical #164 evidence is not rewritten as #168 runtime evidence, and
+#168 does not claim measured quality/cost/latency benefit.
+The last recorded dev deployment remains hosted v9 at `7d68e4e`;
+historical #162 evidence does not validate the new graph.
 
 The agent receives text, not uploaded photos, user/session credentials, or
 data-store access tools. There is no direct card-text implementation or
