@@ -20,6 +20,13 @@ through the backend.
 - [uv](https://docs.astral.sh/uv/)
 - Python 3.12+
 
+## AI-assisted development
+
+This repository uses **Microsoft HVE Core** through shared Copilot plugin
+defaults. Start a Copilot-harness session with **RPI Agent** for research,
+planning, implementation, and review. See [HVE Core setup](docs/hve-core.md)
+for client trust/discovery checks and the project-specific guidance.
+
 ## Local setup
 
 1. Copy the local environment template:

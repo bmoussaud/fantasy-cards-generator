@@ -388,8 +388,8 @@ performance result or acceptance pass.
 Before acceptance, run the pinned hosted stack against deterministic mocked
 model HTTP and verify one generation-stage model call on success, strict schema
 options, and one terminal output. Preserve pre-prompt rejection behavior, safety
-ordering, and request isolation checks. Legolas handles fixture/test runtime
-migration details; this document keeps corpus/prompt/category thresholds unchanged.
+ordering, and request isolation checks. The implementation owner handles fixture/test
+runtime migration details; this document keeps corpus/prompt/category thresholds unchanged.
 
 Retain original-span object/ID/parent/timing assertions (including the existing
 `<5 ms` duration tolerance), whole-batch safe release after closure/serialization,

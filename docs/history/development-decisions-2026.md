@@ -1,0 +1,276 @@
+
+
+# Historical Squad decisions
+
+> Archived during the HVE Core migration. This file is provenance, not active
+> instructions or current approval. See [historical-record guidance](README.md).
+
+## Decisions recorded as active at the time
+
+### 2026-08-28T14:44:19.626+00:00: Issue #35 NAT Gateway egress implementation
+**By:** Gimli
+**What:** Added a VNet/delegated ACA subnet, NAT Gateway + static public IP, a workload-profile Container Apps environment wired to that subnet, and Cosmos firewall rules sourced from the NAT public IP. Also switched the azd-targeted app/environment names to parallel `*-nat` resources, added a temporary `LEGACY_COSMOS_IP_RULE` cutover input, and documented rollout/rollback plus Entra redirect verification.
+**Why:** ACA VNet mode is effectively create-time, so the safest dev rollout is a parallel NAT-backed environment while keeping the old path available until live smoke tests pass. The NAT output removes the fragile manually copied ACA outbound-IP dependency in source control, but the final validation/removal of the legacy `20.10.253.231` rule still requires a real Azure deploy and authenticated Cosmos smoke test.
+
+### 2026-08-29: Separate text, image, and overall generation timeout budgets
+**By:** Aragorn
+**What:** Use 20 seconds per text attempt with two retries, 150 seconds for one image attempt with no automatic image retries, and a 225-second overall request budget. If the overall budget expires during image generation after valid text exists, persist and return `awaiting_artwork_retry` instead of a generic 504. Emit content-free request, stage, attempt, elapsed, and budget logs.
+**Why:** The deployed 8-second shared stage timeout and 18-second overall timeout allowed the outer timeout to cancel image retry handling before it could return the established partial-success contract. Image calls have materially different latency and duplicate-cost characteristics from text calls, while the 225-second total remains below the default 240-second Azure Container Apps ingress timeout.
+
+### 2026-08-29: Use the supported gpt-5.5 chat-completions contract
+**By:** Aragorn
+**What:** Keep the deployed gpt-5.5 model on Azure OpenAI `chat/completions` with API version `2025-03-01-preview`, omit non-default `temperature`, and require every strict JSON-schema property, including `schemaVersion`. Parse only Azure's structured error code/message for bounded diagnostics and redact request content before logging.
+**Why:** The live deployment advertises both chat-completion and Responses capabilities. Managed-identity probes showed `temperature: 0.2` is rejected, then strict schema was rejected because `schemaVersion` was optional; removing the parameter and making all properties required returned HTTP 200.
+
+### 2026-08-31: Dev redeploy blocked by Key Vault deleted-state name conflict after azd down --purge
+**By:** Gimli
+**What:** `azd down --purge --force -e dev` completed successfully and deleted `rg-fantasy-card-dev`, but the immediate `azd up -e dev` reprovision failed during Key Vault creation because `kvfcgdev5a7waraj5zp5i` still exists in Azure's deleted state.
+**Why:** The team needs the exact operational blocker recorded: the destroy step reported success, yet Azure still rejected the Key Vault name with `ConflictError: A vault with the same name already exists in deleted state. You need to either recover or purge existing key vault.`
+
+### 2026-08-31: Issue 48 deployer read-only data access implemented
+**By:** Gimli
+**What:** Implemented issue #48 on branch `squad/48-deployer-data-reader-rbac` in commit `8d5fa302068fc14c4cc1ad0bd7096ee6e30e1308`; opened PR https://github.com/bmoussaud/fantasy-cards-generator/pull/49. Changed `infra/main.bicep`, `infra/main.parameters.json`, `infra/modules/cosmos-db.bicep`, `infra/modules/storage.bicep`, `infra/README.md`, `infra/main.json`, and `tests/test_deployment_config.py`.
+**Why:** The root deployment now resolves `deployer().objectId` once and grants the caller Cosmos DB Built-in Data Reader and Storage Blob Data Reader while preserving separate runtime contributor grants, explicit ARM principal types, and existing private-network/firewall restrictions. Bicep restore/build passed; 12 targeted deployment tests and all 61 repository tests passed; Ruff, Black, and diff checks passed.
+
+### 2026-08-31: Redeployed web-nat after mixed-content fix merge
+**By:** Gimli
+**What:** Pulled `main` to merge commit `e62765ce18605676dec785c9f5084fa7ad40d712`, confirmed `azd` 1.32.0 was authenticated against the `dev` environment targeting `fcg-dev-app-nat`, then ran `azd deploy web-nat --no-prompt`. Azure Container Apps reported success, and `az containerapp show` now reports image `fcgdev5a7waraj5zp5iacr.azurecr.io/fantasy-cards-generator/web-nat-dev:azd-deploy-1788176739` with latest revision `fcg-dev-app-nat--azd-1788176748`.
+**Why:** The merged PR #46 changed the app shell to use root-relative static asset paths. Post-deploy verification showed the live home page now references `/static/css/app.css` and `/static/js/app.js` with no `http://.../static/...` URLs, and direct HTTPS requests to both assets returned `200 OK`.
+
+### 2026-08-31T12:18:17.759+00:00: Use root deployer() identity with explicit ARM principal type
+**By:** Gimli
+**What:** Issue #48, https://github.com/bmoussaud/fantasy-cards-generator/issues/48, requires resolving `deployer().objectId` once in root `infra/main.bicep` and passing it to the Cosmos, Storage, and Foundry modules. Remove the obsolete `AZURE_PRINCIPAL_ID` / `deployerPrincipalId` wiring, but retain `AZURE_PRINCIPAL_TYPE` / `deployerPrincipalType` for Storage and Foundry ARM role assignments. Cosmos native SQL role assignments receive only the resolved principal ID because they do not accept `principalType`.
+**Why:** Official Bicep documentation confirms that `deployer()` identifies the user, service principal, or managed identity that initiated deployment and exposes `objectId`, but not principal type. Explicit ARM role-assignment principal types avoid intermittent service-principal or managed-identity errors, while root resolution avoids relying on undocumented nested-module identity behavior and preserves least privilege for interactive and federated CI deployments.
+
+### 2026-09-01T15:29:35.056+00:00: Use public placeholder image for initial Container App provision
+**By:** Gimli
+**What:** Changed `infra/main.bicep` line 331: when `containerImage` param is empty, use `mcr.microsoft.com/azuredocs/containerapps-helloworld:latest` as the fallback instead of `${registry.outputs.registryLoginServer}/fantasy-cards-generator:latest`.
+**Why:** On a fresh environment (or after a resource-token change like `namePrefix fcg→fcag`), the private ACR is brand new and empty. Pointing the Container App at `latest` in that empty registry causes `MANIFEST_UNKNOWN` during `azd provision`, which blocks the entire `azd deploy` step that would have pushed the real image. The public placeholder is guaranteed to exist, so ARM can create the Container App successfully; `azd deploy` then pushes the real image and updates the running revision in the same `azd up` invocation.
+**Evidence:** Deployment `dev-1788270781` in `rg-fcag-dev` (sub `b8ff3e15`):
+- All infra resources succeeded (VNet, LAW, ACR `fcagdevqhg3qc4rlbt4gacr`, App Insights, Key Vault, Container Apps Environment).
+- The ACR was brand new (zero repositories) due to the `namePrefix` change.
+- `fcag-dev-app-nat` Container App ARM deployment failed with: `ContainerAppOperationError / MANIFEST_UNKNOWN: manifest tagged by "latest" is not found`.
+- `az containerapp revision list` returned `[]` — no revision was ever active.
+
+### 2026-09-01T17:19:00.962+00:00: Preprovision hook ensures APP_SESSION_SECRET_KEY presence
+**By:** Gimli
+**What:** Added `hooks/ensure_session_secret.sh` — an idempotent `preprovision` hook that checks if `APP_SESSION_SECRET_KEY` is set in the azd environment. If absent, generates a cryptographically secure 32-byte hex value via `python3 secrets.token_hex(32)`, stores it via `azd env set` (stdout suppressed, no tracing), and unsets the bash variable. Wired as the first preprovision step in `azure.yaml` so it runs before every `azd up` / `azd provision`. Added three tests in `tests/test_deployment_config.py` covering hook safety, azure.yaml wiring, and Bicep double-gate verification (both ACA native secret and env secretRef gated by same non-empty condition).
+**Why:** Root cause: `APP_SESSION_SECRET_KEY` was absent from azd env. `infra/main.parameters.json` uses empty-string default (`${APP_SESSION_SECRET_KEY=}`), so missing value silently passed `""` to Bicep. `infra/modules/container-apps.bicep` gates both the ACA secret and env secretRef on `!empty(appSessionSecretKeyValue)` — correct logic, but when azd env var is unset, the gate condition strips both on the next `azd up`. Symptoms: Container App crash-loop with `RuntimeError: APP_SESSION_SECRET_KEY must be set`. Solution: Preprovision hook ensures the secret is never absent from azd env before ARM provisioning begins.
+**Evidence:** Post-remediation — Container App revision Running/Healthy. `GET /healthz` returned HTTP 200. Secret value never printed or logged. Key Vault sync deferred to next `azd provision` (deployer principal handles it via Bicep).
+**Applicability & Rules:** (1) Never omit `APP_SESSION_SECRET_KEY` from azd env before provisioning; preprovision hook prevents this unless `--skip-hooks` is used. (2) Both ACA secret and env secretRef must be gated by the same condition; splitting the logic risks ARM deployment failure or app crash. (3) Secret-safe hook conventions apply: no `set -x`, additive paths, suppress stdout for `azd env set`.
+
+### 2026-09-02: Healthz infra wiring uses container-scoped blob RBAC and plain timeout knobs
+**By:** Gimli
+**What:** Narrowed the Container App's Storage Blob Data Contributor assignment from the storage account to the `card-assets` blob container resource, and wired `HEALTHZ_COSMOS_TIMEOUT_MS` / `HEALTHZ_BLOB_TIMEOUT_MS` through azd+Bicep as plain integer settings defaulting to `1500`.
+**Why:** The health probe only needs container metadata access plus the app's existing card-asset read/write/delete path within that one container, so account-wide blob scope was broader than necessary. The timeout knobs are non-secret operational limits and belong in IaC next to the existing ACA probe cadence so probe cost stays bounded and auditable.
+
+### 2026-09-02T14:10:23+0000: ARM float arithmetic must not use `mul()`/`div()` (consolidated)
+**By:** Gandalf, Gimli
+**What:** Supersede the earlier operand-reordering guidance for ARM/Bicep math. ARM template functions such as `mul()` and `div()` reject Float operands regardless of operand order, so expressions involving decimal values such as `dailyQuotaGb=0.25` must not rely on reordering. For the Application Insights ingestion-threshold case, floating-point arithmetic was moved out of ARM variables and into the KQL query text; future infra code should either move float math to downstream consumers, scale values to integers first, or otherwise avoid ARM float arithmetic entirely. Validate ARM expression changes with `azd provision --preview`, because local Bicep build/lint does not catch ARM runtime type-validation failures.
+**Why:** The first fix attempt treated Integer-first operand order as sufficient, but follow-up validation showed the remaining Float operand still fails at ARM runtime. Consolidating the corrected rule removes conflicting guidance while preserving the verified workaround and validation discipline the team should follow for future Bicep changes.
+
+### 2026-09-02T14:10:23+0000: Cosmos connectivity is standardized on Private Endpoint under policy-enforced `publicNetworkAccess: Disabled` (consolidated)
+**By:** Gimli, Gandalf, Scribe
+**What:** Initial Option B experimentation proved the ACA subnet service-endpoint path but also showed that the real blocker was not Cosmos DB Serverless. A management-group Azure Policy (`CosmosDB_PublicNetwork_Modify` in `MCAPSGovDeployPolicies`) continuously enforces `publicNetworkAccess: Disabled`, which makes public IP rules and VNet service-endpoint filtering non-viable as the durable path in this subscription. The repo and live Azure contract are now standardized on the Private Endpoint topology: `infra/modules/cosmos-private-endpoint.bicep` provisions `privatelink.documents.azure.com`, the VNet link, and a Cosmos `Sql` private endpoint in the `private-endpoints` subnet; related comments/tests were corrected to attribute the behavior to governance policy rather than a Serverless limitation. Benoit's 2026-09-02 smoke test confirmed `azd up` plus authenticated card generation succeeded end to end through Azure Container Apps → Private Endpoint → Cosmos DB.
+**Why:** Consolidating the Option B attempt, the root-cause correction, the Private Endpoint deployment, and the user smoke test removes conflicting guidance and leaves one clear network decision for future work. Follow-on cleanup may remove the now-inert NAT IP rule, but all new Cosmos connectivity work should assume `publicNetworkAccess: Disabled` remains policy-enforced and that Private Endpoint is the supported path here.
+
+### 2026-09-02T14:10:23+0000: Image quality is an end-to-end low/medium/high contract (consolidated)
+**By:** Aragorn, Legolas
+**What:** Standardize image quality as a `low|medium|high` setting, defaulting to `low`, across the UI form, request handling, service layer, settings validation, and the Azure OpenAI `gpt-image-2` image-generation request. The UI submits the selected value, controller/service code forwards it to `CardGenerationService.generate_card()`, invalid values are normalized or rejected consistently, and deployments must wire `IMAGE_QUALITY` through local env examples and Bicep/Container Apps configuration.
+**Why:** Quality materially affects latency and cost, so the team needs one repo-wide contract instead of separate frontend and backend assumptions. Consolidating the UI and backend decisions records that the form, handler, service signature, and Azure request parameter must evolve together.
+
+### 2026-09-02: Authenticated library uses 5-minute user-delegation Blob SAS URLs
+**By:** Legolas
+**Status:** ⚠️ **SUPERSEDED** by 2026-09-03T08:15:45+0000 decision (backend-proxy route).
+**What:** Library pages mint read-only user-delegation SAS URLs for card artwork with a fixed 5-minute expiry, staying within the storage account's existing 15-minute SAS policy window. The Container App runtime identity keeps container-scoped Blob Data Contributor for uploads and gains account-scoped Storage Blob Delegator only for SAS signing. Cross-user detail lookups fail closed as 404s from the authenticated user's partition rather than revealing whether another owner's card exists.
+**Why:** User-delegation SAS keeps storage private, avoids Shared Key access, and matches the repo's Entra-first posture. Five minutes is long enough for normal page loads and reloads but short enough to limit replay value if a URL leaks. Returning 404 for non-owned card IDs avoids existence disclosure while still enforcing strict per-user scoping.
+
+### 2026-09-03T08:15:45+0000: Authenticated library serves artwork via backend-proxy image route, not SAS URLs
+
+**By:** Legolas
+
+**Supersedes:** the 2026-09-02 decision "Authenticated library uses 5-minute user-delegation Blob SAS URLs."
+
+**What:** Card artwork on `/my/cards` and `/my/cards/{card_id}` is now served through the existing backend-proxy route `GET /cards/{card_id}/image` (`app/main.py` → `card_service.fetch_image()`), which streams blob bytes read by the Container App's managed identity over the private endpoint. `CardLibraryService._resolve_image_url` now returns `record.image_url_path` directly (already set to `/cards/{card_id}/image` at persistence time) instead of minting a signed URL. `AzureBlobSasUrlSigner`, `create_asset_url_signer`, and the `AbstractAssetUrlSigner` protocol were removed from `app/library.py`, and the now-unused **Storage Blob Delegator** RBAC role assignment was removed from `infra/modules/storage.bicep` (confirmed via repo-wide grep that nothing else depended on it). Ownership enforcement (401 unauthenticated, 404 for non-owned cards) is preserved because it already lives in the shared `AbstractCardRepository.get(owner_id, card_id)` scoping used by both the library and the original card-generation image route.
+
+**Why:** The 2026-09-02 SAS approach doesn't work — the storage account is deployed with `networkAcls.defaultAction: Deny` and `publicNetworkAccess: Disabled` (Gimli's private-endpoint-only posture), so a browser on the public internet can never reach `*.blob.core.windows.net` directly. Azure Storage returns HTTP 403 for network-ACL-blocked requests regardless of SAS validity — this was a network-layer denial, not a signing bug. Reusing the pre-existing backend-proxy pattern (the same one the non-library card generation flow already used successfully) avoids reintroducing any client-direct-to-storage dependency and keeps the storage account's network posture untouched, as required. Any future image-delivery work for authenticated views should assume the browser will never talk to Blob Storage directly while `publicNetworkAccess: Disabled` remains in force.
+
+**Evidence:** Issue https://github.com/bmoussaud/fantasy-cards-generator/issues/59, PR https://github.com/bmoussaud/fantasy-cards-generator/pull/60. `python -m pytest tests/` (139 passed), `ruff check .`, `black --check .`, and `az bicep build --file infra/main.bicep` all pass locally.
+
+### 2026-09-03T08:46:26+0000: Library timestamps render as friendly UTC labels
+**By:** Legolas
+**What:** Authenticated library views should render card timestamps as human-friendly UTC text like `Sep 3, 2026, 8:04 AM UTC` while preserving the original ISO-8601 value in each `<time datetime="...">` attribute.
+**Why:** This keeps the UI readable without changing storage or API contracts, and it establishes a reusable presentation convention for future server-rendered metadata in the app until we have a user-specific timezone or locale strategy.
+
+### 2026-09-03: Profile-photo image conditioning is feasible on current GPT-image-2 stack
+**By:** Aragorn
+**What:** Issue #63 can proceed without an Azure model swap. The current backend already targets the `gpt-image-2` deployment in Azure AI Foundry for artwork generation, and the smallest viable implementation is to keep that deployment, add an optional backend-mediated photo upload, and switch photo-backed generations onto an image-edit/reference-image call while preserving the existing text-only `/images/generations` path as fallback.
+**Why:** Repository inspection shows today's flow is text-only end to end (`CardGenerateBody` + URL-encoded form parsing + JSON-only `generate_image()` call), so the gap is API/request-shape support rather than model capability. Microsoft Foundry docs for `gpt-image-2` indicate text+image inputs, edits/variations, and face-preservation support, which matches the issue goal better than reverting to older DALL-E guidance; however, uploads must stay on the existing backend-proxy pattern because Blob Storage is private-endpoint-only and prior SAS-url attempts failed under `publicNetworkAccess: Disabled`.
+
+### 2026-09-03: Profile photo generation backend contract for issue 63
+**By:** Aragorn
+**What:** The card generation backend now accepts an optional `photo` upload for reference-image generation. Frontend-integrated HTMX requests should submit `POST /ui/cards/generate` as `multipart/form-data` with fields `prompt` (required string), `csrf_token` (required string), `idempotency_key` (optional string), `quality` (optional `low|medium|high`), and `photo` (optional file). The JSON API `POST /api/v1/cards/generate` remains unchanged for text-only requests (`prompt`, `csrfToken`, `idempotencyKey`) and also accepts `multipart/form-data` with `prompt`, `csrfToken`, `idempotencyKey`, and optional `photo`. Accepted `photo` content types are `image/jpeg`, `image/png`, and `image/webp`, with a 5 MB max; invalid type returns `415 unsupported_photo_type`, oversized upload returns `413 photo_too_large`. When `photo` is present, backend generation uses Azure AI Foundry `POST /openai/deployments/{FOUNDRY_IMAGE_DEPLOYMENT}/images/edits?api-version=2025-04-01-preview`; when `photo` is absent, it keeps the existing `/images/generations` flow.
+**Why:** This gives Legolas an exact upload contract to build against without changing the existing text-only flow. The uploaded image is read in memory only for the single request and is never persisted to Blob Storage or any durable store, matching the privacy/retention requirement and avoiding browser-facing photo URLs.
+
+### 2026-09-03: Profile photo upload UI for issue 63
+**By:** Legolas
+**What:** Added an optional profile photo file input to the card generator form, wired the HTMX form for multipart submission, and added inline client-side preview/validation messaging for JPEG, PNG, and WebP uploads up to 5 MB.
+**Why:** This keeps the new reference-image capability visible and understandable in the existing server-rendered UI while matching Aragorn's backend upload contract and preserving the current error-panel flow for server-side validation failures.
+
+### 2026-09-03: Fix Azure Foundry bearer auth headers for all live image/text calls
+**By:** Aragorn
+**What:** `AzureFoundryAIClient._post()` and `_post_multipart()` now send the actual Microsoft Entra access token using an Authorization header built with plain string concatenation, and regression coverage asserts the real bearer value is passed on both the JSON (`/chat/completions`) and multipart (`/images/edits`) request paths.
+**Why:** Repository inspection confirmed `_access_token()` has always requested the Cognitive Services scope (`https://cognitiveservices.azure.com/.default`), which matches Azure AI Foundry / Azure OpenAI bearer-token auth, but the outbound header code never interpolated the token. Git history shows the bug has existed since commit `87c51d0` introduced the live Foundry client, so there is no prior working bearer-header implementation in this codebase. This environment can silently rewrite the on-disk display of code using an f-string for this specific header shape, so future fixes should keep the concatenation form instead of an f-string. Local/test workflows defaulting to `AI_MODE=mock`, plus the prior live-mode regression test asserting the placeholder, explain why the breakage escaped detection.
+
+### 2026-09-03: Issue 67 saved-photo library should use dedicated blob storage plus owner-scoped metadata
+**By:** Aragorn
+**What:** Recommend issue #67 store durable reference photos in a new private `profile-photos` blob container, but keep photo metadata in the existing Cosmos `cards` container under the current `/userId` partition model with a new `documentType` such as `saved-photo`. Saved-photo reads must reuse the backend-proxy pattern (new authenticated image route, no SAS URLs), and card generation should accept either a fresh upload or an owner-scoped `saved_photo_id`, with explicit opt-in (`Save this photo to my library`) and a small per-user cap (recommend 10).
+**Why:** The storage account is already private-endpoint-only with `publicNetworkAccess: Disabled`, so browser-direct blob access remains a dead end; the proven `/cards/{card_id}/image` proxy pattern should be extended, not replaced. A dedicated blob container separates longer-lived personal photos from generated card assets and allows least-privilege container-scoped Blob RBAC, while reusing the existing Cosmos container avoids extra data-plane/RBAC sprawl because the app already multiplexes document types (`card`, `generation-audit`) inside the same owner partition. Opt-in persistence with user deletion and pre-persist moderation is the minimum privacy/safety bar now that uploads would become durable instead of #63's in-memory-only flow.
+
+### 2026-09-03: Issue 67 backend API contract for saved photos
+**By:** Aragorn
+**What:** Implemented backend support for a durable saved-photo library. Authenticated routes are: `POST /my/photos` (`multipart/form-data`: required `photo`, required CSRF as `csrf_token` or `csrfToken`, optional `label` 1-80 chars) returning `201` with `{schemaVersion, photoId, label, createdAt, updatedAt, image:{contentType,sizeBytes,url}, thumbnail:{contentType,url}}`; `GET /my/photos` returning `200` with `{schemaVersion, photos:[...]}` newest-first; `GET /my/photos/{photo_id}/image` and `GET /my/photos/{photo_id}/thumbnail` streaming owner-scoped bytes; and `DELETE /my/photos/{photo_id}` requiring `X-CSRF-Token` (or `csrfToken` query param) and returning `204`. Non-owned or missing saved photos return `404` with `errorCode: saved_photo_not_found`.
+
+Card generation now accepts a saved photo as an alternative reference source. `POST /api/v1/cards/generate` accepts JSON `{prompt, csrfToken, idempotencyKey?, savedPhotoId?}` for saved-photo reuse, and both `POST /api/v1/cards/generate` and `POST /ui/cards/generate` accept multipart fields `prompt`, CSRF (`csrfToken` or `csrf_token`), `idempotencyKey`/`idempotency_key`, optional `photo`, optional `saved_photo_id`, optional `save_photo` boolean, and optional `photo_label`. `photo` and `saved_photo_id`/`savedPhotoId` are mutually exclusive and return `422 photo_reference_conflict` if both are supplied. `save_photo=true` requires a fresh upload and fails with `422 saved_photo_requires_upload` otherwise. When `save_photo=true`, the backend performs Azure AI Content Safety moderation before persistence and rejects the whole request on moderation/configuration/cap failures rather than falling back to ephemeral generation.
+**Why:** Legolas needs a stable contract for the frontend library picker and generate-form integration. This record also captures the production caveat: Bicep defaults `CONTENT_SAFETY_ENDPOINT` to the existing Azure AI Services / Foundry account endpoint, but live rollout still needs Azure-side verification that Content Safety is available with sufficient quota in the target region/account before enabling the feature in production.
+
+### 2026-09-03: Issue 67 frontend uses a dedicated My Photos page plus client-side saved-photo picker
+**By:** Legolas
+**What:** Added a new authenticated UI route at `/my/photos/library` for managing saved reference photos, while keeping the existing `GET /my/photos` JSON endpoint as the shared data source for both the library page and the generator's saved-photo picker. The generator now enforces the upload-vs-saved-photo exclusivity in the browser by clearing the file input when a saved photo is chosen and clearing the saved-photo selection when a fresh upload is chosen.
+**Why:** This avoids colliding with Aragorn's API route names, keeps the frontend aligned with the established `/my/cards` navigation pattern, and lets the browser reuse the same owner-scoped API contract for listing and deleting photos without adding new backend HTML partial endpoints.
+
+### 2026-09-03: Harden blank optional card-generation form fields
+**By:** Aragorn
+**What:** Normalize blank or whitespace-only card-generation form strings to `None` before validation, and add a matching `CardGenerateBody` validator for `idempotencyKey`, `csrfToken`, and `savedPhotoId`.
+**Why:** Issue #69 showed that an always-present hidden `saved_photo_id` field could submit `""` and trigger a 422 for every generation request. Hardening both form parsing and the request model covers `saved_photo_id`, `photo_label`, `idempotency_key`, `csrf_token`, and `quality` consistently while preserving CSRF failures for missing or blank tokens.
+
+### 2026-09-03: Issue 69 frontend disables empty saved-photo field submission
+**By:** Legolas
+**What:** Updated the generator form so the hidden `saved_photo_id` field is rendered disabled by default and is only enabled by `app/static/js/app.js` while a saved photo is actively selected. Clearing the picker selection or switching back to a fresh upload now disables the field again so browsers omit it from form submissions.
+**Why:** Aragorn's backend hardening now tolerates blank optional form values, but the saved-photo picker should not submit an empty hidden field in the first place. Keeping the browser-side state aligned with the actual picker selection closes the regression path from #67 and preserves the upload-vs-saved-photo exclusivity flow.
+
+### 2026-09-03: Dev-only Azure Foundry payload debug logging
+**By:** Aragorn
+**What:** Added a dev-only `DEBUG_LOG_AI_PAYLOADS` setting that auto-enables raw Azure Foundry payload/response debug logging only when `APP_ENV=development`, uses the standard `logging` logger `app.ai_debug`, logs full text request/response bodies for `generate_card()`, and logs metadata-only request/response details for image generation/edit calls without logging reference-image bytes or base64 image payloads.
+**Why:** The team needed a local escape hatch to inspect `/chat/completions` input/output while preserving the existing production privacy posture. I hard-blocked payload logging outside `development` even if `DEBUG_LOG_AI_PAYLOADS=true`, so shared/test/production deployments cannot accidentally emit raw prompts or model outputs.
+
+### 2026-09-03: Saved-photo generator submissions should not depend on toggling a hidden field disabled
+**By:** Legolas
+**What:** Removed the generator form's reliance on dynamically disabling/re-enabling the hidden `saved_photo_id` input, and now force the exact saved-photo state onto every HTMX generate request during `htmx:configRequest` while also deleting any stale `photo` part when a saved photo is selected.
+**Why:** Production debug logs from PR #72 proved saved-photo selections were reaching Azure Foundry as plain text-to-image requests, which means the browser request lost `saved_photo_id` before backend parsing. Backend multipart parsing already accepts a non-empty `saved_photo_id` and normalizes blank values to `None`, so the brittle edge was the frontend serialization contract introduced by #69's disabled-hidden-input workaround. Mirroring the selected photo directly into HTMX's outgoing `formData`/`parameters` closes that gap and keeps the upload-vs-saved-photo exclusivity explicit at submission time.
+
+### 2026-09-04T13:10:31.843+00:00: Agent architecture direction (Foundry + Microsoft Agent Framework)
+**By:** Gandalf (Lead/Architect)
+**What:** Proposed a documentation-first architecture that keeps the FastAPI Container App as the public surface, adds a Foundry-hosted `card-orchestrator` agent built with Microsoft Agent Framework for creative orchestration, and records the full design in `docs/architecture-agents-foundry.md`.
+**Why:** Requested by Benoit as a cross-team architecture/specification effort so future agent work uses Microsoft Foundry and the Microsoft Agent Framework without forcing a risky big-bang rewrite.
+**Impacts:** Aragorn (backend integration boundary, project-endpoint invocation, fallback path), Gimli (Bicep/RBAC/env-var/`azure.yaml` topology changes), Legolas (possible future UI states for agent-backed generation and fallbacks), Samwise (golden prompts, shadow-eval strategy, contract and safety regression coverage)
+
+### 2026-09-04: Secret provider foundation lives in `app/secrets.py`
+**By:** Aragorn
+**What:** Added the runtime secret-provider abstraction in `app/secrets.py`, with logical app secret names (`APP_SESSION_SECRET_KEY`, `ENTRA_CLIENT_SECRET`) mapped to the deployed Key Vault secret names and exposed on `app.state.secret_provider` via FastAPI lifespan.
+**Why:** The remaining Key Vault rotation issues (#85/#86/#87) now have a single stable import path and app-level lifecycle hook for reuse without forcing auth/session consumers to know the vault naming details.
+
+### 2026-09-04: Retain the previous Entra OAuth client secret briefly after rotation
+**By:** Aragorn
+**What:** When the app observes a newer `ENTRA_CLIENT_SECRET` version from the secret provider, it switches new logins to that version immediately but retains the previous OAuth client in memory for a 15-minute overlap window for callback fallback.
+**Why:** Key Vault version changes do not create or retire Microsoft Entra application credentials. Keeping the prior secret briefly lets in-flight authorization-code callbacks finish safely while operators roll the new credential across replicas before deleting the old Entra credential.
+
+### 2026-09-04: Secret provider now supports bounded stale fallback
+**By:** Aragorn
+**What:** Extended `app/secrets.py` with `AzureSecretProvider(max_stale=...)`, `SecretProviderConfig.max_stale_seconds`, and the `SECRET_PROVIDER_MAX_STALE_SECONDS` environment setting so Key Vault refresh failures can serve the last known-good value only within a bounded stale window.
+**Why:** Parallel secret-rotation work (#85/#86) builds on the same provider foundation from #84, so this records the new additive config surface and fail-closed behavior before those branches merge.
+
+### 2026-09-04: Issue 71 saved-photo persistence logging
+**By:** Aragorn
+**What:** Added server-side exception logging in `app/photos.py` for saved-photo persistence and delete failures, including stage (`blob upload`, `thumbnail upload`, `cosmos save`, and delete/cleanup stages), `owner_id`, and `photo_id`, while keeping client-facing `ProblemDetails` responses generic. Added regression coverage that asserts the error logs are emitted for upload, Cosmos-save, and delete failures.
+**Why:** Production photo-library 503s were swallowing the root exception, making Azure log diagnostics impossible. Structured exception logging restores diagnosability without exposing photo bytes or secrets to clients, and the regression tests lock that behavior in.
+
+### 2026-09-03: Issue 9 deletion flows use minimal Cosmos TTL audits plus background blob cleanup
+**By:** Aragorn
+**What:** Added authenticated card and account deletion flows, preserving only minimal deletion-audit records in Cosmos (`requestId`, timestamp fields, moderation outcome, optional cost estimate) with item-level TTL set from `AUDIT_RETENTION_DAYS`, while blob cleanup runs in FastAPI background tasks after the HTTP response.
+**Why:** The existing shared Cosmos container already has TTL enabled per item, so a dedicated minimal audit document type satisfies the 30-day retention requirement without new infrastructure. Deleting app-owned cards, saved photos, and same-card generation audits before clearing the session keeps account removal aligned with the MVP privacy scope while avoiding blocking user requests on blob deletions.
+
+### 2026-09-04: Issue 37 closed as superseded by existing Cosmos Private Endpoint
+**By:** Coordinator (decision from Benoit Moussaud)
+**What:** Closed #37 ("Harden ACA-to-Cosmos networking with subnet-scoped access, Option B") without implementing subnet-scoped service endpoints/`virtualNetworkRules`. The repo already implements and has validated a stronger design: Cosmos DB Private Endpoint with `publicNetworkAccess: 'Disabled'` (`infra/modules/cosmos-db.bicep`, `infra/modules/cosmos-private-endpoint.bicep`), smoke-tested 2026-09-02.
+**Why:** Private Endpoint fully removes Cosmos DB's public network path, a stronger guarantee than subnet-scoped service endpoints. Since the deployed design already exceeds #37's acceptance criteria, implementing Option B on top would be redundant. Gimli should not pick up #37-style subnet/service-endpoint work for Cosmos going forward — the Private Endpoint approach is the team's standing decision for this data path.
+
+### 2026-09-04: Key Vault runtime access uses the ACA app identity
+**By:** Gimli
+**What:** Runtime Key Vault secret-value access now targets the Azure Container App's managed identity via Key Vault Secrets User at vault scope, and the app no longer mirrors APP_SESSION_SECRET_KEY or ENTRA_CLIENT_SECRET into ACA-native secrets.
+**Why:** The Python runtime already fetches both secrets directly from Key Vault using managed identity. Keeping copied ACA secret values would duplicate sensitive material and continue the old workaround beyond its shelf life.
+
+### 2026-09-04: Preserve Key Vault network posture
+**By:** Gimli
+**What:** PR #106 set Key Vault `publicNetworkAccess` to `Disabled` in `infra/modules/security.bicep` and removed the permissive `networkAcls` block.
+**Why:** The PR records that the previous declaration caused deployment-preview drift toward public exposure. Keep the private-network declaration rather than reintroducing permissive defaults. This note was recovered on 2026-09-07 from local WIP and checked against merged commit `2683457`; it does not assert the current live Azure configuration.
+
+### 2026-09-09T11:54:57.259+00:00: Dev web deployments use deploy-only `azd deploy` rather than `azd up`
+**By:** Gimli
+**What:** Development environment web deployments now use `azd deploy --service web-nat` instead of `azd up` or `azd provision`. This is a deploy-only invocation that updates only the Container App revision without reprovisioning Azure resources.
+**Why:** The root postprovision hook contains `az ad app credential reset --append`, which rotates the Entra client secret. When `ENTRA_CLIENT_ID` is set in the `dev` environment, running `azd provision` (via `azd up`) would rotate the secret during deployment, breaking subsequent authentication until the new secret is fetched. Deploy-only avoids this rotation by skipping the hook entirely. The infrastructure (VNet, NAT, Cosmos, Key Vault, etc.) is stable and requires no reprove each deploy. Postprovision hook changes should be coordinated through the Coordinator before any future use of `azd up` in dev.
+
+### 2026-09-09T14:34:30.000+00:00: PR #126 — Agent generation feature gate and contract (consolidated)
+**By:** Aragorn, Legolas, Samwise, Gimli, Rai
+**What:** Completed issue #125 agentic integration. Merged PR #126 with:
+- `AGENT_GENERATION_ENABLED` feature gate (default: `false`) gates hosted agent path in CardGenerationService; fallback always available.
+- Non-retryable agent failures (parse error, 400/401) never fallback; caller receives error.
+- Retryable agent failures (timeout, 429, 5xx) fallback to legacy text path once within 225s budget; image flow continues unchanged.
+- Deterministic moderation and artwork persistence remain in web backend; agent receives only text request.
+- Hosted agent telemetry fail-closed: startup gate (`configure_telemetry()`) blocks agent if telemetry init fails; missing credentials → no agent (does not fallback).
+- Generated eval suite configuration committed to infra (smoke-core, submitted to Foundry but not executed).
+- Dev environment: durable hosted agent v1 active, card-orchestrator service via Foundry, AppInsights linkage configured.
+**Why:** Issue #125 required a bounded, safe integration path that minimizes blast radius while preserving existing web reliability. The feature flag allows gradual activation; bounded error budgets + deterministic payloads + fail-closed telemetry prevent runaway costs or cascading failures. Infra wiring (env vars, Bicep RBAC, managed identity) established for durable dev deployment. Evaluation artifacts prepared for offline review before production activation.
+**Testing & Review:** Baseline 690 passed/2 skipped; Samwise initial review REJECTED (RBAC description error); Aragorn corrected and locked out; Legolas independently revised with commit 4983c6e (generation_path fix, client lifecycle); Samwise re-reviewed and APPROVED (723 passed/2 skipped); Gimli deployed app-side infra with dev capacity 10/min; Rai final verdict GREEN. Merged at 2026-09-09T14:34:30Z as 939d1ed0d19671d725aa124df3a2d76f90c580eb.
+**Scope & Deferral:** Out of scope: auth/persistence migration into agent, broad MCP toolbox, premature standalone agents. Open placeholder #102 remains for future agent-driven persistence.
+**Blockers Resolved:** (1) Pre-existing Bicep Entra redeploy footgun discovered during deployment, repaired live, tracked as issue #127 (out of #126 scope). (2) Reviewer lockout recovery per reviewer-protocol: Gandalf independently corrected RBAC conditional assignments (enableFoundryAgentAccess two assignments; Cognitive Services User one unconditional).
+
+### 2026-09-16: Mandatory discussion and issue-first intake
+
+**By:** User request, captured by Squad
+**What:** Feature, bug, and improvement requests must begin with discussion, questions, and analysis, followed by a GitHub issue. Involve every team member in qualification to identify one primary owner before implementation.
+**Why:** The user explicitly requested a mandatory team workflow instead of immediate implementation.
+
+This requirement applies to this repository. Workflow setup is requested; application changes must not bypass intake.
+
+**Approval gate:** The user confirmed: "Only after I explicitly approve the qualified issue". Team agreement, an owner label, and readiness alone do not authorize implementation.
+
+### 2026-09-16T12:53:00.472+00:00: Consolidated root azure.yaml deployment contract for issue #130 (consolidated)
+**By:** Gandalf, Gimli
+**What:** The root `azure.yaml` remains the single supported manifest for `web-nat` and `card-orchestrator`, with `workflows.up` constrained to web-only. The earlier proposal to protect raw bare `azd deploy` through a service `condition` was superseded after validation against azd 1.32.0: that condition is unsupported and was removed. Bare `azd deploy` is therefore unsupported. Supported entrypoints are `./deploy.sh {web|agent|full|provision|preview}` and targeted `azd deploy <service-name>` commands. The agent service retains `prebuild`, `prepackage`, `prepublish`, and `predeploy` guards; agent infrastructure and RBAC remain explicitly gated without duplication. The nested card-orchestrator manifest stays deprecated as a legacy reference. Production approval remains an external gate.
+**Why:** azd 1.32.0 deploys every service selected by the root manifest for a bare deploy, supports only `workflows.up` for this design, and exposed no verified root-hook service-selection signal before service hooks. Consolidating the validated outcome removes a false safety claim while preserving explicit deploy paths, prerequisite guards, web-only `azd up`, separation of RBAC ownership, and rollback-compatible legacy documentation. No Azure resources are provisioned or deployed by this decision.
+
+
+### 2026-09-16T13:45:55.855+00:00: Approbation explicite des décisions communes #143/#146, sans autorisation d’implémentation
+**By:** Squad (au nom du demandeur)
+**What:** Le demandeur approuve explicitement les décisions communes suivantes : production Agent-only via le hosted agent Microsoft Foundry sans chemin direct ni fallback automatique ; mock déterministe réservé aux tests automatisés et interdit ailleurs ; traces soumises à une allowlist stricte, à des plafonds de taille, à une troncature explicite et à une suppression avec la carte ; politique deny-wins ne conservant/exposant pour tout contenu refusé qu’un statut et un code public borné ; conservation de la carte sûre avec signalement `trace_unavailable` si la trace échoue ; préflight bloquant configuration/identité/RBAC puis rollback explicite vers la version précédente sans réactivation automatique d’un fallback ; ordre #143 schéma/persistance → #146 Agent-only → #143 interface finale. Cette approbation valide les décisions mais **n’autorise pas le démarrage de l’implémentation** : aucun code, aucune assignation et aucun label d’exécution ne sont autorisés.
+**References:** https://github.com/bmoussaud/fantasy-cards-generator/issues/143, https://github.com/bmoussaud/fantasy-cards-generator/issues/146, https://github.com/bmoussaud/fantasy-cards-generator/issues/143#issuecomment-5698533438, https://github.com/bmoussaud/fantasy-cards-generator/issues/146#issuecomment-5698533415
+**Why:** Formaliser l’approbation explicite du demandeur sur les décisions communes de #143/#146 tout en préservant strictement la limite d’autorisation : décisions approuvées, implémentation non autorisée.
+
+
+### 2026-09-17T10:03:25.063+00:00: Generation trace v1 persistence and content-free boundary (consolidated)
+**By:** Aragorn, Gandalf
+**What:** Issue #143 J1 embeds a closed, typed `generationTrace` v1 in the existing card document and permits the hosted producer to supply it only through the existing response `metadata` extension point. The trace contains application-owned stage names, closed statuses, measured durations, closed public reason codes, and the generation path; prompts, model output, card snapshots, art prompts, identifiers, URLs, reasoning, exception text, and other free-form values are excluded. Readers sanitize producer data into bounded v1 data, an exact content-free refusal, or a content-free `trace_unavailable` sentinel. Historical and future-version cards remain readable, artwork retry preserves the original trace, and an eligible fallback retains only the real structural agent-stage prefix while changing the path to `fallback`.
+**Why:** Embedding aligns trace lifetime with card/account deletion and avoids a new endpoint or store. The metadata extension supports independently deployed N/N-1 web and hosted-agent versions, while a closed structural schema, deterministic limits, deny-wins handling, and tolerant reads prevent unsafe or malformed producer data from escaping and preserve honest partial execution history.
+
+### 2026-09-17T10:03:25.063+00:00: Issue #143 J1 execution authorization and final gate (consolidated)
+**By:** Squad (on behalf of the requester), Rai
+**What:** The 2026-09-16 approval of the shared #143/#146 design evolved from decisions-approved/implementation-not-authorized to explicit authorization for the schema and backward-compatible persistence milestone of #143 only. The requester accepted local commits `b3a4df4`, `c3e8395`, `0a8ad1a`, and `d02a00c` as the recovered J1 base under Aragorn's technical ownership; froze scope to schema/persistence compatibility; excluded #146, the final #143 interface, Azure deployment, and unrelated local changes; and required Samwise testing, Gandalf contract review, independent Rai review, and Fact Checker verification. Execution should continue autonomously through correction and revalidation, with GitHub/Squad metadata updated and branch `squad/143-persist-agent-generation-trace` pushed and a PR opened only if every gate passes. If the recovered implementation is absent or blocked, diagnose and resume within the workspace. This later authorization supersedes only the earlier implementation prohibition for the bounded J1 scope; the broader #143/#146 sequencing and production safety decisions remain in force.
+**Why:** The requester explicitly authorized a narrow, review-gated implementation after approving the design, while preserving the issue-first workflow, strict reviewer lockout, unrelated-work protection, and the requirement to report only a verified final result or a concrete technical blocker.
+
+
+### 2026-09-17T10:11:47.357+00:00: Issue #143 J1 rejected; Rai locked out; Aragorn owns revision
+**By:** Gandalf, Samwise
+**What:** Gandalf and Samwise independently **REJECTED** the current J1 artifact on branch `squad/143-persist-agent-generation-trace`. Blocking findings are: (1) mutable nested `stages` data can bypass the intended sanitization and persistence boundaries; and (2) malformed numeric JSON types are coerced instead of being rejected. The revision must add exact coercion and boundary tests plus coverage of serialized retry and API responses. Gandalf also noted a non-blocking documentation example mismatch. All five commits in the rejected artifact revision were authored by Rai, so strict reviewer lockout applies: Rai may not revise, co-author, advise on, or otherwise contribute to the next J1 artifact revision. Aragorn is the recommended and designated revision owner for this cycle.
+**Why:** Both the architecture and quality reviews found boundary defects that can undermine the closed, typed trace contract despite otherwise passing targeted tests. Independent revision by Aragorn is required by the reviewer protocol because Rai authored the rejected revision; the lockout remains until the revised artifact is reviewed and approved.
+
+
+### 2026-09-17T10:25:48.722+00:00: Issue #146 authorized and delivered as agent-only production generation (consolidated)
+**By:** Requester (@bmoussaud), Eowyn, Gimli, Samwise, Gandalf, Rai, Fact Checker
+**What:** The requester cancelled #143 as not matching end-user needs; it is closed as not planned and its branch remains retained but unmerged. The requester separately and explicitly authorized #146, removing its dependency on #143 and superseding the earlier shared sequencing that required #143 first. Implementation proceeded from `origin/main` because the repository has no `dev` branch, in worktree `/workspaces/fantasy-cards-generator-146` on branch `squad/146-agent-only-generation`. Through commit `a1b8581`, production generation is Agent-only with no direct fallback and no runtime mock configuration. Startup/liveness use dependency-free `/livez`; readiness alone uses `/healthz` and requires the exact hosted-agent name, version, status, and managed-identity preflight. The application timeout remains 70 seconds by default and at most 90 seconds within the 225-second request budget, with a 100-second ACA readiness timeout; Azure Identity authentication failures are unauthorized/non-retryable while transport/service failures are unavailable/retryable with content-free diagnostics. The azd bootstrap and rollback paths preserve version/identity guarantees and deployed images. Deny-wins runs all applicable refusal-capable generation before durable reservation, persists no refused request/card/audit metadata, preserves an existing safe partial card on refused artwork retry, and uses application-local single flight for simultaneous duplicates on the same instance; cross-replica duplicate upstream work remains possible before the post-moderation atomic reservation chooses the persisted result. Multiple strict rejection cycles used independent revision authors and enforced lockouts. Gandalf, Rai, and Fact Checker independently approved with only non-blocking Azure live validation outstanding. Validation reached 918 passed and 2 skipped, with Ruff, Black, Bicep, ARM semantic comparison, shell, and diff checks passing. The branch was pushed and draft PR #149 targets `main`; Azure live validation is required before the PR is marked ready.
+**Why:** This records the requester's changed product direction and implementation authorization, removes the cancelled trace-first dependency, and preserves the final reviewed safety and operability contract. Agent-only routing must fail closed rather than silently changing execution paths; dependency-aware readiness must block traffic without causing process restart loops; refusal persistence must remain deny-wins even when cleanup is unavailable; and draft status accurately represents the remaining live-environment validation gate.
+
+### 2026-09-18T09:29:42.075Z: New-issue process boundary — triage required before implementation
+**By:** Squad (on behalf of the requester)
+**What:** When a new improvement/feature issue is created, the process ends with assigning the appropriate `squad:{member}` label(s). The team must never start implementation immediately upon issue creation or labeling. The issue must first go through triage — Lead qualification/estimation and explicit requester approval — before any implementation work begins.
+**Why:** Prevent premature or unapproved implementation from starting automatically off issue creation/labeling; preserves the existing issue-first, approval-gated workflow already required for new features/bugs/improvements.

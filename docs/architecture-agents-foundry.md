@@ -730,7 +730,7 @@ Recommendations:
   - thematic quality
   - prompt-to-art coherence
 
-This phase is where Samwise should define golden test prompts and evaluation fixtures.
+This phase is where the test owner should define golden test prompts and evaluation fixtures.
 
 ### Phase 2 — agent-only text/card design, image generation in app
 

@@ -21,6 +21,8 @@ hosted_agents/**
 **/.git/**
 **/.squad
 **/.squad/**
+**/.copilot-tracking
+**/.copilot-tracking/**
 **/.foundry
 **/.foundry/**
 **/.venv

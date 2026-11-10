@@ -1,0 +1,13 @@
+{
+  "extraKnownMarketplaces": {
+    "hve-core": {
+      "source": {
+        "source": "github",
+        "repo": "microsoft/hve-core"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "hve-core@hve-core": true
+  }
+}

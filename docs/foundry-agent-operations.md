@@ -1,5 +1,10 @@
 # Card-orchestrator operations
 
+Dated evidence below retains original operator/reviewer names for provenance.
+Future work is owned by the qualified issue's implementation and deployment
+owners under the [current change workflow](issue-to-copilot-workflow.md), not by
+retired development-agent personas. Historical approvals do not authorize new runs.
+
 ## Consolidated root entry point — issue #130
 
 The root `azure.yaml` is now the single entry point for both `web-nat` and
@@ -572,7 +577,7 @@ Exception messages, response bodies, URLs, headers, request/model text, tokens
 and stack traces never cross the boundary. Unknown values cause the diagnostic
 to be discarded, not echoed.
 
-Expected Gimli handoff after review: deploy the exact candidate once and run the
+Expected deployment-owner handoff after review: deploy the exact candidate once and run the
 existing single bounded ACA-MI invocation. A marker such as
 `concept/authorization/permission_denied/http_403` proves a model-call
 authorization failure; `concept/resource_not_found/not_found/http_404` proves
@@ -702,7 +707,7 @@ Exact sanitized marker:
 
 Evidence stops at the strict boundary: it does not prove the inner SDK or model
 would accept the envelope after that field is handled, and it records no model
-call or token count. Aragorn's next backend step is to verify the hosted
+call or token count. The backend owner's next step is to verify the hosted
 platform/SDK contract for `agent_reference` and add an exact-envelope regression
 before proposing the smallest validated routing-only handling. Do not weaken
 unrelated strict validation, persistence, history, identity, or content-safety
@@ -724,7 +729,7 @@ The regression takes the real `aca_identity_payload.invocation_body()` envelope,
 adds the documented hosted `agent_reference` shape, and sends it through the
 real pinned AgentServer host with fake specialists. This proves the prior local
 boundary rejection is removed; it does not prove the hosted gateway's exact
-value, a model call, or a successful hosted response. Gimli's post-review
+value, a model call, or a successful hosted response. The deployment owner's post-review
 deployment is still required to establish the next live boundary/result.
 
 ## Endpoint persistence follow-up gate (2026-09-09)
@@ -821,7 +826,7 @@ evidence contains no safe field-level detail. The exact reject boundary and
 offending hosted input remain unproven by this run.
 
 The next source uses a unique fixed `card_boundary_invalid_request` code plus
-allowlisted reason/field enums for strict-boundary failures. If Gimli's next
+allowlisted reason/field enums for strict-boundary failures. If the operator's next
 otherwise-identical run returns that code, the container boundary and exact
 field/category are proven. If it still returns generic `invalid_request`, the
 strict application boundary did not generate the observed body; inspect hosted
@@ -1117,7 +1122,7 @@ The documented caller-Entra session scope and current Responses
 is a plausible explanation of the historical 403, **not a proven diagnosis**
 because the error body was discarded. No RBAC escalation is justified.
 
-For Gimli's **next independently approved** execution, this sequence supersedes
+For the operator's **next independently approved** execution, this sequence supersedes
 any earlier operator-created warmup-session recipe:
 
 1. Keep the existing identity, project Consumer role, model limits and web
