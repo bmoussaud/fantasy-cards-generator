@@ -2,6 +2,7 @@
 
 import json
 import re
+import shutil
 import subprocess
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -23,7 +24,14 @@ def test_hve_plugin_uses_upstream_repository_defaults() -> None:
 
 
 def test_retired_framework_has_no_executable_integration() -> None:
-    assert not any(path.is_file() for path in (ROOT / ".squad").rglob("*"))
+    tracked = subprocess.run(
+        ["git", "ls-files", "--", ".squad"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert not tracked.stdout, f"Tracked Squad files remain: {tracked.stdout.strip()}"
     assert not any(path.is_file() for path in (ROOT / ".github").rglob("*squad*"))
     assert json.loads((ROOT / ".mcp.json").read_text()) == {"mcpServers": {}}
     assert (ROOT / ".github/workflows/pr-validation.yml").is_file()
@@ -39,6 +47,53 @@ def test_retired_framework_has_no_executable_integration() -> None:
     container = json.loads((ROOT / ".devcontainer/devcontainer.json").read_text())
     extensions = container["customizations"]["vscode"]["extensions"]
     assert "ise-hve-essentials.hve-core" not in extensions
+
+
+def test_retirement_check_preserves_local_state_but_rejects_tracked_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    subprocess.run(["git", "init", "--quiet"], cwd=tmp_path, check=True)
+    for relative_path in (
+        ".gitignore",
+        ".mcp.json",
+        ".devcontainer/post-create.sh",
+        ".devcontainer/devcontainer.json",
+        ".github/workflows/pr-validation.yml",
+        ".github/skills/architecture-diagram-author/SKILL.md",
+    ):
+        destination = tmp_path / relative_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / relative_path, destination)
+
+    local_paths = [
+        ".squad/log/session.md",
+        ".squad/orchestration-log/session.md",
+        ".squad/decisions/inbox/decision.md",
+        ".squad/sessions/session.json",
+        ".squad/.scratch/note.md",
+        ".squad/.cache/state.json",
+        ".squad-workstream",
+    ]
+    for relative_path in local_paths:
+        destination = tmp_path / relative_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text("Preserved local development state.\n", encoding="utf-8")
+
+    ignored = subprocess.run(
+        ["git", "check-ignore", "--no-index", *local_paths],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert ignored.stdout.splitlines() == local_paths
+
+    monkeypatch.setitem(globals(), "ROOT", tmp_path)
+    test_retired_framework_has_no_executable_integration()
+
+    subprocess.run(["git", "add", "--force", "--", local_paths[0]], cwd=tmp_path, check=True)
+    with pytest.raises(AssertionError, match="Tracked Squad files remain"):
+        test_retired_framework_has_no_executable_integration()
 
 
 def test_hve_working_artifacts_are_ignored_and_excluded_from_web_image() -> None:

@@ -67,8 +67,11 @@ automation is introduced.
 Durable project conventions were distilled into the instructions above;
 [historical decisions](history/README.md) remain for provenance only.
 Historical author names, branch names, issue labels, and past execution records
-are not active integration. Legacy `.squad` Docker exclusions/tests remain only
-to prevent old local state from entering images. Existing GitHub labels/issues,
+are not active integration. Existing untracked `.squad/` state and
+`.squad-workstream` remain ignored; migration does not require deleting local
+logs or notes. Retirement checks reject tracked Squad files, not preserved local
+state. Legacy `.squad` Docker exclusions/tests prevent that state from entering
+images. Existing GitHub labels/issues,
 branch protections, and global tools used by other repositories are not changed.
 If remote branch protection requires a retired workflow check, a maintainer
 must update that setting separately.
