@@ -17,11 +17,13 @@ GitHub issue before creating one. Update a matching issue rather than duplicatin
 it. Missing reproduction or external evidence is an investigation item, not
 permission for a speculative fix.
 
-Use the RPI Agent to research and plan. Obtain real domain input proportionate
-to the change: backend, UI/accessibility, testing, infrastructure, architecture,
-security/privacy, responsible AI, and evidence verification as applicable.
-Record actual contributions or explicit no-impact findings; missing input stays
-pending. Do not simulate a retired named team or invent consensus.
+Use the RPI Agent to research and plan. Before declaring an issue qualified,
+obtain actual input or an explicit no-impact assessment for every required
+domain: backend, UI/accessibility, testing, infrastructure, architecture,
+security/privacy, responsible AI, and evidence verification. Record each
+domain's contribution or no-impact assessment in the issue. Missing input remains
+pending and blocks qualification. Do not simulate a retired named team or invent
+consensus.
 
 The qualified issue records the problem, scope/non-goals, analysis/trade-offs,
 dependencies, bug reproduction/evidence, open questions, measurable acceptance
@@ -68,6 +70,24 @@ Every PR requires appropriate independent review and the existing
 remains blocked until findings are addressed and independently re-reviewed;
 do not self-approve or bypass branch protection. Scope approval, review approval,
 merge permission, and deployment permission are separate gates.
+
+### Rejection and revision ownership
+
+On rejection, the authors of the rejected artifact revision are locked out of
+that artifact's revision cycle. They must not produce, co-author, advise on, or
+pair on its next revision. Assign a different eligible agent with the required
+domain expertise; the coordinating agent must verify that the revision owner
+is not locked out, even if a reviewer recommends a locked-out author.
+
+Lockout applies only to the rejected artifact, not unrelated work, and remains
+until the revised artifact is independently reviewed and approved. If another
+revision is rejected, add its authors to the lockout; do not readmit previously
+locked-out authors. If no eligible revision owner remains, stop and escalate
+to the requester rather than bypassing the lockout.
+
+Record the rejected artifact/revision, locked-out authors, independent revision
+owner, and review outcome in the issue. Carry this state into every handoff and
+resumed session.
 
 ## Automation limits
 

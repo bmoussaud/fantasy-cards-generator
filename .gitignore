@@ -1,6 +1,10 @@
 # HVE Core working artifacts (research, plans, and review notes)
 .copilot-tracking/
 
+# Retired Squad local state retained by existing checkouts
+.squad/
+.squad-workstream
+
 # Python
 __pycache__/
 *.py[cod]
