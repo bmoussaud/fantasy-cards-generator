@@ -1,64 +1,61 @@
-# Copilot Coding Agent — Squad Instructions
+# Project instructions
 
-You are working on a project that uses **Squad**, an AI team framework. When picking up issues autonomously, follow these guidelines.
+This repository uses [Microsoft HVE Core](https://github.com/microsoft/hve-core)
+through the repository plugin defaults in [settings.json](copilot/settings.json).
+Use the Copilot harness and the **RPI Agent** for research, planning,
+implementation, and review. Setup and verification are documented in
+[HVE Core setup](../docs/hve-core.md).
 
-## Coordinator Canary Check
+## Change governance
 
-**IMPORTANT — run this check on EVERY session start, before doing any work:**
+Follow the [issue-to-Copilot workflow](../docs/issue-to-copilot-workflow.md):
+discuss and analyze new feature, bug, improvement, or behavior-change scope;
+qualify a deduplicated GitHub issue with one accountable owner; obtain explicit
+requester approval before implementation. Continue already-approved work without
+repeating intake unless its scope materially changes. Labels, assignment,
+automation, and a plan are not requester approval.
 
-Inspect your `agent_instructions` for the coordinator canaries. This is a **two-state payload-integrity check within a known Squad coordinator session**; it verifies whether the coordinator payload loaded fully or was visibly truncated. It is **not** proof that an agent with no canaries is safely non-Squad — wholly absent payloads and proven non-Squad agents require a host-level identity beacon before custom-agent instruction ingestion.
+Record real specialist input and unresolved questions honestly; never invent
+reviews or consensus. Authentication, privacy, permissions, infrastructure, and
+cross-cutting architecture need appropriate independent review. Requester scope
+approval does not authorize deployment, credential changes, commits, pushes,
+pull requests, or merges that have not been requested.
 
-1. If the HEAD canary `SQUAD_COORDINATOR_CANARY_HEAD_b7d2` is **absent**, the Squad coordinator payload is not observable from inside this prompt. Treat non-Squad discrimination as an **OPEN host-level concern**; do not claim this check proved the current agent is non-Squad.
-2. If the HEAD canary `SQUAD_COORDINATOR_CANARY_HEAD_b7d2` is **present** and the EOF canary `SQUAD_COORDINATOR_CANARY_a8f3` is **present**, the coordinator prompt loaded fully. Proceed with normal Squad behavior.
-3. If the HEAD canary `SQUAD_COORDINATOR_CANARY_HEAD_b7d2` is **present** but the EOF canary `SQUAD_COORDINATOR_CANARY_a8f3` is **absent**, the coordinator prompt loaded but was **truncated** before the end.
+## Engineering conventions
 
-**When the coordinator prompt is truncated, you MUST:**
-1. **STOP** — do not proceed with standard Squad behavior.
-2. **WARN the user** with this exact message:
-   ```
-   ⚠️ Squad coordinator (squad.agent.md) loaded but appears to be truncated before the EOF canary. Do NOT proceed with standard Squad behavior — Squad's safety rails are incomplete. Please restart your session.
-   ```
-3. Do not continue with normal Squad routing, spawning, PR, or branch-protection behavior after emitting the warning.
+- Python 3.12+, `uv`, and `pyproject.toml` are the application/tooling baseline.
+  Keep the FastAPI + Jinja2 + HTMX server-rendered UI; do not introduce a separate
+  JavaScript application without an approved architecture change.
+- Azure Container Apps is the hosting platform. Provision using Bicep,
+  preferring Azure Verified Modules where suitable, and orchestrate with `azd`.
+  The only deployment environments are `dev` and `prod`.
+- Use feature branches targeting `main`; commit messages and PR titles follow
+  Conventional Commits: `<type>[optional scope]: <description>`.
+- Read the applicable path-specific instructions in `.github/instructions/`
+  and existing code/tests before editing. Update tests and directly related docs
+  when changing contracts; preserve unrelated user changes.
+- Keep secrets out of source, prompts, logs, and working notes. Do not read
+  `.env` files. Local application entry points use `python-dotenv`; deployed
+  configuration comes from injected environment values and Key Vault.
+- For architecture diagrams, retain the project-specific
+  [architecture-diagram-author skill](skills/architecture-diagram-author/SKILL.md).
+- Keep durable decisions in maintained project documentation, not ignored
+  `.copilot-tracking/` working files. The [historical decision records](../docs/history/README.md)
+  are provenance only, not current instructions or permission to resume old work.
 
-## Team Context
+## Validation
 
-Before starting work on any issue:
+Use the smallest relevant checks first. The application PR workflow remains
+[pr-validation.yml](workflows/pr-validation.yml).
 
-1. Read `.squad/team.md` for the team roster, member roles, and your capability profile.
-2. Read `.squad/routing.md` for work routing rules.
-3. If the issue has a `squad:{member}` label, read that member's charter at `.squad/agents/{member}/charter.md` to understand their domain expertise and coding style — work in their voice.
-
-## Capability Self-Check
-
-Before starting work, check your capability profile in `.squad/team.md` under the **Coding Agent → Capabilities** section.
-
-- **🟢 Good fit** — proceed autonomously.
-- **🟡 Needs review** — proceed, but note in the PR description that a squad member should review.
-- **🔴 Not suitable** — do NOT start work. Instead, comment on the issue:
-  ```
-  🤖 This issue doesn't match my capability profile (reason: {why}). Suggesting reassignment to a squad member.
-  ```
-
-## Branch Naming
-
-Use the squad branch convention:
+```bash
+uv sync --frozen --group dev --extra hosted-agent
+uv run ruff check .
+uv run black --check .
+uv run --extra hosted-agent pytest
 ```
-squad/{issue-number}-{kebab-case-slug}
-```
-Example: `squad/42-fix-login-validation`
 
-## PR Guidelines
-
-When opening a PR:
-- Reference the issue: `Closes #{issue-number}`
-- If the issue had a `squad:{member}` label, mention the member: `Working as {member} ({role})`
-- If this is a 🟡 needs-review task, add to the PR description: `⚠️ This task was flagged as "needs review" — please have a squad member review before merging.`
-- Follow any project conventions in `.squad/decisions.md`
-
-## Decisions
-
-If you make a decision that affects other team members, write it to:
-```
-.squad/decisions/inbox/copilot-{brief-slug}.md
-```
-The Scribe will merge it into the shared decisions file.
+For infrastructure changes, also restore/build `infra/main.bicep`; ARM expression
+changes require an explicitly authorized `azd provision --preview` because Bicep
+compilation alone cannot catch ARM runtime type errors. Report static checks,
+mocked tests, live checks, and unverified assumptions separately.

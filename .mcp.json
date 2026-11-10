@@ -1,16 +1,3 @@
 {
-  "mcpServers": {
-    "squad_state": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "@bradygaster/squad-cli@insider",
-        "state-mcp"
-      ],
-      "env": {},
-      "tools": [
-        "*"
-      ]
-    }
-  }
+  "mcpServers": {}
 }

@@ -2,7 +2,6 @@
 set -euo pipefail
 
 
-npm install --global --prefix "$HOME/.local" @bradygaster/squad-cli
 npm install --global --prefix "$HOME/.local" @github/copilot
 
 
@@ -14,5 +13,3 @@ npm --version
 
 command -v copilot
 copilot --version
-command -v squad
-

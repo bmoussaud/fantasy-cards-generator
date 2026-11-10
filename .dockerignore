@@ -1,6 +1,7 @@
 .git
 .github
 .copilot
+.copilot-tracking
 .devcontainer
 .pytest_cache
 .ruff_cache
