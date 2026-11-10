@@ -1,13 +1,83 @@
 # Implemented architecture
 
-[![Application architecture](images/architecture.png)](images/architecture.svg)
+[![Image-generation components and calls](images/architecture.png)](images/architecture.svg)
 
-[Editable source](architecture.drawio) | [Self-contained SVG](images/architecture.svg)
+[Editable source (two pages)](architecture.drawio) |
+[Generation SVG](images/architecture.svg) | [Generation PNG](images/architecture.png) |
+[Infrastructure SVG](images/architecture-overview.svg)
 
 This diagram describes the current repository implementation and infrastructure
 defaults, not a fresh inventory of live Azure resources. Historical deployment
 records and proposed extensions are not evidence that a feature is enabled in
 every environment.
+
+## Image-generation call flow
+
+The first draw.io page, **Generation image - appels et composants**, explains
+the initial successful generation path. The web framework is **FastAPI, not
+Flask**. A logical connection inside a service is not necessarily an HTTP call:
+`CardGenerationService`, the MAF graph and deterministic safety/merge nodes are
+Python code. An `Agent` combines instructions, a schema and a model client;
+the model is the remote inference service.
+
+| Step | Component / call | Source |
+| --- | --- | --- |
+| 1 | Browser submits a prompt and optional photo through HTTPS to `/ui/cards/generate`, or a client uses `/api/v1/cards/generate`. FastAPI authenticates and checks CSRF. | [`app/main.py`](../app/main.py), `ui_generate_card` / `api_generate_card` |
+| 2 | `CardGenerationService` applies quotas, idempotency and local prompt moderation, then invokes `FoundryAgentClient`. | [`app/generation.py`](../app/generation.py), `generate_card` / `_run_generation` / `_generate_text` |
+| 3 | `httpx` sends a nonstream, stateless Responses request to the Foundry agent endpoint using an Entra token. Its `input_text` contains the application JSON request; it does **not** contain the photo. `ResponsesAgentServerHost` and `StatelessBoundary` dispatch to `CardOrchestrator`. | [`app/foundry_agent_client.py`](../app/foundry_agent_client.py), `_invoke_without_outer_timeout` / `_build_responses_url`; [`server.py`](../hosted_agents/card_orchestrator/server.py), `create_host` |
+| 4 | A fresh `WorkflowBuilder` graph, exposed as `WorkflowAgent`, runs one `generation` stage through a single `AgentExecutor`. That stage uses `Agent` + `FoundryChatClient` (agent name `card_generation`) and the configured text deployment. A typed merge and safety gates bracket the stage. | [`workflow.py`](../hosted_agents/card_orchestrator/workflow.py), `build_workflow`; [`specialists.py`](../hosted_agents/card_orchestrator/specialists.py), `FoundrySpecialists.agent` / `create_specialists` |
+| 5 | The hosted runtime derives `artPrompt` locally from the validated card, closes resources, applies final checks and emits the terminal result. The successful result is text/JSON, not an image. | [`workflow.py`](../hosted_agents/card_orchestrator/workflow.py), `FinalTextAndArtSafety` / `TerminalEnvelope`; [`orchestrator.py`](../hosted_agents/card_orchestrator/orchestrator.py), `generate` |
+| 6 | WEB validates the hosted result and moderates the card text and art prompt. It proceeds to image generation only after successful agent completion and these gates. | [`app/generation.py`](../app/generation.py), `_generate_text` / `_run_generation` |
+| 7 | WEB's `AzureFoundryAIClient` calls `gpt-image-2` through `httpx`: JSON `images/generations` without a reference image, or multipart `images/edits` with one. It decodes the returned `b64_json` into PNG bytes. | [`app/generation.py`](../app/generation.py), `generate_image` / `generate_image_edit` / `_post` / `_post_multipart` |
+| 8 | WEB moderates the generated image, obtains the Cosmos persistence reservation, uploads the PNG to Blob Storage, then saves the card and permitted operational metadata in Cosmos DB. | [`app/generation.py`](../app/generation.py), `_run_generation` / `_persist_completed` |
+| 9 | WEB returns HTML or JSON with the image URL. A subsequent `GET /cards/{card_id}/image` checks ownership and proxies private Blob bytes to the browser. | [`app/main.py`](../app/main.py), `card_image`; [`app/generation.py`](../app/generation.py), `fetch_image` |
+
+Under the approved #168 single-call contract the text path makes one generation
+model call. The graph, typed merge, moderation gates and `derive_art_prompt()`
+do not make additional LLM calls. The evidence stages are `pre_prompt`,
+`generation`, `final_text` and `final_art_prompt`. The text default is model
+`gpt-5.5`, deployment alias `gpt-5-5`; the image default is `gpt-image-2`
+([`infra/main.bicep`](../infra/main.bicep)). These are repository configuration
+defaults, not a fresh live-resource query. The earlier concept/lore/art-direction
+chain is historical #164 design context, not current runtime behaviour.
+
+The diagram groups the deterministic merge/gate nodes for readability; it does
+not omit them from execution. **One internal Agent is not a separately deployed
+service.** There is one hosted orchestrator, separate from the WEB
+Container App, and it has no image-generation or data-store tools.
+
+### HTTP boundaries and alternative outcomes
+
+WEB calls the project endpoint
+`/agents/{agent-name}/endpoint/protocols/openai/responses`.
+The generation stage calls the text model through `FoundryChatClient`,
+`AIProjectClient` and the OpenAI Responses SDK; it does not call the hosted
+orchestrator again.
+The WEB image calls use
+`/openai/deployments/{image-deployment}/images/generations` or `images/edits`.
+Diagram arrows identify the logical caller and callee; response legs are
+implicit except for the orange hosted-result and image-result arrows.
+
+`held`, `refused`, routing deferral or a runtime failure stops the initial
+pipeline **before** the image-model call. A hosted HTTP 200 can carry a `held`
+business result; WEB can map that to `502 / invalid_model_output`.
+Content-free completion diagnostics explain the failed checker, not necessarily
+the underlying provider cause. See [the invocation contract](foundry-agent-invocation.md).
+
+Without a reference photo, an image-service failure may yield a persisted
+text-only partial card; artwork retry follows a separate image-only path. A
+reference-photo edit failure instead returns an error. Existing image retries,
+duplicate-request replay and failure audits are not expanded into separate
+arrows. Saving a new reference photo can also invoke Azure AI Content Safety
+before this path; loading a saved photo uses Blob Storage. Photos remain
+WEB-owned and are not sent to the hosted generation stage.
+
+## Infrastructure overview
+
+[![Infrastructure, identities and private data services](images/architecture-overview.png)](images/architecture-overview.svg)
+
+The second draw.io page retains the broader infrastructure view, including
+Entra ID, networking, deployment, private endpoints and Application Insights.
 
 ## Runtime boundaries
 
@@ -87,9 +157,10 @@ mandatory telemetry, while dependency readiness (`/healthz`) validates the exact
 configured active agent version with a bounded probe after the server listens.
 Process startup and liveness use dependency-free `/livez`, so a Foundry outage
 cannot cause restart loops.
-The root `azure.yaml`
-deploys the web service only; hosted-agent build/deployment tooling is separate
-under `deployments/card-orchestrator/`.
+The root `azure.yaml` declares both `web-nat` and `card-orchestrator`.
+Its custom `azd up` workflow provisions shared resources, deploys the hosted
+agent, re-provisions the exact version binding, then packages and deploys WEB.
+Additional hosted-agent operational tooling lives under `deployments/card-orchestrator/`.
 
 Web/hosted instrumentation uses Application Insights, linked to a Log Analytics
 workspace. The ACA environment also sends logs to that workspace. Foundry
@@ -112,21 +183,24 @@ The drawing omits individual RBAC resources and alert objects for readability.
 
 ## Maintaining the assets
 
-`architecture.drawio` is the sole diagram source: labels, domain membership,
+`architecture.drawio` is the sole diagram source for both pages: labels, domain membership,
 component coordinates, official icon URLs, edge anchors, and orthogonal
 waypoints are all stored in its uncompressed mxGraph XML. Edit this file in
-diagrams.net, then regenerate both images using the
+diagrams.net, then regenerate both SVG/PNG pairs using the
 [`architecture-diagram-author` skill](../.github/skills/architecture-diagram-author/SKILL.md).
-Do not hand-edit generated images.
+Do not hand-edit generated images. Export `image-generation` to
+`images/architecture.svg` and `images/architecture.png`, and
+`implemented-architecture` to `images/architecture-overview.svg` and
+`images/architecture-overview.png`. PNGs are rasterized from their generated
+SVGs at 1,920 pixels wide. All icons originate from the official
+[Microsoft icon collection](https://aka.ms/MsiconsCollections); their contents
+are inlined in SVG with per-instance identifiers, not external image references.
+The disposable rendering tool is not an application dependency.
 
-The scoped renderer uses Node, `fast-xml-parser`, and `@resvg/resvg-js` from a
+The scoped renderer uses Node, `@xmldom/xmldom`, and `@resvg/resvg-js` from a
 temporary session directory, not application dependencies. It decodes XML
 numeric entities, resolves nested group coordinates, treats omitted coordinates
-as zero, reconstructs orthogonal bends, and downloads only the official
-[Microsoft icon collection](https://aka.ms/MsiconsCollections) URLs in the source.
-Icons are embedded as nested SVGs with instance-prefixed IDs; external images
-are not retained. Arrow markers use `orient="auto"`, and PNG output is 1920
-pixels wide. The generated SVG records the source SHA-256 in its description.
+as zero and reconstructs orthogonal bends. Arrow markers use `orient="auto"`.
 
 When regenerating, inspect the PNG as well as checking XML, local SVG
 references, domain gutters (at least 80 px), line/box and line/title collisions,
