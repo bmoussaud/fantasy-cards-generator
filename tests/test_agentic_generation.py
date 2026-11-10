@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import replace
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -16,22 +17,25 @@ from app.foundry_agent_client import FoundryAgentClient, FoundryAgentInvocationR
 from app.generation import (
     AppServices,
     AuthenticatedOwner,
+    AzureFoundryAIClient,
     CardGenerationService,
     GeneratedCardModel,
     InMemoryAssetStore,
     InMemoryAuditRepository,
     InMemoryCardRepository,
+    InMemorySharedCardAuditRepository,
     MockAgentClient,
     MockAIClient,
     ModerationDecision,
     StoredCard,
+    UpstreamServiceError,
     create_services,
 )
 from app.health import DependencyHealthResult
 from app.main import create_app
 from app.problems import ProblemDetails
 from app.settings import SettingsError, load_app_settings
-from tests.conftest import FakeOAuthClient, begin_login, extract_hidden_value
+from tests.conftest import TEST_OWNER_ID, FakeOAuthClient, begin_login, extract_hidden_value
 
 
 class HealthyAgentProbe:
@@ -812,6 +816,268 @@ def test_artwork_retry_moderation_refusal_preserves_safe_partial_without_retry_a
     assert persisted.status == "awaiting_artwork_retry"
     assert not services.audit_repository._records
     assert not services.asset_store._assets
+
+
+@pytest.mark.parametrize("shared", [False, True])
+@pytest.mark.parametrize(
+    "operation",
+    ["generate-json", "generate-htmx", "photo-json", "photo-htmx", "retry-json", "retry-htmx"],
+)
+def test_provider_image_refusal_has_no_mutations(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    shared: bool,
+    operation: str,
+) -> None:
+    agent_calls = 0
+
+    class Agent:
+        async def invoke(self, query: str) -> FoundryAgentInvocationResult:
+            nonlocal agent_calls
+            agent_calls += 1
+            return _success()
+
+    class TechnicalFailure(MockAIClient):
+        async def generate_image(self, *args, **kwargs):
+            raise UpstreamServiceError("foundry-image", "Temporary outage")
+
+    class SharedBomb(InMemorySharedCardAuditRepository):
+        fail_on_mutation = False
+        mutations = 0
+
+        def check(self) -> None:
+            if self.fail_on_mutation:
+                self.mutations += 1
+                raise AssertionError("Refusal must not mutate shared storage")
+
+        async def save(self, record):
+            self.check()
+            return await super().save(record)
+
+        async def reserve_document(self, **kwargs):
+            self.check()
+            return await super().reserve_document(**kwargs)
+
+        async def delete(self, *args):
+            self.check()
+            return await super().delete(*args)
+
+        async def save_audit(self, record):
+            self.check()
+            return await super().save_audit(record)
+
+        async def reserve_audit(self, **kwargs):
+            self.check()
+            return await super().reserve_audit(**kwargs)
+
+        async def delete_audit(self, *args):
+            self.check()
+            return await super().delete_audit(*args)
+
+    class AssetBomb(InMemoryAssetStore):
+        calls = 0
+
+        async def upload(self, *args):
+            self.calls += 1
+            raise AssertionError("Refusal must not upload")
+
+        async def delete(self, *args):
+            self.calls += 1
+            raise AssertionError("Refusal must not clean up")
+
+    services = _services(monkeypatch, Agent())
+    # A nonzero retry budget must not turn a refusal into repeated image calls.
+    services.settings = replace(
+        services.settings, retry=replace(services.settings.retry, image_max_retries=2)
+    )
+    client = _client(monkeypatch, services)
+    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
+    if shared:
+        repository = SharedBomb()
+        services.card_repository = services.audit_repository = repository
+    else:
+        services.card_repository = RefusalPersistenceBombCardRepository()
+        services.card_repository.fail_on_mutation = False
+        services.audit_repository = RefusalPersistenceBombAuditRepository()
+    card_id = None
+    if operation.startswith("retry"):
+        services.ai_client = TechnicalFailure(services.settings)
+        partial = _generate(client, key="provider-refusal-partial")
+        assert partial.status_code == 200
+        assert partial.json()["status"] == "awaiting_artwork_retry"
+        card_id = partial.json()["cardId"]
+    services.card_repository.fail_on_mutation = True
+    before_cards = {
+        key: record.to_document() for key, record in services.card_repository._records.items()
+    }
+    before_audits = {
+        key: record.to_document() for key, record in services.audit_repository._records.items()
+    }
+    services.asset_store = assets = AssetBomb()
+    real_async_client = httpx.AsyncClient
+    image_requests = []
+
+    def handle(request):
+        image_requests.append(request)
+        return httpx.Response(
+            400,
+            json={
+                "error": {
+                    "code": "BadRequest",
+                    "innererror": {"code": "ResponsibleAIPolicyViolation"},
+                    "message": "PRIVATE-PROVIDER-PROMPT-TOKEN-PHOTO",
+                }
+            },
+        )
+
+    def build_client(*args, **kwargs):
+        return real_async_client(*args, **kwargs, transport=httpx.MockTransport(handle))
+
+    monkeypatch.setattr(generation_module.httpx, "AsyncClient", build_client)
+    services.ai_client = AzureFoundryAIClient(services.settings)
+    services.ai_client._credential = SimpleNamespace(
+        get_token=lambda *_args: SimpleNamespace(token="PRIVATE-PROVIDER-TOKEN")
+    )
+    html = operation.endswith("htmx")
+    if card_id is not None:
+        url = f"/{'ui' if html else 'api/v1'}/cards/{card_id}/artwork/retry"
+    else:
+        url = f"/{'ui' if html else 'api/v1'}/cards/generate"
+    if html or operation.startswith("photo"):
+        data = (
+            {"idempotency_key": "provider-refusal", "csrf_token": csrf_token}
+            if html
+            else {"idempotencyKey": "provider-refusal", "csrfToken": csrf_token}
+        )
+        if card_id is None:
+            data["prompt"] = "A safe original fantasy guardian"
+        response = client.post(
+            url,
+            data=data,
+            files=(
+                {"photo": ("portrait.png", b"\x89PNG\r\n\x1a\nPRIVATE-PHOTO", "image/png")}
+                if operation.startswith("photo")
+                else None
+            ),
+            headers={"HX-Request": "true"} if html else {},
+        )
+    else:
+        body = {"idempotencyKey": "provider-refusal", "csrfToken": csrf_token}
+        if card_id is None:
+            body["prompt"] = "A safe original fantasy guardian"
+        response = client.post(url, json=body)
+
+    assert response.status_code == 422
+    if html:
+        assert response.headers["X-Generation-Error"] == "generated_art_rejected"
+        assert 'role="alert"' in response.text
+    else:
+        assert response.headers["content-type"].startswith("application/problem+json")
+        assert response.json()["errorCode"] == "generated_art_rejected"
+    assert len(image_requests) == 1
+    expected_endpoint = "edits" if operation.startswith("photo") else "generations"
+    assert image_requests[0].url.path.endswith(f"/images/{expected_endpoint}")
+    assert agent_calls == 1
+    assert assets.calls == 0
+    assert {
+        key: record.to_document() for key, record in services.card_repository._records.items()
+    } == before_cards
+    assert {
+        key: record.to_document() for key, record in services.audit_repository._records.items()
+    } == before_audits
+    if shared:
+        assert repository.mutations == 0
+        if card_id:
+            assert (TEST_OWNER_ID, f"card:{card_id}") in repository._records
+    assert "PRIVATE-" not in response.text + caplog.text
+
+
+@pytest.mark.parametrize(
+    "code", ["content_filter", "content_policy_violation", "ResponsibleAIPolicyViolation"]
+)
+def test_provider_refusal_is_not_retried_even_if_upstream_marks_retryable(monkeypatch, code):
+    class RetryableRefusal(MockAIClient):
+        calls = 0
+
+        async def generate_image(self, *args, **kwargs):
+            self.calls += 1
+            raise UpstreamServiceError(
+                "foundry-image",
+                "PRIVATE-PROVIDER",
+                status_code=500,
+                retryable=True,
+                error_code=code,
+            )
+
+    class Agent:
+        async def invoke(self, query):
+            return _success()
+
+    services = _services(monkeypatch, Agent())
+    services.settings = replace(
+        services.settings, retry=replace(services.settings.retry, image_max_retries=2)
+    )
+    services.ai_client = image = RetryableRefusal(services.settings)
+    services.card_repository = RefusalPersistenceBombCardRepository()
+    services.audit_repository = RefusalPersistenceBombAuditRepository()
+    response = _generate(_client(monkeypatch, services))
+    assert response.status_code == 422
+    assert response.json()["errorCode"] == "generated_art_rejected"
+    assert image.calls == 1
+
+
+@pytest.mark.parametrize("photo", [False, True])
+@pytest.mark.parametrize(
+    "code", ["BadRequest", "content_filter_error", "content_filter_unavailable", "content_filtered"]
+)
+def test_non_policy_image_400_keeps_technical_failure_contract(monkeypatch, photo, code):
+    class Agent:
+        async def invoke(self, query):
+            return _success()
+
+    services = _services(monkeypatch, Agent())
+    real_async_client = httpx.AsyncClient
+    calls = []
+
+    def handle(request):
+        calls.append(request)
+        return httpx.Response(
+            400,
+            json={"error": {"code": code, "message": "content_filter PRIVATE-PROVIDER"}},
+        )
+
+    def build_client(*args, **kwargs):
+        return real_async_client(*args, **kwargs, transport=httpx.MockTransport(handle))
+
+    monkeypatch.setattr(generation_module.httpx, "AsyncClient", build_client)
+    services.ai_client = AzureFoundryAIClient(services.settings)
+    services.ai_client._credential = SimpleNamespace(
+        get_token=lambda *_args: SimpleNamespace(token="PRIVATE-TOKEN")
+    )
+    client = _client(monkeypatch, services)
+    if photo:
+        csrf = extract_hidden_value(client.get("/app").text, "csrf_token")
+        response = client.post(
+            "/api/v1/cards/generate",
+            data={
+                "prompt": "A safe original fantasy guardian",
+                "idempotencyKey": "non-policy-photo",
+                "csrfToken": csrf,
+            },
+            files={"photo": ("portrait.png", b"\x89PNG\r\n\x1a\nPRIVATE-PHOTO", "image/png")},
+        )
+        assert response.status_code == 502
+        assert response.json()["errorCode"] == "reference_image_unsupported"
+        assert len(services.audit_repository._records) == 1
+        assert not services.card_repository._records
+    else:
+        response = _generate(client)
+        assert response.status_code == 200
+        assert response.json()["status"] == "awaiting_artwork_retry"
+        assert len(services.card_repository._records) == 1
+    assert len(calls) == 1
+    assert not services.asset_store._assets
+    assert "PRIVATE-" not in response.text
 
 
 def test_concurrent_duplicate_refusals_share_bounded_in_memory_result(

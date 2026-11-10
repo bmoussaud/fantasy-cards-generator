@@ -33,6 +33,7 @@ from app.foundry_agent_client import (
 from app.generation import (
     AuthenticatedOwner,
     CardGenerationService,
+    ReferenceImageUpload,
     UpstreamServiceError,
 )
 from app.problems import ProblemDetails
@@ -287,6 +288,78 @@ def test_late_web_denial_preserves_only_new_hosted_content(monkeypatch, exported
         asyncio.run(generate(CardGenerationService(services)))
     assert len(content(exported)) == (0 if legacy else 1)
     assert all(r["source_runtime"] == "hosted" for r in content(exported))
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("operation", ["generate", "photo", "retry"])
+def test_image_provider_refusal_never_releases_web_details(
+    monkeypatch, exported, caplog, legacy, operation
+):
+    services, _, _, calls = stack(monkeypatch, legacy=legacy)
+    services.settings = replace(
+        services.settings, retry=replace(services.settings.retry, image_max_retries=2)
+    )
+    service = CardGenerationService(services)
+    image_calls = 0
+
+    async def refused(*args, **kwargs):
+        nonlocal image_calls
+        image_calls += 1
+        raise UpstreamServiceError(
+            "foundry-image",
+            "PRIVATE-PROVIDER-RESPONSE",
+            status_code=500,
+            retryable=True,
+            error_code="content_filter",
+        )
+
+    async def scenario():
+        if operation == "retry":
+
+            async def technical_failure(*args, **kwargs):
+                raise UpstreamServiceError("foundry-image", "unavailable")
+
+            services.ai_client.generate_image = technical_failure
+            partial = await generate(service)
+            exported.clear()
+            services.ai_client.generate_image = refused
+            with pytest.raises(ProblemDetails) as raised:
+                await service.retry_artwork(
+                    owner=OWNER,
+                    card_id=partial.cardId,
+                    idempotency_key="refused-retry",
+                    request_id="retry-request",
+                    client_ip="127.0.0.1",
+                )
+        else:
+            services.ai_client.generate_image = services.ai_client.generate_image_edit = refused
+            with pytest.raises(ProblemDetails) as raised:
+                await service.generate_card(
+                    owner=OWNER,
+                    prompt=PROMPT,
+                    idempotency_key="refused-image",
+                    request_id="request",
+                    client_ip="127.0.0.1",
+                    reference_image=(
+                        ReferenceImageUpload(
+                            content=b"\x89PNG\r\n\x1a\nPRIVATE-PHOTO",
+                            content_type="image/png",
+                            filename="portrait.png",
+                        )
+                        if operation == "photo"
+                        else None
+                    ),
+                )
+        assert raised.value.status_code == 422
+        assert raised.value.error_code == "generated_art_rejected"
+
+    asyncio.run(scenario())
+    assert image_calls == 1
+    assert len(calls) == 1
+    assert not [record for record in content(exported) if record["source_runtime"] == "web"]
+    # Already accepted new HOSTED details cannot be retracted by a later WEB refusal.
+    assert len(content(exported)) == (0 if legacy or operation == "retry" else 1)
+    assert "PRIVATE-" not in repr(exported.get_finished_spans()) + caplog.text
 
 
 @pytest.mark.parametrize(

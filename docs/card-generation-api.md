@@ -100,8 +100,20 @@ Successful responses return `200 OK` with schema version `1`.
 }
 ```
 
-If text generation succeeds but artwork does not, the response still returns
-`200 OK` with `status: "awaiting_artwork_retry"` and a `retry_artwork` action.
+If text generation succeeds but artwork encounters a technical failure, the
+response still returns `200 OK` with `status: "awaiting_artwork_retry"` and a
+`retry_artwork` action. A policy refusal is not a technical partial success.
+
+An artwork retry does not regenerate validated text. On upload or completed-card
+save failure it returns `503 persistence_failure`, preserving the pre-existing
+safe partial card and its metadata. After recovery, clients can retry with a new
+idempotency key. Compensation targets only that attempt's newly uploaded asset,
+not the pre-existing card or another attempt's asset; cleanup errors do not mask
+the original persistence failure. Failure audits use the retry request identity
+in the `audit:` namespace, separate from `card:` documents and initial-generation
+audits. Blob and Cosmos operations are not an inter-service transaction: an
+ambiguous write or failed cleanup can require reconciliation, and no blind card
+restoration is performed over a concurrent save.
 
 ### `POST /my/photos`
 
@@ -214,8 +226,14 @@ from `invalid_prompt` (normalized prompt length), photo-input errors, and
 `prompt_rejected` / `generated_text_rejected` / `generated_art_rejected` (policy).
 An upstream agent HTTP 422 is a non-retryable dependency failure surfaced as
 HTTP 502, not a request-validation 422. Agent policy refusals can return 422.
-`generated_art_rejected` covers both a rejected derived art prompt and a
-generated image rejected before publication.
+`generated_art_rejected` covers a rejected derived art prompt, a generated image
+rejected before publication, and a structured image-provider policy refusal
+(`content_filter`, `content_policy_violation`, or `ResponsibleAIPolicyViolation`,
+case-insensitive). Supported provider envelopes include `error.code` and nested
+`innererror` / `inner_error` causes. HTTP 400 alone, free-text messages, and
+`content_filter_error` (filter failure rather than a policy decision) are not
+classified as refusals. Public refusal messages are static and never include the
+provider response, prompt, credentials, or reference photo.
 For diagnostics, share only the HTTP status and the error panel's static
 title/detail/code, not form contents, cookies, tokens, or a HAR export.
 
@@ -237,15 +255,20 @@ The service applies moderation at:
 
 Every policy refusal is deny-wins. The service returns only the bounded response
 status and public error code, stops before later stages, and persists no card,
-artwork blob, or generation-audit record. This includes hosted-agent refusal and
-all four moderation stages. Operational failures that are not content refusals
+artwork blob, durable reservation, or generation-audit record. This includes
+hosted-agent refusal, image-provider refusal for normal generation and
+reference-photo editing, and all four moderation stages. A provider policy
+refusal is never automatically retried, even when marked retryable upstream.
+Operational failures that are not content refusals
 may still retain the existing TTL-limited, content-free generation audit.
 
 Refusal-capable processing runs before any durable card or retry-audit
 reservation. Same-instance duplicate requests are coalesced in memory; the
 durable idempotency reservation is acquired only when a safe completed or
 technical-failure partial card is ready to persist. A refused artwork retry
-leaves the existing safe partial card unchanged and creates no retry audit.
+leaves the existing safe partial card unchanged, returns the same explicit
+`422 generated_art_rejected` refusal, and creates no new reservation, blob, or
+retry audit.
 
 Saved-photo persistence uses Azure AI Content Safety image analysis before
 Blob/Cosmos persistence. The backend rejects saves when any of

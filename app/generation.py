@@ -1473,6 +1473,14 @@ class AzureFoundryAIClient:
         return response.json()
 
 
+def _is_image_policy_refusal(error_code: str | None) -> bool:
+    return (error_code or "").strip().lower() in {
+        "content_filter",
+        "content_policy_violation",
+        "responsibleaipolicyviolation",
+    }
+
+
 def _azure_error_code(response: httpx.Response) -> str:
     error_code = "unknown_error"
     try:
@@ -1484,8 +1492,21 @@ def _azure_error_code(response: httpx.Response) -> str:
     error = payload.get("error")
     if not isinstance(error, dict):
         return error_code
-    if isinstance(error.get("code"), str) and error["code"].strip():
-        error_code = _sanitize_diagnostic(error["code"], limit=100)
+    causes = [error]
+    for _ in range(8):
+        if not causes:
+            break
+        cause = causes.pop()
+        code = cause.get("code")
+        if isinstance(code, str) and code.strip():
+            if _is_image_policy_refusal(code):
+                return code.strip()
+            if error_code == "unknown_error":
+                error_code = _sanitize_diagnostic(code, limit=100)
+        for key in ("innererror", "inner_error"):
+            inner = cause.get(key)
+            if isinstance(inner, dict):
+                causes.append(inner)
     return error_code
 
 
@@ -1755,15 +1776,23 @@ class CardGenerationService:
                 except _GenerationRefusal:
                     raise
                 except ProblemDetails as exc:
-                    await self._save_audit_failure(
-                        owner.owner_id,
-                        retry_card_id,
-                        request_id,
-                        idempotency_key,
-                        request_hash,
-                        exc.error_code,
-                        problem=exc,
-                    )
+                    try:
+                        await self._save_audit_failure(
+                            owner.owner_id,
+                            retry_card_id,
+                            request_id,
+                            idempotency_key,
+                            request_hash,
+                            exc.error_code,
+                            problem=exc,
+                        )
+                    except Exception as audit_exc:
+                        _log_persistence_exception(
+                            event="persistence-failed",
+                            request_id=request_id,
+                            stage="audit-write",
+                            exc=audit_exc,
+                        )
                     raise
                 except asyncio.TimeoutError:
                     problem = ProblemDetails(
@@ -1955,6 +1984,8 @@ class CardGenerationService:
                     detail_mode="edit",
                 )
             record_token_usage("image", image_result.usage)
+        except _GenerationRefusal:
+            raise
         except ProblemDetails as exc:
             if reference_image is not None:
                 await self._save_audit_failure(
@@ -2287,6 +2318,8 @@ class CardGenerationService:
                 detail_quality=retry_quality,
             )
             record_token_usage("image", image_result.usage)
+        except _GenerationRefusal:
+            raise
         except ProblemDetails as exc:
             await self._save_audit_failure(
                 record.owner_id,
@@ -2353,7 +2386,7 @@ class CardGenerationService:
                 usage=UsageAudit.model_validate((record.usage or {}).get("text", {})),
             ),
             image_result=image_result,
-            claim_persistence=False,
+            existing_card=record,
         )
         await self.services.audit_repository.save_audit(
             StoredCard(
@@ -2456,9 +2489,9 @@ class CardGenerationService:
         moderation: list[ModerationDecision],
         text_result: AITextResult,
         image_result: AIImageResult,
-        claim_persistence: bool = True,
+        existing_card: StoredCard | None = None,
     ) -> StoredCard:
-        if claim_persistence:
+        if existing_card is None:
             replay = await self._claim_card_persistence(
                 owner_id=owner.owner_id,
                 card_id=card_id,
@@ -2470,7 +2503,9 @@ class CardGenerationService:
                 if agent_detail.current() is not None:
                     agent_detail.current().deny()
                 return replay
-        blob_name = build_blob_name(owner.owner_id, card_id)
+        # A failed retry must not delete or overwrite a concurrent attempt's asset.
+        asset_id = card_id if existing_card is None else f"{card_id}-{uuid4().hex}"
+        blob_name = build_blob_name(owner.owner_id, asset_id)
         blob_uploaded = False
         blob_metadata: dict[str, Any] | None = None
         persistence_stage = "blob-upload"
@@ -2523,6 +2558,9 @@ class CardGenerationService:
                 },
                 completed_at=now_iso(),
             )
+            if existing_card is not None:
+                record.created_at = existing_card.created_at
+                record.image_quality = existing_card.image_quality
             with telemetry_span(
                 "fcg.persistence",
                 request_id=request_id,
@@ -2577,15 +2615,16 @@ class CardGenerationService:
                         stage="compensation-delete",
                         exc=cleanup_exc,
                     )
-            try:
-                await self.services.card_repository.delete(owner.owner_id, card_id)
-            except Exception as cleanup_exc:
-                _log_persistence_exception(
-                    event="compensation-failed",
-                    request_id=request_id,
-                    stage="cosmos-delete",
-                    exc=cleanup_exc,
-                )
+            if existing_card is None:
+                try:
+                    await self.services.card_repository.delete(owner.owner_id, card_id)
+                except Exception as cleanup_exc:
+                    _log_persistence_exception(
+                        event="compensation-failed",
+                        request_id=request_id,
+                        stage="cosmos-delete",
+                        exc=cleanup_exc,
+                    )
             problem = ProblemDetails(
                 status_code=503,
                 title="Service Unavailable",
@@ -2593,23 +2632,25 @@ class CardGenerationService:
                 type="/problems/persistence-failure",
                 error_code="persistence_failure",
             )
-            try:
-                await self._save_audit_failure(
-                    owner.owner_id,
-                    card_id,
-                    request_id,
-                    idempotency_key,
-                    request_hash,
-                    "persistence_failure",
-                    problem=problem,
-                )
-            except Exception as audit_exc:
-                _log_persistence_exception(
-                    event="persistence-failed",
-                    request_id=request_id,
-                    stage="audit-write",
-                    exc=audit_exc,
-                )
+            # Retry failure audits belong to retry_artwork's request identity.
+            if existing_card is None:
+                try:
+                    await self._save_audit_failure(
+                        owner.owner_id,
+                        card_id,
+                        request_id,
+                        idempotency_key,
+                        request_hash,
+                        "persistence_failure",
+                        problem=problem,
+                    )
+                except Exception as audit_exc:
+                    _log_persistence_exception(
+                        event="persistence-failed",
+                        request_id=request_id,
+                        stage="audit-write",
+                        exc=audit_exc,
+                    )
             raise problem from exc
 
     async def _claim_card_persistence(
@@ -2938,6 +2979,23 @@ class CardGenerationService:
                             error_code="upstream_timeout",
                         ) from exc
                 except UpstreamServiceError as exc:
+                    if service_name == "foundry-image" and _is_image_policy_refusal(exc.error_code):
+                        record_dependency_attempt(
+                            dependency=service_name,
+                            attempt=attempt + 1,
+                            outcome="refused",
+                            duration_ms=(time.perf_counter() - started) * 1000,
+                            request_id=request_id,
+                            error_code="generated_art_rejected",
+                            retryable=False,
+                        )
+                        raise _GenerationRefusal(
+                            status_code=422,
+                            title="Generated Artwork Rejected",
+                            detail="The artwork request was rejected by the image safety policy.",
+                            type="/problems/generated-art-rejected",
+                            error_code="generated_art_rejected",
+                        ) from exc
                     outcome = "throttled" if exc.status_code == 429 else "failed"
                     record_dependency_attempt(
                         dependency=exc.service,
