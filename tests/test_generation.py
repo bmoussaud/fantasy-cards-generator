@@ -1479,6 +1479,207 @@ def test_failed_blob_compensation_does_not_mask_persistence_problem(
     assert "sensitive cleanup detail" not in caplog.text
 
 
+@pytest.mark.parametrize("failure", ["upload", "save", "cleanup", "audit"])
+def test_retry_persistence_failure_preserves_partial_and_can_recover(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    failure: str,
+) -> None:
+    class FaultRepository(InMemorySharedCardAuditRepository):
+        failing = False
+        deletes = 0
+
+        async def save(self, record: StoredCard) -> StoredCard:
+            if self.failing and record.status == "completed":
+                raise RuntimeError("PRIVATE-COSMOS-FAILURE")
+            return await super().save(record)
+
+        async def save_audit(self, record: StoredCard) -> None:
+            if self.failing and failure == "audit":
+                raise RuntimeError("PRIVATE-AUDIT-FAILURE")
+            await super().save_audit(record)
+
+        async def delete(self, owner_id: str, card_id: str) -> None:
+            self.deletes += 1
+            await super().delete(owner_id, card_id)
+
+    class FaultAssets(InMemoryAssetStore):
+        failing = False
+        deleted: list[str]
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.deleted = []
+
+        async def upload(self, blob_name, payload, content_type):
+            if self.failing and failure == "upload":
+                raise RuntimeError("PRIVATE-UPLOAD-FAILURE")
+            return await super().upload(blob_name, payload, content_type)
+
+        async def delete(self, blob_name: str) -> None:
+            self.deleted.append(blob_name)
+            if self.failing and failure == "cleanup":
+                raise RuntimeError("PRIVATE-CLEANUP-FAILURE")
+            await super().delete(blob_name)
+
+    class CountingAI(MockAIClient):
+        calls = 0
+
+        async def generate_card(self, prompt, **kwargs):
+            self.calls += 1
+            return await super().generate_card(prompt, **kwargs)
+
+    services = build_services(monkeypatch)
+    repository = FaultRepository()
+    assets = FaultAssets()
+    ai = CountingAI(services.settings)
+    services.card_repository = services.audit_repository = repository
+    services.asset_store = assets
+    services.ai_client = ai
+    from app import main as main_module
+    from tests.conftest import FakeOAuthClient
+
+    monkeypatch.setattr(main_module, "create_oauth_client", lambda settings: FakeOAuthClient())
+    client = TestClient(create_app(services=services), base_url="https://testserver")
+    begin_login(client)
+    client.get("/auth/callback?code=valid-code&state=opaque", follow_redirects=False)
+    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
+    initial = client.post(
+        "/api/v1/cards/generate",
+        json={
+            "prompt": "A safe fantasy guardian [[mock:image-500]]",
+            "idempotencyKey": "retry-persistence-initial",
+            "csrfToken": csrf_token,
+        },
+    )
+    assert initial.status_code == 200
+    assert initial.json()["status"] == "awaiting_artwork_retry"
+    card_id = initial.json()["cardId"]
+    record = asyncio.run(repository.get(TEST_OWNER_ID, card_id))
+    assert record is not None
+    record.derived_art_prompt = "A safe original fantasy guardian"
+    original = record.to_document()
+    initial_audit = StoredCard(
+        id=card_id,
+        document_type="generation-audit",
+        owner_id=TEST_OWNER_ID,
+        request_id="initial-audit",
+        idempotency_key=record.idempotency_key,
+        request_hash=record.request_hash,
+        status="audit_completed",
+    )
+    asyncio.run(repository.save_audit(initial_audit))
+    repository.failing = failure != "upload"
+    assets.failing = True
+    response = client.post(
+        f"/api/v1/cards/{card_id}/artwork/retry",
+        json={"idempotencyKey": "retry-persistence-failure", "csrfToken": csrf_token},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["errorCode"] == "persistence_failure"
+    assert repository.deletes == 0
+    assert asyncio.run(repository.get(TEST_OWNER_ID, card_id)).to_document() == original
+    assert asyncio.run(repository.get_audit(TEST_OWNER_ID, card_id)) is initial_audit
+    retry_id = generation_module.deterministic_card_id(TEST_OWNER_ID, "retry-persistence-failure")
+    assert (TEST_OWNER_ID, f"card:{card_id}") in repository._records
+    if failure != "audit":
+        audit = asyncio.run(repository.get_audit(TEST_OWNER_ID, retry_id))
+        assert audit.failure_error_code == "persistence_failure"
+        assert audit.request_hash == generation_module.digest_text(f"retry:{card_id}")
+        assert audit.idempotency_key == "retry-persistence-failure"
+        assert (TEST_OWNER_ID, f"audit:{retry_id}") in repository._records
+    assert len(assets.deleted) == (0 if failure == "upload" else 1)
+    assert len(assets._assets) == (1 if failure == "cleanup" else 0)
+    assert "PRIVATE-" not in caplog.text + response.text
+    if failure == "cleanup":
+        assert "compensation-failed" in caplog.text
+
+    repository.failing = assets.failing = False
+    recovered = client.post(
+        f"/api/v1/cards/{card_id}/artwork/retry",
+        json={"idempotencyKey": "retry-persistence-recovered", "csrfToken": csrf_token},
+    )
+    assert recovered.status_code == 200
+    assert recovered.json()["status"] == "completed"
+    assert ai.calls == 1
+    completed = asyncio.run(repository.get(TEST_OWNER_ID, card_id))
+    assert completed.validated_payload == record.validated_payload
+    assert completed.created_at == record.created_at
+    assert completed.image_quality == record.image_quality
+    assert client.get(recovered.json()["imageUrl"]).status_code == 200
+
+
+def test_failed_retry_compensation_does_not_remove_concurrent_success(monkeypatch) -> None:
+    class ConcurrentRepository(InMemorySharedCardAuditRepository):
+        def __init__(self) -> None:
+            super().__init__()
+            self.first_save = asyncio.Event()
+            self.second_saved = asyncio.Event()
+            self.completed_saves = 0
+
+        async def save(self, record):
+            if record.status == "completed":
+                self.completed_saves += 1
+                if self.completed_saves == 1:
+                    self.first_save.set()
+                    await self.second_saved.wait()
+                    raise RuntimeError("PRIVATE-FIRST-SAVE-FAILURE")
+                saved = await super().save(record)
+                self.second_saved.set()
+                return saved
+            return await super().save(record)
+
+    async def scenario() -> None:
+        services = build_services(monkeypatch)
+        repository = ConcurrentRepository()
+        services.card_repository = services.audit_repository = repository
+        service = CardGenerationService(services)
+        owner = AuthenticatedOwner(
+            owner_id=TEST_OWNER_ID,
+            tenant_id=None,
+            object_id=None,
+            subject="test",
+            display_name=None,
+            email=None,
+        )
+        partial = await service.generate_card(
+            owner=owner,
+            prompt="A safe fantasy guardian [[mock:image-500]]",
+            idempotency_key="concurrent-retry-initial",
+            request_id="initial",
+            client_ip="127.0.0.1",
+        )
+        record = await repository.get(owner.owner_id, partial.cardId)
+        record.derived_art_prompt = "A safe original fantasy guardian"
+
+        async def retry(key):
+            return await service.retry_artwork(
+                owner=owner,
+                card_id=record.id,
+                idempotency_key=key,
+                request_id=key,
+                client_ip="127.0.0.1",
+            )
+
+        failed = asyncio.create_task(retry("concurrent-retry-fails"))
+        await repository.first_save.wait()
+        successful = await retry("concurrent-retry-succeeds")
+        with pytest.raises(ProblemDetails) as raised:
+            await failed
+        assert raised.value.error_code == "persistence_failure"
+        assert successful.status == "completed"
+        winner = await repository.get(owner.owner_id, record.id)
+        assert winner.status == "completed"
+        assert winner.validated_payload == record.validated_payload
+        assert set(services.asset_store._assets) == {winner.blob_name}
+        assert await service.fetch_image(owner, record.id) == await services.asset_store.download(
+            winner.blob_name
+        )
+
+    asyncio.run(scenario())
+
+
 def test_concurrent_duplicates_do_not_duplicate_model_calls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1911,6 +2112,46 @@ def test_raw_ai_logging_environment_variables_are_ignored(
 # ---------------------------------------------------------------------------
 # Image quality — generation payload contract
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        ({"code": "content_filter"}, "content_filter"),
+        ({"code": " Content_Policy_Violation "}, "Content_Policy_Violation"),
+        ({"code": "ResponsibleAIPolicyViolation"}, "ResponsibleAIPolicyViolation"),
+        (
+            {"code": "BadRequest", "innererror": {"code": "content_filter"}},
+            "content_filter",
+        ),
+        (
+            {"code": "BadRequest", "inner_error": {"code": "ResponsibleAIPolicyViolation"}},
+            "ResponsibleAIPolicyViolation",
+        ),
+        (
+            {"innererror": {"inner_error": {"code": "content_policy_violation"}}},
+            "content_policy_violation",
+        ),
+        (
+            {"innererror": [], "inner_error": {"code": "content_filter"}},
+            "content_filter",
+        ),
+        ({"code": "content_filter_error"}, "content_filter_error"),
+        ({"code": "BadRequest", "message": "content_filter"}, "BadRequest"),
+        ({"code": 42, "innererror": "content_filter"}, "unknown_error"),
+        ({"code": "", "inner_error": None}, "unknown_error"),
+        ([], "unknown_error"),
+        (None, "unknown_error"),
+    ],
+)
+def test_azure_image_error_code_reads_only_structured_bounded_causes(error, expected):
+    response = httpx.Response(400, json={"error": error})
+    assert generation_module._azure_error_code(response) == expected
+
+
+@pytest.mark.parametrize("body", [b"not-json content_filter", b"[]", b"null"])
+def test_azure_image_error_code_ignores_non_object_payloads(body):
+    assert generation_module._azure_error_code(httpx.Response(400, content=body)) == "unknown_error"
 
 
 def test_foundry_image_request_payload_includes_quality(
