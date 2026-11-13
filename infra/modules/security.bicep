@@ -22,12 +22,17 @@ param appSessionSecretKeyValue string = ''
 @description('Microsoft Entra ID client secret stored in Key Vault as ENTRA_CLIENT_SECRET. Empty skips creating the secret.')
 param entraClientSecretValue string = ''
 
+@secure()
+@description('LinkedIn client secret stored in Key Vault as LINKEDIN_CLIENT_SECRET. Empty skips creating the secret.')
+param linkedinClientSecretValue string = ''
+
 @description('Optional tags shared by security resources.')
 param tags object = {}
 
 var keyVaultReaderRoleDefinitionId = '21090545-7ca7-4776-b22c-e363652d74d2'
 var hasAppSessionSecretKeyValue = !empty(appSessionSecretKeyValue)
 var hasEntraClientSecretValue = !empty(entraClientSecretValue)
+var hasLinkedInClientSecretValue = !empty(linkedinClientSecretValue)
 
 resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
   name: keyVaultName
@@ -71,8 +76,17 @@ resource entraClientSecretSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' 
   }
 }
 
+resource linkedinClientSecretSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (hasLinkedInClientSecretValue) {
+  parent: keyVault
+  name: 'linkedin-client-secret'
+  properties: {
+    value: linkedinClientSecretValue
+  }
+}
+
 output keyVaultName string = keyVault.name
 output keyVaultResourceId string = keyVault.id
 output keyVaultUri string = keyVault.properties.vaultUri
 output appSessionSecretKeySecretUri string = hasAppSessionSecretKeyValue ? appSessionSecretKeySecret!.properties.secretUri : ''
 output entraClientSecretSecretUri string = hasEntraClientSecretValue ? entraClientSecretSecret!.properties.secretUri : ''
+output linkedinClientSecretSecretUri string = hasLinkedInClientSecretValue ? linkedinClientSecretSecret!.properties.secretUri : ''

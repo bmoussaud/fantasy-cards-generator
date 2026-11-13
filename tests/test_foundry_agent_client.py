@@ -21,6 +21,7 @@ from azure.identity import (
 from app.foundry_agent_client import (
     FOUNDRY_AGENT_TOKEN_SCOPE,
     FoundryAgentClient,
+    GenerateCardAgentRequest,
     _build_responses_url,
     _parse_success_envelope,
     _TransportAwareChainedCredential,
@@ -28,6 +29,14 @@ from app.foundry_agent_client import (
 from app.settings import SettingsError, load_app_settings
 
 PROJECT_ENDPOINT = "https://cards.services.ai.azure.com/api/projects/fellowship"
+
+
+def test_internal_agent_query_boundary_is_2500_characters() -> None:
+    assert len(GenerateCardAgentRequest(query="😀" * 2500).query) == 2500
+    with pytest.raises(ValueError):
+        GenerateCardAgentRequest(query="x" * 2501)
+
+
 AGENT_NAME = "card-orchestrator"
 
 
@@ -925,7 +934,7 @@ def test_errors_do_not_leak_prompt_token_or_response_body() -> None:
 
 def test_invalid_query_diagnostics_do_not_include_input() -> None:
     credential = FakeCredential()
-    query = "private-query-marker-" * 21
+    query = "private-query-marker-" + ("x" * 2500)
 
     def unexpected_request(request: httpx.Request) -> httpx.Response:
         pytest.fail("Invalid query must not trigger an HTTP request")

@@ -28,6 +28,8 @@ from app.settings import AppSettings
 SAVED_PHOTO_DOCUMENT_ID_PREFIX = "photo:"
 PROFILE_PHOTO_IMPORT_DOCUMENT_ID_PREFIX = "profile-photo-import:"
 PROFILE_PHOTO_IMPORT_SOURCE = "entra-profile-photo"
+LINKEDIN_PROFILE_PHOTO_IMPORT_SOURCE = "linkedin-profile-photo"
+PROFILE_PHOTO_IMPORT_PROVIDERS = {"entra", "linkedin"}
 PROFILE_PHOTO_IMPORT_LEASE_SECONDS = 600
 PROFILE_PHOTO_IMPORT_CLAIMABLE_STATUSES = {
     "not_offered",
@@ -248,11 +250,12 @@ class ProfilePhotoImportState:
     owner_id: str
     status: str
     photo_id: str | None = None
+    provider: str = "entra"
     updated_at: str = field(default_factory=now_iso)
 
     @property
     def document_id(self) -> str:
-        return f"{PROFILE_PHOTO_IMPORT_DOCUMENT_ID_PREFIX}{self.owner_id}"
+        return _profile_photo_import_document_id(self.owner_id, self.provider)
 
     def to_document(self) -> dict[str, Any]:
         return {
@@ -260,6 +263,7 @@ class ProfilePhotoImportState:
             "documentType": "profile-photo-import",
             "userId": self.owner_id,
             "owner": {"ownerId": self.owner_id},
+            "provider": self.provider,
             "status": self.status,
             "photoId": self.photo_id,
             "updatedAt": self.updated_at,
@@ -277,107 +281,180 @@ class ProfilePhotoImportState:
             owner_id=owner_id,
             status=status,
             photo_id=_optional_label(document.get("photoId")),
+            provider=_profile_photo_import_provider(document.get("provider")),
             updated_at=str(document.get("updatedAt") or now_iso()),
         )
 
 
 class AbstractProfilePhotoImportStateRepository:
-    async def get(self, owner_id: str) -> ProfilePhotoImportState | None:
+    async def get(
+        self,
+        owner_id: str,
+        *,
+        provider: str = "entra",
+    ) -> ProfilePhotoImportState | None:
         raise NotImplementedError
 
     async def save(self, state: ProfilePhotoImportState) -> ProfilePhotoImportState:
         raise NotImplementedError
 
-    async def delete(self, owner_id: str) -> None:
+    async def delete(self, owner_id: str, *, provider: str = "entra") -> None:
         raise NotImplementedError
 
-    async def claim(self, owner_id: str) -> bool:
+    async def delete_owner(self, owner_id: str) -> None:
         raise NotImplementedError
 
-    async def reset_claim(self, owner_id: str) -> None:
+    async def claim(
+        self,
+        owner_id: str,
+        *,
+        provider: str = "entra",
+        allow_replace: bool = False,
+    ) -> bool:
         raise NotImplementedError
 
-    async def mark_deleted_suppressed(self, owner_id: str) -> ProfilePhotoImportState:
+    async def reset_claim(self, owner_id: str, *, provider: str = "entra") -> None:
+        raise NotImplementedError
+
+    async def mark_deleted_suppressed(
+        self,
+        owner_id: str,
+        *,
+        provider: str = "entra",
+    ) -> ProfilePhotoImportState:
         raise NotImplementedError
 
     async def complete_import(
         self,
         owner_id: str,
         photo_id: str,
+        *,
+        provider: str = "entra",
     ) -> bool:
         raise NotImplementedError
 
-    async def complete_no_photo(self, owner_id: str) -> bool:
+    async def complete_no_photo(self, owner_id: str, *, provider: str = "entra") -> bool:
         raise NotImplementedError
 
 
 class InMemoryProfilePhotoImportStateRepository(AbstractProfilePhotoImportStateRepository):
     def __init__(self) -> None:
-        self._records: dict[str, ProfilePhotoImportState] = {}
+        self._records: dict[tuple[str, str], ProfilePhotoImportState] = {}
         self._lock = asyncio.Lock()
 
-    async def get(self, owner_id: str) -> ProfilePhotoImportState | None:
+    async def get(
+        self,
+        owner_id: str,
+        *,
+        provider: str = "entra",
+    ) -> ProfilePhotoImportState | None:
         async with self._lock:
-            return self._records.get(owner_id)
+            return self._records.get((owner_id, provider))
 
     async def save(self, state: ProfilePhotoImportState) -> ProfilePhotoImportState:
         async with self._lock:
             state.updated_at = now_iso()
-            self._records[state.owner_id] = state
+            self._records[(state.owner_id, state.provider)] = state
             return state
 
-    async def delete(self, owner_id: str) -> None:
+    async def delete(self, owner_id: str, *, provider: str = "entra") -> None:
         async with self._lock:
-            self._records.pop(owner_id, None)
+            self._records.pop((owner_id, provider), None)
 
-    async def claim(self, owner_id: str) -> bool:
+    async def delete_owner(self, owner_id: str) -> None:
         async with self._lock:
-            existing = self._records.get(owner_id)
+            self._records = {
+                key: value for key, value in self._records.items() if key[0] != owner_id
+            }
+
+    async def claim(
+        self,
+        owner_id: str,
+        *,
+        provider: str = "entra",
+        allow_replace: bool = False,
+    ) -> bool:
+        async with self._lock:
+            key = (owner_id, provider)
+            existing = self._records.get(key)
             if existing is not None:
-                if existing.status not in PROFILE_PHOTO_IMPORT_CLAIMABLE_STATUSES | {"accepted"}:
+                claimable = PROFILE_PHOTO_IMPORT_CLAIMABLE_STATUSES | {"accepted"}
+                if allow_replace:
+                    claimable.update({"imported", "deleted_suppressed"})
+                if existing.status not in claimable:
                     return False
                 if existing.status == "accepted" and not _profile_import_claim_expired(
                     existing.updated_at
                 ):
                     return False
-            self._records[owner_id] = ProfilePhotoImportState(owner_id=owner_id, status="accepted")
-            return True
-
-    async def reset_claim(self, owner_id: str) -> None:
-        async with self._lock:
-            existing = self._records.get(owner_id)
-            if existing is not None and existing.status == "accepted":
-                self._records[owner_id] = ProfilePhotoImportState(
-                    owner_id=owner_id,
-                    status="failed_retryable",
-                )
-
-    async def mark_deleted_suppressed(self, owner_id: str) -> ProfilePhotoImportState:
-        async with self._lock:
-            state = ProfilePhotoImportState(owner_id=owner_id, status="deleted_suppressed")
-            self._records[owner_id] = state
-            return state
-
-    async def complete_import(self, owner_id: str, photo_id: str) -> bool:
-        async with self._lock:
-            existing = self._records.get(owner_id)
-            if existing is None or existing.status != "accepted":
-                return False
-            self._records[owner_id] = ProfilePhotoImportState(
+            self._records[key] = ProfilePhotoImportState(
                 owner_id=owner_id,
-                status="imported",
-                photo_id=photo_id,
+                status="accepted",
+                provider=provider,
             )
             return True
 
-    async def complete_no_photo(self, owner_id: str) -> bool:
+    async def reset_claim(self, owner_id: str, *, provider: str = "entra") -> None:
         async with self._lock:
-            existing = self._records.get(owner_id)
+            key = (owner_id, provider)
+            existing = self._records.get(key)
+            if existing is not None and existing.status == "accepted":
+                self._records[key] = ProfilePhotoImportState(
+                    owner_id=owner_id,
+                    status="failed_retryable",
+                    provider=provider,
+                )
+
+    async def mark_deleted_suppressed(
+        self,
+        owner_id: str,
+        *,
+        provider: str = "entra",
+    ) -> ProfilePhotoImportState:
+        async with self._lock:
+            state = ProfilePhotoImportState(
+                owner_id=owner_id,
+                status="deleted_suppressed",
+                provider=provider,
+            )
+            self._records[(owner_id, provider)] = state
+            return state
+
+    async def complete_import(
+        self,
+        owner_id: str,
+        photo_id: str,
+        *,
+        provider: str = "entra",
+    ) -> bool:
+        async with self._lock:
+            key = (owner_id, provider)
+            existing = self._records.get(key)
             if existing is None or existing.status != "accepted":
                 return False
-            self._records[owner_id] = ProfilePhotoImportState(
+            self._records[key] = ProfilePhotoImportState(
+                owner_id=owner_id,
+                status="imported",
+                photo_id=photo_id,
+                provider=provider,
+            )
+            return True
+
+    async def complete_no_photo(
+        self,
+        owner_id: str,
+        *,
+        provider: str = "entra",
+    ) -> bool:
+        async with self._lock:
+            key = (owner_id, provider)
+            existing = self._records.get(key)
+            if existing is None or existing.status != "accepted":
+                return False
+            self._records[key] = ProfilePhotoImportState(
                 owner_id=owner_id,
                 status="no_photo",
+                provider=provider,
             )
             return True
 
@@ -527,13 +604,18 @@ class AzureCosmosProfilePhotoImportStateRepository(AbstractProfilePhotoImportSta
             self._container = database.get_container_client(self._container_name)
         return self._container
 
-    async def get(self, owner_id: str) -> ProfilePhotoImportState | None:
+    async def get(
+        self,
+        owner_id: str,
+        *,
+        provider: str = "entra",
+    ) -> ProfilePhotoImportState | None:
         from azure.cosmos.exceptions import CosmosResourceNotFoundError
 
         container = await self._get_container()
         try:
             document = await container.read_item(
-                f"{PROFILE_PHOTO_IMPORT_DOCUMENT_ID_PREFIX}{owner_id}",
+                _profile_photo_import_document_id(owner_id, provider),
                 partition_key=owner_id,
             )
         except CosmosResourceNotFoundError:
@@ -546,25 +628,51 @@ class AzureCosmosProfilePhotoImportStateRepository(AbstractProfilePhotoImportSta
         await container.upsert_item(state.to_document())
         return state
 
-    async def delete(self, owner_id: str) -> None:
+    async def delete(self, owner_id: str, *, provider: str = "entra") -> None:
         from azure.cosmos.exceptions import CosmosResourceNotFoundError
 
         container = await self._get_container()
         try:
             await container.delete_item(
-                f"{PROFILE_PHOTO_IMPORT_DOCUMENT_ID_PREFIX}{owner_id}",
+                _profile_photo_import_document_id(owner_id, provider),
                 partition_key=owner_id,
             )
         except CosmosResourceNotFoundError:
             return
 
-    async def claim(self, owner_id: str) -> bool:
+    async def delete_owner(self, owner_id: str) -> None:
+        from azure.cosmos.exceptions import CosmosResourceNotFoundError
+
+        container = await self._get_container()
+        for provider in PROFILE_PHOTO_IMPORT_PROVIDERS:
+            try:
+                await container.delete_item(
+                    _profile_photo_import_document_id(owner_id, provider),
+                    partition_key=owner_id,
+                )
+            except CosmosResourceNotFoundError:
+                continue
+
+    async def claim(
+        self,
+        owner_id: str,
+        *,
+        provider: str = "entra",
+        allow_replace: bool = False,
+    ) -> bool:
         from azure.cosmos.exceptions import CosmosHttpResponseError
 
         container = await self._get_container()
-        existing = await self.get(owner_id)
+        existing = (
+            await self.get(owner_id)
+            if provider == "entra"
+            else await self.get(owner_id, provider=provider)
+        )
         if existing is not None:
-            if existing.status not in PROFILE_PHOTO_IMPORT_CLAIMABLE_STATUSES | {"accepted"}:
+            claimable = PROFILE_PHOTO_IMPORT_CLAIMABLE_STATUSES | {"accepted"}
+            if allow_replace:
+                claimable.add("imported")
+            if existing.status not in claimable:
                 return False
             if existing.status == "accepted" and not _profile_import_claim_expired(
                 existing.updated_at
@@ -573,7 +681,11 @@ class AzureCosmosProfilePhotoImportStateRepository(AbstractProfilePhotoImportSta
         if existing is None:
             try:
                 await container.create_item(
-                    ProfilePhotoImportState(owner_id=owner_id, status="accepted").to_document()
+                    ProfilePhotoImportState(
+                        owner_id=owner_id,
+                        status="accepted",
+                        provider=provider,
+                    ).to_document()
                 )
             except CosmosHttpResponseError as exc:
                 if exc.status_code == 409:
@@ -585,7 +697,11 @@ class AzureCosmosProfilePhotoImportStateRepository(AbstractProfilePhotoImportSta
             datetime.now(UTC) - timedelta(seconds=PROFILE_PHOTO_IMPORT_LEASE_SECONDS)
         ).isoformat()
         claimable_statuses = ", ".join(
-            f"'{value}'" for value in sorted(PROFILE_PHOTO_IMPORT_CLAIMABLE_STATUSES)
+            f"'{value}'"
+            for value in sorted(
+                PROFILE_PHOTO_IMPORT_CLAIMABLE_STATUSES
+                | ({"imported", "deleted_suppressed"} if allow_replace else set())
+            )
         )
         try:
             await container.patch_item(
@@ -606,17 +722,38 @@ class AzureCosmosProfilePhotoImportStateRepository(AbstractProfilePhotoImportSta
             raise
         return True
 
-    async def reset_claim(self, owner_id: str) -> None:
-        state = await self.get(owner_id)
+    async def reset_claim(self, owner_id: str, *, provider: str = "entra") -> None:
+        state = await self.get(owner_id, provider=provider)
         if state is not None and state.status == "accepted":
-            await self.save(ProfilePhotoImportState(owner_id=owner_id, status="failed_retryable"))
+            await self.save(
+                ProfilePhotoImportState(
+                    owner_id=owner_id,
+                    status="failed_retryable",
+                    provider=provider,
+                )
+            )
 
-    async def mark_deleted_suppressed(self, owner_id: str) -> ProfilePhotoImportState:
-        state = ProfilePhotoImportState(owner_id=owner_id, status="deleted_suppressed")
+    async def mark_deleted_suppressed(
+        self,
+        owner_id: str,
+        *,
+        provider: str = "entra",
+    ) -> ProfilePhotoImportState:
+        state = ProfilePhotoImportState(
+            owner_id=owner_id,
+            status="deleted_suppressed",
+            provider=provider,
+        )
         return await self.save(state)
 
-    async def complete_import(self, owner_id: str, photo_id: str) -> bool:
-        state = await self.get(owner_id)
+    async def complete_import(
+        self,
+        owner_id: str,
+        photo_id: str,
+        *,
+        provider: str = "entra",
+    ) -> bool:
+        state = await self.get(owner_id, provider=provider)
         if state is None or state.status != "accepted":
             return False
         await self.save(
@@ -624,15 +761,27 @@ class AzureCosmosProfilePhotoImportStateRepository(AbstractProfilePhotoImportSta
                 owner_id=owner_id,
                 status="imported",
                 photo_id=photo_id,
+                provider=provider,
             )
         )
         return True
 
-    async def complete_no_photo(self, owner_id: str) -> bool:
-        state = await self.get(owner_id)
+    async def complete_no_photo(
+        self,
+        owner_id: str,
+        *,
+        provider: str = "entra",
+    ) -> bool:
+        state = await self.get(owner_id, provider=provider)
         if state is None or state.status != "accepted":
             return False
-        await self.save(ProfilePhotoImportState(owner_id=owner_id, status="no_photo"))
+        await self.save(
+            ProfilePhotoImportState(
+                owner_id=owner_id,
+                status="no_photo",
+                provider=provider,
+            )
+        )
         return True
 
 
@@ -785,7 +934,10 @@ class SavedPhotoService:
         source: str | None = None,
         source_key: str | None = None,
     ) -> SavedPhotoResponseModel:
-        if source == PROFILE_PHOTO_IMPORT_SOURCE:
+        if source in {
+            PROFILE_PHOTO_IMPORT_SOURCE,
+            LINKEDIN_PROFILE_PHOTO_IMPORT_SOURCE,
+        }:
             try:
                 photo = normalize_imported_profile_photo(photo)
             except InvalidSavedPhotoError as exc:
@@ -937,8 +1089,16 @@ class SavedPhotoService:
         import_state_repository: AbstractProfilePhotoImportStateRepository | None = None,
     ) -> None:
         record = await self._require_photo(owner.owner_id, photo_id)
-        if record.source == PROFILE_PHOTO_IMPORT_SOURCE and import_state_repository is not None:
-            await import_state_repository.mark_deleted_suppressed(owner.owner_id)
+        if import_state_repository is not None:
+            provider = {
+                PROFILE_PHOTO_IMPORT_SOURCE: "entra",
+                LINKEDIN_PROFILE_PHOTO_IMPORT_SOURCE: "linkedin",
+            }.get(record.source)
+            if provider is not None:
+                await import_state_repository.mark_deleted_suppressed(
+                    owner.owner_id,
+                    provider=provider,
+                )
         await self._delete_blob(
             record.blob_name,
             owner_id=owner.owner_id,
@@ -1098,8 +1258,22 @@ def normalize_imported_profile_photo(photo: ReferenceImageUpload) -> ReferenceIm
     return ReferenceImageUpload(
         content=normalized,
         content_type="image/jpeg",
-        filename="entra-profile-photo.jpg",
+        filename="profile-photo.jpg",
     )
+
+
+def _profile_photo_import_document_id(owner_id: str, provider: str) -> str:
+    normalized_provider = _profile_photo_import_provider(provider)
+    if normalized_provider == "entra":
+        return f"{PROFILE_PHOTO_IMPORT_DOCUMENT_ID_PREFIX}{owner_id}"
+    return f"{PROFILE_PHOTO_IMPORT_DOCUMENT_ID_PREFIX}{normalized_provider}:{owner_id}"
+
+
+def _profile_photo_import_provider(value: object) -> str:
+    provider = str(value or "entra").strip().lower()
+    if provider not in PROFILE_PHOTO_IMPORT_PROVIDERS:
+        raise ValueError("Unsupported profile-photo import provider.")
+    return provider
 
 
 def _profile_import_claim_expired(updated_at: str) -> bool:

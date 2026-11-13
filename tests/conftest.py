@@ -20,6 +20,12 @@ os.environ.update(
         "ENTRA_AUTHORITY": "https://login.microsoftonline.com/organizations/v2.0",
         "ENTRA_REDIRECT_URI": "https://testserver/auth/callback",
         "ENTRA_POST_LOGOUT_REDIRECT_URI": "https://testserver/",
+        "LINKEDIN_OIDC_ENABLED": "false",
+        "LINKEDIN_CLIENT_ID": "",
+        "LINKEDIN_CLIENT_SECRET": "",
+        "LINKEDIN_REDIRECT_URI": "",
+        "LINKEDIN_PILOT_OWNER_ALLOWLIST": "",
+        "LINKEDIN_PICTURE_HOST_ALLOWLIST": "",
         "PERSISTENCE_MODE": "memory",
         "FOUNDRY_ENDPOINT": "https://foundry.example",
         "FOUNDRY_IMAGE_DEPLOYMENT": "gpt-image-2",
@@ -131,6 +137,12 @@ def base_environment(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, N
     monkeypatch.setenv("ENTRA_AUTHORITY", "https://login.microsoftonline.com/organizations/v2.0")
     monkeypatch.setenv("ENTRA_REDIRECT_URI", "https://testserver/auth/callback")
     monkeypatch.setenv("ENTRA_POST_LOGOUT_REDIRECT_URI", "https://testserver/")
+    monkeypatch.setenv("LINKEDIN_OIDC_ENABLED", "false")
+    monkeypatch.setenv("LINKEDIN_CLIENT_ID", "")
+    monkeypatch.setenv("LINKEDIN_CLIENT_SECRET", "")
+    monkeypatch.setenv("LINKEDIN_REDIRECT_URI", "")
+    monkeypatch.setenv("LINKEDIN_PILOT_OWNER_ALLOWLIST", "")
+    monkeypatch.setenv("LINKEDIN_PICTURE_HOST_ALLOWLIST", "")
     monkeypatch.setenv("PERSISTENCE_MODE", "memory")
     monkeypatch.setenv("FOUNDRY_ENDPOINT", "https://foundry.example")
     monkeypatch.setenv("FOUNDRY_IMAGE_DEPLOYMENT", "gpt-image-2")

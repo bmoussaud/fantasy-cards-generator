@@ -112,7 +112,7 @@ class GenerateCardAgentRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     schemaVersion: Literal[1] = 1
-    query: str = Field(min_length=1, max_length=400)
+    query: str = Field(min_length=1, max_length=2500)
 
 
 class GenerateCardAgentResponse(BaseModel):

@@ -56,6 +56,26 @@ param appSessionSecretKeyValue string = ''
 @description('Microsoft Entra ID client secret stored in Key Vault as ENTRA_CLIENT_SECRET. Populated automatically by hooks/gen_client_secret.sh when deployEntraAppRegistration=true.')
 param entraClientSecretValue string = ''
 
+@allowed([
+  'false'
+  'true'
+])
+@description('Explicit LinkedIn OIDC pilot feature flag. Disabled by default in every environment.')
+param linkedinOidcEnabled string = 'false'
+
+@description('LinkedIn developer-application client ID. Empty while the pilot is not configured.')
+param linkedinClientId string = ''
+
+@secure()
+@description('LinkedIn client secret stored in Key Vault and exposed to Container Apps only through a secret reference.')
+param linkedinClientSecretValue string = ''
+
+@description('Comma-separated canonical Entra <tid>:<oid> owners allowed to use the LinkedIn developer pilot.')
+param linkedinPilotOwnerAllowlist string = ''
+
+@description('Comma-separated exact LinkedIn picture hosts. Keep empty until a separately authorized contract test proves them.')
+param linkedinPictureHostAllowlist string = ''
+
 @description('Cosmos DB SQL database name for application data.')
 param cosmosDatabaseName string = 'appdb'
 
@@ -384,6 +404,7 @@ module security './modules/security.bicep' = {
     deployerPrincipalId: deployerPrincipalId
     deployerPrincipalType: deployerPrincipalType
     entraClientSecretValue: entraClientSecretValue
+    linkedinClientSecretValue: linkedinClientSecretValue
     keyVaultName: keyVaultName
     location: location
     tags: tags
@@ -418,6 +439,7 @@ module containerAppsEnvironment './modules/container-apps-environment.bicep' = {
 var predictedContainerAppUrl = 'https://${containerAppName}.${containerAppsEnvironment.outputs.containerAppsEnvironmentDefaultDomain}'
 var deployedAuthRedirectUri = '${predictedContainerAppUrl}${entraRedirectPath}'
 var deployedPostLogoutRedirectUri = '${predictedContainerAppUrl}${entraPostLogoutRedirectPath}'
+var deployedLinkedInRedirectUri = '${predictedContainerAppUrl}/auth/linkedin/callback'
 var resolvedContentSafetyEndpoint = empty(contentSafetyEndpoint) ? 'https://${aiFoundryAccountName}.cognitiveservices.azure.com/' : contentSafetyEndpoint
 
 module appRegistration './modules/app-registration.bicep' = if (deployEntraAppRegistration) {
@@ -470,6 +492,12 @@ module containerApps './modules/container-apps.bicep' = {
     entraClientSecretValue: entraClientSecretValue
     entraPostLogoutRedirectUri: empty(entraClientId) ? '' : deployedPostLogoutRedirectUri
     entraRedirectUri: empty(entraClientId) ? '' : deployedAuthRedirectUri
+    linkedinClientId: linkedinClientId
+    linkedinClientSecretValue: linkedinClientSecretValue
+    linkedinOidcEnabled: linkedinOidcEnabled
+    linkedinPictureHostAllowlist: linkedinPictureHostAllowlist
+    linkedinPilotOwnerAllowlist: linkedinPilotOwnerAllowlist
+    linkedinRedirectUri: deployedLinkedInRedirectUri
     contentSafetyApiVersion: contentSafetyApiVersion
     contentSafetyEndpoint: resolvedContentSafetyEndpoint
     contentSafetyMaxHateSeverity: contentSafetyMaxHateSeverity

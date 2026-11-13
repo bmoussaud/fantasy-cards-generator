@@ -161,7 +161,7 @@ class GeneratedCardModel(BaseModel):
 class CardGenerateBody(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    prompt: str = Field(min_length=12, max_length=400)
+    prompt: str = Field(min_length=12, max_length=2500)
     idempotencyKey: str | None = Field(default=None, min_length=8, max_length=128)
     csrfToken: str | None = Field(default=None, min_length=8, max_length=256)
     savedPhotoId: str | None = Field(default=None, min_length=1, max_length=64)
@@ -1533,6 +1533,7 @@ class AppServices:
     photo_moderation_service: Any | None = None
     deletion_audit_repository: Any | None = None
     agent_client: Any | None = None
+    linkedin_transient_repository: Any | None = None
 
 
 class CardGenerationService:
@@ -3121,6 +3122,7 @@ def create_services(
     agent_health_probe: HealthDependencyProbe | None = None,
 ) -> AppServices:
     from app.deletion import AzureCosmosDeletionAuditRepository, InMemoryDeletionAuditRepository
+    from app.linkedin_profile import create_linkedin_transient_repository
     from app.photos import (
         AzureCosmosProfilePhotoImportStateRepository,
         AzureCosmosSavedPhotoRepository,
@@ -3195,6 +3197,7 @@ def create_services(
         deletion_audit_repository=deletion_audit_repository,
         agent_client=resolved_agent_client,
         agent_health_probe=resolved_agent_health_probe,
+        linkedin_transient_repository=create_linkedin_transient_repository(settings),
     )
 
 
@@ -3243,11 +3246,11 @@ def normalize_prompt(prompt: str) -> str:
             type="/problems/invalid-prompt",
             error_code="invalid_prompt",
         )
-    if len(normalized) > 400:
+    if len(normalized) > 2500:
         raise ProblemDetails(
             status_code=422,
             title="Invalid Prompt",
-            detail="The prompt must be 400 characters or fewer.",
+            detail="The prompt must be 2,500 characters or fewer.",
             type="/problems/invalid-prompt",
             error_code="invalid_prompt",
         )

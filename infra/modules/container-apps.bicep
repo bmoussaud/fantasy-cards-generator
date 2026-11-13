@@ -66,6 +66,29 @@ param entraRedirectUri string = ''
 @description('Deployed post-logout redirect URI injected as ENTRA_POST_LOGOUT_REDIRECT_URI. Empty when Entra app registration is disabled.')
 param entraPostLogoutRedirectUri string = ''
 
+@allowed([
+  'false'
+  'true'
+])
+@description('Explicit LinkedIn OIDC pilot feature flag injected as LINKEDIN_OIDC_ENABLED.')
+param linkedinOidcEnabled string = 'false'
+
+@description('LinkedIn developer-application client ID injected as LINKEDIN_CLIENT_ID.')
+param linkedinClientId string = ''
+
+@secure()
+@description('LinkedIn client secret exposed to the Container App only as LINKEDIN_CLIENT_SECRET secretRef.')
+param linkedinClientSecretValue string = ''
+
+@description('Derived deployed callback URI injected as LINKEDIN_REDIRECT_URI.')
+param linkedinRedirectUri string
+
+@description('Canonical Entra owner allowlist injected as LINKEDIN_PILOT_OWNER_ALLOWLIST.')
+param linkedinPilotOwnerAllowlist string = ''
+
+@description('Exact picture-host allowlist injected as LINKEDIN_PICTURE_HOST_ALLOWLIST.')
+param linkedinPictureHostAllowlist string = ''
+
 @description('Persistence mode injected as PERSISTENCE_MODE.')
 param persistenceMode string = 'azure'
 
@@ -244,6 +267,14 @@ var containerAppSecrets = concat(
         {
           name: 'entra-client-secret'
           value: entraClientSecretValue
+        }
+      ]
+    : [],
+  !empty(linkedinClientSecretValue)
+    ? [
+        {
+          name: 'linkedin-client-secret'
+          value: linkedinClientSecretValue
         }
       ]
     : []
@@ -483,6 +514,26 @@ var containerAppEnv = concat(
       name: 'KEY_VAULT_URI'
       value: keyVaultUri
     }
+    {
+      name: 'LINKEDIN_OIDC_ENABLED'
+      value: linkedinOidcEnabled
+    }
+    {
+      name: 'LINKEDIN_CLIENT_ID'
+      value: linkedinClientId
+    }
+    {
+      name: 'LINKEDIN_REDIRECT_URI'
+      value: linkedinRedirectUri
+    }
+    {
+      name: 'LINKEDIN_PILOT_OWNER_ALLOWLIST'
+      value: linkedinPilotOwnerAllowlist
+    }
+    {
+      name: 'LINKEDIN_PICTURE_HOST_ALLOWLIST'
+      value: linkedinPictureHostAllowlist
+    }
   ],
   !empty(appSessionSecretKeyValue)
     ? [
@@ -505,6 +556,14 @@ var containerAppEnv = concat(
         {
           name: 'ENTRA_CLIENT_SECRET'
           secretRef: 'entra-client-secret'
+        }
+      ]
+    : [],
+  !empty(linkedinClientSecretValue)
+    ? [
+        {
+          name: 'LINKEDIN_CLIENT_SECRET'
+          secretRef: 'linkedin-client-secret'
         }
       ]
     : [],

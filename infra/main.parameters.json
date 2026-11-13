@@ -32,6 +32,21 @@
     "entraClientSecretValue": {
       "value": "${ENTRA_CLIENT_SECRET=}"
     },
+    "linkedinOidcEnabled": {
+      "value": "${LINKEDIN_OIDC_ENABLED=false}"
+    },
+    "linkedinClientId": {
+      "value": "${LINKEDIN_CLIENT_ID=}"
+    },
+    "linkedinClientSecretValue": {
+      "value": "${LINKEDIN_CLIENT_SECRET=}"
+    },
+    "linkedinPilotOwnerAllowlist": {
+      "value": "${LINKEDIN_PILOT_OWNER_ALLOWLIST=}"
+    },
+    "linkedinPictureHostAllowlist": {
+      "value": "${LINKEDIN_PICTURE_HOST_ALLOWLIST=}"
+    },
     "healthzCosmosTimeoutMs": {
       "value": "${HEALTHZ_COSMOS_TIMEOUT_MS=1500}"
     },

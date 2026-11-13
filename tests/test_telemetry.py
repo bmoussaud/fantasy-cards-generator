@@ -120,12 +120,22 @@ def test_callback_access_log_redaction_keeps_route_and_status(
             "1.1",
             303,
         )
+        logger.info(
+            '%s - "%s %s HTTP/%s" %d',
+            "127.0.0.1",
+            "GET",
+            ("/auth/linkedin/callback?" f"code={SENSITIVE_SENTINEL}&state=private-linkedin-state"),
+            "1.1",
+            303,
+        )
         logger.info('%s - "%s %s HTTP/%s" %d', "127.0.0.1", "GET", "/healthz", "1.1", 200)
 
     assert 'GET /auth/callback HTTP/1.1" 303' in caplog.text
+    assert 'GET /auth/linkedin/callback HTTP/1.1" 303' in caplog.text
     assert 'GET /healthz HTTP/1.1" 200' in caplog.text
     assert SENSITIVE_SENTINEL not in caplog.text
     assert "private-state" not in caplog.text
+    assert "private-linkedin-state" not in caplog.text
     assert "session_state" not in caplog.text
 
 
@@ -150,6 +160,36 @@ def test_import_diagnostics_work_without_exporter_and_reject_sensitive_values(
     assert "error_code=internal_error" in caplog.text
     assert SENSITIVE_SENTINEL not in caplog.text
     assert all(record.exc_info is None for record in caplog.records)
+
+
+def test_linkedin_import_telemetry_rejects_profile_content_and_provider_values(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(telemetry, "_enabled", False)
+    with caplog.at_level(logging.WARNING, logger=telemetry.LOGGER_NAME):
+        telemetry.safe_log(
+            "auth.linkedin_import_failed",
+            request_id="request-42",
+            attributes={
+                "fcg.stage": "import_claim",
+                "fcg.error_code": "profile_import_failed",
+                "fcg.outcome": "failed",
+                "code": SENSITIVE_SENTINEL,
+                "access_token": SENSITIVE_SENTINEL,
+                "raw_claims": {"name": SENSITIVE_SENTINEL},
+                "picture": f"https://media.example/{SENSITIVE_SENTINEL}",
+                "display_name": SENSITIVE_SENTINEL,
+                "current_role": SENSITIVE_SENTINEL,
+                "expertise": SENSITIVE_SENTINEL,
+                "post_excerpt": SENSITIVE_SENTINEL,
+            },
+        )
+
+    assert "auth.linkedin_import_failed" in caplog.text
+    assert "stage=import_claim" in caplog.text
+    assert "outcome=failed" in caplog.text
+    assert SENSITIVE_SENTINEL not in caplog.text
 
 
 class CapturingInstrument:

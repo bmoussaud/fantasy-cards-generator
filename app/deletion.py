@@ -227,6 +227,7 @@ class DeletionService:
         saved_photo_repository: AbstractSavedPhotoRepository,
         profile_photo_import_state_repository: AbstractProfilePhotoImportStateRepository,
         photo_asset_store: AbstractAssetStore,
+        linkedin_transient_repository: Any | None,
     ) -> None:
         self._settings = settings
         self._card_repository = card_repository
@@ -236,6 +237,7 @@ class DeletionService:
         self._saved_photo_repository = saved_photo_repository
         self._profile_photo_import_state_repository = profile_photo_import_state_repository
         self._photo_asset_store = photo_asset_store
+        self._linkedin_transient_repository = linkedin_transient_repository
         self._audit_ttl_seconds = settings.audit_retention_days * 24 * 60 * 60
 
     async def delete_card(
@@ -331,7 +333,9 @@ class DeletionService:
         request_id: str,
         schedule_cleanup,
     ) -> None:
-        await self._profile_photo_import_state_repository.mark_deleted_suppressed(owner.owner_id)
+        await self._profile_photo_import_state_repository.delete_owner(owner.owner_id)
+        if self._linkedin_transient_repository is not None:
+            await self._linkedin_transient_repository.delete_owner(owner.owner_id)
         cards = await self._card_repository.list_by_owner(owner.owner_id)
         saved_photos = await self._saved_photo_repository.list_by_owner(owner.owner_id)
         generation_audits = await self._audit_repository.list_audits_by_owner(owner.owner_id)

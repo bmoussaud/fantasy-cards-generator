@@ -2,38 +2,162 @@
 
 {% block content %}
     {% include "partials/profile_photo_import_notice.html" %}
+    {% include "partials/linkedin_import_notice.html" %}
     <h1>Generate a fantasy card</h1>
     <p class="site-nav__user">
         Signed in as <strong>{{ user.name or user.email or user.sub }}</strong>
         &middot; {{ user.email or "Email not provided" }}
     </p>
+    {% if linkedin_available %}
+        <section class="panel" aria-labelledby="linkedin-import-heading">
+            <h2 id="linkedin-import-heading">Start from LinkedIn</h2>
+            <p class="field__hint">
+                Optional. Import your display name once, then review it and provide your role,
+                expertise, and any recent-post excerpts yourself. LinkedIn is not used to sign
+                in to Fantasy Card Generator.
+            </p>
+            <form method="post" action="/auth/linkedin/start">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+                <input type="hidden" name="creation_draft_id" value="{{ linkedin_creation_draft_id }}" />
+                <label class="checkbox-row" for="import-linkedin-photo">
+                    <input
+                        id="import-linkedin-photo"
+                        type="checkbox"
+                        name="import_linkedin_photo"
+                        value="true"
+                    />
+                    Allow this import to retrieve my LinkedIn picture and save it to My Photos.
+                </label>
+                <button class="btn btn-ghost" type="submit">Import LinkedIn basics</button>
+            </form>
+        </section>
+    {% endif %}
+    {% if linkedin_draft %}
+        <section class="panel" aria-labelledby="linkedin-draft-heading">
+            <h2 id="linkedin-draft-heading">LinkedIn basics ready to review</h2>
+            <p>
+                The display name below came from LinkedIn. Your role, expertise,
+                excerpts, powers, and card text are not LinkedIn-verified.
+            </p>
+            <form method="post" action="/auth/linkedin/draft/clear">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+                <button class="btn btn-ghost" type="submit">Clear LinkedIn import</button>
+            </form>
+        </section>
+    {% endif %}
     <div class="generator-layout">
         <section class="panel" aria-labelledby="generator-form-heading">
-            <h2 id="generator-form-heading">Describe your card</h2>
+            <h2 id="generator-form-heading">Review your professional profile</h2>
+            <p class="field__hint">
+                Fantasy powers and card text are creative interpretations, not verified
+                professional qualifications.
+            </p>
             <form
                 data-card-generator-form
+                data-structured-profile-form
+                data-profile-context-maxlength="2500"
                 hx-post="/ui/cards/generate"
                 hx-target="#generation-result"
                 hx-swap="innerHTML"
                 hx-indicator="#generation-pending"
             >
                 <div class="field">
-                    <label class="field__label" for="prompt">Card prompt</label>
-                    <p class="field__hint" id="prompt-hint">
-                        Describe the hero, creature, artifact, or spell you want &mdash; 12 to 400 characters.
+                    <label class="field__label" for="display-name">Display name or pseudonym</label>
+                    <p class="field__hint" id="display-name-hint">
+                        {% if linkedin_draft %}
+                            Imported from LinkedIn and fully editable.
+                        {% else %}
+                            Choose the name shown on the card.
+                        {% endif %}
                     </p>
+                    <input
+                        class="field__control"
+                        id="display-name"
+                        name="display_name"
+                        value="{{ profile_display_name }}"
+                        minlength="1"
+                        maxlength="80"
+                        required
+                        aria-describedby="display-name-hint"
+                    />
+                </div>
+                <div class="field">
+                    <label class="field__label" for="current-role">Current role</label>
+                    <p class="field__hint" id="current-role-hint">
+                        User-provided; LinkedIn does not verify or supply this value.
+                    </p>
+                    <input
+                        class="field__control"
+                        id="current-role"
+                        name="current_role"
+                        minlength="2"
+                        maxlength="120"
+                        required
+                        aria-describedby="current-role-hint"
+                    />
+                </div>
+                <fieldset>
+                    <legend class="field__label">Explicit expertise</legend>
+                    <p class="field__hint" id="expertise-hint">
+                        Add one to five concrete expertise statements. Interests are not
+                        automatically treated as certified expertise.
+                    </p>
+                    {% for index in range(1, 6) %}
+                        <div class="field">
+                            <label class="field__label" for="expertise-{{ index }}">
+                                Expertise {{ index }}{% if index > 1 %} (optional){% endif %}
+                            </label>
+                            <input
+                                class="field__control"
+                                id="expertise-{{ index }}"
+                                name="expertise"
+                                minlength="2"
+                                maxlength="80"
+                                {% if index == 1 %}required{% endif %}
+                                aria-describedby="expertise-hint"
+                            />
+                        </div>
+                    {% endfor %}
+                </fieldset>
+                <fieldset>
+                    <legend class="field__label">Recent post excerpts (optional)</legend>
+                    <p class="field__hint" id="post-excerpts-hint">
+                        Add up to three excerpts you selected yourself. Each populated excerpt
+                        must contain 20 to 500 characters.
+                    </p>
+                    {% for index in range(1, 4) %}
+                        <div class="field">
+                            <label class="field__label" for="post-excerpt-{{ index }}">
+                                Excerpt {{ index }}
+                            </label>
+                            <textarea
+                                class="field__control"
+                                id="post-excerpt-{{ index }}"
+                                name="post_excerpt"
+                                rows="3"
+                                minlength="20"
+                                maxlength="500"
+                                aria-describedby="post-excerpts-hint"
+                            ></textarea>
+                        </div>
+                    {% endfor %}
+                </fieldset>
+                <div class="field">
+                    <label class="field__label" for="creative-direction">
+                        Creative direction (optional)
+                    </label>
                     <textarea
                         class="field__control"
-                        id="prompt"
-                        name="prompt"
-                        rows="6"
-                        minlength="12"
-                        maxlength="400"
-                        required
-                        aria-describedby="prompt-hint"
-                        placeholder="A stormcalling druid who commands lightning-forged wolves."
+                        id="creative-direction"
+                        name="creative_direction"
+                        rows="3"
+                        maxlength="200"
+                        aria-describedby="profile-context-feedback"
                     ></textarea>
                 </div>
+                <p id="profile-context-feedback" class="field__hint" role="status" aria-live="polite" data-profile-context-feedback>
+                    The complete profile context may contain up to 2,500 characters.
+                </p>
                 <fieldset class="reference-photo-section">
                     <legend class="field__label">Reference photos</legend>
                     <p class="field__hint">
@@ -44,7 +168,7 @@
                     <input
                         type="hidden"
                         name="saved_photo_id"
-                        value=""
+                        value="{{ linkedin_draft.saved_photo_id if linkedin_draft and linkedin_draft.saved_photo_id else '' }}"
                         data-saved-photo-id-input
                     />
                     <div
@@ -73,6 +197,7 @@
                         </button>
                     </div>
                 </fieldset>
+                <input type="hidden" name="creation_draft_id" value="{{ linkedin_creation_draft_id }}" />
                 <input id="generate-idempotency-key" type="hidden" name="idempotency_key" value="{{ generate_idempotency_key }}" />
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
                 <button class="btn btn-primary" type="submit">Generate card</button>

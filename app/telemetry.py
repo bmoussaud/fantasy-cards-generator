@@ -19,6 +19,8 @@ SAFE_ROUTES = {
     "/app",
     "/auth/login",
     "/auth/callback",
+    "/auth/linkedin/start",
+    "/auth/linkedin/callback",
     "/auth/logout",
     "/healthz",
     "/livez",
@@ -37,29 +39,37 @@ PROFILE_PHOTO_IMPORT_EVENTS = {
     "auth.profile_photo_import_state_save_failed",
     "auth.profile_photo_import_reset_failed",
 }
-SAFE_EVENTS = {
-    "agent.detail.omitted",
-    "exception",
-    "request.completed",
-    "request.failed",
-    "auth.callback_failed",
-    "generation.started",
-    "generation.completed",
-    "generation.failed",
-    "generation.partial",
-    "dependency.started",
-    "dependency.completed",
-    "dependency.failed",
-    "dependency.timeout",
-    "dependency.retry",
-    "moderation.decision",
-    "persistence.completed",
-    "persistence.failed",
-    "compensation.completed",
-    "compensation.failed",
-    "agent.invocation",
-    "generation.text_path",
-} | PROFILE_PHOTO_IMPORT_EVENTS
+LINKEDIN_IMPORT_EVENTS = {
+    "auth.linkedin_import_result",
+    "auth.linkedin_import_failed",
+}
+SAFE_EVENTS = (
+    {
+        "agent.detail.omitted",
+        "exception",
+        "request.completed",
+        "request.failed",
+        "auth.callback_failed",
+        "generation.started",
+        "generation.completed",
+        "generation.failed",
+        "generation.partial",
+        "dependency.started",
+        "dependency.completed",
+        "dependency.failed",
+        "dependency.timeout",
+        "dependency.retry",
+        "moderation.decision",
+        "persistence.completed",
+        "persistence.failed",
+        "compensation.completed",
+        "compensation.failed",
+        "agent.invocation",
+        "generation.text_path",
+    }
+    | PROFILE_PHOTO_IMPORT_EVENTS
+    | LINKEDIN_IMPORT_EVENTS
+)
 SAFE_OPERATIONS = {"generate", "artwork_retry", "fetch_image", "text", "image"}
 SAFE_GENERATION_PATHS = {"agent", "mock"}
 SAFE_OUTCOMES = {
@@ -159,6 +169,7 @@ SAFE_ERROR_CODES = {
     "idempotency_conflict",
     "image_not_found",
     "invalid_model_output",
+    "invalid_creation_draft",
     "invalid_prompt",
     "invalid_photo_upload",
     "invalid_photo_label",
@@ -327,7 +338,7 @@ class AuthCallbackAccessLogFilter(logging.Filter):
         args = record.args
         if isinstance(args, tuple) and len(args) == 5 and isinstance(args[2], str):
             path = args[2].partition("?")[0]
-            if path == "/auth/callback":
+            if path in {"/auth/callback", "/auth/linkedin/callback"}:
                 record.args = (*args[:2], path, *args[3:])
         return True
 
@@ -492,8 +503,8 @@ def safe_log(
     request_id: str | None = None,
     attributes: dict[str, Any] | None = None,
 ) -> None:
-    profile_import_event = name in PROFILE_PHOTO_IMPORT_EVENTS
-    if not _enabled and not profile_import_event and name != "agent.detail.omitted":
+    import_event = name in PROFILE_PHOTO_IMPORT_EVENTS or name in LINKEDIN_IMPORT_EVENTS
+    if not _enabled and not import_event and name != "agent.detail.omitted":
         return
     if name not in SAFE_EVENTS:
         name = "generation.failed"
@@ -502,7 +513,7 @@ def safe_log(
     }
     if valid_request_id(request_id):
         extra["app_request_id"] = request_id
-    if profile_import_event:
+    if import_event:
         outcome = extra.get("fcg_outcome", "failed")
         if outcome not in {"imported", "already_imported", "no_photo"}:
             level = max(level, logging.WARNING)

@@ -425,7 +425,7 @@ Notes:
 - do **not** send raw auth tokens, session cookies, or PII
 - do **not** send raw owner IDs unless the agent genuinely needs them
 - serialize exactly this JSON in one user `input_text`, with `store:false` and
-  `stream:false`; query is trimmed and limited to 1–400 characters
+  `stream:false`; query is trimmed and limited to 1–2,500 characters
 - caller-supplied policy, constraints, image/reference-image fields and owner
   hashes are not supported by the current runtime
 
