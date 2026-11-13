@@ -24,6 +24,7 @@ from app.generation import (
 )
 from app.main import create_app
 from app.photos import (
+    LINKEDIN_PROFILE_PHOTO_IMPORT_SOURCE,
     PROFILE_PHOTO_IMPORT_SOURCE,
     ProfilePhotoImportState,
     SavedPhotoResponseModel,
@@ -378,8 +379,17 @@ def test_saved_photos_are_owner_scoped_for_listing_image_and_delete(
     assert delete.json()["errorCode"] == "saved_photo_not_found"
 
 
-def test_imported_photo_deletion_persists_do_not_reimport_state(
+@pytest.mark.parametrize(
+    ("source", "provider"),
+    [
+        (PROFILE_PHOTO_IMPORT_SOURCE, "entra"),
+        (LINKEDIN_PROFILE_PHOTO_IMPORT_SOURCE, "linkedin"),
+    ],
+)
+def test_imported_photo_deletion_persists_provider_specific_suppression(
     monkeypatch: pytest.MonkeyPatch,
+    source: str,
+    provider: str,
 ) -> None:
     services = build_services(monkeypatch)
     client = make_authenticated_client(monkeypatch, services=services)
@@ -404,9 +414,9 @@ def test_imported_photo_deletion_persists_do_not_reimport_state(
                 content_type="image/png",
                 filename="entra-profile-photo",
             ),
-            label="Microsoft profile photo",
-            source=PROFILE_PHOTO_IMPORT_SOURCE,
-            source_key="me/photo",
+            label=f"{provider} profile photo",
+            source=source,
+            source_key="provider-photo",
         )
     )
     token = csrf_token(client)
@@ -416,9 +426,24 @@ def test_imported_photo_deletion_persists_do_not_reimport_state(
     )
 
     assert response.status_code == 204
-    state = asyncio.run(services.profile_photo_import_state_repository.get(TEST_OWNER_ID))
+    state = asyncio.run(
+        services.profile_photo_import_state_repository.get(
+            TEST_OWNER_ID,
+            provider=provider,
+        )
+    )
     assert state is not None
     assert state.status == "deleted_suppressed"
+    other_provider = "linkedin" if provider == "entra" else "entra"
+    assert (
+        asyncio.run(
+            services.profile_photo_import_state_repository.get(
+                TEST_OWNER_ID,
+                provider=other_provider,
+            )
+        )
+        is None
+    )
 
 
 def test_import_claim_can_be_reset_and_retried(monkeypatch: pytest.MonkeyPatch) -> None:

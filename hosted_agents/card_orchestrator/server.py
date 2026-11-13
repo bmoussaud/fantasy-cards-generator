@@ -22,7 +22,7 @@ from app.foundry_agent_client import GenerateCardAgentRequest
 from hosted_agents.card_orchestrator.orchestrator import CardOrchestrator, RuntimeFailure
 from hosted_agents.card_orchestrator.settings import RuntimeSettings
 
-MAX_BODY_BYTES = 8192
+MAX_BODY_BYTES = 65536
 SAFE_TOP_LEVEL_FIELDS = {
     "agent",
     "agent_reference",

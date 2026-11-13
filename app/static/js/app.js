@@ -192,12 +192,91 @@
         Array.from(normalized).length < prompt.minLength ||
         Array.from(trimmed).length > prompt.maxLength;
       prompt.setCustomValidity(
-        invalid ? "Use 12 to 400 characters; repeated whitespace counts as one space." : ""
+        invalid ? "Use 12 to 2500 characters; repeated whitespace counts as one space." : ""
       );
     }
     prompt.addEventListener("input", validatePrompt);
     prompt.addEventListener("htmx:validation:validate", validatePrompt);
     validatePrompt();
+  }
+
+  function bindStructuredProfileValidation() {
+    var form = document.querySelector("[data-structured-profile-form]");
+    if (!form) {
+      return;
+    }
+    var creativeDirection = form.querySelector('[name="creative_direction"]');
+    var feedback = form.querySelector("[data-profile-context-feedback]");
+    var maxLength = Number(form.dataset.profileContextMaxlength || "2500");
+    if (!creativeDirection || !feedback) {
+      return;
+    }
+
+    function normalize(value) {
+      return value.trim().replace(/\s+/g, " ");
+    }
+
+    function populatedValues(name) {
+      return Array.from(form.querySelectorAll('[name="' + name + '"]'))
+        .map(function (field) {
+          return normalize(field.value);
+        })
+        .filter(Boolean);
+    }
+
+    function composeContext() {
+      var sections = [
+        "Identity (user-confirmed): " +
+          normalize(form.querySelector('[name="display_name"]').value),
+        "Current role (user-provided): " +
+          normalize(form.querySelector('[name="current_role"]').value),
+        "Explicit expertise (user-provided, not LinkedIn-verified):\n" +
+          populatedValues("expertise")
+            .map(function (value) {
+              return "- " + value;
+            })
+            .join("\n"),
+      ];
+      var excerpts = populatedValues("post_excerpt");
+      if (excerpts.length) {
+        sections.push(
+          "Recent post excerpts (user-selected source material):\n" +
+            excerpts
+              .map(function (value) {
+                return "- " + value;
+              })
+              .join("\n")
+        );
+      }
+      var direction = normalize(creativeDirection.value);
+      if (direction) {
+        sections.push("Creative direction: " + direction);
+      }
+      sections.push(
+        "Interpret interests as themes only; do not present them as certified expertise."
+      );
+      return sections.join("\n\n");
+    }
+
+    function validateContext() {
+      var length = Array.from(composeContext()).length;
+      var remaining = maxLength - length;
+      creativeDirection.setCustomValidity(
+        remaining < 0
+          ? "The complete professional profile must be 2,500 characters or fewer."
+          : ""
+      );
+      feedback.textContent =
+        remaining < 0
+          ? "The complete profile is " +
+            Math.abs(remaining) +
+            " characters over the 2,500-character limit."
+          : remaining + " characters remain in the complete profile context.";
+    }
+
+    form.addEventListener("input", validateContext);
+    form.addEventListener("htmx:validation:validate", validateContext);
+    validateContext();
   }
 
   function bindPhotoReferenceForm() {
@@ -211,7 +290,7 @@
     var pickerFeedback = form.querySelector("[data-saved-photo-picker-feedback]");
     var clearSavedPhotoButton = form.querySelector("[data-clear-saved-photo]");
     var savedPhotoInput = form.querySelector("[data-saved-photo-id-input]");
-    var selectedSavedPhotoId = "";
+    var selectedSavedPhotoId = savedPhotoInput ? savedPhotoInput.value : "";
 
     if (
       !picker ||
@@ -279,7 +358,8 @@
         return;
       }
 
-      var defaultPhotoId = (photos[0] && photos[0].photoId) || "";
+      var defaultPhotoId =
+        selectedSavedPhotoId || (photos[0] && photos[0].photoId) || "";
 
       var defaultButton = null;
       photos.forEach(function (photo) {
@@ -736,6 +816,7 @@
   }
 
   bindPromptValidation();
+  bindStructuredProfileValidation();
   bindPhotoReferenceForm();
   bindPhotoLibraryManager();
   bindCardSelectionManager();

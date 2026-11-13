@@ -15,7 +15,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from starlette.datastructures import UploadFile
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -55,7 +55,21 @@ from app.health import (
     run_dependency_probes,
 )
 from app.library import CardLibraryService
+from app.linkedin_profile import (
+    LINKEDIN_CREATION_DRAFT_SESSION_KEY,
+    LINKEDIN_IMPORT_NOTICE_SESSION_KEY,
+    LinkedInImportDraft,
+    LinkedInOAuthState,
+    NormalizedLinkedInProfile,
+    create_linkedin_oauth_client,
+    fetch_linkedin_picture,
+    hash_oauth_state,
+    load_linkedin_settings,
+    transient_expiry,
+    validate_creation_draft_id,
+)
 from app.photos import (
+    LINKEDIN_PROFILE_PHOTO_IMPORT_SOURCE,
     PROFILE_PHOTO_IMPORT_SOURCE,
     SavedPhotoListResponseModel,
     SavedPhotoResponseModel,
@@ -99,6 +113,24 @@ PROFILE_PHOTO_IMPORT_MESSAGES = {
         "Check My Photos or refresh the page before trying again."
     ),
 }
+LINKEDIN_IMPORT_MESSAGES = {
+    "imported": (
+        "Your LinkedIn display name was imported. Review it and complete the "
+        "professional details before generating your card."
+    ),
+    "consent_denied": (
+        "LinkedIn access was not granted. No LinkedIn data was imported; you can "
+        "continue manually."
+    ),
+    "invalid_state": (
+        "The LinkedIn import session is invalid, expired, or already used. Start "
+        "the import again or continue manually."
+    ),
+    "failed": (
+        "LinkedIn profile import could not be completed. Continue manually or try " "again later."
+    ),
+    "unavailable": ("LinkedIn profile import is unavailable for this account. Continue manually."),
+}
 
 
 @dataclass(slots=True)
@@ -111,6 +143,90 @@ class ParsedCardGenerateRequest:
     saved_photo_id: str | None = None
     save_photo: bool = False
     photo_label: str | None = None
+    creation_draft_id: str | None = None
+
+
+class StructuredProfileForm(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: str = Field(min_length=1, max_length=80)
+    current_role: str = Field(min_length=2, max_length=120)
+    expertise: list[str] = Field(min_length=1, max_length=5)
+    post_excerpts: list[str] = Field(default_factory=list, max_length=3)
+    creative_direction: str | None = Field(default=None, max_length=200)
+    creation_draft_id: str
+
+    @field_validator("display_name", "current_role", "creative_direction", mode="before")
+    @classmethod
+    def _normalize_text(cls, value: object) -> object:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            return value
+        normalized = " ".join(value.split())
+        return normalized or None
+
+    @field_validator("expertise", mode="before")
+    @classmethod
+    def _normalize_expertise(cls, value: object) -> object:
+        return _normalize_structured_values(value, minimum=2, maximum=80)
+
+    @field_validator("post_excerpts", mode="before")
+    @classmethod
+    def _normalize_post_excerpts(cls, value: object) -> object:
+        return _normalize_structured_values(value, minimum=20, maximum=500)
+
+    @field_validator("creation_draft_id")
+    @classmethod
+    def _validate_creation_draft_id(cls, value: str) -> str:
+        return validate_creation_draft_id(value)
+
+    @model_validator(mode="after")
+    def _validate_profile_context(self) -> StructuredProfileForm:
+        values = [
+            self.display_name,
+            self.current_role,
+            *self.expertise,
+            *self.post_excerpts,
+            self.creative_direction or "",
+        ]
+        if any(_contains_linkedin_profile_url(value) for value in values):
+            raise ValueError("LinkedIn profile URLs are not accepted.")
+        composed = compose_structured_profile_context(self)
+        if len(composed) > 2500:
+            raise ValueError("The composed professional profile must be 2,500 characters or fewer.")
+        return self
+
+
+def _validate_active_creation_draft_id(request: Request, value: str) -> str:
+    submitted = validate_creation_draft_id(value)
+    active = request.session.get(LINKEDIN_CREATION_DRAFT_SESSION_KEY)
+    if not isinstance(active, str):
+        raise ValueError("Creation draft is not active.")
+    active = validate_creation_draft_id(active)
+    if not secrets.compare_digest(active, submitted):
+        raise ValueError("Creation draft does not match the active session.")
+    return submitted
+
+
+def compose_structured_profile_context(profile: StructuredProfileForm) -> str:
+    sections = [
+        f"Identity (user-confirmed): {profile.display_name}",
+        f"Current role (user-provided): {profile.current_role}",
+        "Explicit expertise (user-provided, not LinkedIn-verified):\n"
+        + "\n".join(f"- {value}" for value in profile.expertise),
+    ]
+    if profile.post_excerpts:
+        sections.append(
+            "Recent post excerpts (user-selected source material):\n"
+            + "\n".join(f"- {value}" for value in profile.post_excerpts)
+        )
+    if profile.creative_direction:
+        sections.append(f"Creative direction: {profile.creative_direction}")
+    sections.append(
+        "Interpret interests as themes only; do not present them as certified expertise."
+    )
+    return "\n\n".join(sections)
 
 
 def create_app(services: AppServices | None = None) -> FastAPI:
@@ -118,6 +234,7 @@ def create_app(services: AppServices | None = None) -> FastAPI:
 
     configure_auth_access_logging()
     auth_settings = load_auth_settings()
+    linkedin_settings = load_linkedin_settings()
     app_settings = load_app_settings()
     app_services = services or create_services(app_settings)
     card_service = CardGenerationService(app_services)
@@ -131,6 +248,7 @@ def create_app(services: AppServices | None = None) -> FastAPI:
         saved_photo_repository=app_services.saved_photo_repository,
         profile_photo_import_state_repository=app_services.profile_photo_import_state_repository,
         photo_asset_store=app_services.photo_asset_store,
+        linkedin_transient_repository=app_services.linkedin_transient_repository,
     )
     photo_service = SavedPhotoService(
         settings=app_services.settings,
@@ -139,6 +257,7 @@ def create_app(services: AppServices | None = None) -> FastAPI:
         moderation_service=app_services.photo_moderation_service,
     )
     profile_import_repository = app_services.profile_photo_import_state_repository
+    linkedin_transient_repository = app_services.linkedin_transient_repository
     templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
     def profile_import_redirect(
@@ -168,6 +287,30 @@ def create_app(services: AppServices | None = None) -> FastAPI:
             url="/app" if get_session_user(request) is not None else "/auth/login",
             status_code=status.HTTP_303_SEE_OTHER,
         )
+
+    def linkedin_import_redirect(
+        request: Request,
+        result: str,
+        *,
+        stage: str,
+        error_code: str = "none",
+        return_path: str = "/app",
+    ) -> RedirectResponse:
+        request.session[LINKEDIN_IMPORT_NOTICE_SESSION_KEY] = {
+            "message": LINKEDIN_IMPORT_MESSAGES[result],
+            "is_error": result != "imported",
+            "request_id": request.state.request_id,
+        }
+        safe_log(
+            "auth.linkedin_import_result",
+            request_id=request.state.request_id,
+            attributes={
+                "fcg.stage": stage,
+                "fcg.outcome": result,
+                "fcg.error_code": error_code,
+            },
+        )
+        return RedirectResponse(url=return_path, status_code=status.HTTP_303_SEE_OTHER)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -287,7 +430,7 @@ def create_app(services: AppServices | None = None) -> FastAPI:
         if request.url.path == "/ui/cards/generate" and any(
             error.get("loc") in (("prompt",), ("body", "prompt")) for error in exc.errors()
         ):
-            detail = "Use a card prompt of 12 to 400 characters."
+            detail = "Use a card prompt of 12 to 2500 characters."
         problem = ProblemDetails(
             status_code=422,
             title="Unprocessable Entity",
@@ -341,6 +484,22 @@ def create_app(services: AppServices | None = None) -> FastAPI:
         request: Request,
         user: AuthenticatedUser = Depends(require_authenticated_user),
     ) -> HTMLResponse:
+        owner_id = user["owner_id"]
+        linkedin_available = (
+            linkedin_settings.enabled
+            and linkedin_settings.is_configured
+            and linkedin_settings.allows_owner(owner_id)
+        )
+        creation_draft_id = request.session.get(LINKEDIN_CREATION_DRAFT_SESSION_KEY)
+        if not isinstance(creation_draft_id, str):
+            creation_draft_id = uuid4().hex
+            request.session[LINKEDIN_CREATION_DRAFT_SESSION_KEY] = creation_draft_id
+        linkedin_draft = None
+        if linkedin_transient_repository is not None:
+            linkedin_draft = await linkedin_transient_repository.get_draft(
+                owner_id=owner_id,
+                draft_id=creation_draft_id,
+            )
         return templates.TemplateResponse(
             request,
             "app_shell.html",
@@ -350,6 +509,17 @@ def create_app(services: AppServices | None = None) -> FastAPI:
                 user=user,
                 profile_photo_import_notice=request.session.pop(
                     "profile_photo_import_notice", None
+                ),
+                linkedin_import_notice=request.session.pop(
+                    LINKEDIN_IMPORT_NOTICE_SESSION_KEY, None
+                ),
+                linkedin_available=linkedin_available,
+                linkedin_creation_draft_id=creation_draft_id,
+                linkedin_draft=linkedin_draft,
+                profile_display_name=(
+                    linkedin_draft.display_name
+                    if linkedin_draft is not None
+                    else (user["name"] or user["email"] or "")
                 ),
             ),
         )
@@ -906,8 +1076,341 @@ def create_app(services: AppServices | None = None) -> FastAPI:
             )
         return RedirectResponse(url="/app", status_code=status.HTTP_303_SEE_OTHER)
 
+    @app.post("/auth/linkedin/start")
+    async def linkedin_start(
+        request: Request,
+        user: AuthenticatedUser = Depends(require_authenticated_user),
+    ) -> RedirectResponse:
+        form = await request.form()
+        app_services.csrf_protector.validate(request, form.get("csrf_token"))
+        owner_id = user["owner_id"]
+        if (
+            not linkedin_settings.enabled
+            or not linkedin_settings.is_configured
+            or not linkedin_settings.allows_owner(owner_id)
+            or linkedin_transient_repository is None
+        ):
+            return linkedin_import_redirect(
+                request,
+                "unavailable",
+                stage="oauth_state",
+                error_code="unavailable",
+            )
+        try:
+            creation_draft_id = _validate_active_creation_draft_id(
+                request,
+                str(form.get("creation_draft_id") or ""),
+            )
+        except ValueError:
+            return linkedin_import_redirect(
+                request,
+                "unavailable",
+                stage="oauth_state",
+                error_code="invalid_request",
+            )
+
+        state_value = secrets.token_urlsafe(32)
+        nonce = secrets.token_urlsafe(32)
+        code_verifier = secrets.token_urlsafe(48)
+        photo_consent = form.get("import_linkedin_photo") == "true"
+        oauth_client = create_linkedin_oauth_client(linkedin_settings)
+        try:
+            authorization = await oauth_client.create_authorization_url(
+                linkedin_settings.redirect_uri,
+                state=state_value,
+                nonce=nonce,
+                code_verifier=code_verifier,
+                scope=" ".join(linkedin_settings.scopes),
+            )
+            authorization_url = authorization.get("url")
+            if not isinstance(authorization_url, str) or not authorization_url:
+                raise RuntimeError("LinkedIn authorization URL was not returned.")
+            created = await linkedin_transient_repository.create_oauth_state(
+                LinkedInOAuthState(
+                    owner_id=owner_id,
+                    state_hash=hash_oauth_state(state_value),
+                    nonce=nonce,
+                    code_verifier=code_verifier,
+                    creation_draft_id=creation_draft_id,
+                    photo_consent=photo_consent,
+                    return_path="/app",
+                    expires_at=transient_expiry(),
+                )
+            )
+            if not created:
+                raise RuntimeError("LinkedIn OAuth state could not be reserved.")
+        except Exception as exc:
+            safe_log(
+                "auth.linkedin_import_failed",
+                request_id=request.state.request_id,
+                attributes={
+                    "fcg.stage": "oauth_state",
+                    "fcg.outcome": "failed",
+                    "fcg.error_code": normalize_error_code(type(exc).__name__),
+                },
+            )
+            return linkedin_import_redirect(
+                request,
+                "failed",
+                stage="oauth_state",
+                error_code="state_creation_failed",
+            )
+        request.session[LINKEDIN_CREATION_DRAFT_SESSION_KEY] = creation_draft_id
+        return RedirectResponse(
+            url=authorization_url,
+            status_code=status.HTTP_307_TEMPORARY_REDIRECT,
+        )
+
+    @app.get("/auth/linkedin/callback")
+    async def linkedin_callback(
+        request: Request,
+        user: AuthenticatedUser = Depends(require_authenticated_user),
+    ) -> RedirectResponse:
+        owner_id = user["owner_id"]
+        if (
+            not linkedin_settings.enabled
+            or not linkedin_settings.is_configured
+            or not linkedin_settings.allows_owner(owner_id)
+            or linkedin_transient_repository is None
+        ):
+            return linkedin_import_redirect(
+                request,
+                "unavailable",
+                stage="oauth_state",
+                error_code="unavailable",
+            )
+
+        state_value = request.query_params.get("state")
+        if not state_value:
+            return linkedin_import_redirect(
+                request,
+                "invalid_state",
+                stage="oauth_state",
+                error_code="invalid_oauth_state",
+            )
+        state_record = await linkedin_transient_repository.consume_oauth_state(
+            owner_id=owner_id,
+            state_hash=hash_oauth_state(state_value),
+        )
+        if state_record is None:
+            return linkedin_import_redirect(
+                request,
+                "invalid_state",
+                stage="oauth_state",
+                error_code="invalid_oauth_state",
+            )
+
+        provider_error = request.query_params.get("error")
+        if provider_error:
+            outcome = "consent_denied" if provider_error == "access_denied" else "failed"
+            return linkedin_import_redirect(
+                request,
+                outcome,
+                stage="oauth_token",
+                error_code="oauth_error",
+                return_path=state_record.return_path,
+            )
+        authorization_code = request.query_params.get("code")
+        if not authorization_code:
+            return linkedin_import_redirect(
+                request,
+                "failed",
+                stage="oauth_token",
+                error_code="missing_authorization_code",
+                return_path=state_record.return_path,
+            )
+
+        oauth_client = create_linkedin_oauth_client(linkedin_settings)
+        try:
+            token = await oauth_client.fetch_access_token(
+                linkedin_settings.redirect_uri,
+                code=authorization_code,
+                code_verifier=state_record.code_verifier,
+            )
+            id_claims = await oauth_client.parse_id_token(
+                token,
+                nonce=state_record.nonce,
+            )
+            userinfo = await oauth_client.userinfo(token=token)
+            if userinfo.get("sub") != id_claims.get("sub"):
+                raise RuntimeError("LinkedIn UserInfo subject did not match the ID token.")
+            profile = NormalizedLinkedInProfile.model_validate(dict(userinfo))
+            saved_photo_id = None
+            import_outcome = "name_only"
+            if (
+                state_record.photo_consent
+                and profile.picture
+                and linkedin_settings.picture_host_allowlist
+            ):
+                import_state_repository = app_services.profile_photo_import_state_repository
+                previous_state = await import_state_repository.get(
+                    owner_id,
+                    provider="linkedin",
+                )
+                claimed = await import_state_repository.claim(
+                    owner_id,
+                    provider="linkedin",
+                    allow_replace=True,
+                )
+                if claimed:
+                    try:
+                        picture = await fetch_linkedin_picture(
+                            profile.picture,
+                            allowed_hosts=linkedin_settings.picture_host_allowlist,
+                        )
+                        stored = await photo_service.save_photo(
+                            owner=AuthenticatedOwner(
+                                owner_id=owner_id,
+                                tenant_id=user["tenant_id"],
+                                object_id=user["object_id"],
+                                subject=user["sub"],
+                                display_name=user["name"],
+                                email=user["email"],
+                            ),
+                            photo=picture,
+                            label="LinkedIn profile photo",
+                            source=LINKEDIN_PROFILE_PHOTO_IMPORT_SOURCE,
+                            source_key="oidc-picture",
+                        )
+                        completed = await import_state_repository.complete_import(
+                            owner_id,
+                            stored.photoId,
+                            provider="linkedin",
+                        )
+                        if not completed:
+                            await photo_service.delete_photo(
+                                AuthenticatedOwner(
+                                    owner_id=owner_id,
+                                    tenant_id=user["tenant_id"],
+                                    object_id=user["object_id"],
+                                    subject=user["sub"],
+                                    display_name=user["name"],
+                                    email=user["email"],
+                                ),
+                                stored.photoId,
+                            )
+                            raise RuntimeError("LinkedIn photo import state changed during import.")
+                        saved_photo_id = stored.photoId
+                        import_outcome = "imported"
+                        if (
+                            previous_state is not None
+                            and previous_state.photo_id
+                            and previous_state.photo_id != stored.photoId
+                        ):
+                            try:
+                                await photo_service.delete_photo(
+                                    AuthenticatedOwner(
+                                        owner_id=owner_id,
+                                        tenant_id=user["tenant_id"],
+                                        object_id=user["object_id"],
+                                        subject=user["sub"],
+                                        display_name=user["name"],
+                                        email=user["email"],
+                                    ),
+                                    previous_state.photo_id,
+                                )
+                            except Exception as cleanup_exc:
+                                safe_log(
+                                    "auth.linkedin_import_failed",
+                                    request_id=request.state.request_id,
+                                    attributes={
+                                        "fcg.stage": "photo_save",
+                                        "fcg.outcome": "partial",
+                                        "fcg.error_code": normalize_error_code(
+                                            type(cleanup_exc).__name__
+                                        ),
+                                    },
+                                )
+                    except Exception as photo_exc:
+                        if previous_state is not None:
+                            await import_state_repository.save(previous_state)
+                        else:
+                            await import_state_repository.reset_claim(
+                                owner_id,
+                                provider="linkedin",
+                            )
+                        safe_log(
+                            "auth.linkedin_import_failed",
+                            request_id=request.state.request_id,
+                            attributes={
+                                "fcg.stage": "profile_photo_fetch",
+                                "fcg.outcome": "partial",
+                                "fcg.error_code": normalize_error_code(type(photo_exc).__name__),
+                            },
+                        )
+            await linkedin_transient_repository.replace_draft(
+                LinkedInImportDraft(
+                    owner_id=owner_id,
+                    draft_id=state_record.creation_draft_id,
+                    display_name=profile.display_name,
+                    saved_photo_id=saved_photo_id,
+                    outcome=import_outcome,
+                    expires_at=transient_expiry(),
+                )
+            )
+        except (OAuthError, ValidationError) as exc:
+            safe_log(
+                "auth.linkedin_import_failed",
+                request_id=request.state.request_id,
+                attributes={
+                    "fcg.stage": "oauth_token",
+                    "fcg.outcome": "failed",
+                    "fcg.error_code": normalize_error_code(type(exc).__name__),
+                },
+            )
+            return linkedin_import_redirect(
+                request,
+                "failed",
+                stage="oauth_token",
+                error_code="oauth_response_invalid",
+                return_path=state_record.return_path,
+            )
+        except Exception as exc:
+            safe_log(
+                "auth.linkedin_import_failed",
+                request_id=request.state.request_id,
+                attributes={
+                    "fcg.stage": "import_claim",
+                    "fcg.outcome": "failed",
+                    "fcg.error_code": normalize_error_code(type(exc).__name__),
+                },
+            )
+            return linkedin_import_redirect(
+                request,
+                "failed",
+                stage="import_claim",
+                error_code="profile_import_failed",
+                return_path=state_record.return_path,
+            )
+
+        request.session[LINKEDIN_CREATION_DRAFT_SESSION_KEY] = state_record.creation_draft_id
+        return linkedin_import_redirect(
+            request,
+            "imported",
+            stage="import_complete",
+            return_path=state_record.return_path,
+        )
+
+    @app.post("/auth/linkedin/draft/clear")
+    async def clear_linkedin_draft(
+        request: Request,
+        user: AuthenticatedUser = Depends(require_authenticated_user),
+    ) -> RedirectResponse:
+        form = await request.form()
+        app_services.csrf_protector.validate(request, form.get("csrf_token"))
+        draft_id = request.session.pop(LINKEDIN_CREATION_DRAFT_SESSION_KEY, None)
+        if linkedin_transient_repository is not None and isinstance(draft_id, str):
+            await linkedin_transient_repository.delete_draft(
+                owner_id=user["owner_id"],
+                draft_id=draft_id,
+            )
+        return RedirectResponse(url="/app", status_code=status.HTTP_303_SEE_OTHER)
+
     @app.get("/auth/logout")
     async def logout(request: Request) -> RedirectResponse:
+        user = get_session_user(request)
+        if linkedin_transient_repository is not None and user is not None:
+            await linkedin_transient_repository.delete_owner(user["owner_id"])
         request.session.clear()
         return RedirectResponse(
             url=build_logout_redirect_target(auth_settings),
@@ -1102,6 +1605,17 @@ def create_app(services: AppServices | None = None) -> FastAPI:
                 error_code="unauthorized",
             )
         app_services.csrf_protector.validate(request, payload.csrf_token)
+        if payload.creation_draft_id is not None:
+            try:
+                _validate_active_creation_draft_id(request, payload.creation_draft_id)
+            except ValueError:
+                raise ProblemDetails(
+                    status_code=422,
+                    title="Invalid Creation Draft",
+                    detail="Refresh the page before generating this card.",
+                    type="/problems/invalid-creation-draft",
+                    error_code="invalid_creation_draft",
+                ) from None
         if payload.save_photo:
             if payload.reference_image is None:
                 raise ProblemDetails(
@@ -1135,6 +1649,16 @@ def create_app(services: AppServices | None = None) -> FastAPI:
             image_quality=image_quality,
             reference_image=payload.reference_image,
         )
+        if payload.creation_draft_id is not None and linkedin_transient_repository is not None:
+            await linkedin_transient_repository.delete_draft(
+                owner_id=owner.owner_id,
+                draft_id=payload.creation_draft_id,
+            )
+            if (
+                request.session.get(LINKEDIN_CREATION_DRAFT_SESSION_KEY)
+                == payload.creation_draft_id
+            ):
+                request.session.pop(LINKEDIN_CREATION_DRAFT_SESSION_KEY, None)
         return templates.TemplateResponse(
             request,
             "partials/card_result.html",
@@ -1216,9 +1740,24 @@ async def _parse_card_generate_request(request: Request) -> ParsedCardGenerateRe
         )
 
     form = await request.form()
+    structured_profile: StructuredProfileForm | None = None
+    if "display_name" in form:
+        structured_profile = _validate_structured_profile_form(
+            {
+                "display_name": form.get("display_name"),
+                "current_role": form.get("current_role"),
+                "expertise": form.getlist("expertise"),
+                "post_excerpts": form.getlist("post_excerpt"),
+                "creative_direction": form.get("creative_direction"),
+                "creation_draft_id": form.get("creation_draft_id"),
+            }
+        )
+        prompt = compose_structured_profile_context(structured_profile)
+    else:
+        prompt = _form_string(form, "prompt")
     body = _validate_card_generate_body(
         {
-            "prompt": _form_string(form, "prompt"),
+            "prompt": prompt,
             "idempotencyKey": _form_string(form, "idempotency_key", "idempotencyKey"),
             "csrfToken": _form_string(form, "csrf_token", "csrfToken"),
             "savedPhotoId": _form_string(form, "saved_photo_id", "savedPhotoId"),
@@ -1233,6 +1772,9 @@ async def _parse_card_generate_request(request: Request) -> ParsedCardGenerateRe
         saved_photo_id=body.savedPhotoId,
         save_photo=_form_bool(form, "save_photo", "savePhoto"),
         photo_label=_form_string(form, "photo_label", "photoLabel"),
+        creation_draft_id=(
+            structured_profile.creation_draft_id if structured_profile is not None else None
+        ),
     )
     if parsed.reference_image is not None and parsed.saved_photo_id is not None:
         raise ProblemDetails(
@@ -1256,6 +1798,13 @@ async def _parse_card_generate_request(request: Request) -> ParsedCardGenerateRe
 def _validate_card_generate_body(payload: object) -> CardGenerateBody:
     try:
         return CardGenerateBody.model_validate(payload)
+    except ValidationError as exc:
+        raise RequestValidationError(exc.errors()) from exc
+
+
+def _validate_structured_profile_form(payload: object) -> StructuredProfileForm:
+    try:
+        return StructuredProfileForm.model_validate(payload)
     except ValidationError as exc:
         raise RequestValidationError(exc.errors()) from exc
 
@@ -1286,6 +1835,27 @@ def _form_string(form, *keys: str) -> str | None:
             if normalized:
                 return normalized
     return None
+
+
+def _normalize_structured_values(
+    value: object,
+    *,
+    minimum: int,
+    maximum: int,
+) -> object:
+    if not isinstance(value, list):
+        return value
+    normalized = [" ".join(item.split()) for item in value if isinstance(item, str)]
+    populated = [item for item in normalized if item]
+    for item in populated:
+        if len(item) < minimum or len(item) > maximum:
+            raise ValueError(f"Each value must contain {minimum} to {maximum} characters.")
+    return populated
+
+
+def _contains_linkedin_profile_url(value: str) -> bool:
+    normalized = value.casefold()
+    return "linkedin.com/in/" in normalized or "linkedin.com/pub/" in normalized
 
 
 def _form_bool(form, *keys: str) -> bool:

@@ -378,7 +378,7 @@ Request body:
 ```
 
 The sole message contains `GenerateCardAgentRequest` JSON: `schemaVersion: 1` and
-a trimmed `query` of 1–400 characters. No user ID, photo bytes, tool definitions,
+a trimmed `query` of 1–2,500 characters. No user ID, photo bytes, tool definitions,
 or tool executions are sent.
 
 The response parser reads the raw Responses wire envelope `output[]/content[]/output_text`, detects refusals before schema validation, treats incomplete or malformed output as non-success, and validates the proposed agent payload:

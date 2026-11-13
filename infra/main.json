@@ -5,8 +5,8 @@
   "metadata": {
     "_generator": {
       "name": "bicep",
-      "version": "0.46.1.21595",
-      "templateHash": "12079596762594795093"
+      "version": "0.45.15.27210",
+      "templateHash": "13823931049413105920"
     }
   },
   "parameters": {
@@ -127,6 +127,45 @@
       "defaultValue": "",
       "metadata": {
         "description": "Microsoft Entra ID client secret stored in Key Vault as ENTRA_CLIENT_SECRET. Populated automatically by hooks/gen_client_secret.sh when deployEntraAppRegistration=true."
+      }
+    },
+    "linkedinOidcEnabled": {
+      "type": "string",
+      "defaultValue": "false",
+      "allowedValues": [
+        "false",
+        "true"
+      ],
+      "metadata": {
+        "description": "Explicit LinkedIn OIDC pilot feature flag. Disabled by default in every environment."
+      }
+    },
+    "linkedinClientId": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "LinkedIn developer-application client ID. Empty while the pilot is not configured."
+      }
+    },
+    "linkedinClientSecretValue": {
+      "type": "securestring",
+      "defaultValue": "",
+      "metadata": {
+        "description": "LinkedIn client secret stored in Key Vault and exposed to Container Apps only through a secret reference."
+      }
+    },
+    "linkedinPilotOwnerAllowlist": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Comma-separated canonical Entra <tid>:<oid> owners allowed to use the LinkedIn developer pilot."
+      }
+    },
+    "linkedinPictureHostAllowlist": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Comma-separated exact LinkedIn picture hosts. Keep empty until a separately authorized contract test proves them."
       }
     },
     "cosmosDatabaseName": {
@@ -739,8 +778,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.46.1.21595",
-              "templateHash": "17585698293662526333"
+              "version": "0.45.15.27210",
+              "templateHash": "204244536197432026"
             }
           },
           "parameters": {
@@ -887,8 +926,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.46.1.21595",
-              "templateHash": "11345900359471379480"
+              "version": "0.45.15.27210",
+              "templateHash": "15553515758241974833"
             }
           },
           "parameters": {
@@ -1006,6 +1045,9 @@
           "entraClientSecretValue": {
             "value": "[parameters('entraClientSecretValue')]"
           },
+          "linkedinClientSecretValue": {
+            "value": "[parameters('linkedinClientSecretValue')]"
+          },
           "keyVaultName": {
             "value": "[variables('keyVaultName')]"
           },
@@ -1022,8 +1064,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.46.1.21595",
-              "templateHash": "13260436190669707920"
+              "version": "0.45.15.27210",
+              "templateHash": "12188138088829919156"
             }
           },
           "parameters": {
@@ -1069,6 +1111,13 @@
                 "description": "Microsoft Entra ID client secret stored in Key Vault as ENTRA_CLIENT_SECRET. Empty skips creating the secret."
               }
             },
+            "linkedinClientSecretValue": {
+              "type": "securestring",
+              "defaultValue": "",
+              "metadata": {
+                "description": "LinkedIn client secret stored in Key Vault as LINKEDIN_CLIENT_SECRET. Empty skips creating the secret."
+              }
+            },
             "tags": {
               "type": "object",
               "defaultValue": {},
@@ -1080,7 +1129,8 @@
           "variables": {
             "keyVaultReaderRoleDefinitionId": "21090545-7ca7-4776-b22c-e363652d74d2",
             "hasAppSessionSecretKeyValue": "[not(empty(parameters('appSessionSecretKeyValue')))]",
-            "hasEntraClientSecretValue": "[not(empty(parameters('entraClientSecretValue')))]"
+            "hasEntraClientSecretValue": "[not(empty(parameters('entraClientSecretValue')))]",
+            "hasLinkedInClientSecretValue": "[not(empty(parameters('linkedinClientSecretValue')))]"
           },
           "resources": [
             {
@@ -1137,6 +1187,18 @@
               "dependsOn": [
                 "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]"
               ]
+            },
+            {
+              "condition": "[variables('hasLinkedInClientSecretValue')]",
+              "type": "Microsoft.KeyVault/vaults/secrets",
+              "apiVersion": "2023-07-01",
+              "name": "[format('{0}/{1}', parameters('keyVaultName'), 'linkedin-client-secret')]",
+              "properties": {
+                "value": "[parameters('linkedinClientSecretValue')]"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]"
+              ]
             }
           ],
           "outputs": {
@@ -1159,6 +1221,10 @@
             "entraClientSecretSecretUri": {
               "type": "string",
               "value": "[if(variables('hasEntraClientSecretValue'), reference(resourceId('Microsoft.KeyVault/vaults/secrets', parameters('keyVaultName'), 'entra-client-secret'), '2023-07-01').secretUri, '')]"
+            },
+            "linkedinClientSecretSecretUri": {
+              "type": "string",
+              "value": "[if(variables('hasLinkedInClientSecretValue'), reference(resourceId('Microsoft.KeyVault/vaults/secrets', parameters('keyVaultName'), 'linkedin-client-secret'), '2023-07-01').secretUri, '')]"
             }
           }
         }
@@ -1202,8 +1268,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.46.1.21595",
-              "templateHash": "15191288791675069220"
+              "version": "0.45.15.27210",
+              "templateHash": "4999513817385126442"
             }
           },
           "parameters": {
@@ -1437,8 +1503,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.46.1.21595",
-              "templateHash": "14311760525912267597"
+              "version": "0.45.15.27210",
+              "templateHash": "15937404824358156258"
             }
           },
           "parameters": {
@@ -1564,8 +1630,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.46.1.21595",
-              "templateHash": "17933453916057870385"
+              "version": "0.45.15.27210",
+              "templateHash": "17905176878991898590"
             }
           },
           "parameters": {
@@ -1694,8 +1760,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.46.1.21595",
-              "templateHash": "16764297838276426784"
+              "version": "0.45.15.27210",
+              "templateHash": "18036984284647648963"
             }
           },
           "parameters": {
@@ -1776,6 +1842,24 @@
           },
           "entraPostLogoutRedirectUri": "[if(empty(if(parameters('deployEntraAppRegistration'), reference('appRegistration').outputs.appId.value, if(equals(parameters('entraAuthMode'), 'existing'), reference('entraAuthGuard').outputs.validatedClientId.value, ''))), createObject('value', ''), createObject('value', format('{0}{1}', format('https://{0}.{1}', variables('containerAppName'), reference('containerAppsEnvironment').outputs.containerAppsEnvironmentDefaultDomain.value), parameters('entraPostLogoutRedirectPath'))))]",
           "entraRedirectUri": "[if(empty(if(parameters('deployEntraAppRegistration'), reference('appRegistration').outputs.appId.value, if(equals(parameters('entraAuthMode'), 'existing'), reference('entraAuthGuard').outputs.validatedClientId.value, ''))), createObject('value', ''), createObject('value', format('{0}{1}', format('https://{0}.{1}', variables('containerAppName'), reference('containerAppsEnvironment').outputs.containerAppsEnvironmentDefaultDomain.value), parameters('entraRedirectPath'))))]",
+          "linkedinClientId": {
+            "value": "[parameters('linkedinClientId')]"
+          },
+          "linkedinClientSecretValue": {
+            "value": "[parameters('linkedinClientSecretValue')]"
+          },
+          "linkedinOidcEnabled": {
+            "value": "[parameters('linkedinOidcEnabled')]"
+          },
+          "linkedinPictureHostAllowlist": {
+            "value": "[parameters('linkedinPictureHostAllowlist')]"
+          },
+          "linkedinPilotOwnerAllowlist": {
+            "value": "[parameters('linkedinPilotOwnerAllowlist')]"
+          },
+          "linkedinRedirectUri": {
+            "value": "[format('{0}/auth/linkedin/callback', format('https://{0}.{1}', variables('containerAppName'), reference('containerAppsEnvironment').outputs.containerAppsEnvironmentDefaultDomain.value))]"
+          },
           "contentSafetyApiVersion": {
             "value": "[parameters('contentSafetyApiVersion')]"
           },
@@ -1915,8 +1999,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.46.1.21595",
-              "templateHash": "18030474260683595154"
+              "version": "0.45.15.27210",
+              "templateHash": "14246840701166605217"
             }
           },
           "parameters": {
@@ -2049,6 +2133,51 @@
               "defaultValue": "",
               "metadata": {
                 "description": "Deployed post-logout redirect URI injected as ENTRA_POST_LOGOUT_REDIRECT_URI. Empty when Entra app registration is disabled."
+              }
+            },
+            "linkedinOidcEnabled": {
+              "type": "string",
+              "defaultValue": "false",
+              "allowedValues": [
+                "false",
+                "true"
+              ],
+              "metadata": {
+                "description": "Explicit LinkedIn OIDC pilot feature flag injected as LINKEDIN_OIDC_ENABLED."
+              }
+            },
+            "linkedinClientId": {
+              "type": "string",
+              "defaultValue": "",
+              "metadata": {
+                "description": "LinkedIn developer-application client ID injected as LINKEDIN_CLIENT_ID."
+              }
+            },
+            "linkedinClientSecretValue": {
+              "type": "securestring",
+              "defaultValue": "",
+              "metadata": {
+                "description": "LinkedIn client secret exposed to the Container App only as LINKEDIN_CLIENT_SECRET secretRef."
+              }
+            },
+            "linkedinRedirectUri": {
+              "type": "string",
+              "metadata": {
+                "description": "Derived deployed callback URI injected as LINKEDIN_REDIRECT_URI."
+              }
+            },
+            "linkedinPilotOwnerAllowlist": {
+              "type": "string",
+              "defaultValue": "",
+              "metadata": {
+                "description": "Canonical Entra owner allowlist injected as LINKEDIN_PILOT_OWNER_ALLOWLIST."
+              }
+            },
+            "linkedinPictureHostAllowlist": {
+              "type": "string",
+              "defaultValue": "",
+              "metadata": {
+                "description": "Exact picture-host allowlist injected as LINKEDIN_PICTURE_HOST_ALLOWLIST."
               }
             },
             "persistenceMode": {
@@ -2387,14 +2516,14 @@
             }
           },
           "variables": {
-            "containerAppSecrets": "[concat(createArray(createObject('name', 'applicationinsights-connection-string', 'value', parameters('appInsightsConnectionString'))), if(not(empty(parameters('appSessionSecretKeyValue'))), createArray(createObject('name', 'app-session-secret-key', 'value', parameters('appSessionSecretKeyValue'))), createArray()), if(not(empty(parameters('entraClientSecretValue'))), createArray(createObject('name', 'entra-client-secret', 'value', parameters('entraClientSecretValue'))), createArray()))]",
+            "containerAppSecrets": "[concat(createArray(createObject('name', 'applicationinsights-connection-string', 'value', parameters('appInsightsConnectionString'))), if(not(empty(parameters('appSessionSecretKeyValue'))), createArray(createObject('name', 'app-session-secret-key', 'value', parameters('appSessionSecretKeyValue'))), createArray()), if(not(empty(parameters('entraClientSecretValue'))), createArray(createObject('name', 'entra-client-secret', 'value', parameters('entraClientSecretValue'))), createArray()), if(not(empty(parameters('linkedinClientSecretValue'))), createArray(createObject('name', 'linkedin-client-secret', 'value', parameters('linkedinClientSecretValue'))), createArray()))]",
             "hasFoundryAgentName": "[not(empty(trim(parameters('foundryAgentName'))))]",
             "hasFoundryAgentVersion": "[not(empty(trim(parameters('foundryAgentVersion'))))]",
             "hasFoundryAgentExpectedVersion": "[not(empty(trim(parameters('foundryAgentExpectedVersion'))))]",
             "foundryAgentConfigurationIsComplete": "[and(and(variables('hasFoundryAgentName'), variables('hasFoundryAgentVersion')), variables('hasFoundryAgentExpectedVersion'))]",
             "validatedFoundryAgentConfiguration": "[if(and(equals(variables('hasFoundryAgentName'), variables('hasFoundryAgentVersion')), equals(variables('hasFoundryAgentVersion'), variables('hasFoundryAgentExpectedVersion'))), createObject('name', trim(parameters('foundryAgentName')), 'version', trim(parameters('foundryAgentVersion')), 'expectedVersion', trim(parameters('foundryAgentExpectedVersion'))), fail('FOUNDRY_AGENT_NAME, FOUNDRY_AGENT_VERSION, and FOUNDRY_AGENT_EXPECTED_VERSION must either all be set or all be empty during the initial placeholder provision.'))]",
             "foundryAgentEnv": "[if(variables('foundryAgentConfigurationIsComplete'), createArray(createObject('name', 'FOUNDRY_AGENT_NAME', 'value', variables('validatedFoundryAgentConfiguration').name), createObject('name', 'FOUNDRY_AGENT_VERSION', 'value', variables('validatedFoundryAgentConfiguration').version), createObject('name', 'FOUNDRY_AGENT_EXPECTED_VERSION', 'value', variables('validatedFoundryAgentConfiguration').expectedVersion)), createArray())]",
-            "containerAppEnv": "[concat(createArray(createObject('name', 'APPLICATIONINSIGHTS_CONNECTION_STRING', 'secretRef', 'applicationinsights-connection-string'), createObject('name', 'TELEMETRY_ENABLED', 'value', 'true'), createObject('name', 'FCG_AGENT_TRACE_ENABLED', 'value', parameters('agentTraceEnabled')), createObject('name', 'AZURE_EXPERIMENTAL_ENABLE_GENAI_TRACING', 'value', 'true'), createObject('name', 'APP_ENV', 'value', parameters('deploymentEnvironment')), createObject('name', 'TELEMETRY_SAMPLING_RATIO', 'value', parameters('telemetrySamplingRatio')), createObject('name', 'OTEL_SERVICE_NAME', 'value', parameters('telemetryServiceName')), createObject('name', 'OTEL_RESOURCE_ATTRIBUTES', 'value', format('deployment.environment.name={0},cloud.platform=azure_container_apps', parameters('telemetryEnvironmentName'))), createObject('name', 'OTEL_TRACES_SAMPLER', 'value', 'parentbased_trace_id_ratio'), createObject('name', 'OTEL_TRACES_SAMPLER_ARG', 'value', parameters('telemetrySamplingRatio')), createObject('name', 'PERSISTENCE_MODE', 'value', parameters('persistenceMode')), createObject('name', 'FOUNDRY_ENDPOINT', 'value', parameters('foundryEndpoint')), createObject('name', 'FOUNDRY_PROJECT_ENDPOINT', 'value', parameters('foundryProjectEndpoint')), createObject('name', 'FOUNDRY_API_VERSION', 'value', parameters('foundryApiVersion')), createObject('name', 'FOUNDRY_IMAGE_DEPLOYMENT', 'value', parameters('foundryImageDeployment')), createObject('name', 'FOUNDRY_AGENT_API_VERSION', 'value', parameters('foundryAgentApiVersion')), createObject('name', 'FOUNDRY_AGENT_TIMEOUT_SECONDS', 'value', parameters('foundryAgentTimeoutSeconds')), createObject('name', 'COSMOS_ENDPOINT', 'value', parameters('cosmosEndpoint')), createObject('name', 'COSMOS_DATABASE_NAME', 'value', parameters('cosmosDatabaseName')), createObject('name', 'COSMOS_CONTAINER_NAME', 'value', parameters('cosmosContainerName')), createObject('name', 'BLOB_ENDPOINT', 'value', parameters('blobEndpoint')), createObject('name', 'BLOB_CONTAINER_NAME', 'value', parameters('blobContainerName')), createObject('name', 'PROFILE_PHOTOS_CONTAINER_NAME', 'value', parameters('profilePhotosContainerName')), createObject('name', 'CONTENT_SAFETY_ENDPOINT', 'value', parameters('contentSafetyEndpoint')), createObject('name', 'CONTENT_SAFETY_API_VERSION', 'value', parameters('contentSafetyApiVersion')), createObject('name', 'CONTENT_SAFETY_MAX_HATE_SEVERITY', 'value', string(parameters('contentSafetyMaxHateSeverity'))), createObject('name', 'CONTENT_SAFETY_MAX_SELF_HARM_SEVERITY', 'value', string(parameters('contentSafetyMaxSelfHarmSeverity'))), createObject('name', 'CONTENT_SAFETY_MAX_SEXUAL_SEVERITY', 'value', string(parameters('contentSafetyMaxSexualSeverity'))), createObject('name', 'CONTENT_SAFETY_MAX_VIOLENCE_SEVERITY', 'value', string(parameters('contentSafetyMaxViolenceSeverity'))), createObject('name', 'HEALTHZ_COSMOS_TIMEOUT_MS', 'value', string(parameters('healthzCosmosTimeoutMs'))), createObject('name', 'HEALTHZ_BLOB_TIMEOUT_MS', 'value', string(parameters('healthzBlobTimeoutMs'))), createObject('name', 'MODERATION_SERVICE', 'value', parameters('moderationService')), createObject('name', 'MODERATION_POLICY_NAME', 'value', parameters('moderationPolicyName')), createObject('name', 'RATE_LIMIT_USER_REQUESTS', 'value', string(parameters('rateLimitUserRequests'))), createObject('name', 'RATE_LIMIT_USER_WINDOW_SECONDS', 'value', string(parameters('rateLimitUserWindowSeconds'))), createObject('name', 'RATE_LIMIT_IP_REQUESTS', 'value', string(parameters('rateLimitIpRequests'))), createObject('name', 'RATE_LIMIT_IP_WINDOW_SECONDS', 'value', string(parameters('rateLimitIpWindowSeconds'))), createObject('name', 'TRUSTED_PROXY_HOPS', 'value', string(parameters('trustedProxyHops'))), createObject('name', 'UPSTREAM_MAX_RETRIES', 'value', string(parameters('upstreamMaxRetries'))), createObject('name', 'IMAGE_MAX_RETRIES', 'value', string(parameters('imageMaxRetries'))), createObject('name', 'UPSTREAM_BASE_BACKOFF_SECONDS', 'value', parameters('upstreamBaseBackoffSeconds')), createObject('name', 'TEXT_TIMEOUT_SECONDS', 'value', parameters('textTimeoutSeconds')), createObject('name', 'IMAGE_TIMEOUT_SECONDS', 'value', parameters('imageTimeoutSeconds')), createObject('name', 'OVERALL_TIMEOUT_SECONDS', 'value', parameters('overallTimeoutSeconds')), createObject('name', 'AUDIT_RETENTION_DAYS', 'value', string(parameters('auditRetentionDays'))), createObject('name', 'IMAGE_SIZE', 'value', parameters('imageSize')), createObject('name', 'IMAGE_QUALITY', 'value', parameters('imageQuality')), createObject('name', 'SAVED_PHOTO_MAX_COUNT', 'value', string(parameters('savedPhotoMaxCount'))), createObject('name', 'SAVED_PHOTO_MAX_BYTES', 'value', parameters('savedPhotoMaxBytes')), createObject('name', 'SAVED_PHOTO_THUMBNAIL_SIZE', 'value', string(parameters('savedPhotoThumbnailSize'))), createObject('name', 'KEY_VAULT_URI', 'value', parameters('keyVaultUri'))), if(not(empty(parameters('appSessionSecretKeyValue'))), createArray(createObject('name', 'APP_SESSION_SECRET_KEY', 'secretRef', 'app-session-secret-key')), createArray()), if(not(empty(parameters('entraClientId'))), createArray(createObject('name', 'ENTRA_CLIENT_ID', 'value', parameters('entraClientId'))), createArray()), if(not(empty(parameters('entraClientSecretValue'))), createArray(createObject('name', 'ENTRA_CLIENT_SECRET', 'secretRef', 'entra-client-secret')), createArray()), if(not(empty(parameters('entraRedirectUri'))), createArray(createObject('name', 'ENTRA_REDIRECT_URI', 'value', parameters('entraRedirectUri'))), createArray()), if(not(empty(parameters('entraPostLogoutRedirectUri'))), createArray(createObject('name', 'ENTRA_POST_LOGOUT_REDIRECT_URI', 'value', parameters('entraPostLogoutRedirectUri'))), createArray()), variables('foundryAgentEnv'))]"
+            "containerAppEnv": "[concat(createArray(createObject('name', 'APPLICATIONINSIGHTS_CONNECTION_STRING', 'secretRef', 'applicationinsights-connection-string'), createObject('name', 'TELEMETRY_ENABLED', 'value', 'true'), createObject('name', 'FCG_AGENT_TRACE_ENABLED', 'value', parameters('agentTraceEnabled')), createObject('name', 'AZURE_EXPERIMENTAL_ENABLE_GENAI_TRACING', 'value', 'true'), createObject('name', 'APP_ENV', 'value', parameters('deploymentEnvironment')), createObject('name', 'TELEMETRY_SAMPLING_RATIO', 'value', parameters('telemetrySamplingRatio')), createObject('name', 'OTEL_SERVICE_NAME', 'value', parameters('telemetryServiceName')), createObject('name', 'OTEL_RESOURCE_ATTRIBUTES', 'value', format('deployment.environment.name={0},cloud.platform=azure_container_apps', parameters('telemetryEnvironmentName'))), createObject('name', 'OTEL_TRACES_SAMPLER', 'value', 'parentbased_trace_id_ratio'), createObject('name', 'OTEL_TRACES_SAMPLER_ARG', 'value', parameters('telemetrySamplingRatio')), createObject('name', 'PERSISTENCE_MODE', 'value', parameters('persistenceMode')), createObject('name', 'FOUNDRY_ENDPOINT', 'value', parameters('foundryEndpoint')), createObject('name', 'FOUNDRY_PROJECT_ENDPOINT', 'value', parameters('foundryProjectEndpoint')), createObject('name', 'FOUNDRY_API_VERSION', 'value', parameters('foundryApiVersion')), createObject('name', 'FOUNDRY_IMAGE_DEPLOYMENT', 'value', parameters('foundryImageDeployment')), createObject('name', 'FOUNDRY_AGENT_API_VERSION', 'value', parameters('foundryAgentApiVersion')), createObject('name', 'FOUNDRY_AGENT_TIMEOUT_SECONDS', 'value', parameters('foundryAgentTimeoutSeconds')), createObject('name', 'COSMOS_ENDPOINT', 'value', parameters('cosmosEndpoint')), createObject('name', 'COSMOS_DATABASE_NAME', 'value', parameters('cosmosDatabaseName')), createObject('name', 'COSMOS_CONTAINER_NAME', 'value', parameters('cosmosContainerName')), createObject('name', 'BLOB_ENDPOINT', 'value', parameters('blobEndpoint')), createObject('name', 'BLOB_CONTAINER_NAME', 'value', parameters('blobContainerName')), createObject('name', 'PROFILE_PHOTOS_CONTAINER_NAME', 'value', parameters('profilePhotosContainerName')), createObject('name', 'CONTENT_SAFETY_ENDPOINT', 'value', parameters('contentSafetyEndpoint')), createObject('name', 'CONTENT_SAFETY_API_VERSION', 'value', parameters('contentSafetyApiVersion')), createObject('name', 'CONTENT_SAFETY_MAX_HATE_SEVERITY', 'value', string(parameters('contentSafetyMaxHateSeverity'))), createObject('name', 'CONTENT_SAFETY_MAX_SELF_HARM_SEVERITY', 'value', string(parameters('contentSafetyMaxSelfHarmSeverity'))), createObject('name', 'CONTENT_SAFETY_MAX_SEXUAL_SEVERITY', 'value', string(parameters('contentSafetyMaxSexualSeverity'))), createObject('name', 'CONTENT_SAFETY_MAX_VIOLENCE_SEVERITY', 'value', string(parameters('contentSafetyMaxViolenceSeverity'))), createObject('name', 'HEALTHZ_COSMOS_TIMEOUT_MS', 'value', string(parameters('healthzCosmosTimeoutMs'))), createObject('name', 'HEALTHZ_BLOB_TIMEOUT_MS', 'value', string(parameters('healthzBlobTimeoutMs'))), createObject('name', 'MODERATION_SERVICE', 'value', parameters('moderationService')), createObject('name', 'MODERATION_POLICY_NAME', 'value', parameters('moderationPolicyName')), createObject('name', 'RATE_LIMIT_USER_REQUESTS', 'value', string(parameters('rateLimitUserRequests'))), createObject('name', 'RATE_LIMIT_USER_WINDOW_SECONDS', 'value', string(parameters('rateLimitUserWindowSeconds'))), createObject('name', 'RATE_LIMIT_IP_REQUESTS', 'value', string(parameters('rateLimitIpRequests'))), createObject('name', 'RATE_LIMIT_IP_WINDOW_SECONDS', 'value', string(parameters('rateLimitIpWindowSeconds'))), createObject('name', 'TRUSTED_PROXY_HOPS', 'value', string(parameters('trustedProxyHops'))), createObject('name', 'UPSTREAM_MAX_RETRIES', 'value', string(parameters('upstreamMaxRetries'))), createObject('name', 'IMAGE_MAX_RETRIES', 'value', string(parameters('imageMaxRetries'))), createObject('name', 'UPSTREAM_BASE_BACKOFF_SECONDS', 'value', parameters('upstreamBaseBackoffSeconds')), createObject('name', 'TEXT_TIMEOUT_SECONDS', 'value', parameters('textTimeoutSeconds')), createObject('name', 'IMAGE_TIMEOUT_SECONDS', 'value', parameters('imageTimeoutSeconds')), createObject('name', 'OVERALL_TIMEOUT_SECONDS', 'value', parameters('overallTimeoutSeconds')), createObject('name', 'AUDIT_RETENTION_DAYS', 'value', string(parameters('auditRetentionDays'))), createObject('name', 'IMAGE_SIZE', 'value', parameters('imageSize')), createObject('name', 'IMAGE_QUALITY', 'value', parameters('imageQuality')), createObject('name', 'SAVED_PHOTO_MAX_COUNT', 'value', string(parameters('savedPhotoMaxCount'))), createObject('name', 'SAVED_PHOTO_MAX_BYTES', 'value', parameters('savedPhotoMaxBytes')), createObject('name', 'SAVED_PHOTO_THUMBNAIL_SIZE', 'value', string(parameters('savedPhotoThumbnailSize'))), createObject('name', 'KEY_VAULT_URI', 'value', parameters('keyVaultUri')), createObject('name', 'LINKEDIN_OIDC_ENABLED', 'value', parameters('linkedinOidcEnabled')), createObject('name', 'LINKEDIN_CLIENT_ID', 'value', parameters('linkedinClientId')), createObject('name', 'LINKEDIN_REDIRECT_URI', 'value', parameters('linkedinRedirectUri')), createObject('name', 'LINKEDIN_PILOT_OWNER_ALLOWLIST', 'value', parameters('linkedinPilotOwnerAllowlist')), createObject('name', 'LINKEDIN_PICTURE_HOST_ALLOWLIST', 'value', parameters('linkedinPictureHostAllowlist'))), if(not(empty(parameters('appSessionSecretKeyValue'))), createArray(createObject('name', 'APP_SESSION_SECRET_KEY', 'secretRef', 'app-session-secret-key')), createArray()), if(not(empty(parameters('entraClientId'))), createArray(createObject('name', 'ENTRA_CLIENT_ID', 'value', parameters('entraClientId'))), createArray()), if(not(empty(parameters('entraClientSecretValue'))), createArray(createObject('name', 'ENTRA_CLIENT_SECRET', 'secretRef', 'entra-client-secret')), createArray()), if(not(empty(parameters('linkedinClientSecretValue'))), createArray(createObject('name', 'LINKEDIN_CLIENT_SECRET', 'secretRef', 'linkedin-client-secret')), createArray()), if(not(empty(parameters('entraRedirectUri'))), createArray(createObject('name', 'ENTRA_REDIRECT_URI', 'value', parameters('entraRedirectUri'))), createArray()), if(not(empty(parameters('entraPostLogoutRedirectUri'))), createArray(createObject('name', 'ENTRA_POST_LOGOUT_REDIRECT_URI', 'value', parameters('entraPostLogoutRedirectUri'))), createArray()), variables('foundryAgentEnv'))]"
           },
           "resources": [
             {
@@ -2605,8 +2734,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.46.1.21595",
-              "templateHash": "2810852726231496297"
+              "version": "0.45.15.27210",
+              "templateHash": "1227320756293365038"
             }
           },
           "parameters": {
@@ -2801,7 +2930,7 @@
                   "content": {
                     "version": "KqlItem/1.0",
                     "title": "Requests: volume, failures, and latency percentiles",
-                    "query": "AppRequests\n| where AppRoleName == '{Service}'\n| summarize Requests=count(), Failures=countif(Success == false), p50=percentile(DurationMs, 50), p95=percentile(DurationMs, 95), p99=percentile(DurationMs, 99) by bin(TimeGenerated, 1h)\n| order by TimeGenerated asc\n",
+                    "query": "AppRequests\r\n| where AppRoleName == '{Service}'\r\n| summarize Requests=count(), Failures=countif(Success == false), p50=percentile(DurationMs, 50), p95=percentile(DurationMs, 95), p99=percentile(DurationMs, 99) by bin(TimeGenerated, 1h)\r\n| order by TimeGenerated asc\r\n",
                     "size": 0,
                     "queryType": 0,
                     "resourceType": "microsoft.operationalinsights/workspaces",
@@ -2814,7 +2943,7 @@
                   "content": {
                     "version": "KqlItem/1.0",
                     "title": "Dependencies: success and latency",
-                    "query": "AppDependencies\n| where AppRoleName == '{Service}'\n| summarize Calls=count(), Failures=countif(Success == false), Throttles=countif(ResultCode == \"429\"), p50=percentile(DurationMs, 50), p95=percentile(DurationMs, 95), p99=percentile(DurationMs, 99) by DependencyType, bin(TimeGenerated, 1h)\n| order by TimeGenerated desc\n",
+                    "query": "AppDependencies\r\n| where AppRoleName == '{Service}'\r\n| summarize Calls=count(), Failures=countif(Success == false), Throttles=countif(ResultCode == \"429\"), p50=percentile(DurationMs, 50), p95=percentile(DurationMs, 95), p99=percentile(DurationMs, 99) by DependencyType, bin(TimeGenerated, 1h)\r\n| order by TimeGenerated desc\r\n",
                     "size": 0,
                     "queryType": 0,
                     "resourceType": "microsoft.operationalinsights/workspaces"
@@ -2826,7 +2955,7 @@
                   "content": {
                     "version": "KqlItem/1.0",
                     "title": "Exceptions and bounded application errors",
-                    "query": "union isfuzzy=true\n  (AppExceptions | where AppRoleName == '{Service}' | project TimeGenerated, Signal=\"exception\", Type=ExceptionType, Severity=SeverityLevel),\n  (AppTraces | where AppRoleName == '{Service}' and SeverityLevel >= 3 | project TimeGenerated, Signal=\"trace\", Type=tostring(Properties[\"fcg.error_code\"]), Severity=SeverityLevel)\n| order by TimeGenerated desc\n| take 100\n",
+                    "query": "union isfuzzy=true\r\n  (AppExceptions | where AppRoleName == '{Service}' | project TimeGenerated, Signal=\"exception\", Type=ExceptionType, Severity=SeverityLevel),\r\n  (AppTraces | where AppRoleName == '{Service}' and SeverityLevel >= 3 | project TimeGenerated, Signal=\"trace\", Type=tostring(Properties[\"fcg.error_code\"]), Severity=SeverityLevel)\r\n| order by TimeGenerated desc\r\n| take 100\r\n",
                     "size": 0,
                     "queryType": 0,
                     "resourceType": "microsoft.operationalinsights/workspaces"
@@ -2838,7 +2967,7 @@
                   "content": {
                     "version": "KqlItem/1.0",
                     "title": "Generation, moderation, retries, persistence, and token aggregates",
-                    "query": "AppMetrics\n| where AppRoleName == '{Service}'\n| where Name startswith \"fcg.\"\n| extend Dimension = case(\n    Name in (\"fcg.generation.requests\", \"fcg.generation.duration\", \"fcg.artwork.retries\"), strcat(\"outcome=\", tostring(Properties[\"fcg.outcome\"])),\n    Name == \"fcg.generation.partial_results\", strcat(\"partial=\", tostring(Properties[\"fcg.partial_reason\"])),\n    Name in (\"fcg.dependency.attempts\", \"fcg.dependency.duration\"), strcat(\"dependency=\", tostring(Properties[\"fcg.dependency\"]), \";attempt=\", tostring(Properties[\"fcg.attempt\"]), \";outcome=\", tostring(Properties[\"fcg.outcome\"])),\n    Name in (\"fcg.dependency.throttles\", \"fcg.dependency.timeouts\"), strcat(\"dependency=\", tostring(Properties[\"fcg.dependency\"])),\n    Name == \"fcg.moderation.decisions\", strcat(\"stage=\", tostring(Properties[\"fcg.stage\"]), \";moderation=\", tostring(Properties[\"fcg.moderation_reason\"]), \";outcome=\", tostring(Properties[\"fcg.outcome\"])),\n    Name == \"fcg.persistence.operations\", strcat(\"store=\", tostring(Properties[\"fcg.store\"]), \";operation=\", tostring(Properties[\"fcg.persistence_operation\"]), \";outcome=\", tostring(Properties[\"fcg.outcome\"])),\n    Name == \"fcg.ai.tokens\", strcat(\"operation=\", tostring(Properties[\"fcg.operation\"]), \";token_type=\", tostring(Properties[\"fcg.token_type\"])),\n    \"aggregate\")\n| summarize Value=sum(Sum) by Name, Dimension, bin(TimeGenerated, 1h)\n| order by TimeGenerated desc\n",
+                    "query": "AppMetrics\r\n| where AppRoleName == '{Service}'\r\n| where Name startswith \"fcg.\"\r\n| extend Dimension = case(\r\n    Name in (\"fcg.generation.requests\", \"fcg.generation.duration\", \"fcg.artwork.retries\"), strcat(\"outcome=\", tostring(Properties[\"fcg.outcome\"])),\r\n    Name == \"fcg.generation.partial_results\", strcat(\"partial=\", tostring(Properties[\"fcg.partial_reason\"])),\r\n    Name in (\"fcg.dependency.attempts\", \"fcg.dependency.duration\"), strcat(\"dependency=\", tostring(Properties[\"fcg.dependency\"]), \";attempt=\", tostring(Properties[\"fcg.attempt\"]), \";outcome=\", tostring(Properties[\"fcg.outcome\"])),\r\n    Name in (\"fcg.dependency.throttles\", \"fcg.dependency.timeouts\"), strcat(\"dependency=\", tostring(Properties[\"fcg.dependency\"])),\r\n    Name == \"fcg.moderation.decisions\", strcat(\"stage=\", tostring(Properties[\"fcg.stage\"]), \";moderation=\", tostring(Properties[\"fcg.moderation_reason\"]), \";outcome=\", tostring(Properties[\"fcg.outcome\"])),\r\n    Name == \"fcg.persistence.operations\", strcat(\"store=\", tostring(Properties[\"fcg.store\"]), \";operation=\", tostring(Properties[\"fcg.persistence_operation\"]), \";outcome=\", tostring(Properties[\"fcg.outcome\"])),\r\n    Name == \"fcg.ai.tokens\", strcat(\"operation=\", tostring(Properties[\"fcg.operation\"]), \";token_type=\", tostring(Properties[\"fcg.token_type\"])),\r\n    \"aggregate\")\r\n| summarize Value=sum(Sum) by Name, Dimension, bin(TimeGenerated, 1h)\r\n| order by TimeGenerated desc\r\n",
                     "size": 0,
                     "queryType": 0,
                     "resourceType": "microsoft.operationalinsights/workspaces",
@@ -2851,7 +2980,7 @@
                   "content": {
                     "version": "KqlItem/1.0",
                     "title": "ACA revision, restart, and platform errors",
-                    "query": "[replace('ContainerAppSystemLogs_CL\n| where ContainerAppName_s == ''__CONTAINER_APP_NAME__''\n| where ''{Revision}'' == ''*'' or RevisionName_s == ''{Revision}''\n| where Reason_s in (\"Restarting\", \"Unhealthy\", \"HealthProbeFailed\") or Log_s has_any (\"restart\", \"unhealthy\", \"probe failed\")\n| project TimeGenerated, RevisionName_s, Reason_s, Log_s\n| order by TimeGenerated desc\n| take 100\n', '__CONTAINER_APP_NAME__', parameters('containerAppName'))]",
+                    "query": "[replace('ContainerAppSystemLogs_CL\r\n| where ContainerAppName_s == ''__CONTAINER_APP_NAME__''\r\n| where ''{Revision}'' == ''*'' or RevisionName_s == ''{Revision}''\r\n| where Reason_s in (\"Restarting\", \"Unhealthy\", \"HealthProbeFailed\") or Log_s has_any (\"restart\", \"unhealthy\", \"probe failed\")\r\n| project TimeGenerated, RevisionName_s, Reason_s, Log_s\r\n| order by TimeGenerated desc\r\n| take 100\r\n', '__CONTAINER_APP_NAME__', parameters('containerAppName'))]",
                     "size": 0,
                     "queryType": 0,
                     "resourceType": "microsoft.operationalinsights/workspaces"
@@ -2863,7 +2992,7 @@
                   "content": {
                     "version": "KqlItem/1.0",
                     "title": "Billable ingestion and daily-cap utilization",
-                    "query": "[replace(replace('Usage\n| where IsBillable == true\n| summarize BillableGB=sum(Quantity) / 1000.0 by bin(TimeGenerated, 1d)\n| extend DailyCapGB=__DAILY_QUOTA_GB__, CapUtilizationPercent=100.0 * BillableGB / __DAILY_QUOTA_GB__\n| order by TimeGenerated desc\n', '__DAILY_QUOTA_GB__', string(parameters('dailyQuotaGb'))), '__DAILY_QUOTA_GB__', string(parameters('dailyQuotaGb')))]",
+                    "query": "[replace(replace('Usage\r\n| where IsBillable == true\r\n| summarize BillableGB=sum(Quantity) / 1000.0 by bin(TimeGenerated, 1d)\r\n| extend DailyCapGB=__DAILY_QUOTA_GB__, CapUtilizationPercent=100.0 * BillableGB / __DAILY_QUOTA_GB__\r\n| order by TimeGenerated desc\r\n', '__DAILY_QUOTA_GB__', string(parameters('dailyQuotaGb'))), '__DAILY_QUOTA_GB__', string(parameters('dailyQuotaGb')))]",
                     "size": 0,
                     "queryType": 0,
                     "resourceType": "microsoft.operationalinsights/workspaces"
@@ -2876,14 +3005,14 @@
                 "[parameters('logAnalyticsWorkspaceResourceId')]"
               ]
             },
-            "availabilityQuery": "[format('AppAvailabilityResults\n| where Name == ''{0}'' and Success == false\n| summarize Failures=count()\n| where Failures >= {1}\n| project Breach=1\n', variables('availabilityTestName'), parameters('availabilityFailureThreshold'))]",
-            "requestFailureQuery": "[format('AppRequests\n| where AppRoleName == ''{0}''\n| summarize Total=count(), Failed=countif(Success == false or ResultCode startswith \"5\")\n| where Total >= {1} and (100.0 * Failed / Total) >= {2}\n| project Breach=1\n', parameters('serviceName'), parameters('requestTrafficFloor'), parameters('requestFailurePercentThreshold'))]",
-            "requestLatencyQuery": "[format('AppRequests\n| where AppRoleName == ''{0}''\n| summarize Total=count(), P95=percentile(DurationMs, 95)\n| where Total >= {1} and P95 >= {2}\n| project Breach=1\n', parameters('serviceName'), parameters('requestTrafficFloor'), parameters('requestP95LatencyMsThreshold'))]",
-            "dependencyFailureQuery": "[format('AppDependencies\n| where AppRoleName == ''{0}''\n| where Success == false or ResultCode in (\"408\", \"429\", \"504\")\n| summarize Failures=count()\n| where Failures >= {1}\n| project Breach=1\n', parameters('serviceName'), parameters('dependencyFailureThreshold'))]",
-            "exceptionQuery": "[format('AppExceptions\n| where AppRoleName == ''{0}''\n| summarize Exceptions=count()\n| where Exceptions >= {1}\n| project Breach=1\n', parameters('serviceName'), parameters('exceptionThreshold'))]",
-            "generationAdverseQuery": "[format('AppMetrics\n| where AppRoleName == ''{0}''\n| where (Name == \"fcg.generation.requests\" and tostring(Properties[\"fcg.outcome\"]) in (\"failed\", \"timed_out\", \"throttled\"))\n    or Name == \"fcg.generation.partial_results\"\n    or (Name == \"fcg.persistence.operations\" and tostring(Properties[\"fcg.outcome\"]) != \"completed\")\n| summarize AdverseOutcomes=sum(Sum)\n| where AdverseOutcomes >= {1}\n| project Breach=1\n', parameters('serviceName'), parameters('generationAdverseOutcomeThreshold'))]",
-            "containerRestartQuery": "[format('ContainerAppSystemLogs_CL\n| where ContainerAppName_s == ''{0}''\n| where Reason_s in (\"Restarting\", \"Unhealthy\", \"HealthProbeFailed\") or Log_s has_any (\"restart\", \"unhealthy\", \"probe failed\")\n| summarize RestartOrUnhealthyEvents=count()\n| where RestartOrUnhealthyEvents >= {1}\n| project Breach=1\n', parameters('containerAppName'), parameters('containerRestartThreshold'))]",
-            "ingestionCapQuery": "[format('Usage\n| where IsBillable == true\n| where TimeGenerated >= ago(24h)\n| summarize BillableGB=sum(Quantity) / 1000.0\n| where BillableGB >= ({0} * {1} / 100.0)\n| project Breach=1\n', parameters('dailyQuotaGb'), parameters('ingestionWarningPercent'))]",
+            "availabilityQuery": "[format('AppAvailabilityResults\r\n| where Name == ''{0}'' and Success == false\r\n| summarize Failures=count()\r\n| where Failures >= {1}\r\n| project Breach=1\r\n', variables('availabilityTestName'), parameters('availabilityFailureThreshold'))]",
+            "requestFailureQuery": "[format('AppRequests\r\n| where AppRoleName == ''{0}''\r\n| summarize Total=count(), Failed=countif(Success == false or ResultCode startswith \"5\")\r\n| where Total >= {1} and (100.0 * Failed / Total) >= {2}\r\n| project Breach=1\r\n', parameters('serviceName'), parameters('requestTrafficFloor'), parameters('requestFailurePercentThreshold'))]",
+            "requestLatencyQuery": "[format('AppRequests\r\n| where AppRoleName == ''{0}''\r\n| summarize Total=count(), P95=percentile(DurationMs, 95)\r\n| where Total >= {1} and P95 >= {2}\r\n| project Breach=1\r\n', parameters('serviceName'), parameters('requestTrafficFloor'), parameters('requestP95LatencyMsThreshold'))]",
+            "dependencyFailureQuery": "[format('AppDependencies\r\n| where AppRoleName == ''{0}''\r\n| where Success == false or ResultCode in (\"408\", \"429\", \"504\")\r\n| summarize Failures=count()\r\n| where Failures >= {1}\r\n| project Breach=1\r\n', parameters('serviceName'), parameters('dependencyFailureThreshold'))]",
+            "exceptionQuery": "[format('AppExceptions\r\n| where AppRoleName == ''{0}''\r\n| summarize Exceptions=count()\r\n| where Exceptions >= {1}\r\n| project Breach=1\r\n', parameters('serviceName'), parameters('exceptionThreshold'))]",
+            "generationAdverseQuery": "[format('AppMetrics\r\n| where AppRoleName == ''{0}''\r\n| where (Name == \"fcg.generation.requests\" and tostring(Properties[\"fcg.outcome\"]) in (\"failed\", \"timed_out\", \"throttled\"))\r\n    or Name == \"fcg.generation.partial_results\"\r\n    or (Name == \"fcg.persistence.operations\" and tostring(Properties[\"fcg.outcome\"]) != \"completed\")\r\n| summarize AdverseOutcomes=sum(Sum)\r\n| where AdverseOutcomes >= {1}\r\n| project Breach=1\r\n', parameters('serviceName'), parameters('generationAdverseOutcomeThreshold'))]",
+            "containerRestartQuery": "[format('ContainerAppSystemLogs_CL\r\n| where ContainerAppName_s == ''{0}''\r\n| where Reason_s in (\"Restarting\", \"Unhealthy\", \"HealthProbeFailed\") or Log_s has_any (\"restart\", \"unhealthy\", \"probe failed\")\r\n| summarize RestartOrUnhealthyEvents=count()\r\n| where RestartOrUnhealthyEvents >= {1}\r\n| project Breach=1\r\n', parameters('containerAppName'), parameters('containerRestartThreshold'))]",
+            "ingestionCapQuery": "[format('Usage\r\n| where IsBillable == true\r\n| where TimeGenerated >= ago(24h)\r\n| summarize BillableGB=sum(Quantity) / 1000.0\r\n| where BillableGB >= ({0} * {1} / 100.0)\r\n| project Breach=1\r\n', parameters('dailyQuotaGb'), parameters('ingestionWarningPercent'))]",
             "alertDefinitions": [
               {
                 "name": "availability",
@@ -3146,8 +3275,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.46.1.21595",
-              "templateHash": "5080484497298381421"
+              "version": "0.45.15.27210",
+              "templateHash": "10724111127732990745"
             }
           },
           "parameters": {
@@ -3379,8 +3508,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.46.1.21595",
-              "templateHash": "16749877639784632872"
+              "version": "0.45.15.27210",
+              "templateHash": "13427901244984523192"
             }
           },
           "parameters": {
@@ -3554,8 +3683,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.46.1.21595",
-              "templateHash": "17238596801795115468"
+              "version": "0.45.15.27210",
+              "templateHash": "9509362034116693422"
             }
           },
           "parameters": {
@@ -7768,8 +7897,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.46.1.21595",
-              "templateHash": "495362804089436313"
+              "version": "0.45.15.27210",
+              "templateHash": "10753811517175570161"
             }
           },
           "parameters": {
@@ -8139,8 +8268,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.46.1.21595",
-              "templateHash": "2772271098075052018"
+              "version": "0.45.15.27210",
+              "templateHash": "1630020994503054976"
             }
           },
           "parameters": {
@@ -8584,8 +8713,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.46.1.21595",
-              "templateHash": "5437736205600952646"
+              "version": "0.45.15.27210",
+              "templateHash": "4062779255774458396"
             }
           },
           "parameters": {
@@ -8724,8 +8853,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.46.1.21595",
-              "templateHash": "6408497062404921467"
+              "version": "0.45.15.27210",
+              "templateHash": "16431383122271112693"
             }
           },
           "parameters": {
@@ -8893,7 +9022,7 @@
                   "content": {
                     "version": "KqlItem/1.0",
                     "title": "Invocation outcomes: completed, failed, timed_out, throttled",
-                    "query": "AppMetrics\n| where AppRoleName == '{AgentService}'\n| where Name == \"fcg.generation.requests\"\n| extend Outcome=tostring(Properties[\"fcg.outcome\"]), AgentVersion=tostring(Properties[\"fcg.agent_version\"])\n| where '{AgentVersion}' == '*' or AgentVersion == '{AgentVersion}'\n| summarize Invocations=sum(Sum) by Outcome, AgentVersion, bin(TimeGenerated, 1h)\n| order by TimeGenerated asc\n",
+                    "query": "AppMetrics\r\n| where AppRoleName == '{AgentService}'\r\n| where Name == \"fcg.generation.requests\"\r\n| extend Outcome=tostring(Properties[\"fcg.outcome\"]), AgentVersion=tostring(Properties[\"fcg.agent_version\"])\r\n| where '{AgentVersion}' == '*' or AgentVersion == '{AgentVersion}'\r\n| summarize Invocations=sum(Sum) by Outcome, AgentVersion, bin(TimeGenerated, 1h)\r\n| order by TimeGenerated asc\r\n",
                     "size": 0,
                     "queryType": 0,
                     "resourceType": "microsoft.operationalinsights/workspaces",
@@ -8906,7 +9035,7 @@
                   "content": {
                     "version": "KqlItem/1.0",
                     "title": "Overall invocation latency by outcome and hosted version",
-                    "query": "AppMetrics\n| where AppRoleName == '{AgentService}'\n| where Name == \"fcg.generation.duration\"\n| extend Outcome=tostring(Properties[\"fcg.outcome\"]), AgentVersion=tostring(Properties[\"fcg.agent_version\"])\n| where '{AgentVersion}' == '*' or AgentVersion == '{AgentVersion}'\n| summarize TotalMs=sum(Sum), MeasurementCount=sum(ItemCount) by Outcome, AgentVersion, bin(TimeGenerated, 1h)\n| extend AvgMs=TotalMs / MeasurementCount\n| order by TimeGenerated asc\n",
+                    "query": "AppMetrics\r\n| where AppRoleName == '{AgentService}'\r\n| where Name == \"fcg.generation.duration\"\r\n| extend Outcome=tostring(Properties[\"fcg.outcome\"]), AgentVersion=tostring(Properties[\"fcg.agent_version\"])\r\n| where '{AgentVersion}' == '*' or AgentVersion == '{AgentVersion}'\r\n| summarize TotalMs=sum(Sum), MeasurementCount=sum(ItemCount) by Outcome, AgentVersion, bin(TimeGenerated, 1h)\r\n| extend AvgMs=TotalMs / MeasurementCount\r\n| order by TimeGenerated asc\r\n",
                     "size": 0,
                     "queryType": 0,
                     "resourceType": "microsoft.operationalinsights/workspaces",
@@ -8919,7 +9048,7 @@
                   "content": {
                     "version": "KqlItem/1.0",
                     "title": "Model dependency latency and outcomes by bounded orchestration stage",
-                    "query": "AppMetrics\n| where AppRoleName == '{AgentService}'\n| where Name == \"fcg.dependency.duration\"\n| extend Stage=tostring(Properties[\"fcg.stage\"]), Provider=tostring(Properties[\"fcg.dependency\"]), Outcome=tostring(Properties[\"fcg.outcome\"]), AgentVersion=tostring(Properties[\"fcg.agent_version\"])\n| where '{AgentVersion}' == '*' or AgentVersion == '{AgentVersion}'\n| summarize TotalMs=sum(Sum), AttemptCount=sum(ItemCount) by Stage, Provider, Outcome, AgentVersion, bin(TimeGenerated, 1h)\n| extend AvgMs=TotalMs / AttemptCount\n| order by TimeGenerated desc\n",
+                    "query": "AppMetrics\r\n| where AppRoleName == '{AgentService}'\r\n| where Name == \"fcg.dependency.duration\"\r\n| extend Stage=tostring(Properties[\"fcg.stage\"]), Provider=tostring(Properties[\"fcg.dependency\"]), Outcome=tostring(Properties[\"fcg.outcome\"]), AgentVersion=tostring(Properties[\"fcg.agent_version\"])\r\n| where '{AgentVersion}' == '*' or AgentVersion == '{AgentVersion}'\r\n| summarize TotalMs=sum(Sum), AttemptCount=sum(ItemCount) by Stage, Provider, Outcome, AgentVersion, bin(TimeGenerated, 1h)\r\n| extend AvgMs=TotalMs / AttemptCount\r\n| order by TimeGenerated desc\r\n",
                     "size": 0,
                     "queryType": 0,
                     "resourceType": "microsoft.operationalinsights/workspaces"
@@ -8931,7 +9060,7 @@
                   "content": {
                     "version": "KqlItem/1.0",
                     "title": "Exceptions and bounded runtime errors",
-                    "query": "union isfuzzy=true\n  (AppExceptions | where AppRoleName == '{AgentService}' | project TimeGenerated, Signal=\"exception\", Type=ExceptionType, Severity=SeverityLevel),\n  (AppTraces | where AppRoleName == '{AgentService}' and SeverityLevel >= 3 | project TimeGenerated, Signal=\"trace\", Type=tostring(Properties[\"fcg.error_code\"]), Severity=SeverityLevel)\n| order by TimeGenerated desc\n| take 100\n",
+                    "query": "union isfuzzy=true\r\n  (AppExceptions | where AppRoleName == '{AgentService}' | project TimeGenerated, Signal=\"exception\", Type=ExceptionType, Severity=SeverityLevel),\r\n  (AppTraces | where AppRoleName == '{AgentService}' and SeverityLevel >= 3 | project TimeGenerated, Signal=\"trace\", Type=tostring(Properties[\"fcg.error_code\"]), Severity=SeverityLevel)\r\n| order by TimeGenerated desc\r\n| take 100\r\n",
                     "size": 0,
                     "queryType": 0,
                     "resourceType": "microsoft.operationalinsights/workspaces"
@@ -8943,7 +9072,7 @@
                   "content": {
                     "version": "KqlItem/1.0",
                     "title": "Moderation and safety signals",
-                    "query": "AppMetrics\n| where AppRoleName == '{AgentService}'\n| where Name == \"fcg.moderation.decisions\"\n| extend Stage=tostring(Properties[\"fcg.stage\"]), Reason=tostring(Properties[\"fcg.moderation_reason\"]), Outcome=tostring(Properties[\"fcg.outcome\"]), AgentVersion=tostring(Properties[\"fcg.agent_version\"])\n| where '{AgentVersion}' == '*' or AgentVersion == '{AgentVersion}'\n| summarize Decisions=sum(Sum) by Stage, Reason, Outcome, AgentVersion, bin(TimeGenerated, 1h)\n| order by TimeGenerated desc\n",
+                    "query": "AppMetrics\r\n| where AppRoleName == '{AgentService}'\r\n| where Name == \"fcg.moderation.decisions\"\r\n| extend Stage=tostring(Properties[\"fcg.stage\"]), Reason=tostring(Properties[\"fcg.moderation_reason\"]), Outcome=tostring(Properties[\"fcg.outcome\"]), AgentVersion=tostring(Properties[\"fcg.agent_version\"])\r\n| where '{AgentVersion}' == '*' or AgentVersion == '{AgentVersion}'\r\n| summarize Decisions=sum(Sum) by Stage, Reason, Outcome, AgentVersion, bin(TimeGenerated, 1h)\r\n| order by TimeGenerated desc\r\n",
                     "size": 0,
                     "queryType": 0,
                     "resourceType": "microsoft.operationalinsights/workspaces"
@@ -8955,7 +9084,7 @@
                   "content": {
                     "version": "KqlItem/1.0",
                     "title": "ACA container restart and unhealthy events",
-                    "query": "[replace('ContainerAppSystemLogs_CL\n| where ContainerAppName_s == ''__CONTAINER_APP_NAME__''\n| where Reason_s in (\"Restarting\", \"Unhealthy\", \"HealthProbeFailed\") or Log_s has_any (\"restart\", \"unhealthy\", \"probe failed\")\n| project TimeGenerated, RevisionName_s, Reason_s, Log_s\n| order by TimeGenerated desc\n| take 100\n', '__CONTAINER_APP_NAME__', parameters('containerAppName'))]",
+                    "query": "[replace('ContainerAppSystemLogs_CL\r\n| where ContainerAppName_s == ''__CONTAINER_APP_NAME__''\r\n| where Reason_s in (\"Restarting\", \"Unhealthy\", \"HealthProbeFailed\") or Log_s has_any (\"restart\", \"unhealthy\", \"probe failed\")\r\n| project TimeGenerated, RevisionName_s, Reason_s, Log_s\r\n| order by TimeGenerated desc\r\n| take 100\r\n', '__CONTAINER_APP_NAME__', parameters('containerAppName'))]",
                     "size": 0,
                     "queryType": 0,
                     "resourceType": "microsoft.operationalinsights/workspaces"
@@ -8968,10 +9097,10 @@
                 "[parameters('logAnalyticsWorkspaceResourceId')]"
               ]
             },
-            "invocationAdverseQuery": "[format('AppMetrics\n| where AppRoleName == ''{0}''\n| where Name == \"fcg.generation.requests\"\n| where tostring(Properties[\"fcg.outcome\"]) in (\"failed\", \"timed_out\", \"throttled\", \"held\", \"refused\", \"routing_defer\")\n| summarize AdverseOutcomes=sum(Sum)\n| where AdverseOutcomes >= {1}\n| project Breach=1\n', parameters('agentServiceName'), parameters('invocationAdverseThreshold'))]",
-            "modelThrottleQuery": "[format('AppMetrics\n| where AppRoleName == ''{0}''\n| where Name == \"fcg.dependency.attempts\"\n| where tostring(Properties[\"fcg.dependency\"]) == \"foundry_text\"\n| where tostring(Properties[\"fcg.outcome\"]) == \"throttled\"\n| summarize Throttles=sum(Sum)\n| where Throttles >= {1}\n| project Breach=1\n', parameters('agentServiceName'), parameters('modelThrottleThreshold'))]",
-            "dependencyFailureQuery": "[format('AppMetrics\n| where AppRoleName == ''{0}''\n| where Name == \"fcg.dependency.attempts\"\n| where tostring(Properties[\"fcg.dependency\"]) == \"foundry_text\"\n| where tostring(Properties[\"fcg.outcome\"]) in (\"failed\", \"timed_out\")\n| summarize DependencyFailures=sum(Sum)\n| where DependencyFailures >= {1}\n| project Breach=1\n', parameters('agentServiceName'), parameters('dependencyFailureThreshold'))]",
-            "containerRestartQuery": "[format('ContainerAppSystemLogs_CL\n| where ContainerAppName_s == ''{0}''\n| where Reason_s in (\"Restarting\", \"Unhealthy\", \"HealthProbeFailed\") or Log_s has_any (\"restart\", \"unhealthy\", \"probe failed\")\n| summarize RestartOrUnhealthyEvents=count()\n| where RestartOrUnhealthyEvents >= {1}\n| project Breach=1\n', parameters('containerAppName'), parameters('containerRestartThreshold'))]",
+            "invocationAdverseQuery": "[format('AppMetrics\r\n| where AppRoleName == ''{0}''\r\n| where Name == \"fcg.generation.requests\"\r\n| where tostring(Properties[\"fcg.outcome\"]) in (\"failed\", \"timed_out\", \"throttled\", \"held\", \"refused\", \"routing_defer\")\r\n| summarize AdverseOutcomes=sum(Sum)\r\n| where AdverseOutcomes >= {1}\r\n| project Breach=1\r\n', parameters('agentServiceName'), parameters('invocationAdverseThreshold'))]",
+            "modelThrottleQuery": "[format('AppMetrics\r\n| where AppRoleName == ''{0}''\r\n| where Name == \"fcg.dependency.attempts\"\r\n| where tostring(Properties[\"fcg.dependency\"]) == \"foundry_text\"\r\n| where tostring(Properties[\"fcg.outcome\"]) == \"throttled\"\r\n| summarize Throttles=sum(Sum)\r\n| where Throttles >= {1}\r\n| project Breach=1\r\n', parameters('agentServiceName'), parameters('modelThrottleThreshold'))]",
+            "dependencyFailureQuery": "[format('AppMetrics\r\n| where AppRoleName == ''{0}''\r\n| where Name == \"fcg.dependency.attempts\"\r\n| where tostring(Properties[\"fcg.dependency\"]) == \"foundry_text\"\r\n| where tostring(Properties[\"fcg.outcome\"]) in (\"failed\", \"timed_out\")\r\n| summarize DependencyFailures=sum(Sum)\r\n| where DependencyFailures >= {1}\r\n| project Breach=1\r\n', parameters('agentServiceName'), parameters('dependencyFailureThreshold'))]",
+            "containerRestartQuery": "[format('ContainerAppSystemLogs_CL\r\n| where ContainerAppName_s == ''{0}''\r\n| where Reason_s in (\"Restarting\", \"Unhealthy\", \"HealthProbeFailed\") or Log_s has_any (\"restart\", \"unhealthy\", \"probe failed\")\r\n| summarize RestartOrUnhealthyEvents=count()\r\n| where RestartOrUnhealthyEvents >= {1}\r\n| project Breach=1\r\n', parameters('containerAppName'), parameters('containerRestartThreshold'))]",
             "alertDefinitions": [
               {
                 "name": "agent-invocation-adverse",

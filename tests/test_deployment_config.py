@@ -201,6 +201,46 @@ def test_generation_runtime_env_vars_are_wired_from_bicep_outputs() -> None:
     assert "trustedProxyHops: trustedProxyHops" in main_bicep
 
 
+def test_linkedin_pilot_configuration_is_disabled_and_secret_safe() -> None:
+    main_bicep = (REPO_ROOT / "infra" / "main.bicep").read_text()
+    main_parameters = json.loads((REPO_ROOT / "infra" / "main.parameters.json").read_text())
+    security_bicep = (REPO_ROOT / "infra" / "modules" / "security.bicep").read_text()
+    container_apps_bicep = (REPO_ROOT / "infra" / "modules" / "container-apps.bicep").read_text()
+
+    assert main_parameters["parameters"]["linkedinOidcEnabled"]["value"] == (
+        "${LINKEDIN_OIDC_ENABLED=false}"
+    )
+    assert main_parameters["parameters"]["linkedinClientSecretValue"]["value"] == (
+        "${LINKEDIN_CLIENT_SECRET=}"
+    )
+    assert main_parameters["parameters"]["linkedinPictureHostAllowlist"]["value"] == (
+        "${LINKEDIN_PICTURE_HOST_ALLOWLIST=}"
+    )
+    assert "param linkedinOidcEnabled string = 'false'" in main_bicep
+    assert (
+        "var deployedLinkedInRedirectUri = "
+        "'${predictedContainerAppUrl}/auth/linkedin/callback'" in main_bicep
+    )
+    assert "linkedinRedirectUri: deployedLinkedInRedirectUri" in main_bicep
+
+    assert "@secure()" in security_bicep
+    assert "param linkedinClientSecretValue string = ''" in security_bicep
+    assert "name: 'linkedin-client-secret'" in security_bicep
+    assert "value: linkedinClientSecretValue" in security_bicep
+
+    assert "name: 'LINKEDIN_OIDC_ENABLED'" in container_apps_bicep
+    assert "name: 'LINKEDIN_CLIENT_ID'" in container_apps_bicep
+    assert "name: 'LINKEDIN_REDIRECT_URI'" in container_apps_bicep
+    assert "name: 'LINKEDIN_PILOT_OWNER_ALLOWLIST'" in container_apps_bicep
+    assert "name: 'LINKEDIN_PICTURE_HOST_ALLOWLIST'" in container_apps_bicep
+    assert "name: 'LINKEDIN_CLIENT_SECRET'" in container_apps_bicep
+    assert "secretRef: 'linkedin-client-secret'" in container_apps_bicep
+    assert (
+        "name: 'LINKEDIN_CLIENT_SECRET'\n          value: linkedinClientSecretValue"
+        not in container_apps_bicep
+    )
+
+
 def test_foundry_project_endpoint_and_agent_access_are_iac_managed() -> None:
     main_bicep = (REPO_ROOT / "infra" / "main.bicep").read_text()
     main_parameters = (REPO_ROOT / "infra" / "main.parameters.json").read_text()

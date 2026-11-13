@@ -1,0 +1,9 @@
+{% if linkedin_import_notice %}
+    <section class="panel" role="{{ 'alert' if linkedin_import_notice.is_error else 'status' }}" aria-labelledby="linkedin-import-result-heading">
+        <h2 id="linkedin-import-result-heading">LinkedIn profile import</h2>
+        <p>{{ linkedin_import_notice.message }}</p>
+        {% if linkedin_import_notice.is_error %}
+            <p class="field__hint">Reference: {{ linkedin_import_notice.request_id }}</p>
+        {% endif %}
+    </section>
+{% endif %}

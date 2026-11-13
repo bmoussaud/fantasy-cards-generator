@@ -30,7 +30,7 @@ KEY = "FOUNDRY_PROJECT_ENDPOINT"
 HERE = Path(__file__).resolve().parent
 # Pin the entire compiled executable contract, excluding compiler provenance.
 # Any expression/resource/parameter change requires independent re-review.
-COMPILED_CONTRACT = "9580d826cab45019ec406344272776d32a15a633e508d6ce7f5334cf2844bd38"
+COMPILED_CONTRACT = "a568e1fd9f164eef68995fca0c9cb9b8a64fffd445be53cd7f0ce916a744b7d5"
 
 
 class GateError(Exception):

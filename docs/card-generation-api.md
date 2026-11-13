@@ -61,10 +61,32 @@ Multipart `POST /api/v1/cards/generate` and `POST /ui/cards/generate` also accep
 `photo` and `saved_photo_id`/`savedPhotoId` are mutually exclusive. Sending both returns
 `422 photo_reference_conflict`.
 
-Prompts must contain 12 to 400 characters after trimming, and at least 12
+Prompts must contain 12 to 2,500 characters after trimming, and at least 12
 characters after collapsing repeated whitespace. The generator form enforces
 these bounds before submission; server-side validation remains authoritative.
 Blank optional string fields are treated as absent.
+
+### Structured browser profile contract
+
+The server-rendered generator UI composes its generation context from:
+
+- editable display name or pseudonym: 1–80 characters
+- current role: 2–120 characters
+- one to five explicit expertise statements: 2–80 characters each
+- up to three optional user-selected recent-post excerpts: 20–500 characters each
+- optional creative direction: 0–200 characters
+
+After canonical whitespace normalization, the composed context must contain
+12–2,500 Unicode characters. Sections are composed in deterministic order:
+identity, current role, explicit expertise, optional recent-post excerpts, then
+optional creative direction. The complete canonical context is moderated and
+used for request hashing and idempotency.
+
+A one-time LinkedIn OIDC import may prefill only the editable display name and,
+when separately consented and safely copied, an owner-scoped saved-photo
+reference. LinkedIn does not supply the role, expertise, post excerpts, powers,
+or creative direction. The UI accepts no LinkedIn profile URL. Imported values
+remain editable, and manual completion works without LinkedIn.
 
 ### `POST /api/v1/cards/{cardId}/artwork/retry`
 

@@ -8,8 +8,9 @@ from fastapi.testclient import TestClient
 from app import main as main_module
 from app.deletion import DeletionAuditRecord
 from app.generation import StoredCard, create_services
+from app.linkedin_profile import LinkedInImportDraft, transient_expiry
 from app.main import create_app
-from app.photos import StoredSavedPhoto
+from app.photos import ProfilePhotoImportState, StoredSavedPhoto
 from app.settings import load_app_settings
 from tests.conftest import TEST_OWNER_ID, FakeOAuthClient, begin_login
 
@@ -267,6 +268,37 @@ def test_delete_account_removes_owned_data_clears_session_and_preserves_minimal_
 ) -> None:
     client = make_authenticated_client(monkeypatch)
     token = csrf_token(client)
+    asyncio.run(
+        client.app.state.services.profile_photo_import_state_repository.save(
+            ProfilePhotoImportState(
+                owner_id=TEST_OWNER_ID,
+                status="imported",
+                photo_id="entra-import",
+            )
+        )
+    )
+    asyncio.run(
+        client.app.state.services.profile_photo_import_state_repository.save(
+            ProfilePhotoImportState(
+                owner_id=TEST_OWNER_ID,
+                status="imported",
+                photo_id="linkedin-import",
+                provider="linkedin",
+            )
+        )
+    )
+    asyncio.run(
+        client.app.state.services.linkedin_transient_repository.replace_draft(
+            LinkedInImportDraft(
+                owner_id=TEST_OWNER_ID,
+                draft_id="linkedin-draft",
+                display_name="Ada Lovelace",
+                saved_photo_id=None,
+                outcome="name_only",
+                expires_at=transient_expiry(),
+            )
+        )
+    )
     store_card(
         client,
         make_card(
@@ -416,11 +448,24 @@ def test_delete_account_removes_owned_data_clears_session_and_preserves_minimal_
     assert audit.cost_estimate is None
     assert audit.timestamps.deleted_at
     assert audit.timestamps.asset_cleanup_completed_at
-    import_state = asyncio.run(
+    entra_import_state = asyncio.run(
         client.app.state.services.profile_photo_import_state_repository.get(TEST_OWNER_ID)
     )
-    assert import_state is not None
-    assert import_state.status == "deleted_suppressed"
+    linkedin_import_state = asyncio.run(
+        client.app.state.services.profile_photo_import_state_repository.get(
+            TEST_OWNER_ID,
+            provider="linkedin",
+        )
+    )
+    linkedin_draft = asyncio.run(
+        client.app.state.services.linkedin_transient_repository.get_draft(
+            owner_id=TEST_OWNER_ID,
+            draft_id="linkedin-draft",
+        )
+    )
+    assert entra_import_state is None
+    assert linkedin_import_state is None
+    assert linkedin_draft is None
 
     follow_up = client.get("/my/cards")
     assert follow_up.status_code == 401

@@ -9,6 +9,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
 
+import httpx
 import pytest
 from authlib.integrations.base_client.async_openid import AsyncOpenIDMixin
 from authlib.integrations.base_client.errors import OAuthError
@@ -502,6 +503,9 @@ def test_graph_profile_photo_request_uses_delegated_bearer_token(
         content = b"jpeg"
 
     class FakeAsyncClient:
+        def __init__(self, **_):
+            pass
+
         async def __aenter__(self):
             return self
 
@@ -521,12 +525,83 @@ def test_graph_profile_photo_request_uses_delegated_bearer_token(
     assert captured["headers"] == {"Authorization": "Bearer delegated-token"}
 
 
+def test_graph_profile_photo_retries_transient_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = 0
+
+    class FakeResponse:
+        status_code = 200
+        headers = {"content-type": "image/png"}
+        content = b"png"
+
+    class FakeAsyncClient:
+        def __init__(self, **_):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return None
+
+        async def get(self, url, *, headers, timeout):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise httpx.ConnectTimeout("temporary timeout", request=httpx.Request("GET", url))
+            return FakeResponse()
+
+    async def no_delay(_):
+        return None
+
+    monkeypatch.setattr(entra_profile.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(entra_profile.asyncio, "sleep", no_delay)
+
+    result = asyncio_run(entra_profile.fetch_profile_photo("delegated-token"))
+
+    assert result is not None
+    assert attempts == 2
+
+
+def test_graph_profile_photo_reports_exhausted_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = 0
+
+    class FakeAsyncClient:
+        def __init__(self, **_):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return None
+
+        async def get(self, url, *, headers, timeout):
+            nonlocal attempts
+            attempts += 1
+            raise httpx.ReadTimeout("SENSITIVE timeout", request=httpx.Request("GET", url))
+
+    async def no_delay(_):
+        return None
+
+    monkeypatch.setattr(entra_profile.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(entra_profile.asyncio, "sleep", no_delay)
+
+    with pytest.raises(entra_profile.ProfilePhotoFetchError) as caught:
+        asyncio_run(entra_profile.fetch_profile_photo("SENSITIVE-TOKEN"))
+
+    assert attempts == 2
+    assert caught.value.error_code == "upstream_timeout"
+    assert "SENSITIVE" not in str(caught.value)
+
+
 @pytest.mark.parametrize("status_code", [401, 403, 429, 500])
 def test_graph_photo_failure_has_safe_status_without_response_body(
     monkeypatch: pytest.MonkeyPatch, status_code: int
 ) -> None:
-    import httpx
-
     real_client = httpx.AsyncClient
     transport = httpx.MockTransport(
         lambda request: httpx.Response(
@@ -534,7 +609,9 @@ def test_graph_photo_failure_has_safe_status_without_response_body(
         )
     )
     monkeypatch.setattr(
-        entra_profile.httpx, "AsyncClient", lambda: real_client(transport=transport)
+        entra_profile.httpx,
+        "AsyncClient",
+        lambda **_: real_client(transport=transport),
     )
 
     with pytest.raises(entra_profile.ProfilePhotoFetchError) as caught:

@@ -66,6 +66,70 @@ ENTRA_SCOPES=openid profile email
   `https://localhost:8000/...`. Plain HTTP is fine only for anonymous pages
   that do not exercise sign-in.
 
+## LinkedIn one-time profile import (developer pilot)
+
+LinkedIn is an optional **data source after Microsoft Entra sign-in**. It is not
+an application authentication method, an ownership authority, or a fallback
+login. Cards, drafts, and saved photos remain owned by the canonical Entra
+`<tid>:<oid>` identity.
+
+The pilot uses LinkedIn OpenID Connect authorization code flow with PKCE and
+exactly the code-owned scopes `openid profile`. One authorized import may
+prefill the editable display name and, only when separately selected before the
+redirect, attempt to copy the provider picture into the owner's My Photos
+library. The returned access token is discarded after UserInfo and optional
+photo handling. The app does not retain a refresh token, synchronize later
+profile changes, request email, collect a LinkedIn profile URL, or import roles,
+skills, positions, or posts.
+
+After import, the user must confirm or enter their current role, one to five
+expertise statements, and any optional recent-post excerpts used for the card.
+The app treats those values as user-provided evidence or creative direction,
+not as LinkedIn-verified claims. If LinkedIn is unavailable, denied, incomplete,
+or disabled, the same card can be completed manually.
+
+The feature is disabled by default. Enabling it requires all of:
+
+| Variable | Contract |
+|---|---|
+| `LINKEDIN_OIDC_ENABLED` | Must be explicitly set to `true`. |
+| `LINKEDIN_CLIENT_ID` | LinkedIn developer-application client ID. |
+| `LINKEDIN_CLIENT_SECRET` | Runtime secret supplied through the approved secret store. |
+| `LINKEDIN_REDIRECT_URI` | Exact HTTPS callback URI registered with LinkedIn. |
+| `LINKEDIN_PILOT_OWNER_ALLOWLIST` | Comma-separated canonical Entra `<tid>:<oid>` owners permitted to see the pilot action. |
+| `LINKEDIN_PICTURE_HOST_ALLOWLIST` | Optional comma-separated exact HTTPS hostnames; leave empty until an authorized contract test proves the provider hosts. |
+
+Scopes are not configurable. A `sub:` fallback owner is never eligible for the
+pilot. Incomplete enabled configuration fails closed, and owners outside the
+allowlist receive the ordinary manual-entry experience.
+
+### Developer-pilot verification checklist
+
+Live pilot execution, LinkedIn app registration, credential creation,
+deployment, and production/general-user enablement require separate
+authorization. For an authorized developer-pilot test:
+
+1. Use a dedicated LinkedIn developer application with the exact HTTPS redirect
+   URI and an app-admin test account.
+2. Verify that the consent screen requests only `openid profile` and does not
+   present the flow as Fantasy Card Generator sign-in.
+3. Keep the pilot owner allowlist limited to the canonical Entra owner running
+   the test.
+4. Record only returned **field names** needed to confirm the contract; do not
+   record personal values, tokens, authorization codes, UserInfo payloads,
+   callback URLs, or picture URLs.
+5. Verify successful name import, manual completion, explicit denial, provider
+   error, invalid state, expired state, replay rejection, and the absence of
+   retained LinkedIn tokens or synchronization.
+6. Keep picture fetching disabled unless the authorized test proves an exact
+   hostname allowlist. Name-only import is the safe default and photo failure
+   must not block it.
+7. Disable `LINKEDIN_OIDC_ENABLED` after the test and confirm that the connect
+   action is unavailable.
+
+Never put LinkedIn credentials or captured sensitive values in source,
+prompts, logs, screenshots, issue comments, or working notes.
+
 ## Deployed environments: Azure Container Apps secrets
 
 `.env` is intentionally **not** shipped in the container image (it stays

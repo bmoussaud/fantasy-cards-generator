@@ -401,7 +401,7 @@ def projection_view(payload: dict[str, Any], *, fields: set[str]) -> View:
 
 
 class QueryProjection(Closed):
-    query: str = Field(min_length=1, max_length=400)
+    query: str = Field(min_length=1, max_length=2500)
 
 
 class ImageInputProjection(Closed):

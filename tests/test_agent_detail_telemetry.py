@@ -59,6 +59,12 @@ OWNER = AuthenticatedOwner(
 PROMPT = "A mountain guardian with an amber shield"
 
 
+def test_agent_detail_query_projection_boundary_is_2500_characters():
+    assert len(detail.QueryProjection(query="😀" * 2500).query) == 2500
+    with pytest.raises(ValueError):
+        detail.QueryProjection(query="x" * 2501)
+
+
 @pytest.fixture
 def exported(monkeypatch):
     monkeypatch.delenv("OTEL_SDK_DISABLED", raising=False)

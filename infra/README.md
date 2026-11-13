@@ -1,5 +1,27 @@
 # Infrastructure deployment notes
 
+## LinkedIn developer-pilot configuration
+
+LinkedIn OIDC remains disabled by default in both `dev` and `prod`. Provisioning
+only wires configuration; it does not create a LinkedIn application, credentials,
+or authorize a live pilot.
+
+```powershell
+azd env set LINKEDIN_OIDC_ENABLED false
+azd env set LINKEDIN_CLIENT_ID <linkedin-client-id>
+azd env set LINKEDIN_CLIENT_SECRET <linkedin-client-secret>
+azd env set LINKEDIN_PILOT_OWNER_ALLOWLIST <tenant-id>:<object-id>
+azd env set LINKEDIN_PICTURE_HOST_ALLOWLIST ''
+```
+
+The callback URI is derived from the deployed Container App URL as
+`/auth/linkedin/callback`; register that exact HTTPS URI in the LinkedIn developer
+application. The client secret is stored as a Key Vault secret and injected into
+Container Apps only through `secretRef`. Keep the picture-host allowlist empty
+until a separately authorized live contract test proves exact provider hosts.
+Enabling the flag without a client ID, secret, or canonical owner allowlist fails
+closed at application startup.
+
 ## Monitoring configuration
 
 Each `dev`/`prod` deployment owns an isolated Log Analytics workspace,
