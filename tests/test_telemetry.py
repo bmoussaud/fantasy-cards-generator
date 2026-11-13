@@ -854,3 +854,4 @@ def test_attribute_and_metric_dimensions_are_allowlisted_and_bounded(
 def test_foundry_agent_dependency_identifier_is_allowlisted() -> None:
     assert telemetry.normalize_dependency("foundry_agent") == "foundry_agent"
     assert telemetry.normalize_dependency("foundry-agent") == "foundry_agent"
+    assert telemetry.normalize_dependency("microsoft_graph") == "microsoft_graph"

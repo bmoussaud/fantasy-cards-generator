@@ -130,6 +130,7 @@ SAFE_DEPENDENCIES = {
     "cosmos",
     "blob",
     "entra",
+    "microsoft_graph",
     "other",
 }
 SAFE_STORES = {"card", "audit", "blob", "cosmos", "memory"}
