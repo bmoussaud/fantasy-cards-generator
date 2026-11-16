@@ -55,6 +55,9 @@ jobs:
       - name: Format check with black
         run: uv run black --check .
 
+      - name: Install reviewed Bicep compiler for contract tests
+        run: az bicep install --version v0.48.1
+
       - name: Run tests
         run: uv run --extra hosted-agent pytest
 

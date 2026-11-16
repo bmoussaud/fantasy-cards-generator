@@ -160,7 +160,10 @@ python -m black --check deployments/dev-endpoint/persist_endpoint.py tests/test_
 az bicep build --file deployments/dev-endpoint/infra/main.bicep --stdout >/dev/null
 ```
 
-Bicep 0.46.1 compiles. The concat linter recommendation is non-blocking.
+Bicep 0.48.1 matches the pinned executable contract; the PR test job installs
+that version explicitly. Successful compilation with another version is not
+proof that its output matches the reviewed SHA-256 contract. The concat linter
+recommendation is non-blocking.
 Synthetic tests interpret the actual compiled module argument and prove full
 snapshot/native-value/Key Vault metadata preservation and failure before child
 submission. This offline interpreter is not a substitute for real ARM validation.
