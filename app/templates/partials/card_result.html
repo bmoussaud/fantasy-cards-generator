@@ -46,7 +46,7 @@
     {% if not card.imageUrl %}
         <div class="card-face__retry">
             <p class="card-face__retry-note">Artwork is not ready yet. You can safely retry artwork generation.</p>
-            <form hx-post="/ui/cards/{{ card.cardId }}/artwork/retry" hx-target="#generation-result" hx-swap="innerHTML" hx-indicator="#retry-pending-{{ card.cardId }}">
+            <form hx-post="/ui/cards/{{ card.cardId }}/artwork/retry" hx-target="#generation-content" hx-swap="innerHTML" hx-indicator="#retry-pending-{{ card.cardId }}">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
                 <input type="hidden" name="idempotency_key" value="{{ retry_idempotency_key }}" />
                 <button class="btn btn-secondary" type="submit">Retry artwork</button>

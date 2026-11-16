@@ -569,7 +569,7 @@ def begin_linkedin_import(
     *,
     import_photo: bool = False,
 ):
-    page = client.get("/app")
+    page = client.get("/my/profile")
     assert page.status_code == 200
     data = {
         "csrf_token": extract_hidden_value(page.text, "csrf_token"),
@@ -629,7 +629,7 @@ def test_linkedin_start_rejects_draft_id_not_bound_to_session(
 
     monkeypatch.setattr(main_module, "create_linkedin_oauth_client", unexpected_client)
     client = make_authenticated_client(monkeypatch)
-    page = client.get("/app")
+    page = client.get("/my/profile")
     active_draft_id = extract_hidden_value(page.text, "creation_draft_id")
 
     response = client.post(
@@ -729,7 +729,7 @@ def test_linkedin_picture_is_not_fetched_without_bound_consent(
     assert draft.saved_photo_id is None
 
 
-def test_linkedin_draft_prefills_editable_name_and_is_consumed_after_generation(
+def test_linkedin_draft_prefills_editable_name_and_is_consumed_after_profile_save(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     enable_linkedin(monkeypatch)
@@ -747,23 +747,25 @@ def test_linkedin_draft_prefills_editable_name_and_is_consumed_after_generation(
     )
     assert callback.status_code == 303
 
-    page = client.get("/app")
+    page = client.get("/my/profile")
     assert 'value="Ada Lovelace"' in page.text
     assert "Imported from LinkedIn and fully editable." in page.text
     draft_id = extract_hidden_value(page.text, "creation_draft_id")
     generated = client.post(
-        "/ui/cards/generate",
+        "/my/profile",
         data={
             "display_name": "Ada, Container Commander",
+            "title": "Principal engineer",
             "current_role": "Platform architect",
             "expertise": ["Container platforms"],
             "creation_draft_id": draft_id,
             "csrf_token": extract_hidden_value(page.text, "csrf_token"),
             "idempotency_key": uuid4().hex,
         },
+        follow_redirects=False,
     )
 
-    assert generated.status_code == 200
+    assert generated.status_code == 303
     repository = client.app.state.services.linkedin_transient_repository
     assert asyncio.run(repository.get_draft(owner_id=TEST_OWNER_ID, draft_id=draft_id)) is None
     assert "linkedin_creation_draft_id" not in decode_session_cookie(client)
@@ -786,12 +788,13 @@ def test_linkedin_draft_is_preserved_after_structured_validation_failure(
         follow_redirects=False,
     )
 
-    page = client.get("/app")
+    page = client.get("/my/profile")
     draft_id = extract_hidden_value(page.text, "creation_draft_id")
     response = client.post(
-        "/ui/cards/generate",
+        "/my/profile",
         data={
             "display_name": "Ada, Container Commander",
+            "title": "Principal engineer",
             "current_role": "x",
             "expertise": ["Container platforms"],
             "creation_draft_id": draft_id,
@@ -806,11 +809,11 @@ def test_linkedin_draft_is_preserved_after_structured_validation_failure(
     assert decode_session_cookie(client)["linkedin_creation_draft_id"] == draft_id
 
 
-def test_structured_generation_rejects_draft_id_not_bound_to_session(
+def test_profile_save_rejects_draft_id_not_bound_to_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client = make_authenticated_client(monkeypatch)
-    page = client.get("/app")
+    page = client.get("/my/profile")
     active_draft_id = extract_hidden_value(page.text, "creation_draft_id")
     submitted_draft_id = uuid4().hex
     repository = client.app.state.services.linkedin_transient_repository
@@ -831,9 +834,10 @@ def test_structured_generation_rejects_draft_id_not_bound_to_session(
 
     asyncio.run(seed_drafts())
     response = client.post(
-        "/ui/cards/generate",
+        "/my/profile",
         data={
             "display_name": "Ada Lovelace",
+            "title": "Principal engineer",
             "current_role": "Platform architect",
             "expertise": ["Container platforms"],
             "creation_draft_id": submitted_draft_id,
@@ -843,7 +847,7 @@ def test_structured_generation_rejects_draft_id_not_bound_to_session(
     )
 
     assert response.status_code == 422
-    assert response.headers["x-generation-error"] == "invalid_creation_draft"
+    assert "import draft changed or expired" in response.text
     assert (
         asyncio.run(repository.get_draft(owner_id=TEST_OWNER_ID, draft_id=active_draft_id))
         is not None

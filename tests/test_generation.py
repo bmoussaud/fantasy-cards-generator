@@ -42,6 +42,7 @@ from tests.conftest import (
     begin_login,
     extract_hidden_value,
     make_authenticated_client,
+    save_test_profile,
 )
 
 VALID_PNG_BYTES = base64.b64decode(
@@ -87,6 +88,11 @@ def build_services(monkeypatch: pytest.MonkeyPatch, **env_overrides: str) -> App
 
 
 def test_app_shell_renders_generation_form(authenticated_client: TestClient) -> None:
+    initial = authenticated_client.get("/app")
+    assert 'href="/my/profile"' in initial.text
+    assert 'action="/my/profile"' not in initial.text
+    assert 'hx-post="/ui/cards/generate"' not in initial.text
+    save_test_profile(authenticated_client)
     response = authenticated_client.get("/app")
 
     assert response.status_code == 200
@@ -115,19 +121,20 @@ def test_app_shell_renders_generation_form(authenticated_client: TestClient) -> 
     assert "Pick from your library" in response.text
     assert "/my/photos/library" in response.text
     assert "Add or manage photos" in response.text
-    assert 'name="display_name"' in response.text
-    assert 'name="current_role"' in response.text
-    assert response.text.count('name="expertise"') == 5
-    assert response.text.count('name="post_excerpt"') == 3
+    assert 'name="display_name"' not in response.text
+    assert 'name="current_role"' not in response.text
+    assert 'name="expertise"' not in response.text
+    assert 'name="post_excerpt"' not in response.text
+    assert 'class="profile-summary"' in response.text
     assert 'name="creative_direction"' in response.text
-    assert 'data-profile-context-maxlength="2500"' in response.text
-    assert "2,500 characters" in response.text
+    assert "Principal engineer" in response.text
     assert 'name="prompt"' not in response.text
 
 
 def test_structured_profile_form_generates_card(
     authenticated_client: TestClient,
 ) -> None:
+    save_test_profile(authenticated_client)
     page = authenticated_client.get("/app")
     response = authenticated_client.post(
         "/ui/cards/generate",
@@ -151,15 +158,19 @@ def test_structured_profile_form_generates_card(
     assert 'class="card-face__name"' in response.text
 
 
-def test_structured_profile_renders_source_and_interpretation_disclaimers(
+def test_profile_keeps_expertise_hint_without_generator_interpretation_paragraph(
     authenticated_client: TestClient,
 ) -> None:
-    response = authenticated_client.get("/app")
+    response = authenticated_client.get("/my/profile")
     text = " ".join(response.text.split())
 
     assert "Imported from LinkedIn and fully editable." not in text
     assert "Interests are not automatically treated as certified expertise." in text
-    assert "Fantasy powers and card text are creative interpretations" in text
+    save_test_profile(authenticated_client)
+    assert (
+        "Fantasy powers and card text are creative interpretations"
+        not in authenticated_client.get("/app").text
+    )
 
 
 @pytest.mark.parametrize(
@@ -175,7 +186,7 @@ def test_structured_profile_rejects_linkedin_profile_urls(
     field: str,
     value: str,
 ) -> None:
-    page = authenticated_client.get("/app")
+    page = authenticated_client.get("/my/profile")
     data: dict[str, object] = {
         "display_name": "Ada Lovelace",
         "current_role": "Platform architect",
@@ -186,10 +197,11 @@ def test_structured_profile_rejects_linkedin_profile_urls(
     }
     data[field] = [value] if field == "expertise" else value
 
-    response = authenticated_client.post("/ui/cards/generate", data=data)
+    data["title"] = "Principal engineer"
+    response = authenticated_client.post("/my/profile", data=data)
 
     assert response.status_code == 422
-    assert response.headers["x-generation-error"] == "validation_error"
+    assert "Check your profile" in response.text
 
 
 @pytest.mark.parametrize(
@@ -201,16 +213,16 @@ def test_structured_profile_rejects_linkedin_profile_urls(
         ("create a graphic gore fantasy creature", 422, "prompt_rejected"),
     ],
 )
-def test_ui_browser_multipart_generation_contract(
+def test_api_browser_multipart_generation_contract(
     authenticated_client: TestClient,
     prompt: str,
     expected_status: int,
     error_code: str | None,
 ) -> None:
-    csrf_token = extract_hidden_value(authenticated_client.get("/app").text, "csrf_token")
+    csrf_token = extract_hidden_value(authenticated_client.get("/my/profile").text, "csrf_token")
     # HTMX 2.0.6 omits the unnamed File for an unselected upload input.
     response = authenticated_client.post(
-        "/ui/cards/generate",
+        "/api/v1/cards/generate",
         files=[
             ("prompt", (None, prompt)),
             ("idempotency_key", (None, "idem-browser-form")),
@@ -221,16 +233,11 @@ def test_ui_browser_multipart_generation_contract(
     )
 
     assert response.status_code == expected_status
-    assert response.headers.get("X-Generation-Error") == error_code
     if error_code:
-        assert 'role="alert"' in response.text
-        assert f"Error code: {error_code}" in response.text
-        assert prompt not in response.text
-        if error_code == "validation_error":
-            assert "12 to 2500 characters" in response.text
+        assert response.json()["errorCode"] == error_code
         assert not authenticated_client.app.state.services.card_repository._records
     else:
-        assert 'class="card-face"' in response.text
+        assert response.json()["status"] == "completed"
         assert len(authenticated_client.app.state.services.card_repository._records) == 1
 
 
@@ -258,7 +265,7 @@ def test_api_rejects_missing_csrf(authenticated_client: TestClient) -> None:
 
 
 def test_api_rejects_unsupported_photo_content_type(authenticated_client: TestClient) -> None:
-    csrf_token = extract_hidden_value(authenticated_client.get("/app").text, "csrf_token")
+    csrf_token = extract_hidden_value(authenticated_client.get("/my/profile").text, "csrf_token")
 
     response = authenticated_client.post(
         "/api/v1/cards/generate",
@@ -275,7 +282,7 @@ def test_api_rejects_unsupported_photo_content_type(authenticated_client: TestCl
 
 
 def test_api_rejects_oversized_photo_upload(authenticated_client: TestClient) -> None:
-    csrf_token = extract_hidden_value(authenticated_client.get("/app").text, "csrf_token")
+    csrf_token = extract_hidden_value(authenticated_client.get("/my/profile").text, "csrf_token")
 
     response = authenticated_client.post(
         "/api/v1/cards/generate",
@@ -294,7 +301,7 @@ def test_api_rejects_oversized_photo_upload(authenticated_client: TestClient) ->
 def test_generate_card_success_persists_card_and_private_asset(
     authenticated_client: TestClient,
 ) -> None:
-    csrf_token = extract_hidden_value(authenticated_client.get("/app").text, "csrf_token")
+    csrf_token = extract_hidden_value(authenticated_client.get("/my/profile").text, "csrf_token")
 
     response = authenticated_client.post(
         "/api/v1/cards/generate",
@@ -391,7 +398,7 @@ def test_generation_with_photo_uses_reference_image_edit_path(
     monkeypatch.setattr(main_module, "create_oauth_client", lambda settings: FakeOAuthClient())
     begin_login(client)
     client.get("/auth/callback?code=valid-code&state=opaque", follow_redirects=False)
-    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
+    csrf_token = extract_hidden_value(client.get("/my/profile").text, "csrf_token")
 
     response = client.post(
         "/api/v1/cards/generate",
@@ -412,10 +419,34 @@ def test_generation_with_photo_uses_reference_image_edit_path(
     assert ai_client.reference_image.content_type == "image/webp"
 
 
-def test_generation_with_photo_returns_clear_error_when_edits_are_unsupported(
+@pytest.mark.parametrize("route", ["/api/v1/cards/generate", "/ui/cards/generate"])
+@pytest.mark.parametrize(
+    ("upstream_status", "upstream_code", "expected_status", "expected_code"),
+    [
+        (400, "unsupported_operation", 502, "reference_image_unsupported"),
+        (400, "OperationNotSupported", 502, "reference_image_unsupported"),
+        (400, "invalid_image_file", 422, "reference_image_rejected"),
+        (400, "unsupported_image_format", 422, "reference_image_rejected"),
+        (415, "invalid_image_file", 422, "reference_image_rejected"),
+        (422, "invalid_request_error", 422, "reference_image_rejected"),
+        (429, "RateLimitReached", 429, "image_rate_limited"),
+        (401, "Unauthorized", 503, "image_service_unauthorized"),
+        (403, "Forbidden", 503, "image_service_unauthorized"),
+        (404, "DeploymentNotFound", 503, "image_service_misconfigured"),
+        (405, None, 503, "image_service_misconfigured"),
+        (500, None, 502, "reference_image_generation_failed"),
+        (501, None, 502, "reference_image_generation_failed"),
+    ],
+)
+def test_generation_with_photo_preserves_actionable_upstream_error_class(
     monkeypatch: pytest.MonkeyPatch,
+    route: str,
+    upstream_status: int,
+    upstream_code: str | None,
+    expected_status: int,
+    expected_code: str,
 ) -> None:
-    class UnsupportedEditAIClient(MockAIClient):
+    class FailingEditAIClient(MockAIClient):
         async def generate_image_edit(
             self,
             art_prompt: str,
@@ -426,12 +457,23 @@ def test_generation_with_photo_returns_clear_error_when_edits_are_unsupported(
         ):
             raise UpstreamServiceError(
                 "foundry-image",
-                "Image edits are unavailable on this deployment.",
-                status_code=400,
-                retryable=False,
-                error_code="unsupported_operation",
+                "NEVER-EXPOSE-provider-payload",
+                status_code=upstream_status,
+                retryable=upstream_status == 429 or upstream_status >= 500,
+                error_code=upstream_code,
+                retry_after_seconds=75 if upstream_status == 429 else None,
             )
 
+        async def generate_image(self, *args, **kwargs):
+            raise AssertionError("A failed edit must not fall back to photo-free generation.")
+
+    monkeypatch.setenv("IMAGE_MAX_RETRIES", "0")
+    dependency_attempts: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        generation_module,
+        "record_dependency_attempt",
+        lambda **attributes: dependency_attempts.append(attributes),
+    )
     settings = load_app_settings()
     defaults = create_services(settings)
     services = AppServices(
@@ -439,7 +481,7 @@ def test_generation_with_photo_returns_clear_error_when_edits_are_unsupported(
         card_repository=InMemoryCardRepository(),
         audit_repository=InMemoryAuditRepository(),
         asset_store=InMemoryAssetStore(),
-        ai_client=UnsupportedEditAIClient(settings),
+        ai_client=FailingEditAIClient(settings),
         agent_client=MockAgentClient(),
         moderation_service=defaults.moderation_service,
         rate_limiter=defaults.rate_limiter,
@@ -452,21 +494,37 @@ def test_generation_with_photo_returns_clear_error_when_edits_are_unsupported(
     monkeypatch.setattr(main_module, "create_oauth_client", lambda settings: FakeOAuthClient())
     begin_login(client)
     client.get("/auth/callback?code=valid-code&state=opaque", follow_redirects=False)
-    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
-
-    response = client.post(
-        "/api/v1/cards/generate",
-        data={
-            "prompt": "create a safe fantasy knight with a moonlit shield",
-            "idempotencyKey": "idem-photo-unsupported",
-            "csrfToken": csrf_token,
-        },
-        files={"photo": ("portrait.png", b"\x89PNG\r\n\x1a\nmock", "image/png")},
+    if route.startswith("/ui/"):
+        save_test_profile(client)
+    csrf_token = extract_hidden_value(client.get("/my/profile").text, "csrf_token")
+    form = (
+        {"csrf_token": csrf_token, "idempotency_key": "idem-photo-error"}
+        if route.startswith("/ui/")
+        else {"csrfToken": csrf_token, "idempotencyKey": "idem-photo-error"}
     )
 
-    assert response.status_code == 502
-    assert response.json()["errorCode"] == "reference_image_unsupported"
+    response = client.post(
+        route,
+        data={**form, "prompt": "create a safe fantasy knight with a moonlit shield"},
+        files={"photo": ("portrait.png", VALID_PNG_BYTES, "image/png")},
+    )
+
+    assert response.status_code == expected_status
+    if route.startswith("/ui/"):
+        assert response.headers["X-Generation-Error"] == expected_code
+        assert f"Error code: {expected_code}" in response.text
+        assert "internal_error" not in response.text
+    else:
+        assert response.json()["errorCode"] == expected_code
+    assert "region" not in response.text
+    assert "NEVER-EXPOSE-provider-payload" not in response.text
+    assert response.headers.get("Retry-After") == ("75" if upstream_status == 429 else None)
     assert services.card_repository._records == {}
+    image_attempts = [
+        attempt for attempt in dependency_attempts if attempt["dependency"] == "foundry-image"
+    ]
+    assert len(image_attempts) == 1
+    assert image_attempts[0]["status_code"] == upstream_status
 
 
 def test_generation_without_photo_keeps_text_only_image_generation_path(
@@ -533,7 +591,7 @@ def test_generation_without_photo_keeps_text_only_image_generation_path(
     monkeypatch.setattr(main_module, "create_oauth_client", lambda settings: FakeOAuthClient())
     begin_login(client)
     client.get("/auth/callback?code=valid-code&state=opaque", follow_redirects=False)
-    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
+    csrf_token = extract_hidden_value(client.get("/my/profile").text, "csrf_token")
 
     response = client.post(
         "/api/v1/cards/generate",
@@ -608,7 +666,7 @@ def test_rate_limits_ignore_untrusted_forwarded_for(monkeypatch: pytest.MonkeyPa
     monkeypatch.setenv("RATE_LIMIT_USER_REQUESTS", "5")
     monkeypatch.setenv("RATE_LIMIT_IP_REQUESTS", "1")
     client = make_authenticated_client(monkeypatch)
-    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
+    csrf_token = extract_hidden_value(client.get("/my/profile").text, "csrf_token")
 
     first = client.post(
         "/api/v1/cards/generate",
@@ -653,7 +711,7 @@ def test_trusted_proxy_uses_rightmost_forwarded_hop() -> None:
 def test_pre_moderation_rejection_persists_no_audit(
     authenticated_client: TestClient,
 ) -> None:
-    csrf_token = extract_hidden_value(authenticated_client.get("/app").text, "csrf_token")
+    csrf_token = extract_hidden_value(authenticated_client.get("/my/profile").text, "csrf_token")
     prompt = "create a fantasy hero in the style of a living artist"
 
     response = authenticated_client.post(
@@ -678,7 +736,7 @@ def test_pre_moderation_rejection_persists_no_audit(
 def test_invalid_model_output_is_rejected_and_not_persisted(
     authenticated_client: TestClient,
 ) -> None:
-    csrf_token = extract_hidden_value(authenticated_client.get("/app").text, "csrf_token")
+    csrf_token = extract_hidden_value(authenticated_client.get("/my/profile").text, "csrf_token")
 
     response = authenticated_client.post(
         "/api/v1/cards/generate",
@@ -694,7 +752,7 @@ def test_invalid_model_output_is_rejected_and_not_persisted(
 
 
 def test_model_bounds_violation_is_rejected(authenticated_client: TestClient) -> None:
-    csrf_token = extract_hidden_value(authenticated_client.get("/app").text, "csrf_token")
+    csrf_token = extract_hidden_value(authenticated_client.get("/my/profile").text, "csrf_token")
 
     response = authenticated_client.post(
         "/api/v1/cards/generate",
@@ -712,7 +770,7 @@ def test_model_bounds_violation_is_rejected(authenticated_client: TestClient) ->
 def test_retryable_text_upstream_failure_is_retried_successfully(
     authenticated_client: TestClient,
 ) -> None:
-    csrf_token = extract_hidden_value(authenticated_client.get("/app").text, "csrf_token")
+    csrf_token = extract_hidden_value(authenticated_client.get("/my/profile").text, "csrf_token")
 
     response = authenticated_client.post(
         "/api/v1/cards/generate",
@@ -764,7 +822,7 @@ def test_generation_paths_emit_dependency_moderation_partial_persistence_and_tok
         "record_token_usage",
         lambda operation, usage: tokens.append((operation, usage)),
     )
-    csrf_token = extract_hidden_value(authenticated_client.get("/app").text, "csrf_token")
+    csrf_token = extract_hidden_value(authenticated_client.get("/my/profile").text, "csrf_token")
 
     successful = authenticated_client.post(
         "/api/v1/cards/generate",
@@ -820,7 +878,7 @@ def test_text_timeout_emits_bounded_dependency_timeout_signal(
         lambda **attributes: dependencies.append(attributes),
     )
     client = make_authenticated_client(monkeypatch)
-    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
+    csrf_token = extract_hidden_value(client.get("/my/profile").text, "csrf_token")
 
     response = client.post(
         "/api/v1/cards/generate",
@@ -843,7 +901,7 @@ def test_text_timeout_emits_bounded_dependency_timeout_signal(
 def test_non_retryable_text_upstream_failure_returns_bad_gateway(
     authenticated_client: TestClient,
 ) -> None:
-    csrf_token = extract_hidden_value(authenticated_client.get("/app").text, "csrf_token")
+    csrf_token = extract_hidden_value(authenticated_client.get("/my/profile").text, "csrf_token")
 
     response = authenticated_client.post(
         "/api/v1/cards/generate",
@@ -866,7 +924,7 @@ def test_upstream_timeout_returns_gateway_timeout(
     monkeypatch.setenv("OVERALL_TIMEOUT_SECONDS", "0.5")
     monkeypatch.setenv("UPSTREAM_MAX_RETRIES", "0")
     client = make_authenticated_client(monkeypatch)
-    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
+    csrf_token = extract_hidden_value(client.get("/my/profile").text, "csrf_token")
 
     response = client.post(
         "/api/v1/cards/generate",
@@ -882,7 +940,7 @@ def test_upstream_timeout_returns_gateway_timeout(
 
 
 def test_idempotent_replay_returns_same_completed_card(authenticated_client: TestClient) -> None:
-    csrf_token = extract_hidden_value(authenticated_client.get("/app").text, "csrf_token")
+    csrf_token = extract_hidden_value(authenticated_client.get("/my/profile").text, "csrf_token")
     payload = {
         "prompt": "create a safe fantasy knight with a radiant crown",
         "idempotencyKey": "idem-replay",
@@ -901,7 +959,7 @@ def test_idempotent_replay_returns_same_completed_card(authenticated_client: Tes
 def test_idempotency_key_conflict_rejects_different_prompt(
     authenticated_client: TestClient,
 ) -> None:
-    csrf_token = extract_hidden_value(authenticated_client.get("/app").text, "csrf_token")
+    csrf_token = extract_hidden_value(authenticated_client.get("/my/profile").text, "csrf_token")
     idem_key = "idem-conflict"
     first = authenticated_client.post(
         "/api/v1/cards/generate",
@@ -928,7 +986,7 @@ def test_idempotency_key_conflict_rejects_different_prompt(
 def test_image_failure_returns_partial_card_and_retry_action(
     authenticated_client: TestClient,
 ) -> None:
-    csrf_token = extract_hidden_value(authenticated_client.get("/app").text, "csrf_token")
+    csrf_token = extract_hidden_value(authenticated_client.get("/my/profile").text, "csrf_token")
 
     response = authenticated_client.post(
         "/api/v1/cards/generate",
@@ -949,7 +1007,8 @@ def test_image_failure_returns_partial_card_and_retry_action(
 def test_ui_generate_renders_composed_card_face_with_type_and_rarity_labels(
     authenticated_client: TestClient,
 ) -> None:
-    csrf_token = extract_hidden_value(authenticated_client.get("/app").text, "csrf_token")
+    save_test_profile(authenticated_client)
+    csrf_token = extract_hidden_value(authenticated_client.get("/my/profile").text, "csrf_token")
 
     response = authenticated_client.post(
         "/ui/cards/generate",
@@ -975,7 +1034,8 @@ def test_ui_generate_renders_composed_card_face_with_type_and_rarity_labels(
 def test_ui_generate_ignores_blank_optional_form_fields(
     authenticated_client: TestClient,
 ) -> None:
-    csrf_token = extract_hidden_value(authenticated_client.get("/app").text, "csrf_token")
+    save_test_profile(authenticated_client)
+    csrf_token = extract_hidden_value(authenticated_client.get("/my/profile").text, "csrf_token")
 
     response = authenticated_client.post(
         "/ui/cards/generate",
@@ -997,12 +1057,14 @@ def test_ui_generate_ignores_blank_optional_form_fields(
     assert len(services.card_repository._records) == 1
     stored_card = next(iter(services.card_repository._records.values()))
     assert stored_card.idempotency_key
-    assert stored_card.prompt == "create a safe fantasy knight with a radiant crown"
+    assert "Identity (user-confirmed): Ada Lovelace" in stored_card.prompt
+    assert "radiant crown" not in stored_card.prompt
 
 
 def test_ui_generate_blank_csrf_token_still_fails_csrf(
     authenticated_client: TestClient,
 ) -> None:
+    save_test_profile(authenticated_client)
     response = authenticated_client.post(
         "/ui/cards/generate",
         data={
@@ -1022,7 +1084,8 @@ def test_ui_generate_blank_csrf_token_still_fails_csrf(
 def test_ui_generate_still_rejects_non_blank_invalid_idempotency_key(
     authenticated_client: TestClient,
 ) -> None:
-    csrf_token = extract_hidden_value(authenticated_client.get("/app").text, "csrf_token")
+    save_test_profile(authenticated_client)
+    csrf_token = extract_hidden_value(authenticated_client.get("/my/profile").text, "csrf_token")
 
     response = authenticated_client.post(
         "/ui/cards/generate",
@@ -1048,12 +1111,13 @@ def test_ui_overall_timeout_during_image_returns_partial_card(
     monkeypatch.setenv("OVERALL_TIMEOUT_SECONDS", "0.5")
     monkeypatch.setenv("IMAGE_MAX_RETRIES", "0")
     client = make_authenticated_client(monkeypatch)
-    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
+    save_test_profile(client)
+    csrf_token = extract_hidden_value(client.get("/my/profile").text, "csrf_token")
 
     response = client.post(
         "/ui/cards/generate",
         data={
-            "prompt": "create a safe fantasy knight [[mock:image-timeout]]",
+            "creative_direction": "create a safe fantasy knight [[mock:image-timeout]]",
             "idempotency_key": "idem-ui-image-timeout",
             "csrf_token": csrf_token,
         },
@@ -1063,10 +1127,13 @@ def test_ui_overall_timeout_during_image_returns_partial_card(
     assert response.status_code == 200
     assert "Artwork is not ready yet" in response.text
     assert "Retry artwork" in response.text
+    assert 'hx-target="#generation-content"' in response.text
+    assert 'hx-indicator="#retry-pending-' in response.text
+    assert 'id="generation-pending"' not in response.text
 
 
 def test_retry_artwork_completes_partial_card(authenticated_client: TestClient) -> None:
-    csrf_token = extract_hidden_value(authenticated_client.get("/app").text, "csrf_token")
+    csrf_token = extract_hidden_value(authenticated_client.get("/my/profile").text, "csrf_token")
     initial = authenticated_client.post(
         "/api/v1/cards/generate",
         json={
@@ -1097,12 +1164,13 @@ def test_retry_artwork_completes_partial_card(authenticated_client: TestClient) 
 
 
 def test_htmx_flow_renders_error_panel(authenticated_client: TestClient) -> None:
-    csrf_token = extract_hidden_value(authenticated_client.get("/app").text, "csrf_token")
+    save_test_profile(authenticated_client)
+    csrf_token = extract_hidden_value(authenticated_client.get("/my/profile").text, "csrf_token")
 
     response = authenticated_client.post(
         "/ui/cards/generate",
         data={
-            "prompt": "create a fantasy hero in the style of a living artist",
+            "creative_direction": "create a fantasy hero in the style of a living artist",
             "idempotency_key": "idem-ui-block",
             "csrf_token": csrf_token,
         },
@@ -1117,7 +1185,8 @@ def test_htmx_flow_renders_error_panel(authenticated_client: TestClient) -> None
 def test_ui_rejects_unsupported_photo_content_type_with_error_panel(
     authenticated_client: TestClient,
 ) -> None:
-    csrf_token = extract_hidden_value(authenticated_client.get("/app").text, "csrf_token")
+    save_test_profile(authenticated_client)
+    csrf_token = extract_hidden_value(authenticated_client.get("/my/profile").text, "csrf_token")
 
     response = authenticated_client.post(
         "/ui/cards/generate",
@@ -1138,7 +1207,8 @@ def test_ui_rejects_unsupported_photo_content_type_with_error_panel(
 def test_ui_rejects_oversized_photo_upload_with_error_panel(
     authenticated_client: TestClient,
 ) -> None:
-    csrf_token = extract_hidden_value(authenticated_client.get("/app").text, "csrf_token")
+    save_test_profile(authenticated_client)
+    csrf_token = extract_hidden_value(authenticated_client.get("/my/profile").text, "csrf_token")
 
     response = authenticated_client.post(
         "/ui/cards/generate",
@@ -1159,7 +1229,8 @@ def test_ui_rejects_oversized_photo_upload_with_error_panel(
 def test_ui_rejects_photo_and_saved_photo_together_with_error_panel(
     authenticated_client: TestClient,
 ) -> None:
-    csrf_token = extract_hidden_value(authenticated_client.get("/app").text, "csrf_token")
+    save_test_profile(authenticated_client)
+    csrf_token = extract_hidden_value(authenticated_client.get("/my/profile").text, "csrf_token")
 
     response = authenticated_client.post(
         "/ui/cards/generate",
@@ -1229,7 +1300,8 @@ def test_ui_saved_photo_submission_uses_image_edit_path(
     monkeypatch.setattr(main_module, "create_oauth_client", lambda settings: FakeOAuthClient())
     begin_login(client)
     client.get("/auth/callback?code=valid-code&state=opaque", follow_redirects=False)
-    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
+    save_test_profile(client)
+    csrf_token = extract_hidden_value(client.get("/my/profile").text, "csrf_token")
 
     saved = client.post(
         "/my/photos",
@@ -1262,7 +1334,8 @@ def test_ui_saved_photo_submission_uses_image_edit_path(
 def test_ui_requires_upload_when_save_photo_is_enabled(
     authenticated_client: TestClient,
 ) -> None:
-    csrf_token = extract_hidden_value(authenticated_client.get("/app").text, "csrf_token")
+    save_test_profile(authenticated_client)
+    csrf_token = extract_hidden_value(authenticated_client.get("/my/profile").text, "csrf_token")
 
     response = authenticated_client.post(
         "/ui/cards/generate",
@@ -1290,7 +1363,8 @@ def test_ui_surfaces_saved_photo_limit_errors(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(main_module, "create_oauth_client", lambda settings: FakeOAuthClient())
     begin_login(client)
     client.get("/auth/callback?code=valid-code&state=opaque", follow_redirects=False)
-    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
+    save_test_profile(client)
+    csrf_token = extract_hidden_value(client.get("/my/profile").text, "csrf_token")
     first_save = client.post(
         "/my/photos",
         data={"label": "Existing photo", "csrf_token": csrf_token},
@@ -1325,7 +1399,8 @@ def test_ui_surfaces_saved_photo_rejected_errors(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(main_module, "create_oauth_client", lambda settings: FakeOAuthClient())
     begin_login(client)
     client.get("/auth/callback?code=valid-code&state=opaque", follow_redirects=False)
-    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
+    save_test_profile(client)
+    csrf_token = extract_hidden_value(client.get("/my/profile").text, "csrf_token")
 
     response = client.post(
         "/ui/cards/generate",
@@ -1345,7 +1420,8 @@ def test_ui_surfaces_saved_photo_rejected_errors(monkeypatch: pytest.MonkeyPatch
 
 
 def test_ui_surfaces_missing_saved_photo_errors(authenticated_client: TestClient) -> None:
-    csrf_token = extract_hidden_value(authenticated_client.get("/app").text, "csrf_token")
+    save_test_profile(authenticated_client)
+    csrf_token = extract_hidden_value(authenticated_client.get("/my/profile").text, "csrf_token")
 
     response = authenticated_client.post(
         "/ui/cards/generate",
@@ -1513,11 +1589,12 @@ def test_harmful_content_split_across_fields_reaches_one_moderation_boundary(
             raise AssertionError("Image moderation must not run after pre-prompt refusal.")
 
     authenticated_client.app.state.services.moderation_service = SplitFieldModeration()
-    page = authenticated_client.get("/app")
+    page = authenticated_client.get("/my/profile")
     response = authenticated_client.post(
-        "/ui/cards/generate",
+        "/my/profile",
         data={
             "display_name": "Ada",
+            "title": "Principal engineer",
             "current_role": "Graphic systems architect",
             "expertise": ["Gore-resistant rendering pipelines"],
             "creation_draft_id": extract_hidden_value(page.text, "creation_draft_id"),
@@ -1527,7 +1604,7 @@ def test_harmful_content_split_across_fields_reaches_one_moderation_boundary(
     )
 
     assert response.status_code == 422
-    assert response.headers["x-generation-error"] == "prompt_rejected"
+    assert "rejected by the safety policy" in response.text
 
 
 def test_persistence_cleanup_deletes_orphaned_blob(
@@ -1573,7 +1650,7 @@ def test_persistence_cleanup_deletes_orphaned_blob(
     monkeypatch.setattr(main_module, "create_oauth_client", lambda settings: FakeOAuthClient())
     begin_login(client)
     client.get("/auth/callback?code=valid-code&state=opaque", follow_redirects=False)
-    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
+    csrf_token = extract_hidden_value(client.get("/my/profile").text, "csrf_token")
 
     response = client.post(
         "/api/v1/cards/generate",
@@ -1629,7 +1706,7 @@ def test_blob_upload_failure_logs_safe_azure_diagnostic(
     monkeypatch.setattr(main_module, "create_oauth_client", lambda settings: FakeOAuthClient())
     begin_login(client)
     client.get("/auth/callback?code=valid-code&state=opaque", follow_redirects=False)
-    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
+    csrf_token = extract_hidden_value(client.get("/my/profile").text, "csrf_token")
 
     response = client.post(
         "/api/v1/cards/generate",
@@ -1686,7 +1763,7 @@ def test_failed_blob_compensation_does_not_mask_persistence_problem(
     monkeypatch.setattr(main_module, "create_oauth_client", lambda settings: FakeOAuthClient())
     begin_login(client)
     client.get("/auth/callback?code=valid-code&state=opaque", follow_redirects=False)
-    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
+    csrf_token = extract_hidden_value(client.get("/my/profile").text, "csrf_token")
 
     response = client.post(
         "/api/v1/cards/generate",
@@ -1771,7 +1848,7 @@ def test_retry_persistence_failure_preserves_partial_and_can_recover(
     client = TestClient(create_app(services=services), base_url="https://testserver")
     begin_login(client)
     client.get("/auth/callback?code=valid-code&state=opaque", follow_redirects=False)
-    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
+    csrf_token = extract_hidden_value(client.get("/my/profile").text, "csrf_token")
     initial = client.post(
         "/api/v1/cards/generate",
         json={
@@ -2555,6 +2632,56 @@ def test_foundry_image_edit_uses_edits_endpoint_and_multipart(
     assert b'name="prompt"' in body
     assert b"A radiant knight raising a silver shield." in body
     assert b'name="image"; filename="portrait.png"' in body
+
+
+@pytest.mark.parametrize("edit", [False, True])
+@pytest.mark.parametrize(
+    ("retry_after", "expected"),
+    [("75", 75), ("999999", 3600), ("0", None), ("-1", None), ("private-payload", None)],
+)
+def test_foundry_image_throttling_preserves_only_bounded_retry_delay(
+    monkeypatch: pytest.MonkeyPatch,
+    edit: bool,
+    retry_after: str,
+    expected: int | None,
+) -> None:
+    monkeypatch.setenv("FOUNDRY_ENDPOINT", "https://foundry.example")
+    monkeypatch.setenv("FOUNDRY_IMAGE_DEPLOYMENT", "gpt-image-2")
+    real_async_client = httpx.AsyncClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            429,
+            headers={"Retry-After": retry_after},
+            json={"error": {"code": "RateLimitReached", "message": "NEVER-EXPOSE-payload"}},
+        )
+
+    def build_client(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_async_client(*args, **kwargs)
+
+    monkeypatch.setattr(generation_module.httpx, "AsyncClient", build_client)
+    client = AzureFoundryAIClient(load_app_settings())
+    client._credential = SimpleNamespace(
+        get_token=lambda *_args, **_kwargs: SimpleNamespace(token="test-token")
+    )
+    operation = (
+        client.generate_image_edit(
+            "A fantasy portrait.",
+            reference_image=ReferenceImageUpload(
+                content=VALID_PNG_BYTES, content_type="image/png", filename="portrait.png"
+            ),
+            request_id="request-throttled",
+        )
+        if edit
+        else client.generate_image("A fantasy portrait.", request_id="request-throttled")
+    )
+    with pytest.raises(UpstreamServiceError) as caught:
+        asyncio.run(operation)
+    assert caught.value.status_code == 429
+    assert caught.value.error_code == "RateLimitReached"
+    assert caught.value.retry_after_seconds == expected
+    assert "NEVER-EXPOSE-payload" not in str(caught.value)
 
 
 # ---------------------------------------------------------------------------

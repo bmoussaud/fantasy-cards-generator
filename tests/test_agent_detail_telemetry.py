@@ -43,7 +43,7 @@ from hosted_agents.card_orchestrator.orchestrator import CardOrchestrator
 from hosted_agents.card_orchestrator.server import create_host
 from hosted_agents.card_orchestrator.settings import RuntimeSettings
 from hosted_agents.card_orchestrator.workflow import StageBoundary
-from tests.conftest import extract_hidden_value
+from tests.conftest import save_test_profile
 from tests.test_agentic_generation import StageModeration, _client, _generate, _services
 from tests.test_card_orchestrator import CARD, settings
 from tests.workflow_fakes import OfflineAgent
@@ -653,6 +653,57 @@ def test_off_never_allocates_or_sanitizes(monkeypatch, exported):
     for name in ("Capture", "text_view", "projection_view", "parse_envelope", "invocation_outcome"):
         monkeypatch.setattr(detail, name, forbidden)
     assert asyncio.run(generate(CardGenerationService(services))).status == "completed"
+    assert not new_spans(exported)
+
+
+def test_professional_profile_never_allocates_detail_in_either_runtime(monkeypatch, exported):
+    services, _, _, calls = stack(monkeypatch, web=True, hosted=True)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Professional evidence entered detailed capture")
+
+    monkeypatch.setattr(detail, "Capture", forbidden)
+    prompt = (
+        "Identity (user-confirmed): Ada Lovelace\n\n"
+        "Professional title (user-provided): Principal engineer"
+    )
+    result = asyncio.run(generate(CardGenerationService(services), prompt=prompt))
+    assert result.status == "completed"
+    assert calls
+    assert not content(exported)
+    assert not new_spans(exported)
+
+
+def test_professional_profile_artwork_retry_never_allocates_detail(monkeypatch, exported):
+    services, _, _, _ = stack(monkeypatch)
+    original_image = services.ai_client.generate_image
+
+    async def unavailable(*args, **kwargs):
+        raise UpstreamServiceError("images", "Image unavailable", status_code=503, retryable=False)
+
+    monkeypatch.setattr(services.ai_client, "generate_image", unavailable)
+    service = CardGenerationService(services)
+    initial = asyncio.run(
+        generate(service, prompt="Identity (user-confirmed): Ada, platform architect")
+    )
+    assert initial.status == "awaiting_artwork_retry"
+    monkeypatch.setattr(services.ai_client, "generate_image", original_image)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Artwork retry captured professional evidence")
+
+    monkeypatch.setattr(detail, "Capture", forbidden)
+    result = asyncio.run(
+        service.retry_artwork(
+            owner=OWNER,
+            card_id=initial.cardId,
+            idempotency_key="profile-retry",
+            request_id="retry-request",
+            client_ip="127.0.0.1",
+        )
+    )
+    assert result.status == "completed"
+    assert not content(exported)
     assert not new_spans(exported)
 
 
@@ -1597,12 +1648,12 @@ def test_html_render_is_part_of_web_boundary(monkeypatch, exported, render_failu
 
     services, _, _, _ = stack(monkeypatch, legacy=legacy)
     client = _client(monkeypatch, services)
-    csrf = extract_hidden_value(client.get("/app").text, "csrf_token")
+    csrf = save_test_profile(client)
     original = Jinja2Templates.TemplateResponse
 
     def render(self, *args, **kwargs):
         if "partials/card_result.html" in args:
-            assert len(content(exported)) == (0 if legacy else 1)
+            assert not content(exported)
             if render_failure:
                 raise RuntimeError("render failed")
         return original(self, *args, **kwargs)
@@ -1618,7 +1669,7 @@ def test_html_render_is_part_of_web_boundary(monkeypatch, exported, render_failu
                     "csrf_token": csrf,
                 },
             )
-        assert len(content(exported)) == (0 if legacy else 1)
+        assert not content(exported)
     else:
         response = client.post(
             "/ui/cards/generate",
@@ -1631,4 +1682,4 @@ def test_html_render_is_part_of_web_boundary(monkeypatch, exported, render_failu
         assert response.status_code == 200
         assert "agentDetail" not in response.text
         assert "capture_version" not in response.text
-        assert len(content(exported)) == 3
+        assert not content(exported)

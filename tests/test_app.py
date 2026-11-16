@@ -5,6 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
+from tests.conftest import FakeOAuthClient, make_authenticated_client
 
 client = TestClient(app, base_url="https://testserver")
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
@@ -76,6 +77,68 @@ def test_home_renders_hero_and_preserves_auth_copy() -> None:
     assert 'src="/static/js/app.js"' in response.text
 
 
+def test_profile_entry_and_generator_heading_are_scoped_to_their_pages(authenticated_client):
+    home = authenticated_client.get("/")
+    assert '<a class="btn btn-primary" href="/my/profile">Manage your profile</a>' in home.text
+    generator = authenticated_client.get("/app")
+    assert '<h1 id="page-heading">Generate your card</h1>' in generator.text
+    assert '<section class="panel" aria-labelledby="page-heading">' in generator.text
+    profile = authenticated_client.get("/my/profile")
+    assert '<h1 id="page-heading">Your professional profile</h1>' in profile.text
+    for page in (home, generator, profile):
+        assert page.status_code == 200
+        assert 'href="/app#generate-card"' in page.text
+
+
+@pytest.mark.parametrize(
+    ("path", "active_href"),
+    [
+        ("/", "/"),
+        ("/my/profile", "/my/profile"),
+        ("/app", "/app#generate-card"),
+        ("/my/cards", "/my/cards"),
+        ("/my/photos/library", "/my/photos/library"),
+        ("/my/account", "/my/account"),
+    ],
+)
+def test_navigation_marks_only_current_page(authenticated_client, path, active_href):
+    response = authenticated_client.get(path)
+    assert response.status_code == 200
+    active = re.findall(r'<a\b[^>]*href="([^"]+)"[^>]*aria-current="page"', response.text)
+    assert active == [active_href]
+    assert 'href="/my/profile"' in response.text
+    assert 'href="/app#generate-card"' in response.text
+    identity = re.search(r'<li class="site-nav__user">(.*?)</li>', response.text, re.S)
+    assert identity is not None
+    assert "<strong>Aragorn</strong>" in identity.group(1)
+    assert "aragorn@example.com" in identity.group(1)
+    assert '<p class="site-nav__user">' not in response.text
+    assert response.text.count("Signed in as") == 1
+
+
+@pytest.mark.parametrize("email", ["", "<private>&@example.com"])
+def test_header_identity_escapes_values_and_handles_missing_email(monkeypatch, email):
+    original = FakeOAuthClient.authorize_access_token
+
+    async def authorize(self, request, **kwargs):
+        token = await original(self, request, **kwargs)
+        token["userinfo"].update(name="<Aragorn>&", email=email)
+        return token
+
+    monkeypatch.setattr(FakeOAuthClient, "authorize_access_token", authorize)
+    with make_authenticated_client(monkeypatch) as authenticated:
+        response = authenticated.get("/my/profile")
+    identity = re.search(r'<li class="site-nav__user">(.*?)</li>', response.text, re.S)
+    assert identity is not None
+    assert "&lt;Aragorn&gt;&amp;" in identity.group(1)
+    assert "<Aragorn>" not in identity.group(1)
+    assert "&middot;" not in identity.group(1)
+    assert ('class="site-nav__email"' in identity.group(1)) == bool(email)
+    if email:
+        assert "&lt;private&gt;&amp;@example.com" in identity.group(1)
+        assert "<private>" not in identity.group(1)
+
+
 def test_ping_partial_still_serves_htmx_check() -> None:
     response = client.get("/partials/ping")
 
@@ -107,7 +170,9 @@ const document = {
   addEventListener() {},
   body: { addEventListener(name, handler) { handlers[name] = handler; } }
 };
-vm.runInNewContext(fs.readFileSync(0, "utf8"), { document });
+vm.runInNewContext(fs.readFileSync(0, "utf8"), {
+  document, window: { matchMedia() { return { matches: false }; } }
+});
 assert.equal(typeof promptHandlers.input, "function");
 for (const value of ["A wizard", "a          b", " ".repeat(20), "x".repeat(401)]) {
   prompt.value = value;
@@ -122,7 +187,7 @@ for (const value of ["A moonlit guardian", "x".repeat(12), "x".repeat(400)]) {
 assert.equal(typeof handlers["htmx:beforeSwap"], "function");
 for (const status of [401, 403, 422, 429, 502, 503, 504]) {
   const detail = {
-    target: { id: "generation-result" },
+    target: { id: "generation-content" },
     shouldSwap: false, isError: true,
     xhr: {
       status,
@@ -138,10 +203,11 @@ for (const status of [401, 403, 422, 429, 502, 503, 504]) {
 }
 for (const [target, status, marker, contentType, initialSwap] of [
   ["other", 422, "validation_error", "text/html", false],
-  ["generation-result", 500, null, "text/html", false],
-  ["generation-result", 422, "validation_error", "application/json", false],
-  ["generation-result", 200, null, "text/html", true],
-  ["generation-result", 302, null, "text/html", false]
+  ["generation-result", 422, "validation_error", "text/html", false],
+  ["generation-content", 500, null, "text/html", false],
+  ["generation-content", 422, "validation_error", "application/json", false],
+  ["generation-content", 200, null, "text/html", true],
+  ["generation-content", 302, null, "text/html", false]
 ]) {
   const detail = {
     target: { id: target }, shouldSwap: initialSwap, isError: status >= 400,
@@ -153,6 +219,16 @@ for (const [target, status, marker, contentType, initialSwap] of [
   handlers["htmx:beforeSwap"]({ detail });
   assert.equal(detail.shouldSwap, initialSwap);
 }
+const scrolls = [];
+handlers["htmx:afterSwap"]({ target: {
+  id: "generation-content", firstElementChild: {},
+  scrollIntoView(options) { scrolls.push(options.block); }
+}});
+assert.deepEqual(scrolls, ["start"]);
+handlers["htmx:afterSwap"]({ target: {
+  id: "generation-result", firstElementChild: {},
+  scrollIntoView() { throw new Error("Do not scroll the persistent loading shell."); }
+}});
 """
     result = subprocess.run(
         ["node", "-e", harness],

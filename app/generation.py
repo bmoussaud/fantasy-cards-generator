@@ -10,13 +10,17 @@ from collections.abc import Awaitable, Callable
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from app import agent_detail
+
+if TYPE_CHECKING:
+    from app.profiles import ProfileRepository
+
 from app.health import (
     AzureBlobHealthProbe,
     AzureCosmosHealthProbe,
@@ -134,6 +138,7 @@ class UpstreamServiceError(RuntimeError):
         retryable: bool = False,
         error_code: str | None = None,
         diagnostic_message: str | None = None,
+        retry_after_seconds: int | None = None,
     ) -> None:
         super().__init__(message)
         self.service = service
@@ -141,6 +146,7 @@ class UpstreamServiceError(RuntimeError):
         self.retryable = retryable
         self.error_code = error_code
         self.diagnostic_message = diagnostic_message
+        self.retry_after_seconds = retry_after_seconds
 
 
 class GeneratedCardModel(BaseModel):
@@ -1435,6 +1441,7 @@ class AzureFoundryAIClient:
                 status_code=response.status_code,
                 retryable=response.status_code == 429 or response.status_code >= 500,
                 error_code=error_code,
+                retry_after_seconds=_retry_after_seconds(response),
             )
         return response.json()
 
@@ -1469,8 +1476,17 @@ class AzureFoundryAIClient:
                 status_code=response.status_code,
                 retryable=response.status_code == 429 or response.status_code >= 500,
                 error_code=error_code,
+                retry_after_seconds=_retry_after_seconds(response),
             )
         return response.json()
+
+
+def _retry_after_seconds(response: httpx.Response) -> int | None:
+    value = response.headers.get("Retry-After", "").strip()
+    if not value.isascii() or not value.isdigit() or len(value) > 9:
+        return None
+    seconds = int(value)
+    return min(seconds, 3600) if seconds > 0 else None
 
 
 def _is_image_policy_refusal(error_code: str | None) -> bool:
@@ -1514,6 +1530,12 @@ def _sanitize_diagnostic(value: str, *, limit: int) -> str:
     return " ".join(value.split())[:limit]
 
 
+def _memory_profile_repository() -> ProfileRepository:
+    from app.profiles import InMemoryProfileRepository
+
+    return InMemoryProfileRepository()
+
+
 @dataclass(slots=True)
 class AppServices:
     settings: AppSettings
@@ -1534,6 +1556,7 @@ class AppServices:
     deletion_audit_repository: Any | None = None
     agent_client: Any | None = None
     linkedin_transient_repository: Any | None = None
+    profile_repository: ProfileRepository = field(default_factory=_memory_profile_repository)
 
 
 class CardGenerationService:
@@ -1711,6 +1734,8 @@ class CardGenerationService:
         client_ip: str,
     ) -> CardResponseModel:
         record = await self.services.card_repository.get(owner.owner_id, card_id)
+        if record is not None and (record.prompt or "").startswith("Identity (user-confirmed):"):
+            agent_detail.suppress()
         if record is None or record.status != "awaiting_artwork_retry":
             raise ProblemDetails(
                 status_code=404,
@@ -2989,6 +3014,7 @@ class CardGenerationService:
                             request_id=request_id,
                             error_code="generated_art_rejected",
                             retryable=False,
+                            status_code=exc.status_code,
                         )
                         raise _GenerationRefusal(
                             status_code=422,
@@ -3006,6 +3032,7 @@ class CardGenerationService:
                         request_id=request_id,
                         error_code=exc.error_code or "dependency_error",
                         retryable=exc.retryable,
+                        status_code=exc.status_code,
                     )
                     if not exc.retryable or attempt >= max_retries:
                         if exc.service == "foundry-image" and on_foundry_image_failure == "pending":
@@ -3044,20 +3071,66 @@ class CardGenerationService:
 
     def _reference_image_problem(self, exc: UpstreamServiceError) -> ProblemDetails:
         error_code = (exc.error_code or "").lower()
-        unsupported = exc.status_code in {400, 404, 405, 415, 422, 501} or any(
-            marker in error_code
-            for marker in ("unsupported", "notsupported", "not_supported", "invalidimage")
-        )
+        if exc.status_code == 429:
+            return ProblemDetails(
+                status_code=429,
+                title="Image Generation Rate Limited",
+                detail=(
+                    "The image service has reached its request limit. " "Wait before trying again."
+                ),
+                type="/problems/image-rate-limited",
+                error_code="image_rate_limited",
+                headers=(
+                    {"Retry-After": str(exc.retry_after_seconds)}
+                    if exc.retry_after_seconds is not None
+                    else {}
+                ),
+            )
+        if exc.status_code in {401, 403}:
+            return ProblemDetails(
+                status_code=503,
+                title="Image Service Authorization Failed",
+                detail=(
+                    "The application could not access the image service. "
+                    "Contact the application administrator."
+                ),
+                type="/problems/image-service-unauthorized",
+                error_code="image_service_unauthorized",
+            )
+        unsupported = error_code in {
+            "unsupported_operation",
+            "operationnotsupported",
+            "operation_not_supported",
+        }
         if unsupported:
             return ProblemDetails(
                 status_code=502,
                 title="Reference Photo Unsupported",
-                detail=(
-                    "Azure AI Foundry image edits are not available on the configured "
-                    "deployment or region."
-                ),
+                detail=("The configured image service does not support reference-photo edits."),
                 type="/problems/reference-image-unsupported",
                 error_code="reference_image_unsupported",
+            )
+        if exc.status_code in {404, 405}:
+            return ProblemDetails(
+                status_code=503,
+                title="Image Service Configuration Error",
+                detail=(
+                    "The configured image deployment or endpoint is unavailable. "
+                    "Contact the application administrator."
+                ),
+                type="/problems/image-service-misconfigured",
+                error_code="image_service_misconfigured",
+            )
+        if exc.status_code in {400, 413, 415, 422}:
+            return ProblemDetails(
+                status_code=422,
+                title="Reference Photo Request Rejected",
+                detail=(
+                    "The image service rejected the photo or image request. "
+                    "Try a different reference photo or contact the application administrator."
+                ),
+                type="/problems/reference-image-rejected",
+                error_code="reference_image_rejected",
             )
         return ProblemDetails(
             status_code=502,
@@ -3130,6 +3203,7 @@ def create_services(
         InMemoryProfilePhotoImportStateRepository,
         InMemorySavedPhotoRepository,
     )
+    from app.profiles import AzureCosmosProfileRepository, InMemoryProfileRepository
 
     if settings.persistence_mode == "azure":
         card_repository = AzureCosmosCardRepository(settings)
@@ -3198,6 +3272,11 @@ def create_services(
         agent_client=resolved_agent_client,
         agent_health_probe=resolved_agent_health_probe,
         linkedin_transient_repository=create_linkedin_transient_repository(settings),
+        profile_repository=(
+            AzureCosmosProfileRepository(settings)
+            if settings.persistence_mode == "azure"
+            else InMemoryProfileRepository()
+        ),
     )
 
 

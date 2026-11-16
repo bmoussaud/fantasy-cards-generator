@@ -1227,12 +1227,28 @@ def require_allowed(decision: Any, stage: str) -> None:
         capture.deny()
 
 
+def suppress() -> None:
+    capture = current()
+    if capture is not None:
+        capture.deny()
+    admission = _admission.get()
+    if admission is not None:
+        admission.disabled = True
+
+
 def operation(runtime: Runtime):
     def decorate(function):
         @wraps(function)
         async def wrapped(self, *args, **kwargs):
             settings = self.settings if runtime == "hosted" else self.services.settings
-            if not settings.agent_trace_enabled:
+            query = kwargs.get("prompt")
+            if runtime == "hosted":
+                request = args[0] if args else kwargs.get("request")
+                query = getattr(request, "query", None)
+            professional_context = isinstance(query, str) and query.startswith(
+                "Identity (user-confirmed):"
+            )
+            if not settings.agent_trace_enabled or professional_context:
                 # Also isolate OFF when an in-process test transport nests runtimes.
                 token = _current.set(None)
                 admission_token = _admission.set(None)

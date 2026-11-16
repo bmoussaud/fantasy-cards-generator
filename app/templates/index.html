@@ -12,7 +12,7 @@
         {% if user %}
             <p>Welcome back, <strong>{{ user.name or user.email or user.sub }}</strong>.</p>
             <div class="hero__actions">
-                <a class="btn btn-primary" href="/app">Open the generator</a>
+                <a class="btn btn-primary" href="/my/profile">Manage your profile</a>
             </div>
         {% elif auth_configured %}
             <div class="hero__actions">

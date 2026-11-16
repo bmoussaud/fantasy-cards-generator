@@ -213,12 +213,32 @@ def make_authenticated_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     return client
 
 
+def save_test_profile(client: TestClient, **overrides: object) -> str:
+    page = client.get("/my/profile")
+    csrf = extract_hidden_value(page.text, "csrf_token")
+    response = client.post(
+        "/my/profile",
+        data={
+            "display_name": "Ada Lovelace",
+            "title": "Principal engineer",
+            "current_role": "Platform architect",
+            "expertise": ["Container platforms"],
+            "csrf_token": csrf,
+            "profile_revision": extract_hidden_value(page.text, "profile_revision"),
+            **overrides,
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303, response.text
+    return csrf
+
+
 @pytest.fixture
 def authenticated_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     return make_authenticated_client(monkeypatch)
 
 
 def extract_hidden_value(html: str, input_name: str) -> str:
-    match = re.search(rf'name="{input_name}" value="([^"]+)"', html)
+    match = re.search(rf'name="{input_name}" value="([^"]*)"', html)
     assert match is not None
     return match.group(1)

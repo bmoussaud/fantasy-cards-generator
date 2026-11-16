@@ -47,6 +47,7 @@ from app.generation import (
     ReferenceImageUpload,
     client_ip_from_request,
     create_services,
+    normalize_prompt,
 )
 from app.health import (
     MisconfiguredHealthProbe,
@@ -76,6 +77,7 @@ from app.photos import (
     SavedPhotoService,
 )
 from app.problems import ProblemDetails
+from app.profiles import ProfessionalProfile, ProfileGenerationOptions
 from app.settings import SettingsError, load_app_settings
 from app.telemetry import (
     configure_auth_access_logging,
@@ -249,6 +251,7 @@ def create_app(services: AppServices | None = None) -> FastAPI:
         profile_photo_import_state_repository=app_services.profile_photo_import_state_repository,
         photo_asset_store=app_services.photo_asset_store,
         linkedin_transient_repository=app_services.linkedin_transient_repository,
+        profile_repository=app_services.profile_repository,
     )
     photo_service = SavedPhotoService(
         settings=app_services.settings,
@@ -385,6 +388,8 @@ def create_app(services: AppServices | None = None) -> FastAPI:
             },
         )
         response.headers["X-Request-ID"] = request.state.request_id
+        if get_session_user(request) is not None:
+            response.headers["Cache-Control"] = "no-store"
         return response
 
     def template_context(request: Request, **context: object) -> dict[str, object]:
@@ -479,12 +484,22 @@ def create_app(services: AppServices | None = None) -> FastAPI:
             template_context(request, page_title="Fantasy Cards Generator"),
         )
 
-    @app.get("/app", response_class=HTMLResponse)
-    async def app_shell(
+    async def render_workshop(
         request: Request,
-        user: AuthenticatedUser = Depends(require_authenticated_user),
+        user: AuthenticatedUser,
+        *,
+        profile_values: dict[str, object] | None = None,
+        profile_error: str | None = None,
+        submitted_revision: str | None = None,
+        response_status: int = 200,
     ) -> HTMLResponse:
         owner_id = user["owner_id"]
+        saved_profile = await profile_storage(app_services.profile_repository.get(owner_id))
+        values = (
+            profile_values
+            if profile_values is not None
+            else saved_profile.profile.model_dump() if saved_profile is not None else {}
+        )
         linkedin_available = (
             linkedin_settings.enabled
             and linkedin_settings.is_configured
@@ -505,7 +520,8 @@ def create_app(services: AppServices | None = None) -> FastAPI:
             "app_shell.html",
             template_context(
                 request,
-                page_title="Generate a card",
+                page_title="My Profile" if request.url.path == "/my/profile" else "Generate a card",
+                profile_only=request.url.path == "/my/profile",
                 user=user,
                 profile_photo_import_notice=request.session.pop(
                     "profile_photo_import_notice", None
@@ -516,13 +532,132 @@ def create_app(services: AppServices | None = None) -> FastAPI:
                 linkedin_available=linkedin_available,
                 linkedin_creation_draft_id=creation_draft_id,
                 linkedin_draft=linkedin_draft,
+                profile_values=values,
+                profile_revision=(
+                    submitted_revision
+                    if submitted_revision is not None
+                    else saved_profile.revision if saved_profile else ""
+                ),
+                saved_profile=saved_profile,
+                profile_error=profile_error,
+                profile_saved=request.query_params.get("saved") == "true",
                 profile_display_name=(
-                    linkedin_draft.display_name
+                    values.get("display_name", linkedin_draft.display_name)
                     if linkedin_draft is not None
-                    else (user["name"] or user["email"] or "")
+                    else values.get("display_name", user["name"] or user["email"] or "")
                 ),
             ),
+            status_code=response_status,
         )
+
+    async def profile_storage(operation):
+        from azure.core.exceptions import AzureError
+
+        try:
+            return await operation
+        except AzureError:
+            safe_log(
+                "profile.persistence_failed", attributes={"fcg.error_code": "persistence_failure"}
+            )
+            raise ProblemDetails(
+                status_code=503,
+                title="Profile unavailable",
+                detail="Your profile could not be loaded or saved. Try again later.",
+                type="/problems/profile-storage",
+                error_code="persistence_failure",
+            ) from None
+
+    @app.get("/app", response_class=HTMLResponse)
+    @app.get("/my/profile", response_class=HTMLResponse)
+    async def app_shell(
+        request: Request,
+        user: AuthenticatedUser = Depends(require_authenticated_user),
+    ) -> HTMLResponse:
+        return await render_workshop(request, user)
+
+    @app.post("/my/profile", response_class=HTMLResponse)
+    async def save_profile(
+        request: Request,
+        user: AuthenticatedUser = Depends(require_api_user),
+    ) -> Response:
+        form = await request.form()
+        app_services.csrf_protector.validate(request, _form_string(form, "csrf_token"))
+        values = {
+            "display_name": form.get("display_name"),
+            "title": form.get("title"),
+            "current_role": form.get("current_role"),
+            "expertise": form.getlist("expertise"),
+            "post_excerpts": form.getlist("post_excerpt"),
+        }
+        revision = _form_string(form, "profile_revision")
+        draft_id = _form_string(form, "creation_draft_id")
+        if draft_id is not None:
+            try:
+                _validate_active_creation_draft_id(request, draft_id)
+            except ValueError:
+                return await render_workshop(
+                    request,
+                    user,
+                    profile_values=values,
+                    submitted_revision=revision or "",
+                    profile_error="The import draft changed or expired. Reload before saving.",
+                    response_status=422,
+                )
+        try:
+            profile = ProfessionalProfile.model_validate(values)
+        except ValidationError:
+            return await render_workshop(
+                request,
+                user,
+                profile_values=values,
+                submitted_revision=revision or "",
+                profile_error=(
+                    "Check your profile: name 1–80 characters, title and role 2–120, "
+                    "1–5 expertise entries of 2–80 and up to 3 excerpts of 20–500. "
+                    "The complete context must leave room for creative direction within "
+                    "2,500 characters. LinkedIn profile URLs are not accepted."
+                ),
+                response_status=422,
+            )
+        decision = await app_services.moderation_service.moderate_text(
+            profile.context(), stage="pre_prompt"
+        )
+        if decision.allowed is not True:
+            return await render_workshop(
+                request,
+                user,
+                profile_values=values,
+                submitted_revision=revision or "",
+                profile_error=(
+                    "This profile was rejected by the safety policy. "
+                    "Your saved profile was not changed."
+                ),
+                response_status=422,
+            )
+        try:
+            await profile_storage(
+                app_services.profile_repository.save(user["owner_id"], profile, revision)
+            )
+        except ProblemDetails as exc:
+            return await render_workshop(
+                request,
+                user,
+                profile_values=values,
+                submitted_revision=revision or "",
+                profile_error=exc.detail,
+                response_status=exc.status_code,
+            )
+        if draft_id is not None and linkedin_transient_repository is not None:
+            await linkedin_transient_repository.delete_draft(
+                owner_id=user["owner_id"], draft_id=draft_id
+            )
+            request.session.pop(LINKEDIN_CREATION_DRAFT_SESSION_KEY, None)
+        destination = (
+            "/my/profile?saved=true"
+            if _form_string(form, "return_to") == "/my/profile"
+            else "/app?saved=true#generate-card"
+        )
+        return RedirectResponse(destination, status_code=303)
 
     @app.get("/my/cards", response_class=HTMLResponse)
     async def my_cards(
@@ -1594,7 +1729,6 @@ def create_app(services: AppServices | None = None) -> FastAPI:
     async def ui_generate_card(
         request: Request,
     ) -> HTMLResponse:
-        payload = await _parse_card_generate_request(request)
         owner = get_authenticated_owner(request)
         if owner is None:
             raise ProblemDetails(
@@ -1604,6 +1738,36 @@ def create_app(services: AppServices | None = None) -> FastAPI:
                 type="/problems/unauthorized",
                 error_code="unauthorized",
             )
+        saved_profile = await profile_storage(app_services.profile_repository.get(owner.owner_id))
+        if saved_profile is None:
+            raise ProblemDetails(
+                status_code=409,
+                title="Save your profile first",
+                detail="Create and save your profile before generating a card.",
+                type="/problems/profile-required",
+                error_code="profile_required",
+            )
+        raw = (
+            await request.json()
+            if request.headers.get("content-type", "").startswith("application/json")
+            else await request.form()
+        )
+        if not hasattr(raw, "get"):
+            raise RequestValidationError(
+                [{"type": "model_type", "loc": ("body",), "msg": "Expected an object."}]
+            )
+        try:
+            options = ProfileGenerationOptions.model_validate(
+                {"creative_direction": raw.get("creative_direction")}
+            )
+        except ValidationError as exc:
+            raise RequestValidationError(exc.errors()) from exc
+        payload = await _parse_card_generate_request(
+            request,
+            saved_prompt=normalize_prompt(
+                saved_profile.profile.context(options.creative_direction)
+            ),
+        )
         app_services.csrf_protector.validate(request, payload.csrf_token)
         if payload.creation_draft_id is not None:
             try:
@@ -1728,10 +1892,16 @@ def create_app(services: AppServices | None = None) -> FastAPI:
     return app
 
 
-async def _parse_card_generate_request(request: Request) -> ParsedCardGenerateRequest:
+async def _parse_card_generate_request(
+    request: Request, *, saved_prompt: str | None = None
+) -> ParsedCardGenerateRequest:
     content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
     if content_type == "application/json":
-        body = _validate_card_generate_body(await request.json())
+        raw = await request.json()
+        if saved_prompt is not None and isinstance(raw, dict):
+            raw = {**raw, "prompt": saved_prompt}
+            raw.pop("creative_direction", None)
+        body = _validate_card_generate_body(raw)
         return ParsedCardGenerateRequest(
             prompt=body.prompt,
             idempotency_key=body.idempotencyKey,
@@ -1741,7 +1911,9 @@ async def _parse_card_generate_request(request: Request) -> ParsedCardGenerateRe
 
     form = await request.form()
     structured_profile: StructuredProfileForm | None = None
-    if "display_name" in form:
+    if saved_prompt is not None:
+        prompt = saved_prompt
+    elif "display_name" in form:
         structured_profile = _validate_structured_profile_form(
             {
                 "display_name": form.get("display_name"),

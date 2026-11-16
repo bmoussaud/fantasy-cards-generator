@@ -18,16 +18,23 @@
                 <span class="brand__name">Fantasy Cards Generator</span>
             </a>
             <ul class="site-nav__links">
-                <li><a class="site-nav__link" href="/">Home</a></li>
+                <li><a class="site-nav__link" href="/"{% if request.url.path == "/" %} aria-current="page"{% endif %}>Home</a></li>
                 {% if user %}
-                    <li><a class="site-nav__link" href="/app">Generator</a></li>
-                    <li><a class="site-nav__link" href="/my/cards">My Cards</a></li>
-                    <li><a class="site-nav__link" href="/my/photos/library">My Photos</a></li>
-                    <li><a class="site-nav__link" href="/my/account">My Account</a></li>
-                    <li class="site-nav__user">Signed in as <strong>{{ user.name or user.email or user.sub }}</strong></li>
+                    <li><a class="site-nav__link" href="/my/profile"{% if request.url.path == "/my/profile" %} aria-current="page"{% endif %}>My Profile</a></li>
+                    <li><a class="site-nav__link" href="/app#generate-card"{% if request.url.path == "/app" %} aria-current="page"{% endif %}>Generator</a></li>
+                    <li><a class="site-nav__link" href="/my/cards"{% if request.url.path == "/my/cards" or request.url.path.startswith("/my/cards/") %} aria-current="page"{% endif %}>My Cards</a></li>
+                    <li><a class="site-nav__link" href="/my/photos/library"{% if request.url.path == "/my/photos/library" %} aria-current="page"{% endif %}>My Photos</a></li>
+                    <li><a class="site-nav__link" href="/my/account"{% if request.url.path == "/my/account" %} aria-current="page"{% endif %}>My Account</a></li>
+                    <li class="site-nav__user">
+                        <span>Signed in as</span>
+                        <strong>{{ user.name or user.email or user.sub }}</strong>
+                        {% if user.email and user.name %}
+                            <span class="site-nav__email">{{ user.email }}</span>
+                        {% endif %}
+                    </li>
                     <li><a class="site-nav__link btn btn-ghost" href="/auth/logout">Sign out</a></li>
                 {% elif auth_configured %}
-                    <li><a class="site-nav__link btn btn-secondary" href="/auth/login">Sign in</a></li>
+                    <li><a class="site-nav__link btn btn-secondary" href="/auth/login"{% if request.url.path == "/auth/login" %} aria-current="page"{% endif %}>Sign in</a></li>
                 {% endif %}
             </ul>
         </nav>

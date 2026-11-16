@@ -855,3 +855,36 @@ def test_foundry_agent_dependency_identifier_is_allowlisted() -> None:
     assert telemetry.normalize_dependency("foundry_agent") == "foundry_agent"
     assert telemetry.normalize_dependency("foundry-agent") == "foundry_agent"
     assert telemetry.normalize_dependency("microsoft_graph") == "microsoft_graph"
+
+
+@pytest.mark.parametrize(
+    ("upstream_code", "status"),
+    [("invalid_image_file", 400), ("RateLimitReached", 429), (SENSITIVE_SENTINEL, 999)],
+)
+def test_image_dependency_failure_keeps_bounded_status_and_known_code_only(
+    monkeypatch: pytest.MonkeyPatch,
+    upstream_code: str,
+    status: int,
+) -> None:
+    captured: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        telemetry, "add_event", lambda name, attributes: captured.append(attributes)
+    )
+    telemetry.record_dependency_attempt(
+        dependency="foundry-image",
+        attempt=1,
+        outcome="failed",
+        duration_ms=1,
+        request_id="request-image-failure",
+        error_code=upstream_code,
+        status_code=status,
+    )
+    attributes = telemetry.safe_attributes(captured[0])
+    assert attributes["fcg.error_code"] == (
+        upstream_code.lower() if status != 999 else "internal_error"
+    )
+    if status != 999:
+        assert attributes["http.response.status_code"] == status
+    else:
+        assert "http.response.status_code" not in attributes
+    assert SENSITIVE_SENTINEL not in repr(attributes)
