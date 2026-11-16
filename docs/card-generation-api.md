@@ -66,27 +66,104 @@ characters after collapsing repeated whitespace. The generator form enforces
 these bounds before submission; server-side validation remains authoritative.
 Blank optional string fields are treated as absent.
 
-### Structured browser profile contract
+### Saved browser profile contract
 
-The server-rendered generator UI composes its generation context from:
+The dedicated `/my/profile` page contains only profile management: identity
+fields and expertise/post-excerpt fieldsets use two columns on wider screens
+and stack on mobile. It has no generator, reference-photo picker or card preview.
+The single **Save Profile and Generate** button saves the profile and opens
+`/app?saved=true#generate-card`, without starting AI generation automatically.
+Validation, moderation or revision-conflict errors keep the editor and submitted
+values visible instead of redirecting.
+The `/app` Generator shows a compact, read-only summary of the saved profile:
+name, title, role and expertise, with optional recent-post excerpts collapsed
+under a native disclosure. Its Edit profile link opens `/my/profile`; there
+are no editable profile fields or profile-save button in Generator.
+Without a saved profile, it links to profile creation and offers no generation
+form. Creative direction and the reference-photo picker remain generation-only.
+The shared navigation emphasizes the current page and announces it with
+`aria-current="page"`. Signed-in identity appears once in the header, with the
+display name and available email address.
+`POST /my/profile` saves the authenticated owner's
+profile using the session CSRF token and the hidden `profile_revision`. An empty
+revision creates the profile; subsequent saves require the current revision.
+Concurrent creation or a stale revision returns `409` with the submitted values
+preserved and a reload link rather than overwriting another edit.
+
+Exactly one `professional-profile` document (`profile:current`, schema version 1)
+is stored per authenticated owner in the existing Cosmos `/userId` partition.
+Creation is conditional and replacement uses the Cosmos ETag. The document has
+no expiry (`ttl: -1`), needs no container migration, and cannot collide with card
+or audit IDs. Azure mode persists across instances and sign-ins; the existing
+memory mode remains ephemeral for development/tests. Account deletion removes
+the profile as well as cards and photos. Profile data is not kept in session
+cookies, and authenticated responses use `Cache-Control: no-store`.
+
+The saved profile contains:
 
 - editable display name or pseudonym: 1–80 characters
+- professional title: 2–120 characters, distinct from the current role
 - current role: 2–120 characters
 - one to five explicit expertise statements: 2–80 characters each
 - up to three optional user-selected recent-post excerpts: 20–500 characters each
-- optional creative direction: 0–200 characters
+
+After saving, the UI offers generation from that saved profile, with optional
+creative direction (0–200 characters) and the existing photo picker. Direction is
+specific to each card, not stored in the profile; absent, empty and whitespace-only
+values are accepted. The initial Generator form contains a short editable
+example; users can change or clear it. HTMX result/error updates preserve the
+form and its current value, including an explicit empty value.
+The loading status stays in the result column's persistent empty-state shell.
+Only `#generation-content` is swapped for cards, marked HTML errors or artwork
+retries, so `#generation-pending` remains available for subsequent generations
+and is hidden while idle.
+HTMX disables the Generate card submit button for the duration of its request
+to prevent repeated clicks, then re-enables it after success or HTTP/transport
+failure. Other generation options and the artwork-retry form are unchanged.
+Reference-photo failures preserve actionable public error codes in both JSON
+and the HTMX error panel: `reference_image_rejected` (422) for an upstream
+photo/input rejection, `image_rate_limited` (429) for image-service throttling,
+and `image_service_unauthorized` or `image_service_misconfigured` (503) for
+application authorization or endpoint/deployment failures.
+An upstream numeric `Retry-After` delay is retained when positive, capped at
+3,600 seconds; it does not add automatic image retries. Image-service request
+limits are shared by all clients of the deployment, so disabling double-clicks
+does not eliminate quota errors. `reference_image_unsupported` (502) requires
+an explicit unsupported-operation code, not just HTTP400 or an invalid image.
+Other reference-image failures remain `reference_image_generation_failed`
+(502). A rejected photo is never silently discarded in favor of photo-free
+generation. Moderation refusals remain `generated_art_rejected` and take
+precedence over technical error classification.
+Content-free dependency diagnostics retain only bounded HTTP statuses and
+allowlisted error codes, never the upstream response body or uploaded photo.
+Unsaved edits are not used. Direct JSON, multipart or form
+calls to `/ui/cards/generate` also require a saved profile; submitted prompts or
+profile fields cannot replace the server-loaded profile. The public programmatic
+`/api/v1/cards/generate` prompt contract remains unchanged.
 
 After canonical whitespace normalization, the composed context must contain
 12–2,500 Unicode characters. Sections are composed in deterministic order:
-identity, current role, explicit expertise, optional recent-post excerpts, then
+identity, professional title, current role, explicit expertise, optional recent-post excerpts, then
 optional creative direction. The complete canonical context is moderated and
-used for request hashing and idempotency.
+used for request hashing and idempotency. Profile validation reserves enough room
+for the full 200-character direction, including its label and separators, so any
+valid direction fits. The profile is also moderated before it is saved; refusal
+preserves the prior saved version.
+
+Detailed content captures are suppressed for the deterministic professional
+context in both web and hosted runtimes, including artwork retry in the web
+runtime. Content-free operational telemetry remains available. Generated cards
+still retain their generation context as before: editing the profile does not
+rewrite or erase historical cards. Delete those cards or the account to remove
+those copies.
 
 A one-time LinkedIn OIDC import may prefill only the editable display name and,
 when separately consented and safely copied, an owner-scoped saved-photo
 reference. LinkedIn does not supply the role, expertise, post excerpts, powers,
 or creative direction. The UI accepts no LinkedIn profile URL. Imported values
-remain editable, and manual completion works without LinkedIn.
+remain editable, and manual completion works without LinkedIn. A successful
+profile save consumes the bound import draft. Imports never silently overwrite
+an existing saved profile.
 
 ### `POST /api/v1/cards/{cardId}/artwork/retry`
 

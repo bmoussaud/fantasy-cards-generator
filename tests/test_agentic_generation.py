@@ -35,7 +35,13 @@ from app.health import DependencyHealthResult
 from app.main import create_app
 from app.problems import ProblemDetails
 from app.settings import SettingsError, load_app_settings
-from tests.conftest import TEST_OWNER_ID, FakeOAuthClient, begin_login, extract_hidden_value
+from tests.conftest import (
+    TEST_OWNER_ID,
+    FakeOAuthClient,
+    begin_login,
+    extract_hidden_value,
+    save_test_profile,
+)
 
 
 class HealthyAgentProbe:
@@ -137,7 +143,7 @@ def _client(monkeypatch: pytest.MonkeyPatch, services: AppServices) -> TestClien
 
 
 def _generate(client: TestClient, *, key: str = "agent-only-test"):
-    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
+    csrf_token = extract_hidden_value(client.get("/my/profile").text, "csrf_token")
     return client.post(
         "/api/v1/cards/generate",
         json={
@@ -566,7 +572,7 @@ def test_input_moderation_refusal_persists_nothing_and_stops_before_agent(
     moderation = StageModeration("pre_prompt")
     services.moderation_service = moderation
     client = _client(monkeypatch, services)
-    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
+    csrf_token = extract_hidden_value(client.get("/my/profile").text, "csrf_token")
     response = client.post(
         "/api/v1/cards/generate",
         json={
@@ -891,7 +897,9 @@ def test_provider_image_refusal_has_no_mutations(
         services.settings, retry=replace(services.settings.retry, image_max_retries=2)
     )
     client = _client(monkeypatch, services)
-    csrf_token = extract_hidden_value(client.get("/app").text, "csrf_token")
+    if operation.endswith("htmx") and not operation.startswith("retry"):
+        save_test_profile(client)
+    csrf_token = extract_hidden_value(client.get("/my/profile").text, "csrf_token")
     if shared:
         repository = SharedBomb()
         services.card_repository = services.audit_repository = repository
@@ -1056,7 +1064,7 @@ def test_non_policy_image_400_keeps_technical_failure_contract(monkeypatch, phot
     )
     client = _client(monkeypatch, services)
     if photo:
-        csrf = extract_hidden_value(client.get("/app").text, "csrf_token")
+        csrf = extract_hidden_value(client.get("/my/profile").text, "csrf_token")
         response = client.post(
             "/api/v1/cards/generate",
             data={
@@ -1066,8 +1074,8 @@ def test_non_policy_image_400_keeps_technical_failure_contract(monkeypatch, phot
             },
             files={"photo": ("portrait.png", b"\x89PNG\r\n\x1a\nPRIVATE-PHOTO", "image/png")},
         )
-        assert response.status_code == 502
-        assert response.json()["errorCode"] == "reference_image_unsupported"
+        assert response.status_code == 422
+        assert response.json()["errorCode"] == "reference_image_rejected"
         assert len(services.audit_repository._records) == 1
         assert not services.card_repository._records
     else:

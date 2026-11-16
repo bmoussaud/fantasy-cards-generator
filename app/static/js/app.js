@@ -829,7 +829,7 @@
     if (
       detail &&
       detail.target &&
-      detail.target.id === "generation-result" &&
+      detail.target.id === "generation-content" &&
       detail.xhr &&
       detail.xhr.status >= 400 &&
       detail.xhr.status < 600 &&
@@ -867,7 +867,7 @@
    */
   document.body.addEventListener("htmx:afterSwap", function (event) {
     var target = event.target;
-    if (!target || target.id !== "generation-result" || !target.firstElementChild) {
+    if (!target || target.id !== "generation-content" || !target.firstElementChild) {
       return;
     }
     var prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;

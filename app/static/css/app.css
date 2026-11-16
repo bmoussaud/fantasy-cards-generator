@@ -239,6 +239,8 @@ code {
   list-style: none;
   margin: 0;
   padding: 0;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .site-nav__link {
@@ -254,12 +256,26 @@ code {
   color: var(--color-accent-strong);
 }
 
+.site-nav__link[aria-current="page"] {
+  font-weight: 800;
+  color: var(--color-parchment);
+}
+
 .site-nav__user {
   font-size: var(--text-sm);
   color: var(--color-parchment-dim);
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
+  flex-wrap: wrap;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.site-nav__user > * {
+  min-width: 0;
+  max-width: 100%;
 }
 
 .site-nav__user strong {
@@ -592,6 +608,86 @@ code {
   align-items: start;
 }
 
+.profile-editor,
+.profile-editor__details {
+  display: grid;
+  gap: var(--space-6);
+  min-width: 0;
+}
+
+.profile-editor {
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+}
+
+.profile-editor__identity,
+.profile-editor__details fieldset {
+  min-width: 0;
+}
+
+.profile-editor__actions {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+}
+
+.profile-editor__intro {
+  flex: 1 1 16rem;
+  margin: 0;
+}
+
+.profile-editor__actions .btn {
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+.profile-summary {
+  display: grid;
+  gap: var(--space-3);
+  margin-bottom: var(--space-6);
+  overflow-wrap: anywhere;
+}
+
+[data-card-generator-form] > .btn-primary {
+  margin-bottom: var(--space-4);
+}
+
+.profile-summary__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.profile-summary__header h2,
+.profile-summary__name,
+.profile-summary__facts {
+  margin: 0;
+}
+
+.profile-summary__facts {
+  display: grid;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+}
+
+.profile-summary__facts dt {
+  color: var(--color-parchment-dim);
+}
+
+.profile-summary__facts dd {
+  margin: 0;
+}
+
+.profile-summary__posts summary {
+  cursor: pointer;
+  font-size: var(--text-sm);
+}
+
 /* ------------------------------------------------------------------ */
 /* 6. Alerts                                                            */
 /* ------------------------------------------------------------------ */
@@ -754,6 +850,26 @@ code {
 
 .empty-state h3 {
   color: var(--color-parchment);
+}
+
+.generation-loading {
+  display: none;
+}
+
+.generation-loading:has(.htmx-request) {
+  display: block;
+}
+
+.generation-loading:has(.htmx-request) + #generation-content {
+  display: none;
+}
+
+.generation-loading .loading-state {
+  justify-content: center;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1270,6 +1386,10 @@ code {
 /* 12. Responsive breakpoints (~360 / 768 / 1024 / 1440)                */
 /* ------------------------------------------------------------------ */
 @media (min-width: 768px) {
+  .profile-editor {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
   .generator-layout {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   }

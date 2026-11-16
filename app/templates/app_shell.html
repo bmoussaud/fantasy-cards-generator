@@ -3,11 +3,7 @@
 {% block content %}
     {% include "partials/profile_photo_import_notice.html" %}
     {% include "partials/linkedin_import_notice.html" %}
-    <h1>Generate a fantasy card</h1>
-    <p class="site-nav__user">
-        Signed in as <strong>{{ user.name or user.email or user.sub }}</strong>
-        &middot; {{ user.email or "Email not provided" }}
-    </p>
+    <h1 id="page-heading">{{ "Your professional profile" if profile_only else "Generate your card" }}</h1>
     {% if linkedin_available %}
         <section class="panel" aria-labelledby="linkedin-import-heading">
             <h2 id="linkedin-import-heading">Start from LinkedIn</h2>
@@ -45,26 +41,34 @@
             </form>
         </section>
     {% endif %}
-    <div class="generator-layout">
-        <section class="panel" aria-labelledby="generator-form-heading">
-            <h2 id="generator-form-heading">Review your professional profile</h2>
-            <p class="field__hint">
-                Fantasy powers and card text are creative interpretations, not verified
-                professional qualifications.
-            </p>
+    <div{% if not profile_only %} class="generator-layout"{% endif %}>
+        <section class="panel" aria-labelledby="page-heading">
+            {% if profile_only %}
+            {% if profile_error %}
+                <p class="error-panel" role="alert">{{ profile_error }} <a href="/my/profile">Reload saved profile</a></p>
+            {% elif profile_saved %}
+                <p role="status">{{ "Profile saved." if profile_only else "Profile saved. You can now generate a card below." }}</p>
+            {% endif %}
             <form
-                data-card-generator-form
-                data-structured-profile-form
-                data-profile-context-maxlength="2500"
-                hx-post="/ui/cards/generate"
-                hx-target="#generation-result"
-                hx-swap="innerHTML"
-                hx-indicator="#generation-pending"
+                method="post"
+                action="/my/profile"
+                {% if profile_only %}class="profile-editor"{% endif %}
             >
+                <input type="hidden" name="profile_revision" value="{{ profile_revision }}" />
+                <input type="hidden" name="creation_draft_id" value="{{ linkedin_creation_draft_id }}" />
+                {% if profile_only %}
+                <div class="profile-editor__actions">
+                    <p class="profile-editor__intro">
+                        Your profile is saved for this signed-in account. Editing it does not change existing cards.
+                    </p>
+                    <button class="btn btn-primary" type="submit">Save Profile and Generate</button>
+                </div>
+                {% endif %}
+                <div{% if profile_only %} class="profile-editor__identity"{% endif %}>
                 <div class="field">
                     <label class="field__label" for="display-name">Display name or pseudonym</label>
                     <p class="field__hint" id="display-name-hint">
-                        {% if linkedin_draft %}
+                        {% if linkedin_draft and not saved_profile %}
                             Imported from LinkedIn and fully editable.
                         {% else %}
                             Choose the name shown on the card.
@@ -82,6 +86,12 @@
                     />
                 </div>
                 <div class="field">
+                    <label class="field__label" for="profile-title">Professional title</label>
+                    <input class="field__control" id="profile-title" name="title"
+                           value="{{ profile_values.get('title', '') }}"
+                           minlength="2" maxlength="120" required />
+                </div>
+                <div class="field">
                     <label class="field__label" for="current-role">Current role</label>
                     <p class="field__hint" id="current-role-hint">
                         User-provided; LinkedIn does not verify or supply this value.
@@ -90,12 +100,15 @@
                         class="field__control"
                         id="current-role"
                         name="current_role"
+                        value="{{ profile_values.get('current_role', '') }}"
                         minlength="2"
                         maxlength="120"
                         required
                         aria-describedby="current-role-hint"
                     />
                 </div>
+                </div>
+                <div{% if profile_only %} class="profile-editor__details"{% endif %}>
                 <fieldset>
                     <legend class="field__label">Explicit expertise</legend>
                     <p class="field__hint" id="expertise-hint">
@@ -111,6 +124,7 @@
                                 class="field__control"
                                 id="expertise-{{ index }}"
                                 name="expertise"
+                                value="{{ profile_values.get('expertise', [])[index - 1] | default('') }}"
                                 minlength="2"
                                 maxlength="80"
                                 {% if index == 1 %}required{% endif %}
@@ -138,10 +152,50 @@
                                 minlength="20"
                                 maxlength="500"
                                 aria-describedby="post-excerpts-hint"
-                            ></textarea>
+                            >{{ profile_values.get('post_excerpts', [])[index - 1] | default('') }}</textarea>
                         </div>
                     {% endfor %}
                 </fieldset>
+                </div>
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+            </form>
+            {% else %}
+            <section class="profile-summary" aria-labelledby="saved-profile-heading">
+                <div class="profile-summary__header">
+                    <h2 id="saved-profile-heading">Your saved profile</h2>
+                    <a href="/my/profile">{{ "Edit profile" if saved_profile else "Create profile" }}</a>
+                </div>
+                {% if saved_profile %}
+                    {% set profile = saved_profile.profile %}
+                    <p class="profile-summary__name"><strong>{{ profile.display_name }}</strong></p>
+                    <dl class="profile-summary__facts">
+                        <div><dt>Title</dt><dd>{{ profile.title }}</dd></div>
+                        <div><dt>Role</dt><dd>{{ profile.current_role }}</dd></div>
+                        <div><dt>Expertise</dt><dd>{{ profile.expertise | join(", ") }}</dd></div>
+                    </dl>
+                    {% if profile.post_excerpts %}
+                        <details class="profile-summary__posts">
+                            <summary>Recent post excerpts ({{ profile.post_excerpts | length }})</summary>
+                            <ul>
+                                {% for excerpt in profile.post_excerpts %}
+                                    <li>{{ excerpt }}</li>
+                                {% endfor %}
+                            </ul>
+                        </details>
+                    {% endif %}
+                {% else %}
+                    <p>Create and save your profile in My Profile before generating a card.</p>
+                {% endif %}
+            </section>
+            {% if saved_profile %}
+            <section id="generate-card" aria-label="Card generation">
+            <form data-card-generator-form
+                  hx-post="/ui/cards/generate"
+                  hx-target="#generation-content"
+                  hx-swap="innerHTML"
+                  hx-disabled-elt="find button[type='submit']"
+                  hx-indicator="#generation-pending">
+                <button class="btn btn-primary" type="submit">Generate card</button>
                 <div class="field">
                     <label class="field__label" for="creative-direction">
                         Creative direction (optional)
@@ -152,12 +206,8 @@
                         name="creative_direction"
                         rows="3"
                         maxlength="200"
-                        aria-describedby="profile-context-feedback"
-                    ></textarea>
+                    >{{ creative_direction | default("Epic fantasy portrait, watercolor textures, deep blue and gold palette, soft cinematic lighting.") }}</textarea>
                 </div>
-                <p id="profile-context-feedback" class="field__hint" role="status" aria-live="polite" data-profile-context-feedback>
-                    The complete profile context may contain up to 2,500 characters.
-                </p>
                 <fieldset class="reference-photo-section">
                     <legend class="field__label">Reference photos</legend>
                     <p class="field__hint">
@@ -200,19 +250,27 @@
                 <input type="hidden" name="creation_draft_id" value="{{ linkedin_creation_draft_id }}" />
                 <input id="generate-idempotency-key" type="hidden" name="idempotency_key" value="{{ generate_idempotency_key }}" />
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-                <button class="btn btn-primary" type="submit">Generate card</button>
+            </form>
+            </section>
+            {% endif %}
+            {% endif %}
+        </section>
+        {% if not profile_only %}
+        <section id="generation-result" aria-live="polite">
+            <div class="empty-state generation-loading">
                 <p id="generation-pending" class="htmx-indicator loading-state" role="status">
                     <span class="spinner" aria-hidden="true"></span>
                     Weaving your card&hellip; this can take up to a minute.
                 </p>
-            </form>
-        </section>
-        <section id="generation-result" aria-live="polite">
-            <div class="empty-state">
-                <svg class="empty-state__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M12 2.5l7 3v5.2c0 4.6-3 8.6-7 10.8-4-2.2-7-6.2-7-10.8V5.5z" stroke-linejoin="round"/></svg>
-                <h3>No card yet</h3>
-                <p>Your generated card will appear here once you describe it.</p>
+            </div>
+            <div id="generation-content">
+                <div class="empty-state">
+                    <svg class="empty-state__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M12 2.5l7 3v5.2c0 4.6-3 8.6-7 10.8-4-2.2-7-6.2-7-10.8V5.5z" stroke-linejoin="round"/></svg>
+                    <h3>No card yet</h3>
+                    <p>Your generated card will appear here once you generate it.</p>
+                </div>
             </div>
         </section>
+        {% endif %}
     </div>
 {% endblock %}

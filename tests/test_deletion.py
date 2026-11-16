@@ -35,7 +35,7 @@ def make_authenticated_client(
 
 
 def csrf_token(client: TestClient) -> str:
-    response = client.get("/app")
+    response = client.get("/my/profile")
     marker = 'name="csrf_token" value="'
     start = response.text.index(marker) + len(marker)
     end = response.text.index('"', start)

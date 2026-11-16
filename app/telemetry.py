@@ -15,6 +15,7 @@ from app.settings import TelemetrySettings, load_telemetry_settings
 LOGGER_NAME = "fantasy_cards_generator.telemetry"
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$", re.ASCII)
 SAFE_ROUTES = {
+    "/my/profile",
     "/",
     "/app",
     "/auth/login",
@@ -160,6 +161,8 @@ SAFE_MODERATION_REASONS = {
     "other",
 }
 SAFE_ERROR_CODES = {
+    "profile_required",
+    "profile_conflict",
     "none",
     "artwork_retry_available",
     "card_not_found",
@@ -169,6 +172,20 @@ SAFE_ERROR_CODES = {
     "generated_text_rejected",
     "idempotency_conflict",
     "image_not_found",
+    "image_rate_limited",
+    "image_service_unauthorized",
+    "image_service_misconfigured",
+    "reference_image_unsupported",
+    "reference_image_generation_failed",
+    "reference_image_rejected",
+    "invalid_image_file",
+    "invalid_request_error",
+    "missing_required_parameter",
+    "unsupported_operation",
+    "operationnotsupported",
+    "operation_not_supported",
+    "ratelimitreached",
+    "deploymentnotfound",
     "invalid_model_output",
     "invalid_creation_draft",
     "invalid_prompt",
@@ -674,6 +691,7 @@ def record_dependency_attempt(
     retryable: bool = False,
     stage: str | None = None,
     agent_version: str | None = None,
+    status_code: int | None = None,
 ) -> None:
     normalized_dependency = normalize_dependency(dependency)
     normalized_outcome = _bounded_value(outcome, SAFE_OUTCOMES, "failed")
@@ -689,6 +707,8 @@ def record_dependency_attempt(
         attributes["fcg.stage"] = normalize_stage(stage)
     if agent_version is not None:
         attributes["fcg.agent_version"] = normalize_agent_version(agent_version)
+    if isinstance(status_code, int) and 100 <= status_code <= 599:
+        attributes["http.response.status_code"] = status_code
     _metric_add(_dependency_counter, 1, attributes)
     _metric_record(_dependency_duration, duration_ms, attributes)
     if normalized_outcome == "throttled":
