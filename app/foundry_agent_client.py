@@ -6,10 +6,10 @@ import inspect
 import json
 import re
 import threading
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from math import isfinite
-from typing import Any, Literal, Protocol
+from typing import Annotated, Any, Literal, Protocol
 from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
@@ -29,6 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from app.agent_detail import Envelope, Source, current, parse_envelope
 from app.completion_diagnostics import CompletionDiagnostics
 from app.generation import GeneratedCardModel
+from app.profile_enrichment_contract import ProfileEnrichmentRequest, ProfileEnrichmentResponse
 from app.settings import AppSettings, SettingsError, load_app_settings
 
 FOUNDRY_AGENT_TOKEN_SCOPE = "https://ai.azure.com/.default"
@@ -113,6 +114,12 @@ class GenerateCardAgentRequest(BaseModel):
 
     schemaVersion: Literal[1] = 1
     query: str = Field(min_length=1, max_length=2500)
+    selectedExpertise: list[Annotated[str, Field(min_length=2, max_length=80)]] | None = Field(
+        default=None, min_length=1, max_length=5
+    )
+
+    def specialist_payload(self) -> dict[str, Any]:
+        return self.model_dump(exclude={"schemaVersion"}, exclude_none=True)
 
 
 class GenerateCardAgentResponse(BaseModel):
@@ -236,10 +243,82 @@ class FoundryAgentClient:
                 if inspect.isawaitable(result):
                     await result
 
-    async def invoke(self, query: str) -> FoundryAgentInvocationResult:
+    async def enrich_profile(
+        self,
+        proposal_request: ProfileEnrichmentRequest,
+        *,
+        before_dispatch: Callable[[], Awaitable[None]],
+    ) -> ProfileEnrichmentResponse:
+        from app.profile_enrichment import MAX_BYTES, EnrichmentFailure
+
+        try:
+            url = _build_responses_url(
+                self._settings.foundry_project_endpoint,
+                self._settings.foundry_agent_name,
+                self._settings.foundry_agent_api_version,
+            )
+            async with asyncio.timeout(110):
+                async with asyncio.timeout(15):
+                    workload_token = await self._get_token()
+                await before_dispatch()
+                async with self._client().stream(
+                    "POST",
+                    url,
+                    headers={
+                        "Authorization": f"Bearer {workload_token}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "store": False,
+                        "stream": False,
+                        "input": [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "input_text",
+                                        "text": proposal_request.model_dump_json(),
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    follow_redirects=False,
+                    timeout=httpx.Timeout(110, connect=10),
+                ) as response:
+                    if response.status_code in {401, 403}:
+                        raise EnrichmentFailure("authorization_failed")
+                    if response.status_code != 200:
+                        raise EnrichmentFailure("unavailable")
+                    raw = bytearray()
+                    async for chunk in response.aiter_bytes(chunk_size=8192):
+                        if len(raw) + len(chunk) > MAX_BYTES:
+                            raise EnrichmentFailure("invalid_response")
+                        raw.extend(chunk)
+            body = json.loads(raw)
+            if not isinstance(body, dict) or body.get("error") or body.get("status") != "completed":
+                raise EnrichmentFailure("invalid_response")
+            text = _extract_output_text(body)
+            if not text or len(text.encode()) > MAX_BYTES:
+                raise EnrichmentFailure("invalid_response")
+            return ProfileEnrichmentResponse.model_validate_json(text)
+        except FoundryAgentConfigurationError:
+            raise EnrichmentFailure("unavailable_configuration") from None
+        except (ClientAuthenticationError, CredentialUnavailableError):
+            raise EnrichmentFailure("authorization_failed") from None
+        except (TimeoutError, httpx.TimeoutException):
+            raise EnrichmentFailure("timeout") from None
+        except (httpx.HTTPError, ServiceRequestError, ServiceResponseError, HttpResponseError):
+            raise EnrichmentFailure("unavailable") from None
+        except (ValueError, ValidationError):
+            raise EnrichmentFailure("invalid_response") from None
+
+    async def invoke(
+        self, query: str, *, selected_expertise: list[str] | None = None
+    ) -> FoundryAgentInvocationResult:
         try:
             return await asyncio.wait_for(
-                self._invoke_without_outer_timeout(query),
+                self._invoke_without_outer_timeout(query, selected_expertise=selected_expertise),
                 timeout=self._settings.foundry_agent_timeout_seconds,
             )
         except TimeoutError:
@@ -341,14 +420,16 @@ class FoundryAgentClient:
             return "misconfigured"
         return "ok"
 
-    async def _invoke_without_outer_timeout(self, query: str) -> FoundryAgentInvocationResult:
+    async def _invoke_without_outer_timeout(
+        self, query: str, *, selected_expertise: list[str] | None = None
+    ) -> FoundryAgentInvocationResult:
         try:
             url = _build_responses_url(
                 self._settings.foundry_project_endpoint,
                 self._settings.foundry_agent_name,
                 self._settings.foundry_agent_api_version,
             )
-            request = GenerateCardAgentRequest(query=query)
+            request = GenerateCardAgentRequest(query=query, selectedExpertise=selected_expertise)
         except (SettingsError, ValidationError, ValueError):
             return FoundryAgentInvocationResult(
                 status="configuration_error",
@@ -395,7 +476,9 @@ class FoundryAgentClient:
                             "content": [
                                 {
                                     "type": "input_text",
-                                    "text": request.model_dump_json(by_alias=False),
+                                    "text": request.model_dump_json(
+                                        by_alias=False, exclude_none=True
+                                    ),
                                 }
                             ],
                         }

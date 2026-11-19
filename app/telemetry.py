@@ -60,6 +60,7 @@ SAFE_EVENTS = (
         "dependency.failed",
         "dependency.timeout",
         "dependency.retry",
+        "image.reference_rejected",
         "moderation.decision",
         "persistence.completed",
         "persistence.failed",
@@ -162,6 +163,8 @@ SAFE_MODERATION_REASONS = {
 }
 SAFE_ERROR_CODES = {
     "profile_required",
+    "expertise_selection_stale",
+    "invalid_expertise_selection",
     "profile_conflict",
     "none",
     "artwork_retry_available",
@@ -225,7 +228,16 @@ SAFE_ERROR_CODES = {
     "photo_moderation_unavailable",
     "photo_moderation_unconfigured",
 }
+REFERENCE_IMAGE_ATTRIBUTE_VALUES = {
+    "fcg.reference_format": {"png", "jpeg", "webp", "other"},
+    "fcg.reference_mode": {"rgb", "rgba", "l", "la", "p", "cmyk", "i", "i16", "f", "1", "other"},
+    "fcg.reference_dimensions": {"under_512", "under_2048", "under_4096", "larger", "other"},
+    "fcg.reference_size": {"under_1mb", "under_4mb", "larger", "other"},
+}
+REFERENCE_IMAGE_BOOLEAN_ATTRIBUTES = {"fcg.reference_verified", "fcg.reference_mime_matches"}
 SAFE_ATTRIBUTE_KEYS = {
+    *REFERENCE_IMAGE_ATTRIBUTE_VALUES,
+    *REFERENCE_IMAGE_BOOLEAN_ATTRIBUTES,
     *COMPLETION_ATTRIBUTE_KEYS,
     "fcg.detail.omission",
     "app.request_id",
@@ -561,7 +573,14 @@ def safe_persistence_log(
     )
     normalized_stage = _bounded_value(
         stage,
-        {"blob_upload", "cosmos_write", "audit_write", "compensation_delete", "cosmos_delete"},
+        {
+            "image_compose",
+            "blob_upload",
+            "cosmos_write",
+            "audit_write",
+            "compensation_delete",
+            "cosmos_delete",
+        },
         "cosmos_write",
     ).replace("_", "-")
     normalized_status = (
@@ -823,6 +842,11 @@ def safe_attributes(attributes: dict[str, Any]) -> dict[str, Any]:
             projected = completion_attribute(key, value)
             if projected is not None:
                 safe[key] = projected
+        elif key in REFERENCE_IMAGE_ATTRIBUTE_VALUES:
+            safe[key] = _bounded_value(value, REFERENCE_IMAGE_ATTRIBUTE_VALUES[key], "other")
+        elif key in REFERENCE_IMAGE_BOOLEAN_ATTRIBUTES:
+            if isinstance(value, bool):
+                safe[key] = value
         elif key == "fcg.detail.omission":
             safe[key] = _bounded_value(
                 value,

@@ -63,6 +63,13 @@ param entraClientSecretValue string = ''
 @description('Explicit LinkedIn OIDC pilot feature flag. Disabled by default in every environment.')
 param linkedinOidcEnabled string = 'false'
 
+@allowed([
+  'false'
+  'true'
+])
+@description('Public Web Search profile suggestions. Disabled by default in every environment.')
+param profileEnrichmentEnabled string = 'false'
+
 @description('LinkedIn developer-application client ID. Empty while the pilot is not configured.')
 param linkedinClientId string = ''
 
@@ -495,6 +502,7 @@ module containerApps './modules/container-apps.bicep' = {
     linkedinClientId: linkedinClientId
     linkedinClientSecretValue: linkedinClientSecretValue
     linkedinOidcEnabled: linkedinOidcEnabled
+    profileEnrichmentEnabled: profileEnrichmentEnabled
     linkedinPictureHostAllowlist: linkedinPictureHostAllowlist
     linkedinPilotOwnerAllowlist: linkedinPilotOwnerAllowlist
     linkedinRedirectUri: deployedLinkedInRedirectUri

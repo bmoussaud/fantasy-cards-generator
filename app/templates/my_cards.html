@@ -55,7 +55,7 @@
                             />
                             <span>Select</span>
                         </label>
-                        <a class="card-summary__media{% if not card.image_url %} is-broken{% endif %}" href="/my/cards/{{ card.card_id }}">
+                        <a class="card-summary__media{% if card.abilities_embedded and card.image_url %} card-summary__media--inscribed{% endif %}{% if not card.image_url %} is-broken{% endif %}" href="/my/cards/{{ card.card_id }}">
                             {% if card.image_url %}
                                 <img src="{{ card.image_url }}" alt="Generated artwork for {{ card.name }}" loading="lazy" />
                             {% endif %}

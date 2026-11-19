@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from app.generation import _default_azure_credential, now_iso
 from app.problems import ProblemDetails
+from app.profile_enrichment_contract import validate_ability_descriptions
 from app.settings import AppSettings
 
 PROFILE_DOCUMENT_ID = "profile:current"
@@ -22,7 +23,43 @@ class ProfessionalProfile(BaseModel):
     title: str = Field(min_length=2, max_length=120)
     current_role: str = Field(min_length=2, max_length=120)
     expertise: list[str] = Field(min_length=1, max_length=5)
+    expertise_descriptions: list[str] = Field(default_factory=list, max_length=5)
     post_excerpts: list[str] = Field(default_factory=list, max_length=3)
+
+    @model_validator(mode="before")
+    @classmethod
+    def preserve_ability_pairs(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        names = value.get("expertise")
+        descriptions = value.get("expertise_descriptions", [])
+        if not isinstance(names, list) or not isinstance(descriptions, list):
+            return value
+        if not descriptions:
+            return value
+        if len(names) != len(descriptions):
+            raise ValueError("ability_description_pair_mismatch")
+        if any(not isinstance(item, str) for item in names + descriptions):
+            raise ValueError("invalid_ability_description")
+        if any(
+            not name.strip() and description.strip()
+            for name, description in zip(names, descriptions, strict=True)
+        ):
+            raise ValueError("orphaned_ability_description")
+        pairs = [
+            (name, description.strip())
+            for name, description in zip(names, descriptions, strict=True)
+            if name.strip()
+        ]
+        return {
+            **value,
+            "expertise": [name for name, _ in pairs],
+            "expertise_descriptions": (
+                [description for _, description in pairs]
+                if any(description for _, description in pairs)
+                else []
+            ),
+        }
 
     @field_validator("display_name", "title", "current_role", mode="before")
     @classmethod
@@ -42,6 +79,7 @@ class ProfessionalProfile(BaseModel):
 
     @model_validator(mode="after")
     def validate_context(self) -> ProfessionalProfile:
+        validate_ability_descriptions(self.expertise, self.expertise_descriptions)
         for values, minimum, maximum in (
             (self.expertise, 2, 80),
             (self.post_excerpts, 20, 500),
@@ -54,6 +92,7 @@ class ProfessionalProfile(BaseModel):
             self.current_role,
             *self.expertise,
             *self.post_excerpts,
+            *self.expertise_descriptions,
         ]
         if any(
             "linkedin.com/in/" in value.casefold() or "linkedin.com/pub/" in value.casefold()
@@ -67,14 +106,20 @@ class ProfessionalProfile(BaseModel):
             )
         return self
 
-    def context(self, creative_direction: str | None = None) -> str:
+    def context(
+        self, creative_direction: str | None = None, *, expertise: list[str] | None = None
+    ) -> str:
         sections = [
             f"Identity (user-confirmed): {self.display_name}",
             f"Professional title (user-provided): {self.title}",
             f"Current role (user-provided): {self.current_role}",
-            "Explicit expertise (user-provided, not LinkedIn-verified):\n"
-            + "\n".join(f"- {item}" for item in self.expertise),
         ]
+        selected_expertise = self.expertise if expertise is None else expertise
+        if selected_expertise:
+            sections.append(
+                "Explicit expertise (user-provided, not LinkedIn-verified):\n"
+                + "\n".join(f"- {item}" for item in selected_expertise)
+            )
         if self.post_excerpts:
             sections.append(
                 "Recent post excerpts (user-selected source material):\n"
@@ -83,7 +128,9 @@ class ProfessionalProfile(BaseModel):
         if creative_direction:
             sections.append(f"Creative direction: {creative_direction}")
         sections.append(
-            "Interpret interests as themes only; do not present them as certified expertise."
+            "Interpret interests as themes only; do not present them as certified expertise. "
+            "Role and expertise may include fictional card abilities, "
+            "not professional qualifications."
         )
         return "\n\n".join(sections)
 

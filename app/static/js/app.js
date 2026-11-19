@@ -6,6 +6,73 @@
 (function () {
   "use strict";
   var ALLOWED_PHOTO_TYPES = ["image/jpeg", "image/png", "image/webp"];
+  var profileEditor = document.getElementById("profile-editor");
+  if (profileEditor) {
+    var enrichmentStart = profileEditor.querySelector("[data-enrichment-start]");
+    var enrichmentCancel = profileEditor.querySelector("[data-enrichment-cancel]");
+    var enrichmentProgress = document.getElementById("enrichment-progress");
+    var enrichmentPending = false;
+    var enrichmentCancelling = false;
+
+    function resetEnrichmentPending() {
+      enrichmentPending = false;
+      enrichmentCancelling = false;
+      enrichmentCancel.removeAttribute("aria-disabled");
+      enrichmentStart.hidden = false;
+      enrichmentCancel.hidden = true;
+      enrichmentProgress.hidden = true;
+    }
+
+    profileEditor.addEventListener("submit", function (event) {
+      var button = event.submitter;
+      var progress = enrichmentProgress;
+      if (!button || !progress) {
+        return;
+      }
+      if (button === enrichmentCancel) {
+        if (enrichmentCancelling) {
+          event.preventDefault();
+          return;
+        }
+        enrichmentCancelling = true;
+        enrichmentCancel.setAttribute("aria-disabled", "true");
+        progress.textContent = "Cancelling the public search. Nothing is saved.";
+      } else if (button === enrichmentStart) {
+        if (enrichmentPending) {
+          event.preventDefault();
+          return;
+        }
+        var name = document.getElementById("display-name");
+        var consent = profileEditor.querySelector('[name="public_lookup_consent"]');
+        name.removeAttribute("aria-invalid");
+        consent.removeAttribute("aria-invalid");
+        var invalidName = !name.value.trim() || name.value.indexOf("@") !== -1;
+        if (invalidName || !consent.checked) {
+          event.preventDefault();
+          var missing = invalidName ? name : consent;
+          missing.setAttribute("aria-invalid", "true");
+          progress.hidden = false;
+          progress.textContent = invalidName
+            ? "Enter a public name or pseudonym in Display name, not an email. No search has started."
+            : "Select the public-search consent checkbox before searching. No search has started.";
+          missing.focus();
+          return;
+        }
+        enrichmentPending = true;
+        enrichmentCancel.hidden = false;
+        progress.hidden = false;
+        progress.textContent =
+          "Sending your public search request; waiting for suggestions (up to two minutes). " +
+          "Nothing is saved. Cancel keeps your editor draft; already-started calls may still be billed.";
+        enrichmentCancel.focus();
+        enrichmentStart.hidden = true;
+      } else {
+        resetEnrichmentPending();
+      }
+    });
+    window.addEventListener("pageshow", resetEnrichmentPending);
+    window.addEventListener("pagehide", resetEnrichmentPending);
+  }
 
   function formatPhotoSize(bytes) {
     if (bytes < 1024 * 1024) {
@@ -822,6 +889,61 @@
   bindCardSelectionManager();
   bindConfirmModalForms();
 
+  var imageCooldownUntil = 0;
+  var imageCooldownTimer = null;
+  var activeGenerationRequests = new Set();
+
+  function updateImageCooldown() {
+    if (!imageCooldownUntil) {
+      return;
+    }
+    var seconds = Math.max(0, Math.ceil((imageCooldownUntil - Date.now()) / 1000));
+    document.querySelectorAll(
+      "[data-card-generator-form] button[type='submit'], [data-artwork-retry-form] button[type='submit']"
+    ).forEach(function (button) {
+      if (seconds > 0) {
+        if (!button.disabled) {
+          button.dataset.imageCooldownOwned = "true";
+        }
+        button.disabled = true;
+      } else if (button.dataset.imageCooldownOwned && !activeGenerationRequests.size) {
+        button.disabled = false;
+        delete button.dataset.imageCooldownOwned;
+      }
+    });
+    document.querySelectorAll("[data-image-rate-limit-status]").forEach(function (status) {
+      status.textContent = seconds > 0
+        ? "Wait " + seconds + " seconds before trying again. Your inputs are preserved; retry manually when the wait ends."
+        : "You can try again now. No generation starts automatically.";
+    });
+    if (!seconds && imageCooldownTimer !== null) {
+      clearInterval(imageCooldownTimer);
+      imageCooldownTimer = null;
+    }
+  }
+
+  document.body.addEventListener("htmx:beforeRequest", function (event) {
+    var detail = event.detail;
+    if (!detail || !detail.target || detail.target.id !== "generation-content") {
+      return;
+    }
+    if (Date.now() < imageCooldownUntil) {
+      event.preventDefault();
+      updateImageCooldown();
+      return;
+    }
+    activeGenerationRequests.add(detail.xhr || detail.elt);
+  });
+
+  document.body.addEventListener("htmx:afterRequest", function (event) {
+    var detail = event.detail;
+    if (detail) {
+      activeGenerationRequests.delete(detail.xhr || detail.elt);
+    }
+    // HTMX restores request-disabled controls before dispatching afterRequest.
+    updateImageCooldown();
+  });
+
   // HTMX does not swap error responses by default. Only render our HTML error
   // partials in the generation region, retaining the HTTP/error semantics.
   document.body.addEventListener("htmx:beforeSwap", function (event) {
@@ -837,6 +959,19 @@
       (detail.xhr.getResponseHeader("Content-Type") || "").startsWith("text/html")
     ) {
       detail.shouldSwap = true;
+      if (
+        detail.xhr.status === 429 &&
+        detail.xhr.getResponseHeader("X-Generation-Error") === "image_rate_limited"
+      ) {
+        var retryAfter = detail.xhr.getResponseHeader("Retry-After") || "";
+        if (/^[0-9]{1,4}$/.test(retryAfter) && Number(retryAfter) > 0 && Number(retryAfter) <= 3600) {
+          imageCooldownUntil = Math.max(imageCooldownUntil, Date.now() + Number(retryAfter) * 1000);
+          if (imageCooldownTimer === null) {
+            imageCooldownTimer = setInterval(updateImageCooldown, 1000);
+          }
+          updateImageCooldown();
+        }
+      }
     }
   });
 
@@ -870,6 +1005,7 @@
     if (!target || target.id !== "generation-content" || !target.firstElementChild) {
       return;
     }
+    updateImageCooldown();
     var prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     target.scrollIntoView({
       behavior: prefersReducedMotion ? "auto" : "smooth",

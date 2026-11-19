@@ -35,6 +35,9 @@
     "linkedinOidcEnabled": {
       "value": "${LINKEDIN_OIDC_ENABLED=false}"
     },
+    "profileEnrichmentEnabled": {
+      "value": "${PROFILE_ENRICHMENT_ENABLED=false}"
+    },
     "linkedinClientId": {
       "value": "${LINKEDIN_CLIENT_ID=}"
     },

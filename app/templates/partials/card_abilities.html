@@ -1,0 +1,8 @@
+<div class="card-face__rules{% if (card.abilitiesEmbedded and card.imageUrl) or (card.abilities_embedded and card.image_url) %} card-face__rules--embedded{% endif %}">
+    <h3 class="card-face__abilities-heading">Abilities</h3>
+    <ul class="card-face__abilities">
+        {% for ability in card.abilities %}
+            <li><strong>{{ ability.name }}</strong> {{ ability.description }}</li>
+        {% endfor %}
+    </ul>
+</div>

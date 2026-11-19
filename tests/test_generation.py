@@ -3,6 +3,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
+from email import policy
+from email.parser import BytesParser
+from io import BytesIO
 from types import SimpleNamespace
 from typing import Literal
 from uuid import uuid4
@@ -10,6 +14,7 @@ from uuid import uuid4
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from PIL import Image
 from starlette.requests import Request
 
 from app import generation as generation_module
@@ -165,7 +170,7 @@ def test_profile_keeps_expertise_hint_without_generator_interpretation_paragraph
     text = " ".join(response.text.split())
 
     assert "Imported from LinkedIn and fully editable." not in text
-    assert "Interests are not automatically treated as certified expertise." in text
+    assert "Card abilities are not professional certifications." in text
     save_test_profile(authenticated_client)
     assert (
         "Fantasy powers and card text are creative interpretations"
@@ -514,6 +519,11 @@ def test_generation_with_photo_preserves_actionable_upstream_error_class(
         assert response.headers["X-Generation-Error"] == expected_code
         assert f"Error code: {expected_code}" in response.text
         assert "internal_error" not in response.text
+        if upstream_status == 429:
+            assert "Wait 75 seconds before trying again" in response.text
+            assert "data-image-rate-limit-status" in response.text
+        else:
+            assert "data-image-rate-limit-status" not in response.text
     else:
         assert response.json()["errorCode"] == expected_code
     assert "region" not in response.text
@@ -2574,6 +2584,8 @@ def test_foundry_image_edit_uses_edits_endpoint_and_multipart(
     monkeypatch.setenv("FOUNDRY_ENDPOINT", "https://foundry.example")
     monkeypatch.setenv("FOUNDRY_IMAGE_DEPLOYMENT", "gpt-image-2")
 
+    reference = BytesIO()
+    Image.new("RGB", (32, 48)).save(reference, format="PNG")
     captured: dict[str, object] = {}
     real_async_client = httpx.AsyncClient
 
@@ -2611,7 +2623,7 @@ def test_foundry_image_edit_uses_edits_endpoint_and_multipart(
         client.generate_image_edit(
             "A radiant knight raising a silver shield.",
             reference_image=ReferenceImageUpload(
-                content=b"mock-image-bytes",
+                content=reference.getvalue(),
                 content_type="image/png",
                 filename="portrait.png",
             ),
@@ -2632,6 +2644,103 @@ def test_foundry_image_edit_uses_edits_endpoint_and_multipart(
     assert b'name="prompt"' in body
     assert b"A radiant knight raising a silver shield." in body
     assert b'name="image"; filename="portrait.png"' in body
+
+
+@pytest.mark.parametrize(
+    ("encoding", "declared_type", "mode", "converted"),
+    [
+        ("BMP", "image/jpeg", "RGB", True),
+        ("PNG", "image/jpeg", "RGB", True),
+        ("PNG", "image/png", "L", True),
+        ("JPEG", "image/jpeg", "RGB", False),
+        ("PNG", "image/png", "RGBA", False),
+    ],
+)
+def test_image_edit_canonicalizes_incompatible_reference_encodings(
+    monkeypatch: pytest.MonkeyPatch,
+    encoding: str,
+    declared_type: str,
+    mode: str,
+    converted: bool,
+) -> None:
+    monkeypatch.setenv("FOUNDRY_ENDPOINT", "https://foundry.example")
+    monkeypatch.setenv("FOUNDRY_IMAGE_DEPLOYMENT", "gpt-image-2")
+    output = BytesIO()
+    Image.new(mode, (32, 48)).save(output, format=encoding)
+    original = output.getvalue()
+    real_async_client = httpx.AsyncClient
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        multipart = BytesParser(policy=policy.default).parsebytes(
+            b"Content-Type: "
+            + request.headers["Content-Type"].encode()
+            + b"\r\n\r\n"
+            + request.content
+        )
+        part = next(
+            part
+            for part in multipart.iter_parts()
+            if part.get_param("name", header="content-disposition") == "image"
+        )
+        payload = part.get_payload(decode=True)
+        assert part.get_content_type() == ("image/png" if converted else declared_type)
+        assert part.get_filename() == ("reference-image.png" if converted else "source-image")
+        with Image.open(BytesIO(payload)) as image:
+            assert image.format == ("PNG" if converted else encoding)
+            assert image.mode in {"RGB", "RGBA"}
+            assert image.size == (32, 48)
+            image.verify()
+        if not converted:
+            assert payload == original
+        return httpx.Response(200, json={"data": [{"b64_json": generation_module.PNG_1X1_BASE64}]})
+
+    def build_client(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_async_client(*args, **kwargs)
+
+    monkeypatch.setattr(generation_module.httpx, "AsyncClient", build_client)
+    client = AzureFoundryAIClient(load_app_settings())
+    client._credential = SimpleNamespace(
+        get_token=lambda *_args, **_kwargs: SimpleNamespace(token="synthetic-test-token")
+    )
+    asyncio.run(
+        client.generate_image_edit(
+            "A blue crystal.",
+            reference_image=ReferenceImageUpload(
+                content=original, content_type=declared_type, filename="source-image"
+            ),
+            request_id="synthetic-encoding-test",
+        )
+    )
+    assert len(requests) == 1
+
+
+def test_image_edit_rejects_unreadable_reference_before_provider_request(monkeypatch) -> None:
+    monkeypatch.setenv("FOUNDRY_ENDPOINT", "https://foundry.example")
+    monkeypatch.setenv("FOUNDRY_IMAGE_DEPLOYMENT", "gpt-image-2")
+    client = AzureFoundryAIClient(load_app_settings())
+
+    async def unexpected_token():
+        pytest.fail("Unreadable photos must not start a provider request.")
+
+    monkeypatch.setattr(client, "_access_token", unexpected_token)
+    with pytest.raises(ProblemDetails) as caught:
+        asyncio.run(
+            client.generate_image_edit(
+                "A blue crystal.",
+                reference_image=ReferenceImageUpload(
+                    content=b"NEVER-EXPOSE-private-photo",
+                    content_type="image/jpeg",
+                    filename="private.jpg",
+                ),
+                request_id="synthetic-unreadable-test",
+            )
+        )
+    assert caught.value.status_code == 422
+    assert caught.value.error_code == "invalid_photo_upload"
+    assert "NEVER-EXPOSE" not in str(caught.value)
 
 
 @pytest.mark.parametrize("edit", [False, True])
@@ -2682,6 +2791,62 @@ def test_foundry_image_throttling_preserves_only_bounded_retry_delay(
     assert caught.value.error_code == "RateLimitReached"
     assert caught.value.retry_after_seconds == expected
     assert "NEVER-EXPOSE-payload" not in str(caught.value)
+
+
+@pytest.mark.parametrize("valid_image", [True, False])
+def test_image_file_rejection_records_only_bounded_encoding_diagnostics(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, valid_image: bool
+) -> None:
+    from app import telemetry
+
+    monkeypatch.setenv("FOUNDRY_ENDPOINT", "https://foundry.example")
+    monkeypatch.setenv("FOUNDRY_IMAGE_DEPLOYMENT", "gpt-image-2")
+    monkeypatch.setattr(telemetry, "_enabled", True)
+    private = "NEVER-EXPOSE-private-photo-prompt-token"
+    output = BytesIO()
+    Image.new("L", (9, 11)).save(output, format="PNG")
+    image = output.getvalue() if valid_image else private.encode()
+    real_async_client = httpx.AsyncClient
+
+    def build_client(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(
+            lambda request: httpx.Response(
+                400, json={"error": {"code": "invalid_image_file", "message": private}}
+            )
+        )
+        return real_async_client(*args, **kwargs)
+
+    monkeypatch.setattr(generation_module.httpx, "AsyncClient", build_client)
+    client = AzureFoundryAIClient(load_app_settings())
+    client._credential = SimpleNamespace(
+        get_token=lambda *_args, **_kwargs: SimpleNamespace(token=private)
+    )
+    with caplog.at_level(logging.INFO, logger=telemetry.LOGGER_NAME):
+        with pytest.raises(UpstreamServiceError) as caught:
+            asyncio.run(
+                client._post_multipart(
+                    "/openai/deployments/gpt-image-2/images/edits",
+                    data={"prompt": private},
+                    files={"image": (private + ".jpg", image, "image/jpeg")},
+                    api_version="2025-04-01-preview",
+                    service_name="foundry-image",
+                )
+            )
+    records = [record for record in caplog.records if record.msg == "image.reference_rejected"]
+    assert len(records) == 1
+    attributes = {
+        key: value for key, value in vars(records[0]).items() if key.startswith("fcg_reference_")
+    }
+    assert attributes == {
+        "fcg_reference_format": "png" if valid_image else "other",
+        "fcg_reference_mode": "l" if valid_image else "other",
+        "fcg_reference_dimensions": "under_512" if valid_image else "other",
+        "fcg_reference_size": "under_1mb",
+        "fcg_reference_verified": valid_image,
+        "fcg_reference_mime_matches": False,
+    }
+    assert caught.value.error_code == "invalid_image_file"
+    assert private not in repr(vars(records[0])) + str(caught.value)
 
 
 # ---------------------------------------------------------------------------

@@ -22,6 +22,51 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SENSITIVE_SENTINEL = "NEVER-EXPORT-user@example.com-secret-token"
 
 
+def test_reference_diagnostics_are_closed_at_producer_and_final_export_boundaries(monkeypatch):
+    monkeypatch.delenv("OTEL_SDK_DISABLED", raising=False)
+    attributes = {
+        key: SENSITIVE_SENTINEL
+        for key in (
+            "fcg.reference_format",
+            "fcg.reference_mode",
+            "fcg.reference_dimensions",
+            "fcg.reference_size",
+            "fcg.reference_verified",
+            "fcg.reference_mime_matches",
+        )
+    }
+    attributes["private.photo"] = SENSITIVE_SENTINEL
+    expected = {
+        key: "other"
+        for key in (
+            "fcg.reference_format",
+            "fcg.reference_mode",
+            "fcg.reference_dimensions",
+            "fcg.reference_size",
+        )
+    }
+    assert telemetry.safe_attributes(attributes) == expected
+    record = SimpleNamespace(
+        attributes={key.replace(".", "_"): value for key, value in attributes.items()}
+    )
+    telemetry.PrivacyLogRecordProcessor().on_emit(record)
+    assert record.attributes == expected
+    assert SENSITIVE_SENTINEL not in repr(record)
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(telemetry.PrivacySpanProcessor())
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    with provider.get_tracer("reference-diagnostic-test").start_as_current_span(
+        "operation"
+    ) as span:
+        span.set_attributes(attributes)
+        span.add_event("image.reference_rejected", attributes)
+    exported = exporter.get_finished_spans()[0]
+    assert dict(exported.attributes) == dict(exported.events[0].attributes) == expected
+    assert SENSITIVE_SENTINEL not in repr(exported)
+    provider.shutdown()
+
+
 @pytest.mark.parametrize(
     "checker",
     ["unexpected_agent_response", "missing_raw_response", "non_stop_finish", "non_text_content"],

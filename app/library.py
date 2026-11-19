@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from app.generation import (
     AbstractCardRepository,
     AuthenticatedOwner,
+    CardAbility,
     GeneratedCardModel,
     StoredCard,
 )
@@ -47,6 +48,7 @@ class LibraryCardSummary:
     completed_at: str | None
     created_at_display: str
     completed_at_display: str | None
+    abilities_embedded: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +62,7 @@ class LibraryCardDetail:
     attack: int
     health: int
     rules_text: str
+    abilities: list[CardAbility]
     flavor_text: str
     art_brief: str
     prompt: str | None
@@ -68,6 +71,8 @@ class LibraryCardDetail:
     completed_at: str | None
     created_at_display: str
     completed_at_display: str | None
+    abilities_embedded: bool = False
+    card_frame_composed: bool = False
 
 
 class CardLibraryService:
@@ -109,6 +114,7 @@ class CardLibraryService:
             completed_at=record.completed_at,
             created_at_display=format_card_timestamp(record.created_at) or record.created_at,
             completed_at_display=format_card_timestamp(record.completed_at),
+            abilities_embedded=record.abilities_embedded,
         )
 
     async def _build_detail(self, record: StoredCard) -> LibraryCardDetail:
@@ -123,6 +129,7 @@ class CardLibraryService:
             attack=payload.attack,
             health=payload.health,
             rules_text=payload.rulesText,
+            abilities=payload.abilities,
             flavor_text=payload.flavorText,
             art_brief=payload.artBrief,
             prompt=record.prompt,
@@ -131,6 +138,8 @@ class CardLibraryService:
             completed_at=record.completed_at,
             created_at_display=format_card_timestamp(record.created_at) or record.created_at,
             completed_at_display=format_card_timestamp(record.completed_at),
+            abilities_embedded=record.abilities_embedded,
+            card_frame_composed=record.card_frame_composed,
         )
 
     async def _resolve_image_url(self, record: StoredCard) -> str | None:

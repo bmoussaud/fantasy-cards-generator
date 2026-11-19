@@ -68,6 +68,9 @@ def test_azd_service_wires_container_app_and_acr() -> None:
     assert "registry: ${AZURE_CONTAINER_REGISTRY_ENDPOINT}" in azure_yaml
     assert "resources:" in azure_yaml
     assert "port: 8000" in azure_yaml
+    assert (
+        "name: PROFILE_ENRICHMENT_ENABLED\n        value: ${PROFILE_ENRICHMENT_ENABLED=false}"
+    ) in azure_yaml
 
 
 def test_entra_user_provisioning_uses_postprovision_hook_and_is_secret_safe() -> None:
@@ -140,6 +143,16 @@ def test_bicep_exposes_azd_container_outputs_without_helloworld_image() -> None:
 def test_generation_runtime_env_vars_are_wired_from_bicep_outputs() -> None:
     container_apps_bicep = (REPO_ROOT / "infra" / "modules" / "container-apps.bicep").read_text()
     main_bicep = (REPO_ROOT / "infra" / "main.bicep").read_text()
+    parameters = json.loads((REPO_ROOT / "infra" / "main.parameters.json").read_text())
+
+    assert "param profileEnrichmentEnabled string = 'false'" in main_bicep
+    assert "profileEnrichmentEnabled: profileEnrichmentEnabled" in main_bicep
+    assert "param profileEnrichmentEnabled string = 'false'" in container_apps_bicep
+    assert "name: 'PROFILE_ENRICHMENT_ENABLED'" in container_apps_bicep
+    assert "value: profileEnrichmentEnabled" in container_apps_bicep
+    assert parameters["parameters"]["profileEnrichmentEnabled"]["value"] == (
+        "${PROFILE_ENRICHMENT_ENABLED=false}"
+    )
 
     assert "name: 'AI_MODE'" not in container_apps_bicep
     assert "name: 'PERSISTENCE_MODE'" in container_apps_bicep

@@ -305,9 +305,37 @@ def test_real_graph_exact_inputs_options_and_terminal_only(monkeypatch, model_tr
     assert len(outputs) == 1
     terminal = GenerateCardAgentResponse.model_validate_json(outputs[0])
     assert terminal.status == "completed" and terminal.card == result.card
-    assert result.card.model_dump() == CARD
+    assert result.card.model_dump() == CARD | {"abilities": []}
     assert len(content(exported)) == 1
     assert_closed(model_transport)
+
+
+@pytest.mark.parametrize("valid", [True, False])
+def test_hosted_specialist_requires_exact_selected_abilities(model_transport, valid):
+    calls, responses, *_ = model_transport
+    expertise = ["Cloud migration", "Incident response"]
+    abilities = [
+        {
+            "name": name,
+            "description": "Opens a temporary portal that moves allies out of danger.",
+        }
+        for name in (expertise if valid else expertise[:1])
+    ]
+    responses[:] = [model_response(CARD | {"abilities": abilities})]
+    request = GenerateCardAgentRequest(query="An arcane guardian", selectedExpertise=expertise)
+    body = wire()
+    body["input"][0]["content"][0]["text"] = request.model_dump_json()
+    response = asyncio.run(post(create_host(settings()), body))
+    assert response.status_code == 200
+    result = GenerateCardAgentResponse.model_validate_json(
+        response.json()["output"][0]["content"][0]["text"]
+    )
+    assert user_payload(calls[0])["selectedExpertise"] == expertise
+    assert result.status == ("completed" if valid else "held")
+    if valid:
+        assert [ability.model_dump() for ability in result.card.abilities] == abilities
+    else:
+        assert result.card is None
 
 
 @pytest.mark.parametrize("stage", STAGES)

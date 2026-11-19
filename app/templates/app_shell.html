@@ -52,111 +52,152 @@
             <form
                 method="post"
                 action="/my/profile"
+                id="profile-editor"
                 {% if profile_only %}class="profile-editor"{% endif %}
             >
+                {# Native implicit Enter must save, never activate the earlier lookup button. #}
+                <button type="submit" hidden tabindex="-1" data-profile-default-save>Save Profile</button>
                 <input type="hidden" name="profile_revision" value="{{ profile_revision }}" />
                 <input type="hidden" name="creation_draft_id" value="{{ linkedin_creation_draft_id }}" />
-                {% if profile_only %}
+                <div class="profile-editor__main">
+                <section class="profile-editor__card" aria-labelledby="profile-card-heading">
+                    <div class="profile-editor__band">
+                        <h2 id="profile-card-heading">Your card profile</h2>
+                        <div class="field">
+                            <label class="field__label" for="display-name">Display name or pseudonym</label>
+                            <p class="field__hint" id="display-name-hint">
+                                {% if linkedin_draft and not saved_profile %}
+                                    Imported from LinkedIn and fully editable.
+                                {% else %}
+                                    Choose the name shown at the top of the card.
+                                {% endif %}
+                            </p>
+                            <div class="profile-editor__name-search">
+                                <input class="field__control" id="display-name" name="display_name"
+                                       value="{{ profile_display_name }}" minlength="1" maxlength="80"
+                                       required aria-describedby="display-name-hint enrichment-name-hint enrichment-progress{% if enrichment_notice %} enrichment-result{% endif %}"
+                                       {% if enrichment_focus == "display-name" %}aria-invalid="true" autofocus{% endif %} />
+                                <div class="profile-editor__lookup-action">
+                                    <button class="btn btn-ghost" type="submit" formnovalidate
+                                            formaction="/my/profile/enrich" data-enrichment-start aria-controls="enrichment-progress"
+                                            {% if not enrichment_available %}disabled{% endif %}>
+                                        Find fantasy role and skills
+                                    </button>
+                                    <button class="btn btn-ghost" type="submit" formnovalidate hidden
+                                            formaction="/my/profile/enrich/cancel" data-enrichment-cancel
+                                            aria-describedby="enrichment-progress">
+                                        <span class="spinner" aria-hidden="true"></span>
+                                        Cancel search
+                                    </button>
+                                    {% if enrichment_available %}
+                                        <noscript>
+                                            <button class="btn btn-ghost" type="submit" formnovalidate
+                                                    formaction="/my/profile/enrich/cancel">Cancel search</button>
+                                        </noscript>
+                                    {% endif %}
+                                </div>
+                            </div>
+                            <p class="field__hint" id="enrichment-name-hint">
+                                Search public Web Search using only the current display name above.
+                                No search starts on typing, Save, or page load.
+                            </p>
+                            <label class="checkbox-row profile-editor__lookup-consent" for="public-lookup-consent">
+                                <input id="public-lookup-consent" type="checkbox" name="public_lookup_consent" value="true"
+                                       aria-describedby="enrichment-name-hint enrichment-progress{% if enrichment_notice %} enrichment-result{% endif %}"
+                                       {% if enrichment_focus == "public-lookup-consent" %}aria-invalid="true" autofocus{% endif %} />
+                                I agree to send only this display name to public Web Search.
+                            </label>
+                            <details class="profile-editor__lookup-help">
+                                <summary>About public search</summary>
+                                <p class="field__hint">
+                                    Public Web Search uses only your display name to find demonstrated expertise and
+                                    suggest an original, humorous fantasy role and abilities. No other private fields or
+                                    excerpts are sent. Suggestions fill the editor; review them before saving. Only
+                                    Save Profile changes your saved profile. Keep confidential details out of your profile
+                                    and shareable cards.
+                                </p>
+                            </details>
+                            <p class="loading-state" id="enrichment-progress" role="status" aria-live="polite" aria-atomic="true" hidden></p>
+                            {% if enrichment_notice %}
+                                <p class="notice" id="enrichment-result" role="status" tabindex="-1"
+                                   {% if enrichment_focus == "enrichment-result" %}autofocus{% endif %}>{{ enrichment_notice }}</p>
+                            {% endif %}
+                            {% if not enrichment_available %}
+                                <p role="status">Automatic suggestions are not configured. Manual editing is still available.</p>
+                            {% endif %}
+                        </div>
+                    </div>
+                    <div class="profile-editor__artwork">
+                        <h3>Illustration</h3>
+                        <p class="field__hint">No image is needed here. Choose a reference photo or art direction in the generator after saving.</p>
+                    </div>
+                    <div class="profile-editor__band">
+                        <h3>Title and role</h3>
+                        <div class="field">
+                            <label class="field__label" for="profile-title">Professional title or fictional card title</label>
+                            <p class="field__hint" id="profile-title-hint">For example, Platform Engineer or Keeper of the Cloud.</p>
+                            <input class="field__control" id="profile-title" name="title"
+                                   value="{{ profile_values.get('title', '') }}" minlength="2" maxlength="120"
+                                   required aria-describedby="profile-title-hint" />
+                        </div>
+                        <div class="field">
+                            <label class="field__label" for="current-role">Current role</label>
+                            <p class="field__hint" id="current-role-hint">
+                                Describe what you do, or give your character a fictional role. For example, Cloud Migration Lead or Guardian of the Gateway.
+                                This role is not verified by LinkedIn.
+                            </p>
+                            <input class="field__control" id="current-role" name="current_role"
+                                   value="{{ profile_values.get('current_role', '') }}" minlength="2" maxlength="120"
+                                   required aria-describedby="current-role-hint" />
+                        </div>
+                    </div>
+                    <div class="profile-editor__band">
+                        <fieldset>
+                            <legend class="field__label">Card abilities <span class="field__hint">(explicit expertise)</span></legend>
+                            <p class="field__hint" id="expertise-hint">
+                                Add one to five expertise statements or fictional skills, one per line.
+                                For example, Incident Response or Ward of Resilience. Card abilities are not professional certifications.
+                            </p>
+                            {% for index in range(1, 6) %}
+                                <div class="field">
+                                    <label class="field__label" for="expertise-{{ index }}">
+                                        Ability {{ index }}{% if index > 1 %} (optional){% endif %}
+                                    </label>
+                                    <input class="field__control" id="expertise-{{ index }}" name="expertise"
+                                           value="{{ profile_values.get('expertise', [])[index - 1] | default('') }}"
+                                           minlength="2" maxlength="80" {% if index == 1 %}required{% endif %}
+                                           aria-describedby="expertise-hint" />
+                                    <label class="field__label" for="expertise-description-{{ index }}">Ability {{ index }} explanation</label>
+                                    <p class="field__hint" id="expertise-description-hint-{{ index }}">Two or three fictional sentences explaining its effect and use (40–1,000 characters). Private to this profile; not sent to card generation.</p>
+                                    <textarea class="field__control" id="expertise-description-{{ index }}"
+                                              name="expertise_description" rows="4" maxlength="1000"
+                                              aria-describedby="expertise-description-hint-{{ index }}">{{ profile_values.get('expertise_descriptions', [])[index - 1] | default('') }}</textarea>
+                                </div>
+                            {% endfor %}
+                        </fieldset>
+                    </div>
+                </section>
                 <div class="profile-editor__actions">
                     <p class="profile-editor__intro">
                         Your profile is saved for this signed-in account. Editing it does not change existing cards.
                     </p>
                     <button class="btn btn-primary" type="submit">Save Profile and Generate</button>
                 </div>
+                </div>
+                {% if enrichment_result and enrichment_result.status == "completed" %}
+                    <section class="profile-editor__suggestions" aria-labelledby="enrichment-references-heading">
+                        <h2 id="enrichment-references-heading">Public references</h2>
+                        <p>The editor now contains fictional card themes, not verified professional qualifications.
+                           The title is a local fictional category, not a researched professional title.
+                           You can edit all fields before saving.</p>
+                        <p>Public Web Search references only; not saved in your profile or card.</p>
+                        <ul>
+                            {% for reference in enrichment_result.publicReferences %}
+                                <li><a href="{{ reference.url }}" target="_blank" rel="noopener noreferrer">{{ reference.title }}</a></li>
+                            {% endfor %}
+                        </ul>
+                    </section>
                 {% endif %}
-                <div{% if profile_only %} class="profile-editor__identity"{% endif %}>
-                <div class="field">
-                    <label class="field__label" for="display-name">Display name or pseudonym</label>
-                    <p class="field__hint" id="display-name-hint">
-                        {% if linkedin_draft and not saved_profile %}
-                            Imported from LinkedIn and fully editable.
-                        {% else %}
-                            Choose the name shown on the card.
-                        {% endif %}
-                    </p>
-                    <input
-                        class="field__control"
-                        id="display-name"
-                        name="display_name"
-                        value="{{ profile_display_name }}"
-                        minlength="1"
-                        maxlength="80"
-                        required
-                        aria-describedby="display-name-hint"
-                    />
-                </div>
-                <div class="field">
-                    <label class="field__label" for="profile-title">Professional title</label>
-                    <input class="field__control" id="profile-title" name="title"
-                           value="{{ profile_values.get('title', '') }}"
-                           minlength="2" maxlength="120" required />
-                </div>
-                <div class="field">
-                    <label class="field__label" for="current-role">Current role</label>
-                    <p class="field__hint" id="current-role-hint">
-                        User-provided; LinkedIn does not verify or supply this value.
-                    </p>
-                    <input
-                        class="field__control"
-                        id="current-role"
-                        name="current_role"
-                        value="{{ profile_values.get('current_role', '') }}"
-                        minlength="2"
-                        maxlength="120"
-                        required
-                        aria-describedby="current-role-hint"
-                    />
-                </div>
-                </div>
-                <div{% if profile_only %} class="profile-editor__details"{% endif %}>
-                <fieldset>
-                    <legend class="field__label">Explicit expertise</legend>
-                    <p class="field__hint" id="expertise-hint">
-                        Add one to five concrete expertise statements. Interests are not
-                        automatically treated as certified expertise.
-                    </p>
-                    {% for index in range(1, 6) %}
-                        <div class="field">
-                            <label class="field__label" for="expertise-{{ index }}">
-                                Expertise {{ index }}{% if index > 1 %} (optional){% endif %}
-                            </label>
-                            <input
-                                class="field__control"
-                                id="expertise-{{ index }}"
-                                name="expertise"
-                                value="{{ profile_values.get('expertise', [])[index - 1] | default('') }}"
-                                minlength="2"
-                                maxlength="80"
-                                {% if index == 1 %}required{% endif %}
-                                aria-describedby="expertise-hint"
-                            />
-                        </div>
-                    {% endfor %}
-                </fieldset>
-                <fieldset>
-                    <legend class="field__label">Recent post excerpts (optional)</legend>
-                    <p class="field__hint" id="post-excerpts-hint">
-                        Add up to three excerpts you selected yourself. Each populated excerpt
-                        must contain 20 to 500 characters.
-                    </p>
-                    {% for index in range(1, 4) %}
-                        <div class="field">
-                            <label class="field__label" for="post-excerpt-{{ index }}">
-                                Excerpt {{ index }}
-                            </label>
-                            <textarea
-                                class="field__control"
-                                id="post-excerpt-{{ index }}"
-                                name="post_excerpt"
-                                rows="3"
-                                minlength="20"
-                                maxlength="500"
-                                aria-describedby="post-excerpts-hint"
-                            >{{ profile_values.get('post_excerpts', [])[index - 1] | default('') }}</textarea>
-                        </div>
-                    {% endfor %}
-                </fieldset>
-                </div>
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
             </form>
             {% else %}
@@ -171,7 +212,9 @@
                     <dl class="profile-summary__facts">
                         <div><dt>Title</dt><dd>{{ profile.title }}</dd></div>
                         <div><dt>Role</dt><dd>{{ profile.current_role }}</dd></div>
-                        <div><dt>Expertise</dt><dd>{{ profile.expertise | join(", ") }}</dd></div>
+                        {% if not generation_profile_revision %}
+                            <div><dt>Expertise</dt><dd>{{ profile.expertise | join(", ") }}</dd></div>
+                        {% endif %}
                     </dl>
                     {% if profile.post_excerpts %}
                         <details class="profile-summary__posts">
@@ -196,6 +239,22 @@
                   hx-disabled-elt="find button[type='submit']"
                   hx-indicator="#generation-pending">
                 <button class="btn btn-primary" type="submit">Generate card</button>
+                {% if generation_profile_revision %}
+                <fieldset class="generation-expertise" aria-describedby="generation-expertise-hint">
+                    <legend class="field__label">Expertise for this card</legend>
+                    <p class="field__hint" id="generation-expertise-hint">
+                        Only checked items are used as expertise for this card. You can uncheck them all without changing your saved profile.
+                    </p>
+                    {% for expertise in profile.expertise %}
+                        <label class="generation-expertise__option">
+                            <input type="checkbox" name="expertise_index" value="{{ loop.index0 }}"
+                                   {% if loop.index <= 3 %}checked{% endif %} />
+                            <span>{{ expertise }}</span>
+                        </label>
+                    {% endfor %}
+                    <input type="hidden" name="expertise_profile_revision" value="{{ generation_profile_revision }}" />
+                </fieldset>
+                {% endif %}
                 <div class="field">
                     <label class="field__label" for="creative-direction">
                         Creative direction (optional)
