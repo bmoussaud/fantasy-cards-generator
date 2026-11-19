@@ -170,7 +170,7 @@ def test_profile_keeps_expertise_hint_without_generator_interpretation_paragraph
     text = " ".join(response.text.split())
 
     assert "Imported from LinkedIn and fully editable." not in text
-    assert "Interests are not automatically treated as certified expertise." in text
+    assert "Card abilities are not professional certifications." in text
     save_test_profile(authenticated_client)
     assert (
         "Fantasy powers and card text are creative interpretations"
