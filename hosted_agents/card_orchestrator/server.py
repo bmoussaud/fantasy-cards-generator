@@ -19,7 +19,9 @@ from pydantic import ValidationError
 from starlette.responses import JSONResponse
 
 from app.foundry_agent_client import GenerateCardAgentRequest
+from app.profile_enrichment_contract import ProfileEnrichmentRequest
 from hosted_agents.card_orchestrator.orchestrator import CardOrchestrator, RuntimeFailure
+from hosted_agents.card_orchestrator.profile_enrichment import ProfileEnrichmentRuntime
 from hosted_agents.card_orchestrator.settings import RuntimeSettings
 
 MAX_BODY_BYTES = 65536
@@ -71,7 +73,7 @@ def _validate_agent_reference(value: Any) -> None:
         raise WireValidationError("invalid_value", "agent_reference")
 
 
-def validate_wire(body: bytes) -> GenerateCardAgentRequest:
+def validate_wire(body: bytes) -> GenerateCardAgentRequest | ProfileEnrichmentRequest:
     try:
         data = json.loads(body, object_pairs_hook=_unique_object)
     except (ValueError, TypeError, UnicodeError, RecursionError):
@@ -143,6 +145,8 @@ def validate_wire(body: bytes) -> GenerateCardAgentRequest:
     if type(request["schemaVersion"]) is not int:
         raise WireValidationError("invalid_schema", "domain")
     try:
+        if request.get("operation") == "enrich_profile":
+            return ProfileEnrichmentRequest.model_validate(request, strict=True)
         return GenerateCardAgentRequest.model_validate(request, strict=True)
     except ValidationError:
         raise WireValidationError("invalid_schema", "domain") from None
@@ -265,6 +269,7 @@ def _disable_payload_telemetry() -> None:
         "httpx",
         "httpcore",
         "msal",
+        "mcp",
     ):
         logger = logging.getLogger(name)
         logger.handlers = [logging.NullHandler()]
@@ -289,7 +294,10 @@ async def _with_cancellation(operation: Any, *signals: asyncio.Event) -> Any:
 
 
 def create_host(
-    settings: RuntimeSettings, *, orchestrator: CardOrchestrator | None = None
+    settings: RuntimeSettings,
+    *,
+    orchestrator: CardOrchestrator | None = None,
+    enrichment_runtime: ProfileEnrichmentRuntime | None = None,
 ) -> ResponsesAgentServerHost:
     _disable_payload_telemetry()
     host = ResponsesAgentServerHost(
@@ -304,10 +312,20 @@ def create_host(
     )
     host.add_middleware(StatelessBoundary)
     runtime = orchestrator or CardOrchestrator(settings)
+    enrichment = enrichment_runtime or ProfileEnrichmentRuntime(settings)
 
     @host.response_handler
     async def respond(request, context, cancellation_signal):
         # SDK CreateResponse normalizes message types; validate the domain object again.
+        domain = json.loads(request["input"][0]["content"][0]["text"])
+        if domain.get("operation") == "enrich_profile":
+            query = ProfileEnrichmentRequest.model_validate(domain, strict=True)
+            response = await _with_cancellation(
+                enrichment.enrich(query),
+                cancellation_signal,
+                context.shutdown,
+            )
+            return TextResponse(context, request, text=response.model_dump_json())
         query = GenerateCardAgentRequest.model_validate_json(
             request["input"][0]["content"][0]["text"]
         )
@@ -328,6 +346,7 @@ def create_host(
                 yield stream.emit_failed(code=failure_code, message="Card generation unavailable.")
 
             return failed()
-        return TextResponse(context, request, text=response.model_dump_json())
+        exclude = {"card": {"abilities"}} if response.card and not response.card.abilities else None
+        return TextResponse(context, request, text=response.model_dump_json(exclude=exclude))
 
     return host

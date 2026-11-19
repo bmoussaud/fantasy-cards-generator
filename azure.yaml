@@ -44,6 +44,8 @@ services:
             agentVersion: "@latest"
             trafficPercentage: 100
     environmentVariables:
+      - name: PROFILE_ENRICHMENT_ENABLED
+        value: ${PROFILE_ENRICHMENT_ENABLED=false}
       - name: AZURE_AI_MODEL_DEPLOYMENT_NAME
         value: ${AZURE_AI_MODEL_DEPLOYMENT_NAME}
       - name: CARD_ORCHESTRATOR_VERSION

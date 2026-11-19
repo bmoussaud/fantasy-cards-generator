@@ -416,6 +416,26 @@ code {
   padding: var(--space-2);
 }
 
+.generation-expertise {
+  min-width: 0;
+  margin: 0 0 var(--space-4);
+  padding: 0;
+  border: 0;
+}
+
+.generation-expertise__option {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  padding-block: var(--space-2);
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.generation-expertise__option input {
+  flex: none;
+}
+
 .reference-photo-section {
   display: grid;
   gap: var(--space-4);
@@ -609,7 +629,7 @@ code {
 }
 
 .profile-editor,
-.profile-editor__details {
+.profile-editor__main {
   display: grid;
   gap: var(--space-6);
   min-width: 0;
@@ -620,13 +640,108 @@ code {
   align-items: start;
 }
 
-.profile-editor__identity,
-.profile-editor__details fieldset {
+.profile-editor__card {
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-1);
+}
+
+.profile-editor__band,
+.profile-editor__artwork {
+  padding: var(--space-4);
+}
+
+.profile-editor__band + .profile-editor__band,
+.profile-editor__artwork {
+  border-block-start: 1px solid var(--color-border-subtle);
+}
+
+.profile-editor__artwork {
+  border-block-end: 1px solid var(--color-border-subtle);
+  background: var(--color-surface-2);
+}
+
+.profile-editor__artwork .field__hint,
+.profile-editor__band .field:last-child {
+  margin-bottom: 0;
+}
+
+.profile-editor__band fieldset {
   min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.profile-editor__suggestions {
+  min-width: 0;
+  border-block-start: 1px solid var(--color-border-subtle);
+  padding-block-start: var(--space-4);
+  overflow-wrap: anywhere;
+}
+
+.profile-editor__name-search {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: var(--space-2);
+}
+
+.profile-editor__name-search .btn {
+  max-width: 100%;
+  white-space: normal;
+}
+
+.profile-editor__lookup-action {
+  display: grid;
+}
+
+.profile-editor__lookup-action > .btn {
+  grid-area: 1 / 1;
+}
+
+.profile-editor__lookup-action > .btn[hidden] {
+  display: inline-flex;
+  visibility: hidden;
+}
+
+.profile-editor__lookup-action noscript .btn {
+  margin-block-start: var(--space-2);
+}
+
+.profile-editor__lookup-help summary {
+  width: fit-content;
+  cursor: pointer;
+  color: var(--color-parchment);
+  text-decoration: underline;
+  text-underline-offset: 0.18em;
+}
+
+.profile-editor__lookup-help p {
+  margin-block: var(--space-2) 0;
+  padding: var(--space-2);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-2);
+}
+
+.profile-editor__lookup-consent {
+  display: flex;
+  align-items: start;
+  gap: var(--space-2);
+}
+
+.profile-editor__lookup-consent input {
+  flex: none;
+}
+
+@media (max-width: 40rem) {
+  .profile-editor__name-search {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .profile-editor__actions {
-  grid-column: 1 / -1;
   display: flex;
   align-items: center;
   justify-content: flex-end;
@@ -640,8 +755,9 @@ code {
 }
 
 .profile-editor__actions .btn {
-  flex: 0 0 auto;
+  max-width: 100%;
   margin-left: auto;
+  white-space: normal;
 }
 
 .profile-summary {
@@ -999,6 +1115,15 @@ code {
   display: none;
 }
 
+.card-summary__media--inscribed {
+  aspect-ratio: auto;
+}
+
+.card-summary__media--inscribed img {
+  height: auto;
+  object-fit: contain;
+}
+
 .card-summary__placeholder {
   position: absolute;
   inset: 0;
@@ -1188,6 +1313,18 @@ code {
   box-shadow: var(--elevation-glow);
 }
 
+.card-face--composed:has(> .card-portrait:not(.is-broken)) {
+  padding: 0;
+  gap: 0;
+  border: 0;
+  background: none;
+  box-shadow: none;
+}
+
+.card-face--composed:has(> .card-portrait:not(.is-broken)) > .card-portrait {
+  border: 0;
+}
+
 .card-face__header {
   display: flex;
   align-items: baseline;
@@ -1300,6 +1437,19 @@ code {
   margin: 0;
 }
 
+.card-face__abilities-heading {
+  font-size: inherit;
+  margin: 0 0 var(--space-2);
+}
+
+.card-face__abilities {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding-inline-start: var(--space-4);
+  overflow-wrap: anywhere;
+}
+
 .card-face__flavor {
   color: var(--color-parchment-dim);
   font-style: italic;
@@ -1324,7 +1474,9 @@ code {
 /* ------------------------------------------------------------------ */
 /* 11. Utilities                                                        */
 /* ------------------------------------------------------------------ */
-.visually-hidden {
+.visually-hidden,
+.card-face--composed:has(> .card-portrait:not(.is-broken)) > :is(.card-face__header, .card-face__badges, .card-face__stats, .card-face__flavor),
+.card-portrait:not(.is-broken) ~ .card-face__rules--embedded {
   position: absolute;
   width: 1px;
   height: 1px;
@@ -1386,8 +1538,15 @@ code {
 /* 12. Responsive breakpoints (~360 / 768 / 1024 / 1440)                */
 /* ------------------------------------------------------------------ */
 @media (min-width: 768px) {
-  .profile-editor {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  .profile-editor:has(.profile-editor__suggestions) {
+    grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  }
+
+  .profile-editor__suggestions {
+    border-block-start: 0;
+    border-inline-start: 1px solid var(--color-border-subtle);
+    padding-block-start: 0;
+    padding-inline-start: var(--space-4);
   }
 
   .generator-layout {

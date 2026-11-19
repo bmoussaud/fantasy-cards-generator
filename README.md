@@ -63,6 +63,16 @@ Authentication is implemented with Microsoft Entra ID using the multi-tenant
 `.env`, provide the Entra values, and follow `docs/auth-setup.md` for app
 registration details.
 
+## Profile suggestions
+
+My Profile can propose editable, fictional card roles and skills using public
+Foundry managed Web Search only, with explicit public-name/context consent.
+Successful suggestions fill the editable name, fictional title, role and expertise
+directly, including a private 2–3 sentence explanation for each ability.
+Explanations are editable and saved only with Save Profile, never sent to card
+generation. Suggestions never save automatically. The feature is default-off.
+See [profile enrichment and controlled activation](docs/profile-enrichment.md).
+
 ## Run tests
 
 ```bash

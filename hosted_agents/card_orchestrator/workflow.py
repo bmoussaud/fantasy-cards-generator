@@ -179,7 +179,7 @@ class StageBoundary(AgentMiddleware):
             try:
                 payload = json.loads(context.messages[0].text)
                 request = GenerateCardAgentRequest.model_validate(payload, strict=True)
-                expected = {"query": request.query}
+                expected = request.specialist_payload()
                 if payload != expected:
                     raise _Stop("held", "invalid_evidence")
             except (ValueError, TypeError):
@@ -287,7 +287,7 @@ class PrePromptSafety(Executor):
         except Exception as exc:
             await ctx.send_message(TerminalOutcome.from_exception(exc, state))
             return
-        await ctx.send_message(specialist_request({"query": request.query}))
+        await ctx.send_message(specialist_request(request.specialist_payload()))
 
 
 class MergeAndGate(Executor):

@@ -73,6 +73,13 @@ param entraPostLogoutRedirectUri string = ''
 @description('Explicit LinkedIn OIDC pilot feature flag injected as LINKEDIN_OIDC_ENABLED.')
 param linkedinOidcEnabled string = 'false'
 
+@allowed([
+  'false'
+  'true'
+])
+@description('Public Web Search profile suggestions injected as PROFILE_ENRICHMENT_ENABLED.')
+param profileEnrichmentEnabled string = 'false'
+
 @description('LinkedIn developer-application client ID injected as LINKEDIN_CLIENT_ID.')
 param linkedinClientId string = ''
 
@@ -377,6 +384,10 @@ var containerAppEnv = concat(
     {
       name: 'FOUNDRY_AGENT_TIMEOUT_SECONDS'
       value: foundryAgentTimeoutSeconds
+    }
+    {
+      name: 'PROFILE_ENRICHMENT_ENABLED'
+      value: profileEnrichmentEnabled
     }
     {
       name: 'COSMOS_ENDPOINT'

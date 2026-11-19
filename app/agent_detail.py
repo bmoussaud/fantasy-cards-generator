@@ -415,17 +415,17 @@ class ImageOutputProjection(Closed):
 
 
 def _contracts(stage: Stage) -> tuple[str, type[BaseModel], type[BaseModel]]:
-    from app.generation import GeneratedCardModel
-    from app.specialist_contract import SCHEMAS, effective_instructions
+    from app.generation import CardTextFields
+    from app.specialist_contract import effective_instructions
 
     if stage == "generation":
         return (
             effective_instructions(stage),
             QueryProjection,
-            SCHEMAS[stage],
+            CardTextFields,
         )
     if stage == "hosted_invocation":
-        return "", QueryProjection, GeneratedCardModel
+        return "", QueryProjection, CardTextFields
     return "", ImageInputProjection, ImageOutputProjection
 
 

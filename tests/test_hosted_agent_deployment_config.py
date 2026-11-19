@@ -348,7 +348,7 @@ def test_root_manifest_card_orchestrator_matches_nested_contract() -> None:
 
     assert _root_agent_environment() == {
         item["name"]: item["value"] for item in nested_service["environmentVariables"]
-    }
+    } | {"PROFILE_ENRICHMENT_ENABLED": "${PROFILE_ENRICHMENT_ENABLED=false}"}
 
 
 def _root_agent_environment() -> dict[str, str]:

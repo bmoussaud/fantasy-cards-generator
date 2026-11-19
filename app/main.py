@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import secrets
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -77,6 +78,20 @@ from app.photos import (
     SavedPhotoService,
 )
 from app.problems import ProblemDetails
+from app.profile_enrichment import (
+    MAX_SECONDS,
+    EnrichmentDraft,
+    EnrichmentFailure,
+    EnrichmentRepository,
+    EnrichmentSettings,
+    canonical_owner,
+    digest,
+    new_transaction,
+)
+from app.profile_enrichment import (
+    SESSION_KEY as ENRICHMENT_SESSION_KEY,
+)
+from app.profile_enrichment_contract import ProfileEnrichmentRequest, ProfileEnrichmentResponse
 from app.profiles import ProfessionalProfile, ProfileGenerationOptions
 from app.settings import SettingsError, load_app_settings
 from app.telemetry import (
@@ -239,6 +254,10 @@ def create_app(services: AppServices | None = None) -> FastAPI:
     linkedin_settings = load_linkedin_settings()
     app_settings = load_app_settings()
     app_services = services or create_services(app_settings)
+    enrichment_settings = EnrichmentSettings.from_environment()
+    if app_services.profile_enrichment_repository is None:
+        app_services.profile_enrichment_repository = EnrichmentRepository()
+    enrichment_repository = app_services.profile_enrichment_repository
     card_service = CardGenerationService(app_services)
     card_library_service = CardLibraryService(app_services.card_repository)
     deletion_service = DeletionService(
@@ -252,6 +271,7 @@ def create_app(services: AppServices | None = None) -> FastAPI:
         photo_asset_store=app_services.photo_asset_store,
         linkedin_transient_repository=app_services.linkedin_transient_repository,
         profile_repository=app_services.profile_repository,
+        profile_enrichment_repository=enrichment_repository,
     )
     photo_service = SavedPhotoService(
         settings=app_services.settings,
@@ -387,6 +407,16 @@ def create_app(services: AppServices | None = None) -> FastAPI:
                 ),
             },
         )
+        if request.url.path.startswith("/my/profile/enrich"):
+            # A slow response must never reinstate a cookie cleared by logout/account switch.
+            response.raw_headers = [
+                (name, value)
+                for name, value in response.raw_headers
+                if not (
+                    name.lower() == b"set-cookie" and value.startswith(b"fantasy_cards_session=")
+                )
+            ]
+            response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["X-Request-ID"] = request.state.request_id
         if get_session_user(request) is not None:
             response.headers["Cache-Control"] = "no-store"
@@ -407,6 +437,17 @@ def create_app(services: AppServices | None = None) -> FastAPI:
     async def handle_problem_details(request: Request, exc: ProblemDetails):
         request.state.error_code = normalize_error_code(exc.error_code)
         if request.url.path.startswith("/ui/"):
+            retry_after = exc.headers.get("Retry-After", "")
+            image_retry_after = None
+            if (
+                exc.status_code == 429
+                and request.state.error_code == "image_rate_limited"
+                and retry_after.isascii()
+                and retry_after.isdigit()
+                and len(retry_after) <= 4
+                and 0 < int(retry_after) <= 3600
+            ):
+                image_retry_after = int(retry_after)
             response = templates.TemplateResponse(
                 request,
                 "partials/generation_error.html",
@@ -415,6 +456,7 @@ def create_app(services: AppServices | None = None) -> FastAPI:
                     error_title=exc.title,
                     error_detail=exc.detail,
                     error_code=request.state.error_code,
+                    image_retry_after=image_retry_after,
                     next_idempotency_key=uuid4().hex,
                 ),
                 status_code=exc.status_code,
@@ -492,7 +534,12 @@ def create_app(services: AppServices | None = None) -> FastAPI:
         profile_error: str | None = None,
         submitted_revision: str | None = None,
         response_status: int = 200,
+        enrichment_result: ProfileEnrichmentResponse | None = None,
+        enrichment_notice: str | None = None,
+        enrichment_focus: str | None = None,
     ) -> HTMLResponse:
+        if request.method == "GET":
+            request.session.setdefault(ENRICHMENT_SESSION_KEY, uuid4().hex)
         owner_id = user["owner_id"]
         saved_profile = await profile_storage(app_services.profile_repository.get(owner_id))
         values = (
@@ -520,8 +567,8 @@ def create_app(services: AppServices | None = None) -> FastAPI:
             "app_shell.html",
             template_context(
                 request,
-                page_title="My Profile" if request.url.path == "/my/profile" else "Generate a card",
-                profile_only=request.url.path == "/my/profile",
+                page_title="Generate a card" if request.url.path == "/app" else "My Profile",
+                profile_only=request.url.path != "/app",
                 user=user,
                 profile_photo_import_notice=request.session.pop(
                     "profile_photo_import_notice", None
@@ -539,7 +586,12 @@ def create_app(services: AppServices | None = None) -> FastAPI:
                     else saved_profile.revision if saved_profile else ""
                 ),
                 saved_profile=saved_profile,
+                generation_profile_revision=saved_profile.revision if saved_profile else None,
                 profile_error=profile_error,
+                enrichment_available=enrichment_settings.available(auth_settings),
+                enrichment_result=enrichment_result,
+                enrichment_notice=enrichment_notice,
+                enrichment_focus=enrichment_focus,
                 profile_saved=request.query_params.get("saved") == "true",
                 profile_display_name=(
                     values.get("display_name", linkedin_draft.display_name)
@@ -587,6 +639,7 @@ def create_app(services: AppServices | None = None) -> FastAPI:
             "title": form.get("title"),
             "current_role": form.get("current_role"),
             "expertise": form.getlist("expertise"),
+            "expertise_descriptions": form.getlist("expertise_description"),
             "post_excerpts": form.getlist("post_excerpt"),
         }
         revision = _form_string(form, "profile_revision")
@@ -603,6 +656,10 @@ def create_app(services: AppServices | None = None) -> FastAPI:
                     profile_error="The import draft changed or expired. Reload before saving.",
                     response_status=422,
                 )
+        if "post_excerpt" not in form:
+            saved = await profile_storage(app_services.profile_repository.get(user["owner_id"]))
+            if saved is not None:
+                values["post_excerpts"] = saved.profile.post_excerpts
         try:
             profile = ProfessionalProfile.model_validate(values)
         except ValidationError:
@@ -613,14 +670,16 @@ def create_app(services: AppServices | None = None) -> FastAPI:
                 submitted_revision=revision or "",
                 profile_error=(
                     "Check your profile: name 1–80 characters, title and role 2–120, "
-                    "1–5 expertise entries of 2–80 and up to 3 excerpts of 20–500. "
+                    "1–5 expertise entries of 2–80; each explanation needs 2–3 plain-text "
+                    "sentences (40–1,000 characters), paired with its ability. "
+                    "Up to 3 excerpts of 20–500. "
                     "The complete context must leave room for creative direction within "
                     "2,500 characters. LinkedIn profile URLs are not accepted."
                 ),
                 response_status=422,
             )
         decision = await app_services.moderation_service.moderate_text(
-            profile.context(), stage="pre_prompt"
+            "\n".join([profile.context(), *profile.expertise_descriptions]), stage="pre_prompt"
         )
         if decision.allowed is not True:
             return await render_workshop(
@@ -658,6 +717,294 @@ def create_app(services: AppServices | None = None) -> FastAPI:
             else "/app?saved=true#generate-card"
         )
         return RedirectResponse(destination, status_code=303)
+
+    async def enrichment_form(request: Request):
+        from urllib.parse import parse_qs
+
+        from starlette.datastructures import FormData
+
+        if request.headers.get("content-type", "").split(";")[0] != (
+            "application/x-www-form-urlencoded"
+        ):
+            raise HTTPException(415, "Submit the profile form to use this action.")
+        raw = bytearray()
+        async for chunk in request.stream():
+            if len(raw) + len(chunk) > 65_536:
+                raise HTTPException(413, "The profile form is too large.")
+            raw.extend(chunk)
+        try:
+            fields = parse_qs(
+                raw.decode("utf-8"), keep_blank_values=True, max_num_fields=40, errors="strict"
+            )
+        except (ValueError, UnicodeError):
+            raise HTTPException(422, "The profile form is invalid.") from None
+        form = FormData((key, item) for key, items in fields.items() for item in items)
+        app_services.csrf_protector.validate(request, _form_string(form, "csrf_token"))
+        return form
+
+    def enrichment_values(form) -> EnrichmentDraft:
+        return EnrichmentDraft(
+            display_name=str(form.get("display_name", "")),
+            title=str(form.get("title", "")),
+            current_role=str(form.get("current_role", "")),
+            expertise=[str(item) for item in form.getlist("expertise")],
+            expertise_descriptions=[str(item) for item in form.getlist("expertise_description")],
+            post_excerpts=[str(item) for item in form.getlist("post_excerpt")],
+        )
+
+    def enrichment_message(outcome: str) -> str:
+        return {
+            "no_evidence": "No suitable expertise was found. Your profile was not changed.",
+            "ambiguous_identity": (
+                "The public identity is ambiguous. Review the display name and try again."
+            ),
+            "unavailable_configuration": (
+                "Public profile suggestions are not enabled. Manual editing is still available."
+            ),
+            "refused": "The safety policy refused these suggestions.",
+            "identity_required": "This action requires a tenant and user-bound Microsoft login.",
+            "public_consent_required": "Select public-search consent beside Display name first.",
+            "public_name_invalid": (
+                "Enter a public name or pseudonym in Display name, not an email address."
+            ),
+            "busy": "A lookup is already running. Cancel it before starting another.",
+            "timeout": "The suggestions timed out. Your saved profile was not changed.",
+            "cancelled": "Suggestions cancelled or expired. Your saved profile was not changed.",
+            "stale_profile": (
+                "Your saved profile changed in another tab. Reload it before trying again."
+            ),
+        }.get(outcome, "Suggestions are unavailable. Your profile was not changed; try again.")
+
+    @app.post("/my/profile/enrich", response_class=HTMLResponse)
+    async def start_profile_enrichment(
+        request: Request, user: AuthenticatedUser = Depends(require_api_user)
+    ) -> Response:
+        form = await enrichment_form(request)
+        try:
+            draft = enrichment_values(form)
+        except ValidationError:
+            raise HTTPException(422, "The profile draft exceeds its field limits.") from None
+        revision = _form_string(form, "profile_revision")
+        transaction = None
+        result = None
+        outcome = "unavailable"
+        response_status = 200
+        rate_notice = None
+        retry_after = None
+        try:
+            async with asyncio.timeout(MAX_SECONDS):
+                if not enrichment_settings.available(auth_settings):
+                    raise EnrichmentFailure("unavailable_configuration")
+                owner_id = canonical_owner(user)
+                if form.get("public_lookup_consent") != "true":
+                    raise EnrichmentFailure("public_consent_required")
+                session = request.session.get(ENRICHMENT_SESSION_KEY)
+                if not isinstance(session, str) or not session:
+                    raise EnrichmentFailure("cancelled")
+                public_name = " ".join(draft.display_name.split())
+                if not public_name or "@" in public_name:
+                    raise EnrichmentFailure("public_name_invalid")
+                try:
+                    public_request = ProfileEnrichmentRequest(
+                        operation="enrich_profile",
+                        publicName=public_name,
+                        publicContext="",
+                        transactionId=uuid4().hex,
+                    )
+                except ValidationError:
+                    raise EnrichmentFailure("public_name_invalid") from None
+                state, pending = new_transaction(
+                    state=session,
+                    owner_id=owner_id,
+                    session_hash=digest(session),
+                    draft=draft,
+                    revision=revision,
+                    public_name=public_request.publicName,
+                    public_context=public_request.publicContext,
+                )
+                await profile_storage(enrichment_repository.create(pending))
+                transaction = pending
+                consumed = await profile_storage(
+                    enrichment_repository.consume(owner_id, state, digest(session))
+                )
+                if consumed is None:
+                    raise EnrichmentFailure("cancelled")
+                await card_service._enforce_rate_limits(
+                    owner_id,
+                    client_ip_from_request(
+                        request, trusted_proxy_hops=app_services.settings.trusted_proxy_hops
+                    ),
+                )
+                public_moderation = await app_services.moderation_service.moderate_text(
+                    "\n".join([public_request.publicName, public_request.publicContext]),
+                    stage="pre_prompt",
+                )
+                if not public_moderation.allowed:
+                    raise EnrichmentFailure("refused")
+                current = await profile_storage(
+                    app_services.profile_repository.get(transaction.owner_id)
+                )
+                if (current.revision if current else None) != transaction.revision:
+                    raise EnrichmentFailure("stale_profile")
+                if app_services.agent_client is None or not hasattr(
+                    app_services.agent_client, "enrich_profile"
+                ):
+                    raise EnrichmentFailure("unavailable_configuration")
+
+                async def admit_sources() -> None:
+                    current = await profile_storage(
+                        app_services.profile_repository.get(transaction.owner_id)
+                    )
+                    if (current.revision if current else None) != transaction.revision:
+                        raise EnrichmentFailure("stale_profile")
+                    if not await profile_storage(enrichment_repository.admit(transaction)):
+                        raise EnrichmentFailure("cancelled")
+
+                result = await app_services.agent_client.enrich_profile(
+                    ProfileEnrichmentRequest(
+                        operation="enrich_profile",
+                        publicName=transaction.public_name,
+                        publicContext=transaction.public_context,
+                        transactionId=transaction.transaction_id,
+                    ),
+                    before_dispatch=admit_sources,
+                )
+                outcome = result.status
+                current = await profile_storage(
+                    app_services.profile_repository.get(transaction.owner_id)
+                )
+                if (current.revision if current else None) != transaction.revision:
+                    raise EnrichmentFailure("stale_profile")
+                if outcome == "completed":
+                    moderation = await app_services.moderation_service.moderate_text(
+                        "\n".join(
+                            [
+                                result.current_role or "",
+                                *result.expertise,
+                                *result.expertise_descriptions,
+                            ]
+                        ),
+                        stage="post_text",
+                    )
+                    if not moderation.allowed:
+                        raise EnrichmentFailure("refused")
+                current = await profile_storage(
+                    app_services.profile_repository.get(transaction.owner_id)
+                )
+                if (current.revision if current else None) != transaction.revision:
+                    raise EnrichmentFailure("stale_profile")
+        except ProblemDetails as exc:
+            if exc.error_code != "rate_limit_exceeded":
+                raise
+            response_status = exc.status_code
+            rate_notice = exc.detail
+            retry_after = exc.headers.get("Retry-After")
+        except (EnrichmentFailure, ValidationError) as exc:
+            result = None
+            outcome = exc.status if isinstance(exc, EnrichmentFailure) else "invalid_response"
+            response_status = 503 if outcome == "unavailable_configuration" else 422
+        except TimeoutError:
+            result = None
+            outcome = "timeout"
+        finally:
+            if transaction is not None:
+                active = await profile_storage(enrichment_repository.finish(transaction))
+                if not active:
+                    result = None
+                    outcome = "cancelled"
+        values = draft.model_dump()
+        if outcome == "completed" and result is not None and transaction is not None:
+            values.update(
+                display_name=transaction.public_name,
+                title=(
+                    "Fictional card adventurer"
+                    if result.current_role == "Fantasy trading-card persona"
+                    else "Fantasy trading-card persona"
+                ),
+                current_role=result.current_role,
+                expertise=result.expertise,
+                expertise_descriptions=result.expertise_descriptions,
+            )
+        response = await render_workshop(
+            request,
+            user,
+            profile_values=values,
+            submitted_revision=revision or "",
+            enrichment_result=result if outcome == "completed" else None,
+            enrichment_notice=(
+                "Suggestions filled into the editor below. Review the name, fictional title, "
+                "role and skills, then Save Profile when ready. Nothing has been saved."
+                if outcome == "completed"
+                else rate_notice or enrichment_message(outcome)
+            ),
+            enrichment_focus=(
+                "display-name"
+                if outcome == "public_name_invalid"
+                else (
+                    "public-lookup-consent"
+                    if outcome == "public_consent_required"
+                    else "enrichment-result"
+                )
+            ),
+            response_status=response_status,
+        )
+        if retry_after:
+            response.headers["Retry-After"] = retry_after
+        return response
+
+    @app.post("/my/profile/enrich/apply", response_class=HTMLResponse)
+    @app.post("/my/profile/enrich/cancel", response_class=HTMLResponse)
+    async def apply_or_cancel_enrichment(
+        request: Request, user: AuthenticatedUser = Depends(require_api_user)
+    ) -> Response:
+        form = await enrichment_form(request)
+        try:
+            draft = enrichment_values(form)
+        except ValidationError:
+            raise HTTPException(422, "The profile draft exceeds its field limits.") from None
+        revision = _form_string(form, "profile_revision")
+        values = draft.model_dump()
+        notice = enrichment_message("cancelled")
+        error = None
+        if request.url.path.endswith("/cancel"):
+            session = request.session.get(ENRICHMENT_SESSION_KEY)
+            if isinstance(session, str):
+                await profile_storage(
+                    enrichment_repository.delete_owner(user["owner_id"], digest(session))
+                )
+        else:
+            values["current_role"] = str(form.get("proposed_role", ""))
+            values["expertise"] = [str(item) for item in form.getlist("proposed_expertise")]
+            values["expertise_descriptions"] = []
+            try:
+                profile = ProfessionalProfile.model_validate(values)
+                decision = await app_services.moderation_service.moderate_text(
+                    profile.context(), stage="pre_prompt"
+                )
+                if not decision.allowed:
+                    raise EnrichmentFailure("refused")
+                current = await profile_storage(
+                    app_services.profile_repository.get(user["owner_id"])
+                )
+                if (current.revision if current else None) != revision:
+                    raise EnrichmentFailure("stale_profile")
+                values = profile.model_dump()
+                notice = "Suggestions applied to the editor only. Save explicitly when ready."
+            except ValidationError:
+                error = "Complete your title and check the profile limits before applying."
+            except EnrichmentFailure as exc:
+                values = draft.model_dump()
+                error = enrichment_message(exc.status)
+        return await render_workshop(
+            request,
+            user,
+            profile_values=values,
+            submitted_revision=revision or "",
+            enrichment_notice=notice if not error else None,
+            profile_error=error,
+            enrichment_focus="enrichment-result" if not error else None,
+            response_status=422 if error else 200,
+        )
 
     @app.get("/my/cards", response_class=HTMLResponse)
     async def my_cards(
@@ -1546,6 +1893,8 @@ def create_app(services: AppServices | None = None) -> FastAPI:
         user = get_session_user(request)
         if linkedin_transient_repository is not None and user is not None:
             await linkedin_transient_repository.delete_owner(user["owner_id"])
+        if user is not None:
+            await profile_storage(enrichment_repository.delete_owner(user["owner_id"]))
         request.session.clear()
         return RedirectResponse(
             url=build_logout_redirect_target(auth_settings),
@@ -1747,11 +2096,8 @@ def create_app(services: AppServices | None = None) -> FastAPI:
                 type="/problems/profile-required",
                 error_code="profile_required",
             )
-        raw = (
-            await request.json()
-            if request.headers.get("content-type", "").startswith("application/json")
-            else await request.form()
-        )
+        is_json = request.headers.get("content-type", "").startswith("application/json")
+        raw = await request.json() if is_json else await request.form()
         if not hasattr(raw, "get"):
             raise RequestValidationError(
                 [{"type": "model_type", "loc": ("body",), "msg": "Expected an object."}]
@@ -1762,10 +2108,46 @@ def create_app(services: AppServices | None = None) -> FastAPI:
             )
         except ValidationError as exc:
             raise RequestValidationError(exc.errors()) from exc
+        selected_expertise = None
+        if not is_json:
+            revisions = raw.getlist("expertise_profile_revision")
+            choices = raw.getlist("expertise_index")
+            if revisions or choices:
+                app_services.csrf_protector.validate(
+                    request, _form_string(raw, "csrf_token", "csrfToken")
+                )
+                if revisions != [saved_profile.revision]:
+                    raise ProblemDetails(
+                        status_code=409,
+                        title="Refresh your expertise choices",
+                        detail="Reload Generator to choose from your current saved profile.",
+                        type="/problems/expertise-selection-stale",
+                        error_code="expertise_selection_stale",
+                    )
+                available = {
+                    str(index): expertise
+                    for index, expertise in enumerate(saved_profile.profile.expertise)
+                }
+                if len(choices) > len(available) or any(
+                    not isinstance(choice, str) or choice not in available for choice in choices
+                ):
+                    raise ProblemDetails(
+                        status_code=422,
+                        title="Invalid expertise selection",
+                        detail="Choose only the expertises listed in Generator.",
+                        type="/problems/invalid-expertise-selection",
+                        error_code="invalid_expertise_selection",
+                    )
+                selected = set(choices)
+                selected_expertise = [
+                    expertise for index, expertise in available.items() if index in selected
+                ]
         payload = await _parse_card_generate_request(
             request,
             saved_prompt=normalize_prompt(
-                saved_profile.profile.context(options.creative_direction)
+                saved_profile.profile.context(
+                    options.creative_direction, expertise=selected_expertise
+                )
             ),
         )
         app_services.csrf_protector.validate(request, payload.csrf_token)
@@ -1812,6 +2194,7 @@ def create_app(services: AppServices | None = None) -> FastAPI:
             ),
             image_quality=image_quality,
             reference_image=payload.reference_image,
+            selected_expertise=selected_expertise,
         )
         if payload.creation_draft_id is not None and linkedin_transient_repository is not None:
             await linkedin_transient_repository.delete_draft(

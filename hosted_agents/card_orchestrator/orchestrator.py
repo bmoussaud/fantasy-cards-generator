@@ -509,6 +509,8 @@ class CardOrchestrator:
             try:
                 refinement = SCHEMAS[stage].model_validate_json(result.text, strict=True)
                 card = GeneratedCardModel.model_validate(refinement.model_dump(), strict=True)
+                if not card.matches_expertise(payload.get("selectedExpertise")):
+                    raise ValueError("ability_selection_mismatch")
             except (ValidationError, ValueError, TypeError):
                 if detail is not None:
                     detail.reason = "schema_invalid"
@@ -536,9 +538,9 @@ class CardOrchestrator:
                 detail,
                 instruction=detail.instruction,
                 input_payload=snapshot,
-                output_payload=refinement.model_dump(),
+                output_payload=refinement.model_dump(exclude={"abilities"}),
                 input_fields={"query"},
-                output_fields=set(SCHEMAS[stage].model_fields),
+                output_fields=agent_detail.CARD_FIELDS,
                 output_kind="card",
                 deployment_version=telemetry_version,
             )

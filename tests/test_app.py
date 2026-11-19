@@ -163,15 +163,31 @@ const form = {
   dataset: {},
   querySelector(selector) { return selector === '[name="prompt"]' ? prompt : null; }
 };
+const generateButton = { disabled: false, dataset: {} };
+const retryButton = { disabled: false, dataset: {} };
+const unavailableButton = { disabled: true, dataset: {} };
+const cooldownStatus = { textContent: "" };
+let now = 1000;
+const timers = new Map();
+let nextTimer = 0;
+class TestDate extends Date { static now() { return now; } }
 const document = {
+  getElementById() { return null; },
   querySelector(selector) {
     return selector === "[data-card-generator-form]" ? form : null;
+  },
+  querySelectorAll(selector) {
+    return selector.includes("button")
+      ? [generateButton, retryButton, unavailableButton] : [cooldownStatus];
   },
   addEventListener() {},
   body: { addEventListener(name, handler) { handlers[name] = handler; } }
 };
 vm.runInNewContext(fs.readFileSync(0, "utf8"), {
-  document, window: { matchMedia() { return { matches: false }; } }
+  document, Date: TestDate,
+  setInterval(callback) { const id = ++nextTimer; timers.set(id, callback); return id; },
+  clearInterval(id) { timers.delete(id); },
+  window: { matchMedia() { return { matches: false }; } }
 });
 assert.equal(typeof promptHandlers.input, "function");
 for (const value of ["A wizard", "a          b", " ".repeat(20), "x".repeat(401)]) {
@@ -229,6 +245,76 @@ handlers["htmx:afterSwap"]({ target: {
   id: "generation-result", firstElementChild: {},
   scrollIntoView() { throw new Error("Do not scroll the persistent loading shell."); }
 }});
+
+function receiveThrottle(delay, code = "image_rate_limited", status = 429) {
+  handlers["htmx:beforeSwap"]({ detail: {
+    target: { id: "generation-content" }, shouldSwap: false,
+    xhr: { status, getResponseHeader(name) {
+      return { "X-Generation-Error": code, "Content-Type": "text/html",
+               "Retry-After": delay }[name] || null;
+    }}
+  }});
+}
+for (const delay of [null, "", "0", "-1", "1.5", "3601", "9".repeat(12), "abc"]) {
+  receiveThrottle(delay);
+  assert.equal(generateButton.disabled, false);
+  assert.equal(timers.size, 0);
+}
+receiveThrottle("60", "validation_error");
+receiveThrottle("60", "image_rate_limited", 503);
+assert.equal(timers.size, 0);
+
+receiveThrottle("60");
+assert.equal(generateButton.disabled, true);
+assert.equal(retryButton.disabled, true);
+assert.match(cooldownStatus.textContent, /60 seconds/);
+let prevented = false;
+handlers["htmx:beforeRequest"]({ detail: {
+  target: { id: "generation-content" }, elt: form
+}, preventDefault() { prevented = true; } });
+assert.equal(prevented, true);
+now += 20000;
+for (const tick of [...timers.values()]) tick();
+assert.match(cooldownStatus.textContent, /40 seconds/);
+receiveThrottle("10"); // A shorter concurrent response cannot shorten the wait.
+now += 10000;
+receiveThrottle("60");
+now += 30000;
+for (const tick of [...timers.values()]) tick();
+assert.equal(generateButton.disabled, true);
+now += 30000;
+for (const tick of [...timers.values()]) tick();
+assert.equal(generateButton.disabled, false);
+assert.equal(retryButton.disabled, false);
+assert.equal(unavailableButton.disabled, true);
+assert.equal(timers.size, 0);
+assert.match(cooldownStatus.textContent, /try again/);
+
+// HTMX cleanup may re-enable its button while a longer quota wait is active.
+handlers["htmx:beforeRequest"]({ detail: {
+  target: { id: "generation-content" }, elt: form
+}, preventDefault() { throw new Error("A manual retry should be admitted."); } });
+receiveThrottle("2");
+generateButton.disabled = false;
+handlers["htmx:afterRequest"]({ detail: {
+  target: { id: "generation-content" }, elt: form
+}});
+assert.equal(generateButton.disabled, true);
+now += 2000;
+for (const tick of [...timers.values()]) tick();
+assert.equal(generateButton.disabled, false);
+const pendingRequest = {};
+handlers["htmx:beforeRequest"]({ detail: {
+  target: { id: "generation-content" }, elt: form, xhr: pendingRequest
+}, preventDefault() { throw new Error("Expired cooldown must allow retry."); } });
+receiveThrottle("1");
+now += 1000;
+for (const tick of [...timers.values()]) tick();
+assert.equal(generateButton.disabled, true);
+handlers["htmx:afterRequest"]({ detail: { xhr: pendingRequest } });
+assert.equal(generateButton.disabled, false);
+// The timer only updates controls; it never submits a request or edits fields.
+assert.equal(prompt.value, "x".repeat(400));
 """
     result = subprocess.run(
         ["node", "-e", harness],
@@ -288,6 +374,7 @@ const photo = {
 function startPage(rootSelector, root, state) {
   const handlers = {};
   const document = {
+    getElementById() { return null; },
     querySelector(selector) { return selector === rootSelector ? root : null; },
     createElement() { return new Element(); },
     addEventListener() {}, body: new Element()
@@ -470,6 +557,7 @@ function mountGenerator(photos) {
   const requests = [];
   vm.runInNewContext(source, {
     document: {
+      getElementById() { return null; },
       querySelector(selector) {
         return selector === "[data-card-generator-form]" ? root : null;
       },

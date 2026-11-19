@@ -13,7 +13,7 @@
     </section>
 
     <div class="library-detail-layout">
-        <article class="card-face" data-rarity="{{ card.rarity }}" data-type="{{ card.card_type }}">
+        <article class="card-face{% if card.card_frame_composed %} card-face--composed{% endif %}" data-rarity="{{ card.rarity }}" data-type="{{ card.card_type }}">
             <header class="card-face__header">
                 <h2 class="card-face__name">{{ card.name }}</h2>
                 <span class="card-face__mana" title="Mana cost">
@@ -50,7 +50,11 @@
                     <span class="visually-hidden">Health</span>{{ card.health }}
                 </span>
             </div>
-            <p class="card-face__rules">{{ card.rules_text }}</p>
+            {% if card.abilities %}
+                {% include "partials/card_abilities.html" %}
+            {% else %}
+                <p class="card-face__rules">{{ card.rules_text }}</p>
+            {% endif %}
             {% if card.flavor_text %}
                 <p class="card-face__flavor">{{ card.flavor_text }}</p>
             {% endif %}

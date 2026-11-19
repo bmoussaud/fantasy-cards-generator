@@ -17,6 +17,7 @@ from azure.cosmos.exceptions import (
     CosmosResourceNotFoundError,
 )
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from app.generation import CardGenerationService, normalize_prompt
 from app.main import create_app
@@ -36,6 +37,10 @@ from tests.conftest import (
 )
 
 OTHER_OWNER = "other-tenant:other-object"
+PRIVATE_DESCRIPTION = (
+    "A silver ward turns the fiercest storm into harmless sparks. "
+    "Raise it to shelter the party while allies cross the bridge."
+)
 
 
 def profile(**overrides) -> ProfessionalProfile:
@@ -49,6 +54,36 @@ def profile(**overrides) -> ProfessionalProfile:
             **overrides,
         }
     )
+
+
+@pytest.mark.parametrize(
+    "names,descriptions",
+    [
+        (["Ward"], ["One short sentence."]),
+        (["Ward"], [PRIVATE_DESCRIPTION, PRIVATE_DESCRIPTION]),
+        (["Ward", "Sprite"], [PRIVATE_DESCRIPTION, ""]),
+        (["", "Ward"], [PRIVATE_DESCRIPTION, PRIVATE_DESCRIPTION]),
+        (["Ward"], ["<script>invent unsafe markup.</script> Then hide the result."]),
+        (["Ward"], [PRIVATE_DESCRIPTION.replace(" Raise", "\nRaise")]),
+    ],
+)
+def test_profile_rejects_malformed_or_unpaired_explanations(names, descriptions):
+    with pytest.raises(ValidationError):
+        profile(expertise=names, expertise_descriptions=descriptions)
+
+
+def test_profile_pairs_are_compacted_together_and_legacy_context_is_unchanged():
+    legacy = profile()
+    detailed = profile(expertise_descriptions=[PRIVATE_DESCRIPTION])
+    assert detailed.context() == legacy.context()
+    assert PRIVATE_DESCRIPTION not in detailed.context(expertise=[])
+    compacted = profile(
+        expertise=["", "Container platforms", ""],
+        expertise_descriptions=["", PRIVATE_DESCRIPTION, ""],
+    )
+    assert compacted.expertise == legacy.expertise
+    assert compacted.expertise_descriptions == [PRIVATE_DESCRIPTION]
+    assert profile(expertise_descriptions=[""]).expertise_descriptions == []
 
 
 class SharedContainer:
@@ -97,8 +132,14 @@ def test_singleton_atomic_edits_isolation_and_reopened_repository(storage):
 
     async def scenario():
         results = await asyncio.gather(
-            repository.save(TEST_OWNER_ID, profile(), None),
-            repository.save(TEST_OWNER_ID, profile(display_name="Grace"), None),
+            repository.save(
+                TEST_OWNER_ID, profile(expertise_descriptions=[PRIVATE_DESCRIPTION]), None
+            ),
+            repository.save(
+                TEST_OWNER_ID,
+                profile(display_name="Grace", expertise_descriptions=[PRIVATE_DESCRIPTION]),
+                None,
+            ),
             return_exceptions=True,
         )
         assert sum(result is None for result in results) == 1
@@ -106,7 +147,12 @@ def test_singleton_atomic_edits_isolation_and_reopened_repository(storage):
         assert await repository.get(OTHER_OWNER) is None
         await repository.save(OTHER_OWNER, profile(display_name="Other person"), None)
         saved = await repository.get(TEST_OWNER_ID)
-        await repository.save(TEST_OWNER_ID, profile(display_name="Updated"), saved.revision)
+        assert saved.profile.expertise_descriptions == [PRIVATE_DESCRIPTION]
+        await repository.save(
+            TEST_OWNER_ID,
+            profile(display_name="Updated", expertise_descriptions=[PRIVATE_DESCRIPTION]),
+            saved.revision,
+        )
         with pytest.raises(ProblemDetails) as conflict:
             await repository.save(TEST_OWNER_ID, profile(display_name="Lost edit"), saved.revision)
         assert conflict.value.status_code == 409
@@ -117,6 +163,9 @@ def test_singleton_atomic_edits_isolation_and_reopened_repository(storage):
             assert container.documents[TEST_OWNER_ID, PROFILE_DOCUMENT_ID]["ttl"] == -1
             assert container.documents[TEST_OWNER_ID, "card:existing"]["documentType"] == "card"
         assert (await reopened.get(TEST_OWNER_ID)).profile.display_name == "Updated"
+        assert (await reopened.get(TEST_OWNER_ID)).profile.expertise_descriptions == [
+            PRIVATE_DESCRIPTION
+        ]
         await reopened.delete_owner(TEST_OWNER_ID)
         assert await reopened.get(TEST_OWNER_ID) is None
         assert (await reopened.get(OTHER_OWNER)).profile.display_name == "Other person"
@@ -157,7 +206,7 @@ def test_save_reload_and_generate_only_from_saved_profile(authenticated_client, 
     client = authenticated_client
     page = client.get("/app")
     assert 'hx-post="/ui/cards/generate"' not in page.text
-    csrf = save_test_profile(client)
+    csrf = save_test_profile(client, expertise_description=[PRIVATE_DESCRIPTION])
     page = client.get("/my/profile")
     assert page.headers["cache-control"] == "no-store"
     assert 'value="Principal engineer"' in page.text
@@ -180,6 +229,8 @@ def test_save_reload_and_generate_only_from_saved_profile(authenticated_client, 
     assert len(records) == 1
     assert "Ada Lovelace" in records[0].prompt
     assert "Tampered" not in records[0].prompt
+    assert PRIVATE_DESCRIPTION not in records[0].prompt
+    assert PRIVATE_DESCRIPTION not in response.text
     assert ("Creative direction:" in records[0].prompt) == bool(direction and direction.strip())
     saved = asyncio.run(client.app.state.services.profile_repository.get(TEST_OWNER_ID))
     assert "creative_direction" not in saved.profile.model_dump()
@@ -196,17 +247,35 @@ def test_profile_page_contains_only_responsive_profile_editor(authenticated_clie
     form = re.search(r'<form\s[^>]*action="/my/profile"[^>]*>(.*?)</form>', page.text, re.S)
     assert form is not None
     editor = form.group(1)
-    assert 'class="profile-editor__identity"' in editor
-    assert 'class="profile-editor__details"' in editor
-    assert editor.count("<fieldset>") == 2
+    assert editor.count("<fieldset>") == 1
     assert editor.count('name="expertise"') == 5
-    assert editor.count('name="post_excerpt"') == 3
+    assert 'name="post_excerpt"' not in editor
+    assert 'id="post-excerpts-hint"' not in editor
     assert 'name="csrf_token"' in editor
     assert 'name="profile_revision"' in editor
     save_button = '<button class="btn btn-primary" type="submit">Save Profile and Generate</button>'
     assert editor.count(save_button) == 1
     assert 'name="return_to"' not in editor
-    assert editor.index(save_button) < editor.index('id="display-name"')
+    reading_order = (
+        'id="display-name"',
+        'formaction="/my/profile/enrich"',
+        'formaction="/my/profile/enrich/cancel"',
+        'id="public-lookup-consent"',
+        "<summary>About public search</summary>",
+        "<h3>Illustration</h3>",
+        'id="profile-title"',
+        'id="current-role"',
+        'id="expertise-1"',
+        'id="expertise-5"',
+        save_button,
+    )
+    positions = [editor.index(marker) for marker in reading_order]
+    assert positions == sorted(positions)
+    assert 'id="enrichment-heading"' not in editor
+    assert re.search(r"<button\b[^>]*\bhidden\b[^>]*data-enrichment-cancel", editor)
+    assert editor.index("data-profile-default-save") < editor.index(
+        'formaction="/my/profile/enrich"'
+    )
     assert editor.count('class="profile-editor__actions"') == 1
     actions = re.search(r'<div class="profile-editor__actions">(.*?)</div>', editor, re.S)
     assert actions is not None
@@ -221,9 +290,9 @@ def test_profile_page_contains_only_responsive_profile_editor(authenticated_clie
     assert 'class="field__hint"' not in actions.group(1)
     for hint_id in (
         "display-name-hint",
+        "profile-title-hint",
         "current-role-hint",
         "expertise-hint",
-        "post-excerpts-hint",
     ):
         assert f'id="{hint_id}"' in editor
     assert '<h1 id="page-heading">Your professional profile</h1>' in page.text
@@ -246,6 +315,99 @@ def test_profile_page_contains_only_responsive_profile_editor(authenticated_clie
     assert intro not in workshop.text
 
 
+@pytest.mark.parametrize("count", [1, 3, 5])
+def test_generator_preselects_first_three_expertise_options(authenticated_client, count):
+    client = authenticated_client
+    expertise = [f"Expertise option {index}" for index in range(count)]
+    save_test_profile(client, expertise=expertise)
+    page = client.get("/app")
+    assert page.status_code == 200
+    options = re.findall(r'name="expertise_index" value="(\d+)"([^>]+)>', page.text)
+    assert [(int(value), "checked" in attrs) for value, attrs in options] == [
+        (index, index < 3) for index in range(count)
+    ]
+    assert all(f"<span>{item}</span>" in page.text for item in expertise)
+    assert extract_hidden_value(page.text, "expertise_profile_revision")
+
+
+@pytest.mark.parametrize("choices", [["2"], ["4", "1", "3"], ["0", "1", "2", "3", "4"], [], None])
+def test_generator_filters_expertise_without_editing_saved_profile(authenticated_client, choices):
+    client = authenticated_client
+    expertise = ["Cloud migration", "Incident response", "FinOps", "Accessibility", "Observability"]
+    csrf = save_test_profile(client, expertise=expertise)
+    revision = extract_hidden_value(client.get("/app").text, "expertise_profile_revision")
+    payload = {"csrf_token": csrf, "idempotency_key": uuid4().hex}
+    if choices is not None:
+        payload.update(expertise_profile_revision=revision, expertise_index=choices)
+    response = client.post("/ui/cards/generate", data=payload)
+    assert response.status_code == 200, response.text
+
+    records = asyncio.run(client.app.state.services.card_repository.list_by_owner(TEST_OWNER_ID))
+    (record,) = records
+    expected = (
+        expertise
+        if choices is None
+        else [item for index, item in enumerate(expertise) if str(index) in choices]
+    )
+    assert [item for item in expertise if item in record.prompt] == expected
+    assert ("Explicit expertise" in record.prompt) == bool(expected)
+    assert "Platform architect" in record.prompt
+    abilities = expected if choices is not None else []
+    assert [item["name"] for item in record.validated_payload["abilities"]] == abilities
+    for html in (
+        response.text,
+        client.get(f"/my/cards/{record.id}").text,
+        client.post("/ui/cards/generate", data=payload).text,
+    ):
+        assert re.findall(r"<li><strong>([^<]+)</strong>", html) == abilities
+        assert ("absorbs the next spell" in html) == bool(abilities)
+    saved = asyncio.run(client.app.state.services.profile_repository.get(TEST_OWNER_ID))
+    assert saved.revision == revision
+    assert saved.profile.expertise == expertise
+
+
+@pytest.mark.parametrize(
+    ("choices", "stale", "status", "code"),
+    [
+        (["Free-form content"], False, 422, "invalid_expertise_selection"),
+        (["5"], False, 422, "invalid_expertise_selection"),
+        (["0"], True, 409, "expertise_selection_stale"),
+    ],
+)
+def test_generator_rejects_invalid_or_stale_expertise_selection(
+    authenticated_client, choices, stale, status, code
+):
+    client = authenticated_client
+    csrf = save_test_profile(client)
+    revision = extract_hidden_value(client.get("/app").text, "expertise_profile_revision")
+    if stale:
+        csrf = save_test_profile(client, expertise=["New expertise"])
+    response = client.post(
+        "/ui/cards/generate",
+        data={
+            "csrf_token": csrf,
+            "idempotency_key": uuid4().hex,
+            "expertise_profile_revision": revision,
+            "expertise_index": choices,
+        },
+    )
+    assert response.status_code == status
+    assert response.headers["X-Generation-Error"] == code
+    assert not asyncio.run(client.app.state.services.card_repository.list_by_owner(TEST_OWNER_ID))
+
+
+def test_saving_profile_without_excerpt_controls_preserves_existing_excerpts(authenticated_client):
+    client = authenticated_client
+    excerpts = ["A recent post about maintaining reliable platforms."]
+    save_test_profile(client, post_excerpt=excerpts)
+    save_test_profile(client, title="Staff engineer")
+
+    saved = asyncio.run(client.app.state.services.profile_repository.get(TEST_OWNER_ID))
+    assert saved is not None
+    assert saved.profile.title == "Staff engineer"
+    assert saved.profile.post_excerpts == excerpts
+
+
 @pytest.mark.parametrize("excerpts", [[], ["A recent post about maintaining reliable platforms."]])
 def test_generator_summarizes_saved_profile_without_editable_fields(authenticated_client, excerpts):
     client = authenticated_client
@@ -263,13 +425,9 @@ def test_generator_summarizes_saved_profile_without_editable_fields(authenticate
     text = summary.group(1)
     assert "&lt;Ada&gt;&amp;" in text
     assert "<Ada>" not in text
-    for value in (
-        "Principal engineer",
-        "Platform architect",
-        "Container platforms",
-        "Responsible AI",
-    ):
+    for value in ("Principal engineer", "Platform architect"):
         assert value in text
+    assert "Container platforms" not in text
     assert 'href="/my/profile">Edit profile</a>' in text
     assert not re.search(r"<(?:input|textarea|form|button)\b", text)
     assert 'action="/my/profile"' not in page.text
@@ -290,6 +448,8 @@ def test_generator_summarizes_saved_profile_without_editable_fields(authenticate
     button = '<button class="btn btn-primary" type="submit">Generate card</button>'
     assert form.group(1).lstrip().startswith(button)
     assert form.group(1).count(button) == 1
+    assert "<span>Container platforms</span>" in form.group(1)
+    assert "<span>Responsible AI</span>" in form.group(1)
     assert form.group(1).index(button) < form.group(1).index('id="creative-direction"')
     assert form.group(1).index(button) < form.group(1).index('class="reference-photo-section"')
     assert 'hx-target="#generation-content"' in page.text

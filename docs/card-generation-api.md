@@ -105,28 +105,97 @@ The saved profile contains:
 - professional title: 2–120 characters, distinct from the current role
 - current role: 2–120 characters
 - one to five explicit expertise statements: 2–80 characters each
-- up to three optional user-selected recent-post excerpts: 20–500 characters each
+- up to three existing recent-post excerpts: 20–500 characters each. My Profile
+  no longer edits them; saving from that editor preserves existing excerpts.
+
+My Profile follows the card's reading order: display name, an illustration
+note, title and role, then the existing expertise fields presented as card
+abilities. Public-search suggestions are separate from manual editing and do
+not save the profile. The illustration note is not an upload field.
 
 After saving, the UI offers generation from that saved profile, with optional
-creative direction (0–200 characters) and the existing photo picker. Direction is
+creative direction (0–200 characters) and the existing photo picker. Generator
+preselects the first three saved expertise entries (or all if fewer). Only
+checked entries become named abilities, in saved profile order, with an
+agent-written explanation for each. The same abilities appear in the generation
+result and My Cards. Clearing all checkboxes keeps the ordinary rules text
+without named abilities. This choice never edits the saved
+profile. If the profile changed since the page loaded, reload Generator before
+submitting the selection again. Generating named abilities requires a Hosted
+agent that accepts `selectedExpertise` and returns the matching `abilities`;
+incomplete responses fail before artwork generation. The public JSON API
+and previously saved cards retain their existing contract. Direction is
 specific to each card, not stored in the profile; absent, empty and whitespace-only
 values are accepted. The initial Generator form contains a short editable
 example; users can change or clear it. HTMX result/error updates preserve the
 form and its current value, including an explicit empty value.
+
+For new cards with selected abilities, the backend requests **only an illustration**
+from the image provider: no typography, card frame, UI, stats, rules or named
+powers. The effective prompt is built on the web from the validated visual
+`artBrief`, not the Hosted agent's precomposed-card `artPrompt`; its bounded input
+keeps it below 4,000 characters. The same prompt is moderated, used for ordinary
+generation or reference-photo editing, and stored for artwork retry. The subject's
+appearance can come from the reference; its text/layout must not be copied.
+No Hosted-agent deployment or contract change is needed.
+
+After text/artwork moderation and before upload, Pillow composes **one complete
+card in the stored PNG**: frame, name, mana cost, type/rarity, uncropped illustration,
+the exact ordered selected ability names and generated explanations in an interior
+panel, flavor text, attack and health. It does not draw the alternative `rulesText`
+or append an exterior ability strip. The frame grows with the content instead of
+truncating text, squeezing the font or covering a provider-rendered card.
+The existing Pillow dependency and bundled Noto Sans font provide local rendering,
+wrapping long words and retaining accents and explicit line breaks; no model call is added.
+Inputs are limited to PNG/JPEG/WebP, 32 MiB and 4,096 pixels per source edge.
+Final canvases are bounded to 32 million pixels and 16,384 pixels high; excessive
+line-break expansion is rejected before allocation. Characters missing from the
+bundled font fail explicitly instead of silently becoming replacement boxes.
+The final PNG's actual MIME type, SHA-256 and byte count are stored.
+Noto Sans is distributed under the [SIL Open Font License](../app/assets/fonts/OFL.txt);
+the unmodified font is from [Google Fonts](https://github.com/google/fonts/tree/main/ofl/notosans),
+content blob `75575046c015ff623a848096a15779867ba71453`.
+
+Generation and successful artwork retries share this finalization path. A private
+additive `artworkLayout: "illustration_only_v1"` marker identifies the new flow,
+including pending cards, so retry reuses its approved illustration-only prompt and
+local complete-card composition without regenerating text. Historical pending
+cards without this marker keep their original prompt and original footer behavior.
+The additive `blob.abilitiesEmbedded` marker identifies completed inscribed files;
+missing markers mean historical artwork and are never inferred from card text.
+The JSON response contract is unchanged. With an inscribed image available,
+Generator/My Cards keep a semantic, screen-reader-accessible HTML copy without a
+visible duplicate. For the new complete-card layout, exterior HTML title/stats/flavor
+are also visually hidden while the image works, leaving a single visible card.
+These copies become visible if artwork fails to load. Pending and
+historical cards keep the visible ability text. Library thumbnails show the full
+inscribed file without cropping. Existing image files and generations with no
+selected abilities are byte-for-byte unchanged. Only the card's validated,
+moderated abilities are rendered, never private My Profile explanations.
+Composition failures use the existing explicit `persistence_failure` response;
+no image is uploaded or marked inscribed, and an existing retryable card survives.
+
 The loading status stays in the result column's persistent empty-state shell.
 Only `#generation-content` is swapped for cards, marked HTML errors or artwork
 retries, so `#generation-pending` remains available for subsequent generations
 and is hidden while idle.
 HTMX disables the Generate card submit button for the duration of its request
 to prevent repeated clicks, then re-enables it after success or HTTP/transport
-failure. Other generation options and the artwork-retry form are unchanged.
+failure, unless an image-service cooldown is still active. Other generation
+options remain editable.
 Reference-photo failures preserve actionable public error codes in both JSON
 and the HTMX error panel: `reference_image_rejected` (422) for an upstream
 photo/input rejection, `image_rate_limited` (429) for image-service throttling,
 and `image_service_unauthorized` or `image_service_misconfigured` (503) for
 application authorization or endpoint/deployment failures.
 An upstream numeric `Retry-After` delay is retained when positive, capped at
-3,600 seconds; it does not add automatic image retries. Image-service request
+3,600 seconds. On marked image429 HTML failures, the error panel displays this
+delay and JavaScript temporarily disables Generate card and any displayed
+artwork-retry submit buttons. The countdown preserves the form, including its
+photo selection, and enables manual retry at expiry, never an automatic request.
+Missing or invalid delays retain the generic error without inventing a cooldown.
+This is page-local guidance, not shared quota enforcement; successful partial-card
+responses retain their existing artwork-retry contract. Image-service request
 limits are shared by all clients of the deployment, so disabling double-clicks
 does not eliminate quota errors. `reference_image_unsupported` (502) requires
 an explicit unsupported-operation code, not just HTTP400 or an invalid image.
@@ -136,6 +205,17 @@ generation. Moderation refusals remain `generated_art_rejected` and take
 precedence over technical error classification.
 Content-free dependency diagnostics retain only bounded HTTP statuses and
 allowlisted error codes, never the upstream response body or uploaded photo.
+On an image-edit `invalid_image_file` response, `image.reference_rejected`
+adds finite format/mode categories, Pillow verification and MIME-agreement
+booleans, and bucketed byte size/longest edge. These are diagnostic hints, not
+proof that the provider accepts the input. Raw dimensions, filenames, MIME
+strings, image bytes, prompts and provider messages are not retained.
+Before an edit request, the backend decodes the reference locally. Already
+canonical RGB/RGBA PNG, JPEG and WebP files with matching content types are
+preserved. Other decodable encodings, mismatched MIME types and non-RGB(A) modes
+are converted to metadata-free RGB(A) PNG without resizing or dropping the
+reference. Unreadable/unsafe inputs or converted files at least50MB fail
+explicitly before any provider request; there is no photo-free fallback.
 Unsaved edits are not used. Direct JSON, multipart or form
 calls to `/ui/cards/generate` also require a saved profile; submitted prompts or
 profile fields cannot replace the server-loaded profile. The public programmatic

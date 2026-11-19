@@ -1,5 +1,5 @@
 {% import "partials/icons.html" as icons %}
-<article class="card-face" data-rarity="{{ card.rarity }}" data-type="{{ card.cardType }}">
+<article class="card-face{% if card.cardFrameComposed %} card-face--composed{% endif %}" data-rarity="{{ card.rarity }}" data-type="{{ card.cardType }}">
     <input id="generate-idempotency-key" type="hidden" name="idempotency_key" value="{{ next_idempotency_key }}" hx-swap-oob="true" />
     <header class="card-face__header">
         <h2 class="card-face__name">{{ card.name }}</h2>
@@ -39,14 +39,18 @@
             <span class="visually-hidden">Health</span>{{ card.health }}
         </span>
     </div>
-    <p class="card-face__rules">{{ card.rulesText }}</p>
+    {% if card.abilities %}
+        {% include "partials/card_abilities.html" %}
+    {% else %}
+        <p class="card-face__rules">{{ card.rulesText }}</p>
+    {% endif %}
     {% if card.flavorText %}
         <p class="card-face__flavor">{{ card.flavorText }}</p>
     {% endif %}
     {% if not card.imageUrl %}
         <div class="card-face__retry">
             <p class="card-face__retry-note">Artwork is not ready yet. You can safely retry artwork generation.</p>
-            <form hx-post="/ui/cards/{{ card.cardId }}/artwork/retry" hx-target="#generation-content" hx-swap="innerHTML" hx-indicator="#retry-pending-{{ card.cardId }}">
+            <form data-artwork-retry-form hx-post="/ui/cards/{{ card.cardId }}/artwork/retry" hx-target="#generation-content" hx-swap="innerHTML" hx-indicator="#retry-pending-{{ card.cardId }}">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
                 <input type="hidden" name="idempotency_key" value="{{ retry_idempotency_key }}" />
                 <button class="btn btn-secondary" type="submit">Retry artwork</button>
