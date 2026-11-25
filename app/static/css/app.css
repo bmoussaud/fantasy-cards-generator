@@ -1475,7 +1475,7 @@ code {
 /* 11. Utilities                                                        */
 /* ------------------------------------------------------------------ */
 .visually-hidden,
-.card-face--composed:has(> .card-portrait:not(.is-broken)) > :is(.card-face__header, .card-face__badges, .card-face__stats, .card-face__flavor),
+.card-face--composed:has(> .card-portrait:not(.is-broken)) > :is(.card-face__header, .card-face__badges, .card-face__stats, .card-face__flavor, .card-face__rules),
 .card-portrait:not(.is-broken) ~ .card-face__rules--embedded {
   position: absolute;
   width: 1px;

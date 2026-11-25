@@ -305,7 +305,7 @@ def test_real_graph_exact_inputs_options_and_terminal_only(monkeypatch, model_tr
     assert len(outputs) == 1
     terminal = GenerateCardAgentResponse.model_validate_json(outputs[0])
     assert terminal.status == "completed" and terminal.card == result.card
-    assert result.card.model_dump() == CARD | {"abilities": []}
+    assert result.card.model_dump() == CARD | {"abilities": [], "accentColor": None}
     assert len(content(exported)) == 1
     assert_closed(model_transport)
 

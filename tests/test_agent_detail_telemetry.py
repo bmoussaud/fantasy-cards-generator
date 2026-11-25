@@ -1239,10 +1239,10 @@ def test_untrusted_carrier_is_withheld_through_terminal_export(
 
 def test_oversized_projection_has_no_partial_json_or_full_validation_claim(monkeypatch, exported):
     large = CARD | {
-        "name": "é" * 80,
-        "rulesText": "é" * 400,
-        "flavorText": "é" * 280,
-        "artBrief": "é" * 300,
+        "name": "é" * 20,
+        "rulesText": "€" * 400,
+        "flavorText": "é" * 90,
+        "artBrief": "€" * 300,
     }
     services, _, transport, _ = stack(monkeypatch, outputs=[large])
     response = _generate(_client(monkeypatch, services))

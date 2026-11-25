@@ -395,7 +395,7 @@ def test_agent_success_preserves_card_contract_image_and_persistence(
     }
     assert calls == ["A safe original frost guardian hero with a silver shield"]
     assert len(services.card_repository._records) == 1
-    assert len(services.asset_store._assets) == 1
+    assert len(services.asset_store._assets) == 2
 
 
 @pytest.mark.parametrize(

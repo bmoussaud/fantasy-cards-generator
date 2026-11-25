@@ -241,7 +241,7 @@ def test_real_maf_single_model_call_is_project_scoped_and_nonpersistent(model_tr
         CardOrchestrator(settings()).generate(GenerateCardAgentRequest(query="mountain drake"))
     )
     assert result.status == "completed", result
-    assert result.card.model_dump() == CARD
+    assert result.card.model_dump() == CARD | {"abilities": [], "accentColor": None}
     assert len(calls) == 1
     for call in calls:
         assert call["model"] == "test"
@@ -316,7 +316,8 @@ def test_supported_reasoning_metadata_is_ignored_for_final_text_eligibility(
         CardOrchestrator(settings()).generate(GenerateCardAgentRequest(query="mountain drake"))
     )
     assert result.status == "completed"
-    assert result.card is not None and result.card.model_dump() == CARD
+    assert result.card is not None
+    assert result.card.model_dump() == CARD | {"abilities": [], "accentColor": None}
     assert "REASONING_SENTINEL" not in result.model_dump_json()
     assert len(calls) == 1
 

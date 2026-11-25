@@ -8,7 +8,7 @@ from app.generation import (
     AbstractCardRepository,
     AuthenticatedOwner,
     CardAbility,
-    GeneratedCardModel,
+    CardPayload,
     StoredCard,
 )
 
@@ -99,7 +99,7 @@ class CardLibraryService:
         return await self._build_detail(record)
 
     async def _build_summary(self, record: StoredCard) -> LibraryCardSummary:
-        payload = GeneratedCardModel.model_validate(record.validated_payload or {})
+        payload = CardPayload.model_validate(record.validated_payload or {})
         return LibraryCardSummary(
             card_id=record.id,
             name=payload.name,
@@ -114,11 +114,11 @@ class CardLibraryService:
             completed_at=record.completed_at,
             created_at_display=format_card_timestamp(record.created_at) or record.created_at,
             completed_at_display=format_card_timestamp(record.completed_at),
-            abilities_embedded=record.abilities_embedded,
+            abilities_embedded=record.abilities_embedded or record.card_frame_composed,
         )
 
     async def _build_detail(self, record: StoredCard) -> LibraryCardDetail:
-        payload = GeneratedCardModel.model_validate(record.validated_payload or {})
+        payload = CardPayload.model_validate(record.validated_payload or {})
         return LibraryCardDetail(
             card_id=record.id,
             name=payload.name,

@@ -1032,7 +1032,7 @@ def test_ui_generate_renders_composed_card_face_with_type_and_rarity_labels(
 
     assert response.status_code == 200
     body = response.text
-    assert 'class="card-face"' in body
+    assert 'class="card-face card-face--composed"' in body
     assert "data-rarity=" in body
     assert "data-type=" in body
     # Rarity/type meaning is conveyed by a visible text label, not color alone.
@@ -1061,7 +1061,7 @@ def test_ui_generate_ignores_blank_optional_form_fields(
     )
 
     assert response.status_code == 200
-    assert 'class="card-face"' in response.text
+    assert 'class="card-face card-face--composed"' in response.text
 
     services = authenticated_client.app.state.services
     assert len(services.card_repository._records) == 1
@@ -1904,8 +1904,8 @@ def test_retry_persistence_failure_preserves_partial_and_can_recover(
         assert audit.request_hash == generation_module.digest_text(f"retry:{card_id}")
         assert audit.idempotency_key == "retry-persistence-failure"
         assert (TEST_OWNER_ID, f"audit:{retry_id}") in repository._records
-    assert len(assets.deleted) == (0 if failure == "upload" else 1)
-    assert len(assets._assets) == (1 if failure == "cleanup" else 0)
+    assert len(assets.deleted) == (1 if failure == "upload" else 2)
+    assert len(assets._assets) == (2 if failure == "cleanup" else 0)
     assert "PRIVATE-" not in caplog.text + response.text
     if failure == "cleanup":
         assert "compensation-failed" in caplog.text
@@ -1987,7 +1987,7 @@ def test_failed_retry_compensation_does_not_remove_concurrent_success(monkeypatc
         winner = await repository.get(owner.owner_id, record.id)
         assert winner.status == "completed"
         assert winner.validated_payload == record.validated_payload
-        assert set(services.asset_store._assets) == {winner.blob_name}
+        assert set(services.asset_store._assets) == set(winner.asset_names)
         assert await service.fetch_image(owner, record.id) == await services.asset_store.download(
             winner.blob_name
         )

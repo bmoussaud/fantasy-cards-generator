@@ -1,0 +1,72 @@
+id: portrait-debordant
+version: 1
+label: Portrait débordant
+canvas:
+  aspect_ratio: "63:88"
+  reference_px: [750, 1050]
+  corner_radius_pct_w: 3.5
+layers:
+  - border
+  - trim
+  - title_plaque
+  - overflow_band
+  - art_window
+  - portrait_overflow
+  - type_plaque
+  - ability_panel
+  - stat_medallion
+  - finish_overlay
+geometry:
+  border: {x: 0, y: 0, w: 100, h: 100}
+  trim: {inset_pct_w: 3.0, stroke_pct_w: 0.8}
+  title_plaque: {x: 6, y: 4.5, w: 88, h: 8.5}
+  cost_token: {anchor: title_plaque.right, diameter_pct_w: 9}
+  overflow_band: {x: 6, y: 13.5, w: 88, h: 4.0}
+  art_window: {x: 6, y: 17.5, w: 88, h: 36.0}
+  type_plaque: {x: 5, y: 54.5, w: 90, h: 6.5}
+  ability_panel: {x: 6, y: 62.0, w: 88, h: 30.0}
+  stat_medallion: {center: [85, 88.5], diameter_pct_w: 17}
+portrait_overflow:
+  direction: up_only
+  max_extent: overflow_band
+  requires: subject_mask
+  technique: edit_extract
+  transparent_fraction: [0.20, 0.90]
+  fallback: none
+palette:
+  fixed:
+    ivory: "#F1E8D3"
+    parchment: "#E9DDC2"
+    brass: "#B89B5E"
+    brass_dark: "#7A6338"
+    ink: "#2A2118"
+    flavor_ink: "#4A3F33"
+  accent:
+    saturation: [0.35, 0.75]
+    lightness: [0.30, 0.55]
+    fallback_by_card_type:
+      hero: "#2F5DA8"
+      creature: "#3E7D4A"
+      artifact: "#7A6338"
+      spell: "#6B3FA0"
+    border_tint: 0.15
+typography:
+  family: EB Garamond
+  title: {weight: semibold, size: 4.2, min: 3.2}
+  cost: {weight: bold, size: 3.6}
+  type_line: {weight: semibold, size: 2.6}
+  ability_name: {weight: bold, size: 2.3, min: 1.8}
+  ability_text: {weight: regular, size: 2.0, min: 1.6}
+  flavor: {weight: regular, style: italic, size: 1.9, min: 1.6}
+  stats_label: {weight: semibold, size: 1.6}
+  stats_value: {weight: bold, size: 4.5}
+generation_limits:
+  abilities_max: 3
+  ability_description_chars: [20, 120]
+  flavor_text_chars_max: 90
+text_fit_order: [shrink_ability_text_to_min, drop_flavor_text]
+rarity:
+  common: {emblem: "#9aa5b4", finish: matte}
+  uncommon: {emblem: "#59c78e", finish: satin_brushed_trim}
+  rare: {emblem: "#62a9f2", finish: pearly_sheen_trim}
+  legendary: {emblem: "#e8a33d", finish: gold_leaf_trim_engraved, emblem_glow: soft}

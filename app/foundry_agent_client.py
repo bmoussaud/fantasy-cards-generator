@@ -115,7 +115,7 @@ class GenerateCardAgentRequest(BaseModel):
     schemaVersion: Literal[1] = 1
     query: str = Field(min_length=1, max_length=2500)
     selectedExpertise: list[Annotated[str, Field(min_length=2, max_length=80)]] | None = Field(
-        default=None, min_length=1, max_length=5
+        default=None, min_length=1, max_length=3
     )
 
     def specialist_payload(self) -> dict[str, Any]:

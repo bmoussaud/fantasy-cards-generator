@@ -157,7 +157,7 @@ def test_sequential_validation_and_mechanics_invariant():
     result = asyncio.run(orchestrator.generate(GenerateCardAgentRequest(query="  drake  ")))
     assert result.status == "completed"
     assert fake.calls[0] == ("generation", {"query": "drake"})
-    assert result.card.model_dump() == CARD | {"abilities": []}
+    assert result.card.model_dump() == CARD | {"abilities": [], "accentColor": None}
     assert result.artPrompt.endswith(CARD["artBrief"])
     assert fake.closed
     evidence = result.metadata["safetyEvidence"]
