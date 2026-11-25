@@ -1890,7 +1890,7 @@ def test_seventeenth_real_hosted_request_cannot_allocate_retained_spans(
             | {
                 "name": glyph * 80,
                 "rulesText": glyph * 400,
-                "flavorText": glyph * 280,
+                "flavorText": glyph * 90,
                 "artBrief": glyph * 300,
             }
         ]
@@ -1903,6 +1903,8 @@ def test_seventeenth_real_hosted_request_cannot_allocate_retained_spans(
     # Hang watchdog, not a performance SLO; the runtime's own deadlines remain active.
     watchdog_seconds = 2 * runtime.settings.timeout_seconds
     stage_outputs = dict(zip(SCHEMAS, outputs or [CARD], strict=True))
+    for stage, schema in SCHEMAS.items():
+        schema.model_validate(stage_outputs[stage])
 
     def respond(call):
         stage = next(
