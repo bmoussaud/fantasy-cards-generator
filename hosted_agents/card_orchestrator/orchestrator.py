@@ -538,7 +538,7 @@ class CardOrchestrator:
                 detail,
                 instruction=detail.instruction,
                 input_payload=snapshot,
-                output_payload=refinement.model_dump(exclude={"abilities"}),
+                output_payload=refinement.model_dump(include=agent_detail.CARD_FIELDS),
                 input_fields={"query"},
                 output_fields=agent_detail.CARD_FIELDS,
                 output_kind="card",

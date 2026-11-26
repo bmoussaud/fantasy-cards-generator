@@ -8,20 +8,33 @@ import json
 import time
 import warnings
 from collections import defaultdict, deque
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from io import BytesIO
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 from uuid import uuid4
 
 import httpx
 from PIL import Image, ImageOps, UnidentifiedImageError
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from app import agent_detail
-from app.card_artwork import compose_card_artwork, inscribe_card_abilities
+from app.card_artwork import (
+    compose_card_artwork,
+    inscribe_card_abilities,
+    normalize_scene,
+    validate_subject_cutout,
+)
+from app.card_styles import (
+    DEFAULT_LAYOUT,
+    RECIPE_LAYOUTS,
+    ArtworkLayout,
+    CardStyle,
+    load_recipe,
+    normalize_accent,
+)
 
 if TYPE_CHECKING:
     from app.profiles import ProfileRepository
@@ -59,6 +72,10 @@ AUDIT_DOCUMENT_ID_PREFIX = "audit:"
 
 class _GenerationRefusal(ProblemDetails):
     pass
+
+
+class _RetrySuperseded(Exception):
+    """Another retry completed (or the card was deleted) before this one committed."""
 
 
 @dataclass(slots=True)
@@ -164,7 +181,15 @@ class CardAbility(BaseModel):
 
 def _require_abilities_in_output_schema(schema: dict[str, Any]) -> None:
     # Strict model output requires the key; historical stored cards may omit it.
-    schema["required"].append("abilities")
+    schema["required"].extend(["abilities", "accentColor", "inscription"])
+
+
+class CardInscription(BaseModel):
+    """Hosted metadata: a printed subtype and compatibility-only ability labels."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    subtype: str = Field(min_length=2, max_length=32, pattern=r"^[A-Za-z]+([ -][A-Za-z]+)*$")
+    abilityNames: list[Annotated[str, Field(min_length=2, max_length=48)]] = Field(max_length=5)
 
 
 class CardTextFields(BaseModel):
@@ -182,13 +207,57 @@ class CardTextFields(BaseModel):
     artBrief: str = Field(min_length=12, max_length=300)
 
 
-class GeneratedCardModel(CardTextFields):
-    model_config = ConfigDict(json_schema_extra=_require_abilities_in_output_schema)
+class CardPayload(CardTextFields):
+    """Additive storage contract: historical cards keep their original text bounds."""
 
     abilities: list[CardAbility] = Field(default_factory=list, max_length=5)
+    accentColor: str | None = Field(default=None, pattern=r"^#[0-9a-fA-F]{6}$")
+    inscription: CardInscription | None = None
+
+    @model_validator(mode="after")
+    def print_labels_match_selection(self):
+        if self.inscription and len(self.inscription.abilityNames) != len(self.abilities):
+            raise ValueError("ability_print_label_count_mismatch")
+        return self
+
+    def printed_abilities(self) -> list[CardAbility]:
+        return self.abilities
+
+    def printed_type(self) -> str | None:
+        if not self.inscription:
+            return None
+        kind = "Creature" if self.cardType in {"creature", "hero"} else self.cardType.capitalize()
+        return f"{kind} — {self.inscription.subtype}"
 
     def matches_expertise(self, selected: list[str] | None) -> bool:
         return [ability.name for ability in self.abilities] == (selected or [])
+
+
+class GeneratedCardAbility(CardAbility):
+    description: str = Field(min_length=20, max_length=120)
+
+
+class GeneratedCardModel(CardPayload):
+    model_config = ConfigDict(json_schema_extra=_require_abilities_in_output_schema)
+
+    # The Web route caps selections at three; five keeps the hosted wire compatible with
+    # previously released Web revisions that may still request up to five expertises.
+    abilities: list[GeneratedCardAbility] = Field(default_factory=list, max_length=5)
+    flavorText: str = Field(min_length=0, max_length=90)
+
+
+def payload_fits_recipe(payload: CardPayload) -> bool:
+    """Whether generated text satisfies the recipe bounds (older hosted versions may not)."""
+    try:
+        GeneratedCardModel.model_validate(payload.model_dump())
+    except ValidationError:
+        return False
+    return len(payload.abilities) <= load_recipe().generation_limits.abilities_max
+
+
+def stored_payload(payload: CardPayload) -> dict[str, Any]:
+    # Earlier Web revisions reject unknown validatedPayload keys.
+    return payload.model_dump(exclude={"accentColor", "inscription"})
 
 
 class CardGenerateBody(BaseModel):
@@ -244,6 +313,7 @@ class CardResponseModel(BaseModel):
     abilities: list[CardAbility] = Field(default_factory=list, exclude=True)
     abilitiesEmbedded: bool = Field(default=False, exclude=True)
     cardFrameComposed: bool = Field(default=False, exclude=True)
+    typeLine: str | None = Field(default=None, exclude=True)
 
 
 class ModerationDecision(BaseModel):
@@ -319,14 +389,34 @@ class StoredCard:
     ttl_seconds: int | None = None
     image_quality: Literal["low", "medium", "high"] | None = None
     abilities_embedded: bool = False
-    artwork_layout: Literal["illustration_only_v1"] | None = None
+    artwork_layout: ArtworkLayout | None = None
+    card_style: CardStyle | None = None
+    inscription: CardInscription | None = None
+    artwork_assets: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    def card_payload(self) -> CardPayload:
+        return CardPayload.model_validate(
+            (self.validated_payload or {}) | {"inscription": self.inscription}
+        )
 
     @property
     def card_frame_composed(self) -> bool:
-        return (
-            self.status == "completed"
-            and self.abilities_embedded
-            and self.artwork_layout == "illustration_only_v1"
+        return self.status == "completed" and (
+            self.artwork_layout in RECIPE_LAYOUTS
+            or (self.abilities_embedded and self.artwork_layout == "illustration_only_v1")
+        )
+
+    @property
+    def asset_names(self) -> list[str]:
+        return list(
+            dict.fromkeys(
+                name
+                for name in [
+                    self.blob_name,
+                    *(asset.get("blobName") for asset in self.artwork_assets.values()),
+                ]
+                if isinstance(name, str) and name
+            )
         )
 
     def to_document(self) -> dict[str, Any]:
@@ -378,6 +468,12 @@ class StoredCard:
             document["blob"]["abilitiesEmbedded"] = True
         if self.artwork_layout is not None:
             document["artworkLayout"] = self.artwork_layout
+        if self.card_style is not None:
+            document["card_style"] = self.card_style.model_dump()
+        if self.inscription is not None:
+            document["inscription"] = self.inscription.model_dump()
+        if self.artwork_assets:
+            document["artworkAssets"] = self.artwork_assets
         return document
 
     @classmethod
@@ -403,10 +499,21 @@ class StoredCard:
             image_url_path=blob.get("imageUrlPath"),
             abilities_embedded=blob.get("abilitiesEmbedded") is True,
             artwork_layout=(
-                "illustration_only_v1"
-                if document.get("artworkLayout") == "illustration_only_v1"
+                document["artworkLayout"]
+                if document.get("artworkLayout") in {"illustration_only_v1", *RECIPE_LAYOUTS}
                 else None
             ),
+            card_style=(
+                CardStyle.model_validate(document["card_style"])
+                if document.get("card_style") is not None
+                else None
+            ),
+            inscription=(
+                CardInscription.model_validate(document["inscription"])
+                if document.get("inscription") is not None
+                else None
+            ),
+            artwork_assets=dict(document.get("artworkAssets") or {}),
             moderation=list(document.get("moderation") or []),
             text_model=document.get("textModel"),
             image_model=document.get("imageModel"),
@@ -454,12 +561,14 @@ class AIImageResult:
     image: ImageResult
     metadata: ModelMetadata
     usage: UsageAudit
+    extraction_usage: UsageAudit | None = None
 
 
 @dataclass(slots=True)
 class GenerationProgress:
     stage: str = "reserved"
-    validated_payload: GeneratedCardModel | None = None
+    validated_payload: CardPayload | None = None
+    artwork_layout: ArtworkLayout = DEFAULT_LAYOUT
     derived_art_prompt: str | None = None
     moderation: list[ModerationDecision] = field(default_factory=list)
     text_result: AITextResult | None = None
@@ -612,6 +721,17 @@ class AbstractCardRepository:
     async def save(self, record: StoredCard) -> StoredCard:
         raise NotImplementedError
 
+    async def complete_retry(self, record: StoredCard) -> StoredCard | None:
+        """Store a completed retry only while the card still awaits artwork, else None.
+
+        The in-memory repositories never yield while holding their state, so this
+        read-then-write runs without interleaving inside one event loop.
+        """
+        current = await self.get(record.owner_id, record.id)
+        if current is None or current.status != "awaiting_artwork_retry":
+            return None
+        return await self.save(record)
+
     async def get(self, owner_id: str, card_id: str) -> StoredCard | None:
         raise NotImplementedError
 
@@ -654,7 +774,14 @@ class AbstractAssetStore:
     async def download(self, blob_name: str) -> tuple[bytes, str]:
         raise NotImplementedError
 
+    async def snapshot(self, blob_name: str) -> str:
+        raise NotImplementedError
+
+    async def download_snapshot(self, blob_name: str, snapshot: str) -> tuple[bytes, str]:
+        raise NotImplementedError
+
     async def delete(self, blob_name: str) -> None:
+        """Delete the blob together with its snapshots."""
         raise NotImplementedError
 
 
@@ -875,6 +1002,7 @@ class InMemorySharedCardAuditRepository(AbstractCardRepository, AbstractAuditRep
 class InMemoryAssetStore(AbstractAssetStore):
     def __init__(self) -> None:
         self._assets: dict[str, tuple[bytes, str]] = {}
+        self._snapshots: dict[str, dict[str, tuple[bytes, str]]] = {}
         self._lock = asyncio.Lock()
 
     async def upload(self, blob_name: str, payload: bytes, content_type: str) -> dict[str, Any]:
@@ -894,9 +1022,26 @@ class InMemoryAssetStore(AbstractAssetStore):
                 raise FileNotFoundError(blob_name)
             return payload
 
+    async def snapshot(self, blob_name: str) -> str:
+        async with self._lock:
+            payload = self._assets.get(blob_name)
+            if payload is None:
+                raise FileNotFoundError(blob_name)
+            snapshot_id = uuid4().hex
+            self._snapshots.setdefault(blob_name, {})[snapshot_id] = payload
+            return snapshot_id
+
+    async def download_snapshot(self, blob_name: str, snapshot: str) -> tuple[bytes, str]:
+        async with self._lock:
+            payload = self._snapshots.get(blob_name, {}).get(snapshot)
+            if payload is None:
+                raise FileNotFoundError(blob_name)
+            return payload
+
     async def delete(self, blob_name: str) -> None:
         async with self._lock:
             self._assets.pop(blob_name, None)
+            self._snapshots.pop(blob_name, None)
 
 
 class AzureCosmosCardRepository(AbstractCardRepository, AbstractAuditRepository):
@@ -1037,6 +1182,46 @@ class AzureCosmosCardRepository(AbstractCardRepository, AbstractAuditRepository)
             self._record_document(record, document_id=_card_document_id(record.id))
         )
         return record
+
+    async def complete_retry(self, record: StoredCard) -> StoredCard | None:
+        from azure.core import MatchConditions
+        from azure.cosmos.exceptions import (
+            CosmosAccessConditionFailedError,
+            CosmosResourceExistsError,
+            CosmosResourceNotFoundError,
+        )
+
+        container = await self._get_container()
+        document_id = _card_document_id(record.id)
+        for _ in range(3):
+            current = await self._read_raw_document(record.owner_id, document_id)
+            legacy = current is None
+            if legacy and document_id != record.id:
+                current = await self._read_raw_document(record.owner_id, record.id)
+            if (
+                current is None
+                or str(current.get("documentType", "card")) != "card"
+                or current.get("status") != "awaiting_artwork_retry"
+            ):
+                return None
+            record.updated_at = now_iso()
+            body = self._record_document(record, document_id=document_id)
+            try:
+                if legacy:
+                    await container.create_item(body)
+                else:
+                    await container.replace_item(
+                        document_id,
+                        body,
+                        etag=current["_etag"],
+                        match_condition=MatchConditions.IfNotModified,
+                    )
+                return record
+            except CosmosAccessConditionFailedError:
+                continue
+            except (CosmosResourceExistsError, CosmosResourceNotFoundError):
+                continue
+        return None
 
     async def get(self, owner_id: str, card_id: str) -> StoredCard | None:
         return await self._get_typed_record(
@@ -1191,6 +1376,17 @@ class AzureBlobAssetStore(AbstractAssetStore):
         props = await blob.get_blob_properties()
         return await stream.readall(), props.content_settings.content_type or "image/png"
 
+    async def snapshot(self, blob_name: str) -> str:
+        blob = self._container.get_blob_client(blob_name)
+        result = await blob.create_snapshot()
+        return str(result["snapshot"])
+
+    async def download_snapshot(self, blob_name: str, snapshot: str) -> tuple[bytes, str]:
+        blob = self._container.get_blob_client(blob_name, snapshot=snapshot)
+        stream = await blob.download_blob()
+        props = await blob.get_blob_properties()
+        return await stream.readall(), props.content_settings.content_type or "image/png"
+
     async def delete(self, blob_name: str) -> None:
         blob = self._container.get_blob_client(blob_name)
         try:
@@ -1240,6 +1436,7 @@ class MockAIClient:
                 f"When played, {normalized[:80].lower()} reshapes the battle in your favor."
             ),
             "flavorText": f"Forged from a single idea: {normalized[:60]}",
+            "accentColor": "#2F5DA8",
             "artBrief": (
                 "Epic fantasy trading card illustration of "
                 f"{normalized[:70]}, dramatic lighting, painterly detail."
@@ -1383,9 +1580,9 @@ class AzureFoundryAIClient:
             raise UpstreamServiceError("foundry-image", "Image generation payload was invalid.")
         decoded_image = base64.b64decode(b64_image)
         usage = UsageAudit(
-            inputTokens=0,
-            outputTokens=0,
-            totalTokens=0,
+            inputTokens=(response.get("usage") or {}).get("input_tokens", 0),
+            outputTokens=(response.get("usage") or {}).get("output_tokens", 0),
+            totalTokens=(response.get("usage") or {}).get("total_tokens", 0),
             latencyMs=int((time.perf_counter() - started_at) * 1000),
         )
         return AIImageResult(
@@ -1410,6 +1607,7 @@ class AzureFoundryAIClient:
         reference_image: ReferenceImageUpload,
         request_id: str,
         image_quality: Literal["low", "medium", "high"] | None = None,
+        transparent_background: bool = False,
     ) -> AIImageResult:
         quality = image_quality if image_quality is not None else self.settings.image_quality
         if quality not in {"low", "medium", "high"}:
@@ -1422,6 +1620,11 @@ class AzureFoundryAIClient:
                 "prompt": art_prompt,
                 "size": self.settings.image_size,
                 "quality": quality,
+                **(
+                    {"background": "transparent", "output_format": "png"}
+                    if transparent_background
+                    else {}
+                ),
             },
             files={
                 "image": (
@@ -1442,9 +1645,9 @@ class AzureFoundryAIClient:
             raise UpstreamServiceError("foundry-image", "Image edit payload was invalid.")
         decoded_image = base64.b64decode(b64_image)
         usage = UsageAudit(
-            inputTokens=0,
-            outputTokens=0,
-            totalTokens=0,
+            inputTokens=(response.get("usage") or {}).get("input_tokens", 0),
+            outputTokens=(response.get("usage") or {}).get("output_tokens", 0),
+            totalTokens=(response.get("usage") or {}).get("total_tokens", 0),
             latencyMs=int((time.perf_counter() - started_at) * 1000),
         )
         return AIImageResult(
@@ -1460,6 +1663,22 @@ class AzureFoundryAIClient:
                 mode="live",
             ),
             usage=usage,
+        )
+
+    async def extract_subject(
+        self,
+        prompt: str,
+        *,
+        scene: ImageResult,
+        request_id: str,
+        image_quality: Literal["low", "medium", "high"] | None = None,
+    ) -> AIImageResult:
+        return await self.generate_image_edit(
+            prompt,
+            reference_image=ReferenceImageUpload(scene.content, scene.content_type, "scene.png"),
+            request_id=request_id,
+            image_quality=image_quality,
+            transparent_background=True,
         )
 
     async def _post(
@@ -1854,6 +2073,7 @@ class CardGenerationService:
                     text_result=progress.text_result,
                     image_quality=image_quality,
                     partial_reason="image_timeout",
+                    artwork_layout=progress.artwork_layout,
                 )
                 return self._as_response(partial)
             problem = (
@@ -2120,6 +2340,12 @@ class CardGenerationService:
             )
             raise problem
 
+        # A previous hosted version may still answer with historical text bounds; keep
+        # such cards on the historical frame rather than rejecting them.
+        artwork_layout: ArtworkLayout = (
+            DEFAULT_LAYOUT if payload_fits_recipe(validated_payload) else "illustration_only_v1"
+        )
+
         progress.stage = "post-text-moderation"
         post_text = await self.services.moderation_service.moderate_text(
             " ".join(
@@ -2128,6 +2354,12 @@ class CardGenerationService:
                     validated_payload.rulesText,
                     validated_payload.flavorText,
                     validated_payload.artBrief,
+                    validated_payload.printed_type() or "",
+                    *(
+                        validated_payload.inscription.abilityNames
+                        if validated_payload.inscription
+                        else []
+                    ),
                     *(
                         f"{ability.name}: {ability.description}"
                         for ability in validated_payload.abilities
@@ -2147,15 +2379,7 @@ class CardGenerationService:
                 error_code="generated_text_rejected",
             )
 
-        derived_art_prompt = (
-            derive_illustration_prompt(validated_payload)
-            if validated_payload.abilities
-            else (
-                agent_art_prompt
-                if agent_art_prompt is not None
-                else derive_art_prompt(validated_payload)
-            )
-        )
+        derived_art_prompt = derive_illustration_prompt(validated_payload)
         progress.stage = "art-prompt-moderation"
         post_art_prompt = await self.services.moderation_service.moderate_text(
             derived_art_prompt,
@@ -2173,6 +2397,7 @@ class CardGenerationService:
             )
 
         progress.validated_payload = validated_payload
+        progress.artwork_layout = artwork_layout
         progress.derived_art_prompt = derived_art_prompt
         progress.moderation = moderation
         progress.text_result = text_result
@@ -2233,6 +2458,7 @@ class CardGenerationService:
                 text_result=text_result,
                 partial_reason="image_failure",
                 image_quality=image_quality,
+                artwork_layout=artwork_layout,
             )
             return self._as_response(partial)
 
@@ -2262,7 +2488,7 @@ class CardGenerationService:
             moderation=moderation,
             text_result=text_result,
             image_result=image_result,
-            compose_frame=bool(validated_payload.abilities),
+            artwork_layout=artwork_layout,
         )
         return self._as_response(completed)
 
@@ -2276,7 +2502,7 @@ class CardGenerationService:
         idempotency_key: str,
         request_id: str,
         selected_expertise: list[str] | None = None,
-    ) -> tuple[str, AITextResult, GeneratedCardModel, str | None]:
+    ) -> tuple[str, AITextResult, CardPayload, str | None]:
         """Generate card text through the only supported path for the configured runtime.
 
         Returns (generation_path, text_result, validated_payload, agent_art_prompt) where
@@ -2295,7 +2521,7 @@ class CardGenerationService:
             )
             if selected_expertise:
                 card.abilities = [
-                    CardAbility(
+                    GeneratedCardAbility(
                         name=expertise,
                         description=(
                             "Conjure a protective ward that absorbs the next spell "
@@ -2344,7 +2570,7 @@ class CardGenerationService:
         idempotency_key: str,
         request_id: str,
         selected_expertise: list[str] | None = None,
-    ) -> tuple[str, AITextResult, GeneratedCardModel, str | None]:
+    ) -> tuple[str, AITextResult, CardPayload, str | None]:
         """Invoke the Foundry hosted agent for card text generation.
 
         Every failure is surfaced through the structured public error contract.
@@ -2398,7 +2624,9 @@ class CardGenerationService:
                         detail,
                         instruction="",
                         input_payload={"query": prompt},
-                        output_payload=agent_result.card.model_dump(exclude={"abilities"}),
+                        output_payload=agent_result.card.model_dump(
+                            include=agent_detail.CARD_FIELDS
+                        ),
                         input_fields={"query"},
                         output_fields=agent_detail.CARD_FIELDS,
                         output_kind="final_card",
@@ -2482,7 +2710,7 @@ class CardGenerationService:
         request_hash: str,
         idempotency_key: str,
         request_id: str,
-    ) -> tuple[str, AITextResult, GeneratedCardModel, str | None]:
+    ) -> tuple[str, AITextResult, CardPayload, str | None]:
         """Generate deterministic card text for automated tests only."""
         try:
             text_result = await self._retry_upstream(
@@ -2535,6 +2763,7 @@ class CardGenerationService:
         request_id: str,
         retry_idempotency_key: str,
     ) -> CardResponseModel:
+        deadline = time.monotonic() + self.services.settings.retry.overall_timeout_seconds
         retry_card_id = deterministic_card_id(record.owner_id, retry_idempotency_key)
         request_hash = digest_text(f"retry:{record.id}")
         if record.validated_payload is None or record.derived_art_prompt is None:
@@ -2588,6 +2817,17 @@ class CardGenerationService:
                 type="/problems/generated-art-rejected",
                 error_code="generated_art_rejected",
             )
+        payload = record.card_payload()
+        subject_result = None
+        if record.artwork_layout == "portrait_debordant_v1":
+            subject_result = await self._extract_subject(
+                payload,
+                image_result,
+                request_id=request_id,
+                image_quality=retry_quality,
+                moderation=moderation,
+                deadline=deadline,
+            )
         reservation, created = await self.services.audit_repository.reserve_audit(
             owner_id=record.owner_id,
             card_id=retry_card_id,
@@ -2605,7 +2845,6 @@ class CardGenerationService:
                 retry_card_id=retry_card_id,
                 fallback_record=record,
             )
-        payload = GeneratedCardModel.model_validate(record.validated_payload)
         completed = await self._persist_completed(
             owner=AuthenticatedOwner(
                 owner_id=record.owner_id,
@@ -2630,7 +2869,8 @@ class CardGenerationService:
             ),
             image_result=image_result,
             existing_card=record,
-            compose_frame=record.artwork_layout == "illustration_only_v1",
+            artwork_layout=record.artwork_layout,
+            subject_result=subject_result,
         )
         await self.services.audit_repository.save_audit(
             StoredCard(
@@ -2646,6 +2886,104 @@ class CardGenerationService:
         )
         return self._as_response(completed)
 
+    async def _extract_subject(
+        self,
+        payload: CardPayload,
+        scene: AIImageResult,
+        *,
+        request_id: str,
+        image_quality: Literal["low", "medium", "high"],
+        moderation: list[ModerationDecision],
+        deadline: float,
+    ) -> AIImageResult | None:
+        operation = getattr(self.services.ai_client, "extract_subject", None)
+        reserve = min(10.0, self.services.settings.retry.overall_timeout_seconds * 0.1)
+        timeout = min(
+            self.services.settings.retry.image_timeout_seconds,
+            deadline - time.monotonic() - reserve,
+        )
+        if operation is None or timeout <= 0:
+            safe_log("image.extraction_skipped", request_id=request_id)
+            return None
+        prompt = derive_subject_prompt(payload)
+        decision = await self.services.moderation_service.moderate_text(
+            prompt, stage="post_art_prompt"
+        )
+        moderation.append(decision)
+        agent_detail.require_allowed(decision, "post_art_prompt")
+        if not decision.allowed:
+            raise _GenerationRefusal(
+                status_code=422,
+                title="Artwork Prompt Rejected",
+                detail="The subject extraction prompt was rejected by moderation.",
+                type="/problems/generated-art-rejected",
+                error_code="generated_art_rejected",
+            )
+        started = time.perf_counter()
+        try:
+            with telemetry_span("fcg.subject_extraction", request_id=request_id):
+                result = await asyncio.wait_for(
+                    operation(
+                        prompt,
+                        scene=scene.image,
+                        request_id=request_id,
+                        image_quality=image_quality,
+                    ),
+                    timeout=timeout,
+                )
+        except UpstreamServiceError as exc:
+            if _is_image_policy_refusal(exc.error_code):
+                raise _GenerationRefusal(
+                    status_code=422,
+                    title="Generated Artwork Rejected",
+                    detail="The subject extraction was rejected by the image safety policy.",
+                    type="/problems/generated-art-rejected",
+                    error_code="generated_art_rejected",
+                ) from exc
+            record_dependency_attempt(
+                dependency="foundry-image",
+                attempt=1,
+                outcome="failed",
+                duration_ms=(time.perf_counter() - started) * 1000,
+                request_id=request_id,
+                error_code=exc.error_code or "dependency_error",
+                status_code=exc.status_code,
+                retryable=False,
+            )
+            safe_log("image.extraction_failed", request_id=request_id)
+            return None
+        except (TimeoutError, httpx.HTTPError, ValueError, OSError):
+            safe_log("image.extraction_failed", request_id=request_id)
+            return None
+        record_token_usage("image", result.usage)
+        scene.extraction_usage = result.usage
+        post_image = await self.services.moderation_service.moderate_image(result.image)
+        moderation.append(post_image)
+        agent_detail.require_allowed(post_image, "post_image")
+        if not post_image.allowed:
+            raise _GenerationRefusal(
+                status_code=422,
+                title="Generated Artwork Rejected",
+                detail="The extracted subject was rejected by moderation.",
+                type="/problems/generated-art-rejected",
+                error_code="generated_art_rejected",
+            )
+        try:
+            result.image.content = await asyncio.to_thread(
+                validate_subject_cutout, result.image.content, scene.image.content
+            )
+        except (ValueError, OSError):
+            safe_log("image.extraction_invalid_mask", request_id=request_id)
+            return None
+        record_dependency_attempt(
+            dependency="foundry-image",
+            attempt=1,
+            outcome="completed",
+            duration_ms=(time.perf_counter() - started) * 1000,
+            request_id=request_id,
+        )
+        return result
+
     async def _persist_partial(
         self,
         *,
@@ -2655,12 +2993,13 @@ class CardGenerationService:
         idempotency_key: str,
         request_hash: str,
         prompt: str,
-        validated_payload: GeneratedCardModel,
+        validated_payload: CardPayload,
         derived_art_prompt: str,
         moderation: list[ModerationDecision],
         text_result: AITextResult,
         image_quality: Literal["low", "medium", "high"],
         partial_reason: str,
+        artwork_layout: ArtworkLayout = DEFAULT_LAYOUT,
     ) -> StoredCard:
         replay = await self._claim_card_persistence(
             owner_id=owner.owner_id,
@@ -2683,14 +3022,24 @@ class CardGenerationService:
             status="awaiting_artwork_retry",
             prompt=prompt,
             prompt_hash=digest_text(prompt),
-            validated_payload=validated_payload.model_dump(),
+            validated_payload=stored_payload(validated_payload),
             derived_art_prompt=derived_art_prompt,
             moderation=[item.model_dump() for item in moderation],
             text_model=text_result.metadata.model_dump(),
             image_model=None,
             usage={"text": text_result.usage.model_dump()},
             image_quality=image_quality,
-            artwork_layout="illustration_only_v1" if validated_payload.abilities else None,
+            artwork_layout=artwork_layout,
+            inscription=validated_payload.inscription,
+            card_style=(
+                CardStyle(
+                    accent=normalize_accent(
+                        validated_payload.accentColor, validated_payload.cardType
+                    )
+                )
+                if artwork_layout == DEFAULT_LAYOUT
+                else None
+            ),
         )
         with telemetry_span(
             "fcg.persistence",
@@ -2729,13 +3078,14 @@ class CardGenerationService:
         idempotency_key: str,
         request_hash: str,
         prompt: str,
-        validated_payload: GeneratedCardModel,
+        validated_payload: CardPayload,
         derived_art_prompt: str,
         moderation: list[ModerationDecision],
         text_result: AITextResult,
         image_result: AIImageResult,
         existing_card: StoredCard | None = None,
-        compose_frame: bool = False,
+        artwork_layout: ArtworkLayout | None = None,
+        subject_result: AIImageResult | None = None,
     ) -> StoredCard:
         if existing_card is None:
             replay = await self._claim_card_persistence(
@@ -2752,18 +3102,34 @@ class CardGenerationService:
         # A failed retry must not delete or overwrite a concurrent attempt's asset.
         asset_id = card_id if existing_card is None else f"{card_id}-{uuid4().hex}"
         blob_name = build_blob_name(owner.owner_id, asset_id)
-        blob_uploaded = False
+        uploaded: list[str] = []
         blob_metadata: dict[str, Any] | None = None
         persistence_stage = "image-compose"
         try:
             image_content = image_result.image.content
             image_content_type = image_result.image.content_type
             abilities_embedded = bool(validated_payload.abilities)
-            if abilities_embedded:
-                abilities = [
-                    (ability.name, ability.description) for ability in validated_payload.abilities
-                ]
-                if compose_frame:
+            style = existing_card.card_style if existing_card is not None else None
+            if artwork_layout in RECIPE_LAYOUTS and style is None:
+                recipe = load_recipe(RECIPE_LAYOUTS[artwork_layout])
+                style = CardStyle(
+                    recipe=recipe.id,
+                    accent=normalize_accent(
+                        validated_payload.accentColor, validated_payload.cardType, recipe
+                    ),
+                )
+            scene_content = None
+            labels = (
+                validated_payload.printed_abilities()
+                if artwork_layout == DEFAULT_LAYOUT
+                else validated_payload.abilities
+            )
+            abilities = [(ability.name, ability.description) for ability in labels]
+            if abilities_embedded or artwork_layout in RECIPE_LAYOUTS:
+                if artwork_layout is not None:
+                    if artwork_layout in RECIPE_LAYOUTS:
+                        scene_content = await asyncio.to_thread(normalize_scene, image_content)
+                        image_content = scene_content
                     image_content = await asyncio.to_thread(
                         compose_card_artwork,
                         image_content,
@@ -2775,6 +3141,10 @@ class CardGenerationService:
                         attack=validated_payload.attack,
                         health=validated_payload.health,
                         flavor_text=validated_payload.flavorText,
+                        type_line=validated_payload.printed_type(),
+                        layout=artwork_layout,
+                        card_style=style,
+                        subject_cutout=subject_result.image.content if subject_result else None,
                     )
                 else:
                     image_content = await asyncio.to_thread(
@@ -2782,6 +3152,20 @@ class CardGenerationService:
                     )
                 image_content_type = "image/png"
             persistence_stage = "blob-upload"
+            artwork_assets: dict[str, dict[str, Any]] = {}
+            uploaded.append(blob_name)
+            # Source layers are snapshots of the card blob: any revision that deletes the card
+            # blob with its snapshots (including earlier ones) leaves no orphaned layer behind.
+            for role, asset_content in (
+                ("scene", scene_content),
+                ("subject", subject_result.image.content if subject_result else None),
+            ):
+                if asset_content is not None:
+                    asset_metadata = await self.services.asset_store.upload(
+                        blob_name, asset_content, "image/png"
+                    )
+                    asset_metadata["snapshot"] = await self.services.asset_store.snapshot(blob_name)
+                    artwork_assets[role] = asset_metadata
             with telemetry_span(
                 "fcg.persistence",
                 request_id=request_id,
@@ -2801,7 +3185,6 @@ class CardGenerationService:
                     outcome="completed",
                     request_id=request_id,
                 )
-            blob_uploaded = True
             persistence_stage = "cosmos-write"
             record = StoredCard(
                 id=card_id,
@@ -2813,7 +3196,7 @@ class CardGenerationService:
                 status="completed",
                 prompt=prompt,
                 prompt_hash=digest_text(prompt),
-                validated_payload=validated_payload.model_dump(),
+                validated_payload=stored_payload(validated_payload),
                 derived_art_prompt=derived_art_prompt,
                 blob_name=blob_metadata["blobName"],
                 blob_content_type=blob_metadata["contentType"],
@@ -2821,16 +3204,30 @@ class CardGenerationService:
                 blob_size_bytes=blob_metadata["sizeBytes"],
                 image_url_path=f"/cards/{card_id}/image",
                 abilities_embedded=abilities_embedded,
-                artwork_layout=(
-                    "illustration_only_v1" if abilities_embedded and compose_frame else None
-                ),
+                artwork_layout=artwork_layout,
+                card_style=style if artwork_layout in RECIPE_LAYOUTS else None,
+                inscription=validated_payload.inscription,
+                artwork_assets=artwork_assets,
                 moderation=[item.model_dump() for item in moderation],
                 text_model=text_result.metadata.model_dump(),
                 image_model=image_result.metadata.model_dump(),
                 usage={
                     "text": text_result.usage.model_dump(),
                     "image": image_result.usage.model_dump(),
-                    "totalLatencyMs": text_result.usage.latencyMs + image_result.usage.latencyMs,
+                    **(
+                        {"extraction": image_result.extraction_usage.model_dump()}
+                        if image_result.extraction_usage
+                        else {}
+                    ),
+                    "totalLatencyMs": (
+                        text_result.usage.latencyMs
+                        + image_result.usage.latencyMs
+                        + (
+                            image_result.extraction_usage.latencyMs
+                            if image_result.extraction_usage
+                            else 0
+                        )
+                    ),
                 },
                 completed_at=now_iso(),
             )
@@ -2845,7 +3242,13 @@ class CardGenerationService:
                     "fcg.persistence_operation": "save_completed",
                 },
             ):
-                saved = await self.services.card_repository.save(record)
+                if existing_card is None:
+                    saved = await self.services.card_repository.save(record)
+                else:
+                    completed = await self.services.card_repository.complete_retry(record)
+                    if completed is None:
+                        raise _RetrySuperseded()
+                    saved = completed
                 record_persistence(
                     store="card",
                     operation="save_completed",
@@ -2853,54 +3256,84 @@ class CardGenerationService:
                     request_id=request_id,
                 )
                 return saved
-        except Exception as exc:
-            _log_persistence_exception(
-                event="persistence-failed",
-                request_id=request_id,
-                stage=persistence_stage,
-                exc=exc,
-            )
-            if blob_uploaded and blob_metadata is not None:
+        except (Exception, asyncio.CancelledError) as exc:
+            superseded = isinstance(exc, _RetrySuperseded)
+            if not superseded:
+                _log_persistence_exception(
+                    event="persistence-failed",
+                    request_id=request_id,
+                    stage=persistence_stage,
+                    exc=exc,
+                )
+
+            async def compensate() -> None:
+                if persistence_stage == "cosmos-write":
+                    try:
+                        current = await self.services.card_repository.get(owner.owner_id, card_id)
+                    except Exception as cleanup_exc:
+                        _log_persistence_exception(
+                            event="compensation-failed",
+                            request_id=request_id,
+                            stage="cosmos-read",
+                            exc=cleanup_exc,
+                        )
+                        return
+                    if current is not None and current.blob_name == blob_name:
+                        return
+                for uploaded_name in reversed(uploaded):
+                    try:
+                        await self.services.asset_store.delete(uploaded_name)
+                        record_persistence(
+                            store="blob",
+                            operation="compensate",
+                            outcome="completed",
+                            request_id=request_id,
+                        )
+                        safe_persistence_log(
+                            event="compensation-succeeded",
+                            request_id=request_id,
+                            stage="compensation-delete",
+                            status_code=None,
+                            azure_error_code=None,
+                        )
+                        add_event(
+                            "compensation.completed",
+                            {
+                                "fcg.store": "blob",
+                                "fcg.persistence_operation": "compensate",
+                                "fcg.outcome": "completed",
+                            },
+                        )
+                    except Exception as cleanup_exc:
+                        _log_persistence_exception(
+                            event="compensation-failed",
+                            request_id=request_id,
+                            stage="compensation-delete",
+                            exc=cleanup_exc,
+                        )
+                if existing_card is None:
+                    try:
+                        await self.services.card_repository.delete(owner.owner_id, card_id)
+                    except Exception as cleanup_exc:
+                        _log_persistence_exception(
+                            event="compensation-failed",
+                            request_id=request_id,
+                            stage="cosmos-delete",
+                            exc=cleanup_exc,
+                        )
+
+            cancelled = isinstance(exc, asyncio.CancelledError)
+            cleanup = asyncio.create_task(compensate())
+            while not cleanup.done():
                 try:
-                    await self.services.asset_store.delete(blob_name)
-                    record_persistence(
-                        store="blob",
-                        operation="compensate",
-                        outcome="completed",
-                        request_id=request_id,
-                    )
-                    safe_persistence_log(
-                        event="compensation-succeeded",
-                        request_id=request_id,
-                        stage="compensation-delete",
-                        status_code=None,
-                        azure_error_code=None,
-                    )
-                    add_event(
-                        "compensation.completed",
-                        {
-                            "fcg.store": "blob",
-                            "fcg.persistence_operation": "compensate",
-                            "fcg.outcome": "completed",
-                        },
-                    )
-                except Exception as cleanup_exc:
-                    _log_persistence_exception(
-                        event="compensation-failed",
-                        request_id=request_id,
-                        stage="compensation-delete",
-                        exc=cleanup_exc,
-                    )
-            if existing_card is None:
-                try:
-                    await self.services.card_repository.delete(owner.owner_id, card_id)
-                except Exception as cleanup_exc:
-                    _log_persistence_exception(
-                        event="compensation-failed",
-                        request_id=request_id,
-                        stage="cosmos-delete",
-                        exc=cleanup_exc,
-                    )
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    cancelled = True
+            cleanup.result()
+            if cancelled:
+                raise asyncio.CancelledError() from exc
+            if superseded:
+                return await self._superseded_retry_result(owner.owner_id, card_id)
             problem = ProblemDetails(
                 status_code=503,
                 title="Service Unavailable",
@@ -2928,6 +3361,26 @@ class CardGenerationService:
                         exc=audit_exc,
                     )
             raise problem from exc
+
+    async def _superseded_retry_result(self, owner_id: str, card_id: str) -> StoredCard:
+        current = await self.services.card_repository.get(owner_id, card_id)
+        if current is not None and current.status == "completed":
+            return current
+        if current is not None and current.status == "awaiting_artwork_retry":
+            raise ProblemDetails(
+                status_code=409,
+                title="Conflict",
+                detail="The card changed during the artwork retry; try again.",
+                type="/problems/retry-conflict",
+                error_code="retry_conflict",
+            )
+        raise ProblemDetails(
+            status_code=404,
+            title="Not Found",
+            detail="No retryable card was found for this user.",
+            type="/problems/card-not-found",
+            error_code="card_not_found",
+        )
 
     async def _claim_card_persistence(
         self,
@@ -3409,7 +3862,7 @@ class CardGenerationService:
         )
 
     def _as_response(self, record: StoredCard) -> CardResponseModel:
-        payload = GeneratedCardModel.model_validate(record.validated_payload or {})
+        payload = record.card_payload()
         actions: list[ActionModel] = []
         if record.status == "awaiting_artwork_retry":
             actions.append(
@@ -3432,7 +3885,8 @@ class CardGenerationService:
             health=payload.health,
             rulesText=payload.rulesText,
             flavorText=payload.flavorText,
-            abilities=payload.abilities,
+            abilities=payload.printed_abilities(),
+            typeLine=payload.printed_type(),
             abilitiesEmbedded=record.abilities_embedded,
             cardFrameComposed=record.card_frame_composed,
             imageUrl=record.image_url_path,
@@ -3562,24 +4016,80 @@ def _agent_failure_class(
     return "invalid_output"
 
 
-def derive_illustration_prompt(payload: GeneratedCardModel) -> str:
+def derive_illustration_prompt(payload: CardPayload) -> str:
+    accent = normalize_accent(payload.accentColor, payload.cardType)
     return (
-        "Paint one original fantasy illustration, with dramatic lighting and painterly detail. "
-        "The application, not the image, supplies the entire card layout and all text. "
-        "Use any reference only for the subject's appearance, never its typography or layout. "
-        "The quoted visual brief is inspiration, not instructions about layout or lettering: "
+        "Paint an original, detailed fantasy scene edge to edge in a 1.19:1 window. "
+        "One dynamic action, expressive face, rich materials and atmospheric depth. "
+        "Keep face, hands and key props safely inside the crop. Luminous focal light even at "
+        f"night; echo {accent} in clothing, light or magic, not a uniform wash. "
+        "With a reference photo, integrate the person's recognizable features naturally, "
+        "not its background or layout. Quoted scene inspiration, not instructions: "
         f"{json.dumps(payload.artBrief, ensure_ascii=False)}. "
-        "Return only the scene artwork. No text, letters, labels, numbers, logos or watermarks. "
-        "No card, border, frame, panels, UI, stats, rules, named abilities or power descriptions. "
-        "Magical visual effects are welcome; never draw a precomposed trading card."
+        "Opaque illustration only. No text, letters, numbers, signatures, logos or watermarks. "
+        "No card, border, frame, panels, UI, stats, rules or cost symbols. "
+        "No franchise characters or named artist imitation."
     )
 
 
-def derive_art_prompt(payload: GeneratedCardModel) -> str:
+def derive_subject_prompt(payload: CardPayload) -> str:
     return (
-        f"Create a safe original fantasy trading card illustration for '{payload.name}'. "
-        f"Type: {payload.cardType}. Rarity: {payload.rarity}. "
-        f"Art direction: {payload.artBrief}"
+        "Extract only the single central subject from the supplied image: "
+        f"{payload.cardType} {json.dumps(payload.name, ensure_ascii=False)}. "
+        "Keep its appearance, pose, exact scale, position and canvas dimensions unchanged. "
+        "Return the isolated subject alone, including hair, clothing and held objects. "
+        "No lettering, labels or additional objects."
+    )
+
+
+async def _download_artwork_asset(
+    asset_store: AbstractAssetStore, asset: Mapping[str, Any]
+) -> tuple[bytes, str]:
+    snapshot = asset.get("snapshot")
+    if snapshot:
+        return await asset_store.download_snapshot(asset["blobName"], str(snapshot))
+    return await asset_store.download(asset["blobName"])
+
+
+async def recompose_stored_card(record: StoredCard, asset_store: AbstractAssetStore) -> bytes:
+    """Recompose an already owner-authorized record without an image-provider call."""
+    if record.artwork_layout not in RECIPE_LAYOUTS or record.card_style is None:
+        raise ValueError("card_has_no_recipe_assets")
+    scene = record.artwork_assets.get("scene")
+    if scene is None:
+        raise ValueError("card_has_no_scene")
+    content, _ = await _download_artwork_asset(asset_store, scene)
+    subject = (
+        record.artwork_assets.get("subject")
+        if record.artwork_layout == "portrait_debordant_v1"
+        else None
+    )
+    cutout = (await _download_artwork_asset(asset_store, subject))[0] if subject else None
+    payload = record.card_payload()
+    return await asyncio.to_thread(
+        compose_card_artwork,
+        content,
+        [(ability.name, ability.description) for ability in payload.printed_abilities()],
+        name=payload.name,
+        card_type=payload.cardType,
+        rarity=payload.rarity,
+        mana_cost=payload.manaCost,
+        attack=payload.attack,
+        health=payload.health,
+        flavor_text=payload.flavorText,
+        type_line=payload.printed_type(),
+        layout=record.artwork_layout,
+        card_style=record.card_style,
+        subject_cutout=cutout,
+    )
+
+
+def derive_art_prompt(payload: CardPayload) -> str:
+    return (
+        "Paint an original fantasy scene in motion for a 1.19:1 window. "
+        "Keep the subject luminous, the setting vivid and the action readable. "
+        "Illustration only: no text, card frame, logos, UI or signatures. "
+        f"Visual brief: {payload.artBrief}"
     )
 
 

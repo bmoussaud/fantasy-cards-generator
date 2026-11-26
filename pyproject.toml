@@ -20,6 +20,7 @@ dependencies = [
     "opentelemetry-instrumentation-httpx>=0.64b0",
     "python-multipart>=0.0.32",
     "pillow>=12.3.0",
+    "pyyaml>=6.0.3",
 ]
 
 [project.optional-dependencies]

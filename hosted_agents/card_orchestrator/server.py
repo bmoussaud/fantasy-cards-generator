@@ -346,7 +346,17 @@ def create_host(
                 yield stream.emit_failed(code=failure_code, message="Card generation unavailable.")
 
             return failed()
-        exclude = {"card": {"abilities"}} if response.card and not response.card.abilities else None
+        exclude: dict[str, Any] | None = None
+        if response.card is not None:
+            # Earlier Web revisions forbid unknown card keys; presentation travels separately.
+            if response.card.accentColor is not None:
+                response.metadata["cardStyle"] = {"accentColor": response.card.accentColor}
+            if response.card.inscription is not None:
+                response.metadata["inscription"] = response.card.inscription.model_dump()
+            card_exclude = {"accentColor", "inscription"} | (
+                set() if response.card.abilities else {"abilities"}
+            )
+            exclude = {"card": card_exclude}
         return TextResponse(context, request, text=response.model_dump_json(exclude=exclude))
 
     return host

@@ -28,7 +28,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from app.agent_detail import Envelope, Source, current, parse_envelope
 from app.completion_diagnostics import CompletionDiagnostics
-from app.generation import GeneratedCardModel
+from app.generation import CardPayload
 from app.profile_enrichment_contract import ProfileEnrichmentRequest, ProfileEnrichmentResponse
 from app.settings import AppSettings, SettingsError, load_app_settings
 
@@ -114,6 +114,7 @@ class GenerateCardAgentRequest(BaseModel):
 
     schemaVersion: Literal[1] = 1
     query: str = Field(min_length=1, max_length=2500)
+    # Five, not the Web route's three: hosted versions must keep serving earlier Web revisions.
     selectedExpertise: list[Annotated[str, Field(min_length=2, max_length=80)]] | None = Field(
         default=None, min_length=1, max_length=5
     )
@@ -127,7 +128,9 @@ class GenerateCardAgentResponse(BaseModel):
 
     schemaVersion: Literal[1]
     status: Literal["completed", "refused", "routing_defer", "held"]
-    card: GeneratedCardModel | None = None
+    # Wire cards keep the historical bounds and carry no accent; recipe bounds and the
+    # accent (metadata.cardStyle) are applied by the Web so mixed versions stay compatible.
+    card: CardPayload | None = None
     artPrompt: str | None = Field(default=None, min_length=1, max_length=1000)
     metadata: dict[str, Any] = Field(default_factory=dict)
     safetyHints: list[str] = Field(default_factory=list)
@@ -148,7 +151,7 @@ class FoundryAgentInvocationResult:
     response_id: str | None = None
     request_id: str | None = None
     agent_version: str | None = None
-    card: GeneratedCardModel | None = None
+    card: CardPayload | None = None
     art_prompt: str | None = None
     error_code: str | None = None
     completion_diagnostics: CompletionDiagnostics | None = None
@@ -837,6 +840,15 @@ def _parse_success_envelope(
     try:
         payload = json.loads(output_text)
         agent_response = GenerateCardAgentResponse.model_validate(payload)
+        if (
+            agent_response.status == "completed"
+            and agent_response.card is not None
+            and "inscription" in agent_response.metadata
+        ):
+            agent_response.card = CardPayload.model_validate(
+                agent_response.card.model_dump()
+                | {"inscription": agent_response.metadata["inscription"]}
+            )
     except (json.JSONDecodeError, ValidationError, ValueError):
         return FoundryAgentInvocationResult(
             status="invalid_response",
@@ -902,7 +914,7 @@ def _parse_success_envelope(
         response_id=response_id,
         request_id=request_id,
         agent_version=agent_version,
-        card=agent_response.card,
+        card=_with_wire_accent(agent_response.card, agent_response.metadata),
         art_prompt=agent_response.artPrompt,
         agent_detail=private_detail,
         agent_detail_rejected=(
@@ -910,6 +922,16 @@ def _parse_success_envelope(
         ),
         message="Foundry agent invocation completed.",
     )
+
+
+def _with_wire_accent(card: CardPayload | None, metadata: Mapping[str, Any]) -> CardPayload | None:
+    style = metadata.get("cardStyle")
+    accent = style.get("accentColor") if isinstance(style, Mapping) else None
+    if card is None or card.accentColor is not None or not isinstance(accent, str):
+        return card
+    if re.fullmatch(r"#[0-9a-fA-F]{6}", accent) is None:
+        return card
+    return card.model_copy(update={"accentColor": accent})
 
 
 def _contains_refusal(body: Mapping[str, Any]) -> bool:

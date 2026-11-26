@@ -2128,13 +2128,13 @@ def create_app(services: AppServices | None = None) -> FastAPI:
                     str(index): expertise
                     for index, expertise in enumerate(saved_profile.profile.expertise)
                 }
-                if len(choices) > len(available) or any(
+                if len(choices) > min(3, len(available)) or any(
                     not isinstance(choice, str) or choice not in available for choice in choices
                 ):
                     raise ProblemDetails(
                         status_code=422,
                         title="Invalid expertise selection",
-                        detail="Choose only the expertises listed in Generator.",
+                        detail="Choose at most three of the expertises listed in Generator.",
                         type="/problems/invalid-expertise-selection",
                         error_code="invalid_expertise_selection",
                     )

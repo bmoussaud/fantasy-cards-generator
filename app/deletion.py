@@ -428,9 +428,9 @@ class DeletionService:
 
     def _card_blob_targets(self, cards: list[StoredCard]) -> list[BlobDeletionTarget]:
         return [
-            BlobDeletionTarget(store="card", blob_name=card.blob_name)
+            BlobDeletionTarget(store="card", blob_name=name)
             for card in cards
-            if isinstance(card.blob_name, str) and card.blob_name
+            for name in card.asset_names
         ]
 
     def _photo_blob_targets(self, photos: list[StoredSavedPhoto]) -> list[BlobDeletionTarget]:

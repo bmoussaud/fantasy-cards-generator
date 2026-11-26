@@ -173,7 +173,8 @@ def test_singleton_atomic_edits_isolation_and_reopened_repository(storage):
     asyncio.run(scenario())
 
 
-def test_profile_reserves_exact_normalized_context_capacity(authenticated_client):
+def test_profile_reserves_exact_normalized_context_capacity(authenticated_client, monkeypatch):
+    monkeypatch.setattr("app.generation.title_from_prompt", lambda _: "Capacity Guardian")
     values = {
         "display_name": "n" * 80,
         "title": "t" * 120,
@@ -330,7 +331,7 @@ def test_generator_preselects_first_three_expertise_options(authenticated_client
     assert extract_hidden_value(page.text, "expertise_profile_revision")
 
 
-@pytest.mark.parametrize("choices", [["2"], ["4", "1", "3"], ["0", "1", "2", "3", "4"], [], None])
+@pytest.mark.parametrize("choices", [["2"], ["4", "1", "3"], ["0", "1", "2"], [], None])
 def test_generator_filters_expertise_without_editing_saved_profile(authenticated_client, choices):
     client = authenticated_client
     expertise = ["Cloud migration", "Incident response", "FinOps", "Accessibility", "Observability"]
@@ -371,6 +372,7 @@ def test_generator_filters_expertise_without_editing_saved_profile(authenticated
     [
         (["Free-form content"], False, 422, "invalid_expertise_selection"),
         (["5"], False, 422, "invalid_expertise_selection"),
+        (["0", "1", "2", "3"], False, 422, "invalid_expertise_selection"),
         (["0"], True, 409, "expertise_selection_stale"),
     ],
 )
@@ -714,7 +716,7 @@ def test_invalid_direction_does_not_generate_or_update_profile(authenticated_cli
     )
     assert response.status_code == 422
     assert 'id="creative-direction"' not in response.text
-    assert "watercolor textures" not in response.text
+    assert "Anime storybook style" not in response.text
     assert not client.app.state.services.card_repository._records
     after = asyncio.run(client.app.state.services.profile_repository.get(TEST_OWNER_ID))
     assert after.revision == before.revision

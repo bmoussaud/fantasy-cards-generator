@@ -6,6 +6,16 @@
 (function () {
   "use strict";
   var ALLOWED_PHOTO_TYPES = ["image/jpeg", "image/png", "image/webp"];
+  var expertiseGroup = document.querySelector(".generation-expertise");
+  if (expertiseGroup) {
+    expertiseGroup.addEventListener("change", function () {
+      var choices = expertiseGroup.querySelectorAll('input[name="expertise_index"]');
+      var selected = expertiseGroup.querySelectorAll('input[name="expertise_index"]:checked');
+      choices[0].setCustomValidity(
+        selected.length > 3 ? "Choose at most three expertise items for this card." : ""
+      );
+    });
+  }
   var profileEditor = document.getElementById("profile-editor");
   if (profileEditor) {
     var enrichmentStart = profileEditor.querySelector("[data-enrichment-start]");

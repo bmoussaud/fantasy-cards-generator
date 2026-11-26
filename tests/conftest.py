@@ -45,7 +45,7 @@ os.environ.update(
         "UPSTREAM_BASE_BACKOFF_SECONDS": "0.01",
         "TEXT_TIMEOUT_SECONDS": "0.2",
         "IMAGE_TIMEOUT_SECONDS": "0.2",
-        "OVERALL_TIMEOUT_SECONDS": "0.6",
+        "OVERALL_TIMEOUT_SECONDS": "5",
         "AUDIT_RETENTION_DAYS": "30",
         "PROFILE_PHOTOS_CONTAINER_NAME": "profile-photos",
         "CONTENT_SAFETY_ENDPOINT": "https://content-safety.example",
@@ -163,7 +163,9 @@ def base_environment(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, N
     monkeypatch.setenv("UPSTREAM_BASE_BACKOFF_SECONDS", "0.01")
     monkeypatch.setenv("TEXT_TIMEOUT_SECONDS", "0.2")
     monkeypatch.setenv("IMAGE_TIMEOUT_SECONDS", "0.2")
-    monkeypatch.setenv("OVERALL_TIMEOUT_SECONDS", "0.6")
+    # The real 1024x1536 PIL composition runs inside the request budget.
+    # Deadline-specific tests set their own shorter budgets.
+    monkeypatch.setenv("OVERALL_TIMEOUT_SECONDS", "5")
     monkeypatch.setenv("AUDIT_RETENTION_DAYS", "30")
     monkeypatch.setenv("PROFILE_PHOTOS_CONTAINER_NAME", "profile-photos")
     monkeypatch.setenv("CONTENT_SAFETY_ENDPOINT", "https://content-safety.example")

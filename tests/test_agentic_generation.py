@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import replace
+from io import BytesIO
 from types import SimpleNamespace
 from typing import Any
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from PIL import Image, PngImagePlugin
 
 from app import generation as generation_module
 from app.foundry_agent_client import FoundryAgentClient, FoundryAgentInvocationResult
@@ -395,7 +397,8 @@ def test_agent_success_preserves_card_contract_image_and_persistence(
     }
     assert calls == ["A safe original frost guardian hero with a silver shield"]
     assert len(services.card_repository._records) == 1
-    assert len(services.asset_store._assets) == 1
+    (blob_name,) = services.asset_store._assets
+    assert len(services.asset_store._snapshots[blob_name]) == 1
 
 
 @pytest.mark.parametrize(
@@ -824,6 +827,15 @@ def test_artwork_retry_moderation_refusal_preserves_safe_partial_without_retry_a
     assert not services.asset_store._assets
 
 
+@pytest.fixture
+def private_reference_png() -> bytes:
+    metadata = PngImagePlugin.PngInfo()
+    metadata.add_text("Comment", "PRIVATE-PHOTO")
+    payload = BytesIO()
+    Image.new("RGB", (16, 16), "navy").save(payload, format="PNG", pnginfo=metadata)
+    return payload.getvalue()
+
+
 @pytest.mark.parametrize("shared", [False, True])
 @pytest.mark.parametrize(
     "operation",
@@ -834,6 +846,7 @@ def test_provider_image_refusal_has_no_mutations(
     caplog: pytest.LogCaptureFixture,
     shared: bool,
     operation: str,
+    private_reference_png: bytes,
 ) -> None:
     agent_calls = 0
 
@@ -963,7 +976,7 @@ def test_provider_image_refusal_has_no_mutations(
             url,
             data=data,
             files=(
-                {"photo": ("portrait.png", b"\x89PNG\r\n\x1a\nPRIVATE-PHOTO", "image/png")}
+                {"photo": ("portrait.png", private_reference_png, "image/png")}
                 if operation.startswith("photo")
                 else None
             ),
@@ -1038,7 +1051,9 @@ def test_provider_refusal_is_not_retried_even_if_upstream_marks_retryable(monkey
 @pytest.mark.parametrize(
     "code", ["BadRequest", "content_filter_error", "content_filter_unavailable", "content_filtered"]
 )
-def test_non_policy_image_400_keeps_technical_failure_contract(monkeypatch, photo, code):
+def test_non_policy_image_400_keeps_technical_failure_contract(
+    monkeypatch, photo, code, private_reference_png
+):
     class Agent:
         async def invoke(self, query):
             return _success()
@@ -1072,7 +1087,7 @@ def test_non_policy_image_400_keeps_technical_failure_contract(monkeypatch, phot
                 "idempotencyKey": "non-policy-photo",
                 "csrfToken": csrf,
             },
-            files={"photo": ("portrait.png", b"\x89PNG\r\n\x1a\nPRIVATE-PHOTO", "image/png")},
+            files={"photo": ("portrait.png", private_reference_png, "image/png")},
         )
         assert response.status_code == 422
         assert response.json()["errorCode"] == "reference_image_rejected"

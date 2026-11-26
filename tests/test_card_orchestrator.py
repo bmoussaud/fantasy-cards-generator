@@ -9,6 +9,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from pydantic import Field
 
 pytest.importorskip("azure.ai.agentserver.responses")
 pytest.importorskip("agent_framework.foundry")
@@ -19,7 +20,12 @@ from app.foundry_agent_client import (  # noqa: E402
     GenerateCardAgentRequest,
     _parse_success_envelope,
 )
-from app.generation import GeneratedCardModel, HeuristicModerationService  # noqa: E402
+from app.generation import (  # noqa: E402
+    CardAbility,
+    CardPayload,
+    CardTextFields,
+    HeuristicModerationService,
+)
 from app.settings import load_app_settings  # noqa: E402
 from hosted_agents.card_orchestrator.orchestrator import (  # noqa: E402
     CardOrchestrator,
@@ -157,7 +163,11 @@ def test_sequential_validation_and_mechanics_invariant():
     result = asyncio.run(orchestrator.generate(GenerateCardAgentRequest(query="  drake  ")))
     assert result.status == "completed"
     assert fake.calls[0] == ("generation", {"query": "drake"})
-    assert result.card.model_dump() == CARD | {"abilities": []}
+    assert result.card.model_dump() == CARD | {
+        "abilities": [],
+        "accentColor": None,
+        "inscription": None,
+    }
     assert result.artPrompt.endswith(CARD["artBrief"])
     assert fake.closed
     evidence = result.metadata["safetyEvidence"]
@@ -483,10 +493,32 @@ def test_actual_sdk_host_roundtrip_through_existing_operator_parser():
             result = await client.invoke("drake")
         assert result.success, result
         assert result.schema_valid
-        assert result.card == GeneratedCardModel.model_validate(CARD)
+        assert result.card == CardPayload.model_validate(CARD)
         assert fake.closed
 
     asyncio.run(scenario())
+
+
+def test_accent_travels_in_metadata_so_released_web_parsers_accept_the_card():
+    class ReleasedWebCard(CardTextFields):
+        # Released Web revisions validate the wire card strictly, without accentColor.
+        abilities: list[CardAbility] = Field(default_factory=list, max_length=5)
+
+    inscription = {"subtype": "Mountain Drake", "abilityNames": []}
+    orchestrator, _ = runtime(
+        FakeSpecialists([CARD | {"accentColor": "#6B3FA0", "inscription": inscription}])
+    )
+    response = asyncio.run(post(create_host(settings(), orchestrator=orchestrator), wire()))
+    assert response.status_code == 200
+    envelope = response.json()
+    payload = json.loads(envelope["output"][0]["content"][0]["text"])
+    assert "accentColor" not in payload["card"]
+    assert payload["metadata"]["cardStyle"] == {"accentColor": "#6B3FA0"}
+    assert payload["metadata"]["inscription"] == inscription
+    assert ReleasedWebCard.model_validate(payload["card"])
+    parsed = _parse_success_envelope(envelope, request_id=None, expected_version="candidate-1")
+    assert parsed.success and parsed.card.accentColor == "#6B3FA0"
+    assert parsed.card.inscription.model_dump() == inscription
 
 
 @pytest.mark.parametrize(
@@ -738,7 +770,7 @@ def test_actual_probe_body_roundtrips_without_session_state(monkeypatch, caplog)
         response.json(), request_id=None, expected_version="candidate-1"
     )
     assert parsed.success and parsed.schema_valid
-    assert parsed.card == GeneratedCardModel.model_validate(CARD)
+    assert parsed.card == CardPayload.model_validate(CARD)
     assert fake.calls[0] == ("generation", {"query": payload.SYNTHETIC_QUERY})
     observed = json.dumps(fake.calls) + response.text + caplog.text
     assert session not in observed
