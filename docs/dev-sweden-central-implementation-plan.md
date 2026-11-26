@@ -85,6 +85,45 @@ identité/authentification, sécurité/confidentialité, IA responsable et véri
 des preuves. Aucun de ces avis n'est acquis par ce plan. Les revues indépendantes
 infrastructure, identité et données restent notamment en attente.
 
+### Vérifications de faisabilité du 26 novembre 2026
+
+Sources : Microsoft Learn (consulté le 26/11/2026) et preuves ARM consignées
+dans #194. Aucune requête ARM n'a pu être faite : l'environnement de l'agent ne
+résout ni `login.microsoftonline.com`, ni `management.azure.com`.
+
+| Dépendance | Sweden Central | Preuve | Reste à vérifier en live |
+|---|---|---|---|
+| `MAI-Image-2.7` `2026-11-02` (préversion) | Probable | Absent des [tables régionales Learn](https://learn.microsoft.com/azure/foundry/foundry-models/concepts/models-sold-directly-by-azure-region-availability) (2.5/2.6 y figurent en Suède). Listé par `az cognitiveservices model list -l swedencentral` et déployé (capacité 1) sur `bmoussaud-2-resource` selon #194. | Quota GlobalStandard restant : le déploiement existant consomme déjà la capacité. Learn indique 0 RPM au niveau gratuit et ne publie pas encore de RPM pour 2.7. |
+| `gpt-5.5` `2026-04-24` | Oui | Table Learn Global Standard Europe. | Quota : le DEV demande 10 unités, et `bmoussaud-2-resource` porte déjà 3 déploiements `gpt-5.5`. |
+| `gpt-image-2` `2026-04-21` | Oui | Table Learn Global Standard Europe. | Quota. |
+| Hosted agents | Oui | [Liste Learn des régions](https://learn.microsoft.com/azure/foundry/agents/concepts/hosted-agents). | Quota de sessions régional. |
+| Content Safety texte/image | Oui | [Disponibilité Learn](https://learn.microsoft.com/azure/ai-services/content-safety/region-availability). Le défaut Bicep reste `MODERATION_SERVICE=heuristic`. | Aucun si le défaut est conservé. |
+| ACA, Cosmos, ACR | Oui | Fournisseurs ARM vérifiés dans #194. | Restriction d'accès Cosmos à la région pour l'abonnement. |
+| Key Vault, Storage, NAT, Log Analytics, App Insights | Oui | Région standard ; `bmoussaud-2-resource-appinsights` existe déjà en Suède (#194). | Politiques d'abonnement. |
+| Application Entra distincte | n/a | `ENTRA_APP_UNIQUE_NAME` ajouté. | Aucune collision sur le `uniqueName` choisi. |
+
+Requêtes en lecture seule à exécuter par @bmoussaud, connecté à l'abonnement
+`bmoussaudms` :
+
+```bash
+az account set --subscription b8ff3e15-7e2d-4fac-a773-992fb59ccedd
+az cognitiveservices model list -l swedencentral \
+  --query "[?model.name=='MAI-Image-2.7'||model.name=='gpt-5.5'||model.name=='gpt-image-2'].{n:model.name,v:model.version,f:model.format,s:join(',',model.skus[].name)}" -o table
+az cognitiveservices usage list -l swedencentral \
+  --query "[?contains(name.value,'MAI-Image-2.7')||contains(name.value,'gpt-5.5')||contains(name.value,'gpt-image-2')].{q:name.value,cur:currentValue,lim:limit}" -o table
+az cognitiveservices account deployment list -n bmoussaud-2-resource -g <rg> \
+  --query "[].{d:name,m:properties.model.name,c:sku.capacity}" -o table
+az cosmosdb locations show --location swedencentral -o json
+az policy assignment list --query "[].{n:displayName,e:enforcementMode}" -o table
+az rest --method get --url "https://graph.microsoft.com/beta/applications?\$filter=uniqueName eq 'fantasy-cards-generator-dev-swedencentral'&\$select=appId"
+```
+
+Condition de sortie : `limit - current` vaut au moins 1 pour MAI-Image-2.7 et
+gpt-image-2, et au moins 10 pour gpt-5.5. À défaut, demander un quota
+supplémentaire ou réduire la capacité DEV (MAI : `AI_FOUNDRY_MAI_IMAGE_DEPLOYMENT_CAPACITY` ;
+texte et GPT Image : paramètres Bicep non exposés dans `main.parameters.json`),
+sans supprimer l'ancien DEV.
+
 **Point d'arrêt :** présenter le périmètre qualifié à @bmoussaud et obtenir
 l'approbation explicite avant le lot 1.
 
