@@ -9,6 +9,16 @@ from typing import Literal
 PERSISTENCE_MODE_VALUES = {"memory", "azure"}
 TELEMETRY_ENV_VALUES = {"development", "production", "test"}
 IMAGE_QUALITY_VALUES = {"low", "medium", "high"}
+GPT_IMAGE_MODEL = "gpt-image-2"
+MAI_IMAGE_MODEL = "MAI-Image-2.7"
+FOUNDRY_IMAGE_MODEL_VALUES = (GPT_IMAGE_MODEL, MAI_IMAGE_MODEL)
+GPT_IMAGE_DEFAULT_SIZE = "1024x1536"
+# Close to the 1.19:1 cadre-classique window; 1,024,512 pixels.
+MAI_IMAGE_DEFAULT_SIZE = "1104x928"
+MAI_IMAGE_MIN_SIDE = 768
+# No pixel ceiling is published for MAI-Image-2.7; 1024x1536 is the largest size
+# verified against the live deployment, so larger requests are rejected up front.
+MAI_IMAGE_MAX_PIXELS = 1_572_864
 FOUNDRY_AGENT_RUNTIME_SECONDS = 65.0
 FOUNDRY_AGENT_TIMEOUT_MAX_SECONDS = 90.0
 
@@ -81,6 +91,12 @@ class AppSettings:
     saved_photo_max_bytes: int
     saved_photo_thumbnail_size: int
     agent_trace_enabled: bool = True
+    foundry_image_model: str = GPT_IMAGE_MODEL
+    foundry_image_endpoint: str | None = None
+
+    @property
+    def uses_mai_image(self) -> bool:
+        return self.foundry_image_model == MAI_IMAGE_MODEL
 
 
 class SettingsError(RuntimeError):
@@ -129,7 +145,18 @@ def load_app_settings() -> AppSettings:
     if image_quality_raw not in IMAGE_QUALITY_VALUES:
         raise SettingsError("IMAGE_QUALITY must be one of: low, medium, high.")
 
+    image_model = _string_env("FOUNDRY_IMAGE_MODEL", default=GPT_IMAGE_MODEL)
+    if image_model not in FOUNDRY_IMAGE_MODEL_VALUES:
+        raise SettingsError(
+            "FOUNDRY_IMAGE_MODEL must be one of: " + ", ".join(FOUNDRY_IMAGE_MODEL_VALUES) + "."
+        )
+    default_image_size = (
+        MAI_IMAGE_DEFAULT_SIZE if image_model == MAI_IMAGE_MODEL else GPT_IMAGE_DEFAULT_SIZE
+    )
+
     settings = AppSettings(
+        foundry_image_model=image_model,
+        foundry_image_endpoint=_optional_env("FOUNDRY_IMAGE_ENDPOINT"),
         agent_trace_enabled=parse_agent_trace_enabled(),
         app_env=app_env,
         persistence_mode=persistence_mode,
@@ -225,7 +252,7 @@ def load_app_settings() -> AppSettings:
             ),
         ),
         audit_retention_days=_int_env("AUDIT_RETENTION_DAYS", default=30, minimum=1),
-        image_size=_string_env("IMAGE_SIZE", default="1024x1536"),
+        image_size=_string_env("IMAGE_SIZE", default=default_image_size),
         image_quality=image_quality_raw,  # type: ignore[arg-type]
         saved_photo_max_count=_int_env("SAVED_PHOTO_MAX_COUNT", default=10, minimum=1),
         saved_photo_max_bytes=_int_env(
@@ -271,6 +298,8 @@ def _validate_app_settings(settings: AppSettings) -> None:
 
     _require(settings.foundry_endpoint, "FOUNDRY_ENDPOINT must be set.")
     _require(settings.foundry_image_deployment, "FOUNDRY_IMAGE_DEPLOYMENT must be set.")
+    if settings.uses_mai_image:
+        _validate_mai_image_settings(settings)
     _require(settings.foundry_project_endpoint, "FOUNDRY_PROJECT_ENDPOINT must be set.")
     _require(settings.foundry_agent_name, "FOUNDRY_AGENT_NAME must be set.")
     _require(settings.foundry_agent_version, "FOUNDRY_AGENT_VERSION must be set.")
@@ -294,6 +323,27 @@ def _validate_app_settings(settings: AppSettings) -> None:
     ):
         if value not in {0, 2, 4, 6}:
             raise SettingsError(f"{name} must be one of: 0, 2, 4, 6.")
+
+
+def parse_image_size(value: str) -> tuple[int, int]:
+    width, separator, height = value.strip().lower().partition("x")
+    if not separator or not width.isdigit() or not height.isdigit():
+        raise SettingsError("IMAGE_SIZE must use the WIDTHxHEIGHT format.")
+    return int(width), int(height)
+
+
+def _validate_mai_image_settings(settings: AppSettings) -> None:
+    endpoint = settings.foundry_image_endpoint
+    _require(endpoint, "FOUNDRY_IMAGE_ENDPOINT must be set when FOUNDRY_IMAGE_MODEL is MAI.")
+    if not str(endpoint).lower().startswith("https://"):
+        raise SettingsError("FOUNDRY_IMAGE_ENDPOINT must be an https URL.")
+    width, height = parse_image_size(settings.image_size)
+    if min(width, height) < MAI_IMAGE_MIN_SIDE:
+        raise SettingsError(f"IMAGE_SIZE sides must be >= {MAI_IMAGE_MIN_SIDE} for MAI images.")
+    if width * height > MAI_IMAGE_MAX_PIXELS:
+        raise SettingsError(
+            f"IMAGE_SIZE must not exceed {MAI_IMAGE_MAX_PIXELS:,} pixels for MAI images."
+        )
 
 
 def _optional_env(name: str) -> str | None:

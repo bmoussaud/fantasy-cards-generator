@@ -180,6 +180,8 @@ def base_environment(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, N
     monkeypatch.setenv("TELEMETRY_ENABLED", "false")
     monkeypatch.setenv("APPLICATIONINSIGHTS_CONNECTION_STRING", "")
     monkeypatch.setenv("OTEL_SDK_DISABLED", "true")
+    for name in ("FOUNDRY_IMAGE_MODEL", "FOUNDRY_IMAGE_ENDPOINT", "IMAGE_SIZE"):
+        monkeypatch.delenv(name, raising=False)
     real_create_services = create_services
 
     def create_test_services(settings):

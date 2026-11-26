@@ -68,6 +68,15 @@
     "foundryAgentTimeoutSeconds": {
       "value": "${FOUNDRY_AGENT_TIMEOUT_SECONDS=70}"
     },
+    "foundryImageModel": {
+      "value": "${FOUNDRY_IMAGE_MODEL=gpt-image-2}"
+    },
+    "foundryImageEndpoint": {
+      "value": "${FOUNDRY_IMAGE_ENDPOINT=}"
+    },
+    "foundryMaiImageDeploymentName": {
+      "value": "${FOUNDRY_MAI_IMAGE_DEPLOYMENT=MAI-Image-2.7}"
+    },
     "contentSafetyEndpoint": {
       "value": "${CONTENT_SAFETY_ENDPOINT=}"
     },

@@ -111,6 +111,16 @@ param foundryApiVersion string = '2025-03-01-preview'
 @description('Azure AI Foundry image deployment injected as FOUNDRY_IMAGE_DEPLOYMENT.')
 param foundryImageDeployment string = 'gpt-image-2'
 
+@allowed([
+  'gpt-image-2'
+  'MAI-Image-2.7'
+])
+@description('Image model family injected as FOUNDRY_IMAGE_MODEL.')
+param foundryImageModel string = 'gpt-image-2'
+
+@description('Optional MAI image inference base URL injected as FOUNDRY_IMAGE_ENDPOINT when set.')
+param foundryImageEndpoint string = ''
+
 @description('Foundry hosted agent name. May be empty only for the initial public-placeholder provision.')
 param foundryAgentName string = ''
 
@@ -378,6 +388,10 @@ var containerAppEnv = concat(
       value: foundryImageDeployment
     }
     {
+      name: 'FOUNDRY_IMAGE_MODEL'
+      value: foundryImageModel
+    }
+    {
       name: 'FOUNDRY_AGENT_API_VERSION'
       value: foundryAgentApiVersion
     }
@@ -546,6 +560,14 @@ var containerAppEnv = concat(
       value: linkedinPictureHostAllowlist
     }
   ],
+  !empty(trim(foundryImageEndpoint))
+    ? [
+        {
+          name: 'FOUNDRY_IMAGE_ENDPOINT'
+          value: trim(foundryImageEndpoint)
+        }
+      ]
+    : [],
   !empty(appSessionSecretKeyValue)
     ? [
         {
