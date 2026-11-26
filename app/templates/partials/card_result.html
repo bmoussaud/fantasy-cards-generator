@@ -10,7 +10,7 @@
     <div class="card-face__badges">
         <span class="badge badge-type">
             {{ icons.type_icon(card.cardType) }}
-            {{ card.cardType | capitalize }}
+            {{ card.typeLine or (card.cardType | capitalize) }}
         </span>
         <span class="badge badge-rarity" data-rarity="{{ card.rarity }}">
             {{ icons.rarity_icon(card.rarity) }}

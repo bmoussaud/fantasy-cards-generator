@@ -15,8 +15,18 @@ Color = Annotated[str, Field(pattern=r"^#[0-9a-fA-F]{6}$")]
 Percent = Annotated[float, Field(ge=0, le=100)]
 CardType = Literal["hero", "creature", "artifact", "spell"]
 Rarity = Literal["common", "uncommon", "rare", "legendary"]
-ArtworkLayout = Literal["illustration_only_v1", "portrait_debordant_v1"]
-DEFAULT_LAYOUT: ArtworkLayout = "portrait_debordant_v1"
+ArtworkLayout = Literal["illustration_only_v1", "portrait_debordant_v1", "cadre_classique_v1"]
+DEFAULT_LAYOUT: ArtworkLayout = "cadre_classique_v1"
+DEFAULT_RECIPE = "cadre-classique"
+RECIPE_LAYOUTS = {DEFAULT_LAYOUT: DEFAULT_RECIPE, "portrait_debordant_v1": "portrait-debordant"}
+IDENTITIES = {
+    "ivory": "#DDD3B5",
+    "blue": "#2860A0",
+    "rose": "#BB5073",
+    "green": "#35795A",
+    "violet": "#55446F",
+    "gold": "#BE923E",
+}
 
 
 class RecipeField(BaseModel):
@@ -70,7 +80,7 @@ class Geometry(RecipeField):
     trim: Trim
     title_plaque: Box
     cost_token: CostToken
-    overflow_band: Box
+    overflow_band: Box | None = None
     art_window: Box
     type_plaque: Box
     ability_panel: Box
@@ -80,14 +90,15 @@ class Geometry(RecipeField):
     def ordered_regions(self) -> Self:
         title, band, art = self.title_plaque, self.overflow_band, self.art_window
         if not (
-            title.y + title.h < band.y
-            and abs(band.y + band.h - art.y) < 0.0001
-            and band.x == art.x
-            and band.w == art.w
+            title.y + title.h < (band or art).y
             and art.y + art.h < self.type_plaque.y
             and self.type_plaque.y + self.type_plaque.h < self.ability_panel.y
         ):
             raise ValueError("invalid_recipe_geometry_order")
+        if band and not (
+            abs(band.y + band.h - art.y) < 0.0001 and band.x == art.x and band.w == art.w
+        ):
+            raise ValueError("invalid_recipe_overflow_band")
         return self
 
 
@@ -165,7 +176,7 @@ class CardRecipe(RecipeField):
     canvas: Canvas
     layers: list[str]
     geometry: Geometry
-    portrait_overflow: Overflow
+    portrait_overflow: Overflow | None = None
     palette: Palette
     typography: Typography
     generation_limits: GenerationLimits
@@ -174,7 +185,7 @@ class CardRecipe(RecipeField):
 
     @model_validator(mode="after")
     def supported_layers(self) -> Self:
-        if self.layers != [
+        layers = [
             "border",
             "trim",
             "title_plaque",
@@ -185,7 +196,16 @@ class CardRecipe(RecipeField):
             "ability_panel",
             "stat_medallion",
             "finish_overlay",
-        ]:
+        ]
+        band = self.geometry.overflow_band
+        if self.id == DEFAULT_RECIPE:
+            layers.remove("overflow_band")
+            layers.remove("portrait_overflow")
+            if band or self.portrait_overflow:
+                raise ValueError("unexpected_recipe_overflow")
+        elif self.id != "portrait-debordant" or not (band and self.portrait_overflow):
+            raise ValueError("unsupported_recipe")
+        if self.layers != layers:
             raise ValueError("unsupported_recipe_layers")
         if self.text_fit_order != ["shrink_ability_text_to_min", "drop_flavor_text"]:
             raise ValueError("unsupported_recipe_text_fit")
@@ -193,11 +213,10 @@ class CardRecipe(RecipeField):
             self.palette.accent.fallback_by_card_type
         ) != {"hero", "creature", "artifact", "spell"}:
             raise ValueError("incomplete_recipe_variants")
-        for low, high in (
-            self.palette.accent.saturation,
-            self.palette.accent.lightness,
-            self.portrait_overflow.transparent_fraction,
-        ):
+        ranges = [self.palette.accent.saturation, self.palette.accent.lightness]
+        if self.portrait_overflow:
+            ranges.append(self.portrait_overflow.transparent_fraction)
+        for low, high in ranges:
             if not 0 <= low < high <= 1:
                 raise ValueError("invalid_recipe_range")
         width, height = self.canvas.reference_px
@@ -205,19 +224,19 @@ class CardRecipe(RecipeField):
         token_bottom = (title.y + title.h / 2) * height / 100 + (
             self.geometry.cost_token.diameter_pct_w * width / 200
         )
-        if token_bottom >= self.geometry.overflow_band.y * height / 100:
+        if token_bottom >= (band or self.geometry.art_window).y * height / 100:
             raise ValueError("recipe_cost_intersects_overflow")
         return self
 
 
 class CardStyle(RecipeField):
-    recipe: str = "portrait-debordant"
+    recipe: str = DEFAULT_RECIPE
     version: int = 1
     accent: Color
 
 
 @lru_cache(maxsize=16)
-def load_recipe(recipe_id: str = "portrait-debordant", version: int = 1) -> CardRecipe:
+def load_recipe(recipe_id: str = DEFAULT_RECIPE, version: int = 1) -> CardRecipe:
     if not re.fullmatch(r"[a-z]+(?:-[a-z]+)*", recipe_id) or not 1 <= version <= 999:
         raise ValueError("invalid_recipe_identity")
     filename = f"{recipe_id.replace('-', '_')}_v{version}.yaml"
@@ -229,13 +248,31 @@ def load_recipe(recipe_id: str = "portrait-debordant", version: int = 1) -> Card
 
 
 def normalize_accent(value: str | None, card_type: str, recipe: CardRecipe | None = None) -> str:
-    palette = (recipe or load_recipe()).palette.accent
+    recipe = recipe or load_recipe()
+    palette = recipe.palette.accent
     if card_type not in palette.fallback_by_card_type:
         raise ValueError("invalid_card_type")
     if not isinstance(value, str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
         return palette.fallback_by_card_type[card_type]
     rgb = tuple(int(value[index : index + 2], 16) / 255 for index in (1, 3, 5))
     hue, lightness, saturation = colorsys.rgb_to_hls(*rgb)
+    if recipe.id == DEFAULT_RECIPE:
+        degrees = hue * 360
+        if value.upper() in IDENTITIES.values():
+            return value.upper()
+        if lightness < 0.18 or (saturation < 0.20 and lightness < 0.55):
+            return IDENTITIES["violet"]
+        if saturation < 0.20 or (lightness > 0.82 and 30 <= degrees <= 65):
+            return IDENTITIES["ivory"]
+        if 24 <= degrees < 65:
+            return IDENTITIES["gold"]
+        if 65 <= degrees < 165:
+            return IDENTITIES["green"]
+        if 165 <= degrees < 255:
+            return IDENTITIES["blue"]
+        if 255 <= degrees < 305:
+            return IDENTITIES["violet"]
+        return IDENTITIES["rose"]
     lightness = min(max(lightness, palette.lightness[0]), palette.lightness[1])
     saturation = min(max(saturation, palette.saturation[0]), palette.saturation[1])
     return "#" + "".join(

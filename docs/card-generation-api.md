@@ -127,8 +127,9 @@ agent that accepts `selectedExpertise` and returns the matching `abilities`;
 incomplete responses fail before artwork generation. The public JSON API
 and previously saved cards retain their existing contract. Direction is
 specific to each card, not stored in the profile; absent, empty and whitespace-only
-values are accepted. The initial Generator form contains a short editable
-example; users can change or clear it. HTMX result/error updates preserve the
+values are accepted. The initial Generator form suggests a storybook anime portrait
+of a smiling wizard in a gold-trimmed blue cloak. Users can edit or clear this
+suggestion; it is not an API default. HTMX result/error updates preserve the
 form and its current value, including an explicit empty value.
 
 For all new cards, the backend requests **only an illustration**
@@ -138,34 +139,33 @@ powers. The effective prompt is built on the web from the validated visual
 keeps it below 4,000 characters. The same prompt is moderated, used for ordinary
 generation or reference-photo editing, and stored for artwork retry. The subject's
 appearance can come from the reference; its text/layout must not be copied.
-The shared WEB/HOSTED generated schema now limits abilities to three, explanations
-to 20–120 characters, and flavor text to 90 characters. Deploy both runtimes together.
-`accentColor` is optional (`#RRGGBB` or null), so its absence in older agent output
-does not break generation. An agent still returning longer text must be upgraded.
+The provider paints a complete, expressive fantasy scene for a **1.19:1 window**,
+with luminous focal lighting even at night. A reference photo is used for likeness
+only; the scene is generated or photo-edited once, never edited again to extract
+a subject. The WEB moderates the actual prompt and image before composition.
 
-After moderation, Pillow renders the default versioned
-[`portrait-debordant@1` recipe](../app/card_recipes/portrait_debordant_v1.yaml)
-into a fixed 750×1050 PNG: ivory/brass trim, EB Garamond serif typography, name
-plaque, original numbered cost token, type pictogram, distinct rarity emblem,
-illustration window, selected abilities and an ATQ/PV stat medallion.
-Generated accents are clamped in HLS (saturation 0.35–0.75, lightness 0.30–0.55).
-Absent/invalid values use the curated per-type fallback exactly. The border mixes
-15% accent into ivory; text uses fixed ink, never accent. Rarity changes emblem
-and finish only, not geometry. The design uses no proprietary frames, symbols or logos.
+The default [`cadre-classique@1` recipe](../app/card_recipes/cadre_classique_v1.yaml)
+produces a **1024×1536** portrait. The illustration stays within a rectangular
+window covering half the height. Pillow supplies the bold serif title, two original
+cost marks, type plaque, tinted rules panel with large serif text and italic flavor,
+rarity badge, lower-right attack/health plate and **Illus. Azure AI Foundry** credit.
+Ivory, blue, rose, green, violet and gold are color identities selected by `accentColor`
+(per-type fallback); rare and legendary finishes add gold independently of identity.
 
-The illustration is fitted to its window. One optional second `images/edits` call
-extracts the subject with `background="transparent"` and `output_format="png"`.
-The subject-only prompt preserves pose, scale and position; scene and cutout use
-the same local transform. Overflow above the window is clipped to y=13.5–17.5%,
-strictly below the title and cost token. A mask must have 20–90% fully transparent
-pixels and match the source dimensions. Unsupported edits, invalid masks and
-technical errors keep a valid card without overflow, with no automatic extraction retry.
-The edit is bounded by the remaining overall deadline and image-stage timeout,
-reserving time for persistence. Policy refusals still deny the whole generation
-before durable reservation. Both extraction prompt and output are moderated.
+The text specialist writes the effects in English. The card image, generation result
+and My Cards detail display each selected expertise name (`abilities[].name`)
+exactly as saved, in selection order, even when the name is not in English.
+The WEB still validates and moderates `inscription.abilityNames` for wire compatibility
+but does not use these labels for display. It uses `inscription.subtype` to print
+the type line, e.g. `Creature — Human Knight`. The hosted agent carries
+inscription and accent in optional metadata, not
+new keys in its strict wire card. Older agents still work: their existing labels
+are preserved without attempting an unverified translation. The current recipe
+accepts up to three selected abilities, 20–120 characters per effect and up to 90
+for flavor; older agents returning larger payloads retain the historical layout.
 
 Text is wrapped without truncation. The renderer first shrinks ability typography
-to recipe minima, then omits flavor if necessary. It reserves the stat medallion
+to recipe minima, then omits flavor if necessary. It reserves the stats plate
 and fails explicitly if the fixed panel still cannot hold the abilities.
 Inputs are limited to PNG/JPEG/WebP, 32 MiB and 4,096 pixels per source edge.
 Bundled fonts fail explicitly on unsupported characters rather than replacement boxes.
@@ -176,14 +176,16 @@ the unmodified font is from [Google Fonts](https://github.com/google/fonts/tree/
 content blob `75575046c015ff623a848096a15779867ba71453`.
 
 Generation and successful artwork retries share finalization. New cards, including
-pending cards, persist `artworkLayout: "portrait_debordant_v1"` and
-`card_style: {recipe: "portrait-debordant", version: 1, accent: "#RRGGBB"}`.
-The private `artworkAssets` map stores scene PNG, optional subject PNG, and final PNG
-metadata (MIME, SHA-256, bytes and owner-scoped blob name). No source-asset public
+pending cards, persist `artworkLayout: "cadre_classique_v1"` and
+`card_style: {recipe: "cadre-classique", version: 1, accent: "#RRGGBB"}`.
+The private `artworkAssets` map stores the scene snapshot, not a second subject;
+the main blob contains the final PNG. No source-asset public
 URLs are introduced. `recompose_stored_card` reuses these assets without a provider
 call after the caller authorizes the owner. Compensation and card/account deletion
-cover every asset. Returned extraction usage is retained even if its mask is rejected.
-Retries retain the stored style/layout and do not regenerate text.
+cover every asset. Retries retain the stored style/layout and do not regenerate text.
+Previously stored [`portrait-debordant@1`](../app/card_recipes/portrait_debordant_v1.yaml)
+cards retain their 750×1050 composition, original labels and optional subject snapshot.
+Only retries on that older recipe still perform the moderated cutout edit.
 Historical `illustration_only_v1` cards keep their growing Noto renderer; cards
 without a layout marker keep their original prompt/footer behavior. Historical
 payloads still accept five abilities, 180-character descriptions and 280-character flavor.
@@ -203,7 +205,7 @@ no image is uploaded or marked inscribed, and an existing retryable card survive
 
 ### Recipe evidence
 
-The [four-rarity sheet](assets/card-recipes/portrait-debordant-v1.png) and
+The historical portrait-debordant [four-rarity sheet](assets/card-recipes/portrait-debordant-v1.png) and
 [six-thumbnail mobile grid](assets/card-recipes/portrait-debordant-mobile.png)
 use one original live-generated scene and extracted subject with four accents.
 They isolate layout/finish differences, not four separate generation attempts.

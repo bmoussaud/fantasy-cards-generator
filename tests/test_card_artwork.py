@@ -17,7 +17,7 @@ from PIL import Image, ImageChops, ImageDraw, ImageFont
 
 from app import generation
 from app.card_artwork import _wrap_text, compose_card_artwork, inscribe_card_abilities
-from app.card_styles import CardRecipe, CardStyle, load_recipe, normalize_accent
+from app.card_styles import IDENTITIES, CardRecipe, CardStyle, load_recipe, normalize_accent
 from app.foundry_agent_client import FoundryAgentClient
 from app.generation import StoredCard
 from tests.conftest import TEST_OWNER_ID, extract_hidden_value, save_test_profile
@@ -244,6 +244,159 @@ def test_illustration_prompt_stays_below_limit_even_with_maximum_json_escaping()
     prompt = generation.derive_illustration_prompt(card)
     assert len(prompt) < 4000
     assert "\\u0000" * 300 in prompt
+    # Ordinary full-length briefs must still fit the bounded image trace projection.
+    plain = card.model_copy(update={"artBrief": "x" * 300})
+    assert len(generation.derive_illustration_prompt(plain)) <= 1000
+
+
+def test_classic_card_prints_and_displays_verbatim_french_expertise_on_retry(
+    authenticated_client, monkeypatch
+):
+    from tests.test_foundry_agent_client import (
+        FakeCredential,
+        completed_agent_payload,
+        responses_envelope,
+    )
+
+    client = authenticated_client
+    services = client.app.state.services
+    payload = completed_agent_payload(metadata={"agentVersion": "classic-test"})
+    payload["card"]["abilities"] = [
+        {"name": ABILITY_NAME, "description": "Shelter one ally behind a living ward."}
+    ]
+    payload["metadata"]["inscription"] = {"subtype": "Human Warden", "abilityNames": ["Wild Ward"]}
+    payload["metadata"]["cardStyle"] = {"accentColor": "#FA89B1"}
+    services.agent_client = FoundryAgentClient(
+        replace(services.settings, foundry_agent_expected_version="classic-test"),
+        credential=FakeCredential(),
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json=responses_envelope(payload))
+        ),
+    )
+    original_image = services.ai_client.generate_image
+    allow = False
+
+    async def image(*args, **kwargs):
+        if not allow:
+            raise generation.UpstreamServiceError("foundry-image", "unavailable", status_code=503)
+        return await original_image(*args, **kwargs)
+
+    drawn = []
+    original_text = ImageDraw.ImageDraw.text
+
+    def text(draw, position, string, **kwargs):
+        drawn.append(string)
+        return original_text(draw, position, string, **kwargs)
+
+    monkeypatch.setattr(services.ai_client, "generate_image", image)
+    monkeypatch.setattr(ImageDraw.ImageDraw, "text", text)
+    result, form = generate_selected(client)
+    assert result.status_code == 200, result.text
+    (pending,) = asyncio.run(services.card_repository.list_by_owner(TEST_OWNER_ID))
+    assert pending.status == "awaiting_artwork_retry"
+    assert pending.validated_payload["abilities"][0]["name"] == ABILITY_NAME
+    assert "inscription" not in pending.validated_payload
+    allow = True
+    result = client.post(
+        f"/api/v1/cards/{pending.id}/artwork/retry",
+        json={"csrfToken": form["csrf_token"], "idempotencyKey": uuid4().hex},
+    )
+    assert result.status_code == 200, result.text
+    (record,) = asyncio.run(services.card_repository.list_by_owner(TEST_OWNER_ID))
+    assert record.status == "completed" and record.card_style.accent == IDENTITIES["rose"]
+    assert ABILITY_NAME in " ".join(drawn) and "Wild Ward" not in " ".join(drawn)
+    assert record.card_payload().printed_type() in drawn
+    assert "Illus. Azure AI Foundry" in drawn
+    for page in (
+        client.post("/ui/cards/generate", data=form),
+        client.get(f"/my/cards/{record.id}"),
+    ):
+        assert page.status_code == 200
+        assert ABILITY_NAME in page.text and "Wild Ward" not in page.text
+    assert (
+        asyncio.run(
+            generation.recompose_stored_card(
+                StoredCard.from_document(record.to_document()), services.asset_store
+            )
+        )
+        == client.get(record.image_url_path).content
+    )
+    asyncio.run(services.agent_client.aclose())
+
+
+def test_classic_illustration_stays_inside_its_window_and_identities_are_distinct():
+    recipe = load_recipe()
+    assert recipe.portrait_overflow is None and recipe.geometry.overflow_band is None
+    colors = [normalize_accent(raw, "hero") for raw in ("#FFFFEE", "#FF68AD", "#1874CF")]
+    assert colors == [IDENTITIES[key] for key in ("ivory", "rose", "blue")]
+
+    def render(content, accent):
+        return Image.open(
+            BytesIO(
+                compose_card_artwork(
+                    content,
+                    [],
+                    name="Coast Warden",
+                    card_type="hero",
+                    rarity="rare",
+                    mana_cost=4,
+                    attack=3,
+                    health=5,
+                    flavor_text="Every dawn brings a new tide.",
+                    card_style=CardStyle(accent=accent),
+                )
+            )
+        ).convert("RGB")
+
+    alternate = BytesIO()
+    Image.new("RGB", (640, 480), "#C16A54").save(alternate, "PNG")
+    first, second = render(artwork_bytes(), colors[0]), render(alternate.getvalue(), colors[0])
+    art = recipe.geometry.art_window.pixels(*first.size)
+    diff = ImageChops.difference(first, second).getbbox()
+    assert diff and art[0] <= diff[0] < diff[2] <= art[2] and art[1] <= diff[1] < diff[3] <= art[3]
+    # Same rarity and black edge; the exposed frame itself must change with the identity.
+    border = (38, 400, 48, 800)
+    assert len({render(artwork_bytes(), color).crop(border).tobytes() for color in colors}) == 3
+
+
+def test_classic_panel_fits_three_max_length_expertise_names_and_effects(monkeypatch):
+    recipe = load_recipe()
+    width, height = recipe.canvas.reference_px
+    panel = recipe.geometry.ability_panel.pixels(width, height)
+    drawn = []
+    original = ImageDraw.ImageDraw.text
+
+    def text(draw, xy, value, **kwargs):
+        if kwargs.get("fill") == recipe.palette.fixed.ink and panel[1] < xy[1] < panel[3]:
+            left, top, right, bottom = draw.textbbox(
+                xy, value, font=kwargs["font"], anchor=kwargs["anchor"]
+            )
+            assert panel[0] < left <= right < panel[2] and panel[1] < top <= bottom < panel[3]
+            drawn.append((value, top, bottom))
+        return original(draw, xy, value, **kwargs)
+
+    monkeypatch.setattr(ImageDraw.ImageDraw, "text", text)
+    effect = ("Guard each neighboring ally until the last lantern on the sea wall fades. " * 2)[
+        :120
+    ].strip()
+    abilities = [(letter * 80, effect) for letter in ("W", "Œ", "É")]
+    compose_card_artwork(
+        artwork_bytes(),
+        abilities,
+        name="Keeper of the Last Lantern on the Western Sea Wall",
+        card_type="hero",
+        rarity="legendary",
+        mana_cost=12,
+        attack=10,
+        health=20,
+        flavor_text="Even the longest night has an edge.",
+    )
+
+    def squash(value):
+        return "".join(value.split())
+
+    assert squash(" ".join(v for v, _, _ in drawn)) == squash(" ".join(n + d for n, d in abilities))
+    assert all(a[2] <= b[1] for a, b in zip(drawn, drawn[1:]))
 
 
 @pytest.mark.parametrize("mode", ["generate", "edit", "retry"])
@@ -338,7 +491,7 @@ def test_hosted_v19_effective_provider_prompt_is_artwork_only_for_selected_cards
     if mode == "retry":
         (pending,) = asyncio.run(services.card_repository.list_by_owner(TEST_OWNER_ID))
         assert pending.status == "awaiting_artwork_retry"
-        assert pending.artwork_layout == "portrait_debordant_v1"
+        assert pending.artwork_layout == "cadre_classique_v1"
         allow_image = True
         response = client.post(
             f"/api/v1/cards/{pending.id}/artwork/retry",
@@ -354,15 +507,19 @@ def test_hosted_v19_effective_provider_prompt_is_artwork_only_for_selected_cards
     (record,) = asyncio.run(services.card_repository.list_by_owner(TEST_OWNER_ID))
     assert record.derived_art_prompt == effective
     assert record.card_frame_composed
-    assert record.to_document()["artworkLayout"] == "portrait_debordant_v1"
+    assert record.to_document()["artworkLayout"] == "cadre_classique_v1"
     assert visual_brief in effective
     assert agent_payload["artPrompt"] not in effective
     assert (
         "No text" in effective and "No card, border, frame, panels, UI, stats, rules" in effective
     )
     assert ABILITY_NAME not in effective
-    assert len(extraction_calls) == 1
-    assert client.get(record.image_url_path).content != source
+    assert not extraction_calls and set(record.artwork_assets) == {"scene"}
+    assert "1.19:1" in effective and record.card_style.accent in effective
+    restored = StoredCard.from_document(record.to_document())
+    image = client.get(record.image_url_path).content
+    assert image != source
+    assert asyncio.run(generation.recompose_stored_card(restored, services.asset_store)) == image
     asyncio.run(services.agent_client.aclose())
 
 
@@ -467,7 +624,7 @@ def test_real_private_image_bytes_metadata_and_accessible_rendering(
     assert PRIVATE_NOTE not in repr(pairs)
     assert served.content != source
     with Image.open(BytesIO(served.content)) as final:
-        assert final.size == (750, 1050)
+        assert final.size == (1024, 1536)
     for html in (
         response.text,
         client.get(f"/my/cards/{record.id}").text,
@@ -505,7 +662,7 @@ def test_artwork_retry_inscribes_once_and_legacy_image_stays_unchanged(
     assert "card-face__rules--embedded" not in response.text
     (partial,) = asyncio.run(services.card_repository.list_by_owner(TEST_OWNER_ID))
     assert not calls and not partial.abilities_embedded
-    assert partial.artwork_layout == "portrait_debordant_v1"
+    assert partial.artwork_layout == "cadre_classique_v1"
     text_attempts = {
         key: value for key, value in services.ai_client._attempts.items() if key.startswith("text:")
     }
@@ -615,13 +772,14 @@ def recipe_card(*, cutout=None, rarity="rare", accent="#2F5DA8", abilities=None,
         attack=3,
         health=5,
         flavor_text=flavor,
-        card_style=CardStyle(accent=accent),
+        layout="portrait_debordant_v1",
+        card_style=CardStyle(recipe="portrait-debordant", accent=accent),
         subject_cutout=cutout,
     )
 
 
 def test_recipe_rejects_geometry_that_touches_identity_or_reorders_layers():
-    recipe = load_recipe()
+    recipe = load_recipe("portrait-debordant")
     assert (recipe.id, recipe.version) == ("portrait-debordant", 1)
     for changed in (
         {
@@ -644,12 +802,12 @@ def test_recipe_rejects_geometry_that_touches_identity_or_reorders_layers():
 def test_accent_clamp_and_type_fallback(card_type):
     import colorsys
 
-    recipe = load_recipe()
+    recipe = load_recipe("portrait-debordant")
     fallback = recipe.palette.accent.fallback_by_card_type[card_type]
-    assert normalize_accent(None, card_type) == fallback
-    assert normalize_accent("invalid", card_type) == fallback
+    assert normalize_accent(None, card_type, recipe) == fallback
+    assert normalize_accent("invalid", card_type, recipe) == fallback
     for raw in ("#FFFFFF", "#000000", "#FF0000", "#00FF00", "#0202FE"):
-        accent = normalize_accent(raw, card_type)
+        accent = normalize_accent(raw, card_type, recipe)
         rgb = [int(accent[index : index + 2], 16) / 255 for index in (1, 3, 5)]
         _, lightness, saturation = colorsys.rgb_to_hls(*rgb)
         assert 0.345 <= saturation <= 0.755
@@ -661,15 +819,16 @@ def test_overflow_changes_only_pixels_inside_the_band(rarity):
     before = Image.open(BytesIO(recipe_card(rarity=rarity))).convert("RGB")
     after = Image.open(BytesIO(recipe_card(cutout=subject_bytes(), rarity=rarity))).convert("RGB")
     difference = ImageChops.difference(before, after)
-    band = load_recipe().geometry.overflow_band.pixels(*before.size)
-    art = load_recipe().geometry.art_window.pixels(*before.size)
+    geometry = load_recipe("portrait-debordant").geometry
+    band = geometry.overflow_band.pixels(*before.size)
+    art = geometry.art_window.pixels(*before.size)
     assert difference.crop(art).getbbox() is not None
     ImageDraw.Draw(difference).rectangle((art[0], art[1], art[2] - 1, art[3] - 1), fill="black")
     bbox = difference.getbbox()
     assert bbox is not None
     assert band[0] <= bbox[0] < bbox[2] <= band[2]
     assert band[1] <= bbox[1] < bbox[3] <= band[3]
-    title = load_recipe().geometry.title_plaque.pixels(*before.size)
+    title = geometry.title_plaque.pixels(*before.size)
     assert difference.crop(title).getbbox() is None
 
 
@@ -712,7 +871,7 @@ def test_recipe_typography_is_ink_not_accent_and_fits_three_maximum_descriptions
 def test_recipe_fit_guard_preserves_five_historical_abilities_before_omitting_flavor(monkeypatch):
     from app.card_artwork import _rules_layout
 
-    recipe = load_recipe()
+    recipe = load_recipe("portrait-debordant")
     abilities = [(f"Pouvoir {n}", "Une barrière protège les alliés proches.") for n in range(5)]
     layout = _rules_layout(abilities, "Ambiance " * 31, recipe, 750, 1050)
     rendered = "".join(item[1] for item in layout)
@@ -724,10 +883,6 @@ def test_recipe_fit_guard_preserves_five_historical_abilities_before_omitting_fl
 @pytest.mark.parametrize(
     "field,value",
     [
-        (
-            "abilities",
-            [{"name": "Pouvoir", "description": "Une lumière protège chaque allié."}] * 4,
-        ),
         ("abilities", [{"name": "Pouvoir", "description": "A" * 121}]),
         ("flavorText", "A" * 91),
     ],
@@ -742,12 +897,67 @@ def test_new_generation_limits_do_not_break_stored_payloads(field, value):
     assert generation.GeneratedCardModel.model_validate(valid_card()).accentColor is None
 
 
+def test_released_hosted_output_beyond_recipe_bounds_falls_back_to_legacy_layout(
+    authenticated_client, monkeypatch
+):
+    from tests.test_foundry_agent_client import (
+        FakeCredential,
+        completed_agent_payload,
+        responses_envelope,
+    )
+
+    client = authenticated_client
+    services = client.app.state.services
+    # A released hosted version (v19) may return 180-character abilities, 280-character
+    # flavor text and no accent while the new Web pin is rolling out.
+    agent_payload = completed_agent_payload(metadata={"agentVersion": "profile-explanations-test"})
+    description = ("Une barrière protège les alliés proches du gardien. " * 4)[:170]
+    agent_payload["card"]["abilities"] = [{"name": ABILITY_NAME, "description": description}]
+    agent_payload["card"]["flavorText"] = ("La mer écoute ceux qui savent lui parler. " * 6)[:270]
+    agent_payload["card"].pop("accentColor", None)
+    services.agent_client = FoundryAgentClient(
+        replace(
+            services.settings,
+            foundry_agent_version="19",
+            foundry_agent_expected_version="profile-explanations-test",
+        ),
+        credential=FakeCredential(),
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json=responses_envelope(agent_payload))
+        ),
+    )
+    original_image = services.ai_client.generate_image
+
+    async def image(*args, **kwargs):
+        result = await original_image(*args, **kwargs)
+        return replace(result, image=replace(result.image, content=artwork_bytes()))
+
+    async def extract(*args, **kwargs):
+        pytest.fail("Output outside the recipe bounds must not reach subject extraction")
+
+    monkeypatch.setattr(services.ai_client, "generate_image", image)
+    monkeypatch.setattr(services.ai_client, "extract_subject", extract, raising=False)
+    response, _ = generate_selected(client)
+    assert response.status_code == 200, response.text
+    (record,) = asyncio.run(services.card_repository.list_by_owner(TEST_OWNER_ID))
+    assert record.status == "completed" and record.abilities_embedded
+    assert record.artwork_layout == "illustration_only_v1" and record.card_style is None
+    assert record.validated_payload["abilities"][0]["description"] == description.strip()
+    assert record.asset_names == [record.blob_name] and not record.artwork_assets
+    assert client.get(f"/my/cards/{record.id}").status_code == 200
+    asyncio.run(services.agent_client.aclose())
+
+
 @pytest.mark.parametrize("outcome", ["success", "unsupported", "timeout", "opaque", "refused"])
-def test_extraction_persistence_recomposition_and_deletion(
+def test_historical_pending_extraction_recomposition_and_deletion(
     authenticated_client, monkeypatch, outcome
 ):
     client = authenticated_client
     services = client.app.state.services
+    # Image composition runs real Pillow work; a 0.6 s request budget is runner-dependent.
+    services.settings = replace(
+        services.settings, retry=replace(services.settings.retry, overall_timeout_seconds=5.0)
+    )
     calls = []
     original_image = services.ai_client.generate_image
 
@@ -778,17 +988,34 @@ def test_extraction_persistence_recomposition_and_deletion(
 
     monkeypatch.setattr(services.ai_client, "generate_image", image)
     monkeypatch.setattr(services.ai_client, "extract_subject", extract, raising=False)
-    response, form = generate_selected(client)
+    _, form = generate_selected(client, direction="[[mock:image-500]]")
+    (pending,) = asyncio.run(services.card_repository.list_by_owner(TEST_OWNER_ID))
+    pending.artwork_layout = "portrait_debordant_v1"
+    pending.card_style = CardStyle(recipe="portrait-debordant", accent="#2F5DA8")
+    pending.derived_art_prompt = "A quiet guardian fills the old window."
+    asyncio.run(services.card_repository.save(pending))
+    response = client.post(
+        f"/api/v1/cards/{pending.id}/artwork/retry",
+        json={"csrfToken": form["csrf_token"], "idempotencyKey": uuid4().hex},
+    )
     assert len(calls) == 1
     records = asyncio.run(services.card_repository.list_by_owner(TEST_OWNER_ID))
     if outcome == "refused":
-        assert response.status_code == 422 and not records and not services.asset_store._assets
+        assert response.status_code == 422 and not services.asset_store._assets
+        assert [r.status for r in records] == ["awaiting_artwork_retry"]
         return
     assert response.status_code == 200, response.text
     (record,) = records
     assert record.card_style.recipe == "portrait-debordant"
     assert ("extraction" in record.usage) == (outcome in {"success", "opaque"})
-    assert len(record.asset_names) == (3 if outcome == "success" else 2)
+    # Source layers are snapshots of the single card blob, so earlier revisions that delete
+    # only the card blob (with its snapshots) leave no orphaned layer.
+    assert record.asset_names == [record.blob_name]
+    roles = {"scene", "subject"} if outcome == "success" else {"scene"}
+    assert set(record.artwork_assets) == roles
+    assert {asset["blobName"] for asset in record.artwork_assets.values()} == {record.blob_name}
+    assert len(services.asset_store._snapshots[record.blob_name]) == len(roles)
+    assert "accentColor" not in record.validated_payload
     restored = StoredCard.from_document(record.to_document())
     assert restored.card_style == record.card_style
     assert restored.artwork_assets == record.artwork_assets
@@ -799,7 +1026,7 @@ def test_extraction_persistence_recomposition_and_deletion(
         f"/api/v1/cards/{record.id}", headers={"x-csrf-token": form["csrf_token"]}
     )
     assert deleted.status_code == 204
-    assert not services.asset_store._assets
+    assert not services.asset_store._assets and not services.asset_store._snapshots
 
 
 def test_legacy_five_ability_card_still_loads_in_library(authenticated_client):
@@ -835,6 +1062,7 @@ def test_accented_multiline_glyphs_do_not_overlap(monkeypatch):
         artwork_bytes(),
         [(title, "Écarte les ennemis et protège les alliés du gardien.")],
         name=title,
+        layout="portrait_debordant_v1",
         card_type="hero",
         rarity="rare",
         mana_cost=4,
@@ -873,14 +1101,11 @@ def test_cancelled_persistence_cleans_attempt_but_preserves_committed_card(
         original_upload = services.asset_store.upload
         original_delete = services.asset_store.delete
         original_save = services.card_repository.save
+        roles = iter(["scene", "subject", "final"])
 
         async def upload(name, content, mime):
             result = await original_upload(name, content, mime)
-            role = (
-                "scene"
-                if name.endswith("-scene.png")
-                else ("subject" if name.endswith("-subject.png") else "final")
-            )
+            role = next(roles)
             if stage == role:
                 reached.set()
                 await asyncio.Event().wait()
@@ -941,6 +1166,6 @@ def test_cancelled_persistence_cleans_attempt_but_preserves_committed_card(
             assert set(services.asset_store._assets) == set(current.asset_names)
         else:
             assert current.to_document() == before
-            assert not services.asset_store._assets
+            assert not services.asset_store._assets and not services.asset_store._snapshots
 
     asyncio.run(scenario())

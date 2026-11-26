@@ -1,0 +1,41 @@
+id: cadre-classique
+version: 1
+label: Cadre classique
+canvas:
+  aspect_ratio: "2:3"
+  reference_px: [1024, 1536]
+  corner_radius_pct_w: 4
+layers: [border, trim, title_plaque, art_window, type_plaque, ability_panel, stat_medallion, finish_overlay]
+geometry:
+  border: {x: 0, y: 0, w: 100, h: 100}
+  trim: {inset_pct_w: 2.6, stroke_pct_w: 0.65}
+  title_plaque: {x: 4, y: 3, w: 92, h: 6.2}
+  cost_token: {anchor: title_plaque.right, diameter_pct_w: 5.4}
+  art_window: {x: 5.4, y: 9.6, w: 89.2, h: 50}
+  type_plaque: {x: 4, y: 60, w: 92, h: 5.7}
+  ability_panel: {x: 5.4, y: 66.1, w: 89.2, h: 27.8}
+  stat_medallion: {center: [86.5, 94.4], diameter_pct_w: 18}
+palette:
+  fixed: {ivory: "#FFFAEF", parchment: "#FFF9F3", brass: "#D4AB60", brass_dark: "#795123", ink: "#201B1D", flavor_ink: "#463B41"}
+  accent:
+    saturation: [0, 1]
+    lightness: [0, 1]
+    fallback_by_card_type: {hero: "#DDD3B5", creature: "#35795A", artifact: "#BE923E", spell: "#2860A0"}
+    border_tint: 0.90
+typography:
+  family: EB Garamond
+  title: {weight: bold, size: 4.1, min: 1.8}
+  cost: {weight: bold, size: 3}
+  type_line: {weight: bold, size: 3.2, min: 2.2}
+  ability_name: {weight: bold, size: 3.0, min: 1.2}
+  ability_text: {size: 3.1, min: 1.2}
+  flavor: {style: italic, size: 3.0, min: 1.2}
+  stats_label: {weight: semibold, size: 1.65}
+  stats_value: {weight: bold, size: 4.3}
+generation_limits: {abilities_max: 3, ability_description_chars: [20, 120], flavor_text_chars_max: 90}
+text_fit_order: [shrink_ability_text_to_min, drop_flavor_text]
+rarity:
+  common: {emblem: "#494653", finish: matte}
+  uncommon: {emblem: "#285484", finish: satin_brushed_trim}
+  rare: {emblem: "#D4AB60", finish: gold_leaf_trim_engraved}
+  legendary: {emblem: "#EAC274", finish: gold_leaf_trim_engraved, emblem_glow: soft}

@@ -34,6 +34,7 @@ def parser_source():
         "GenerateCardAgentResponse",
         "FoundryAgentInvocationResult",
         "_parse_success_envelope",
+        "_with_wire_accent",
         "_contains_refusal",
         "_extract_output_text",
         "_metadata_version",
@@ -51,7 +52,7 @@ def parser_source():
         "from collections.abc import Mapping\nfrom dataclasses import dataclass, field\n"
         "from typing import Any, Literal\n"
         "from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator\n"
-        "from app.generation import GeneratedCardModel\n"
+        "from app.generation import CardPayload\n"
     )
     lines = source.splitlines()
     return (

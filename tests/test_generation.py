@@ -1904,8 +1904,10 @@ def test_retry_persistence_failure_preserves_partial_and_can_recover(
         assert audit.request_hash == generation_module.digest_text(f"retry:{card_id}")
         assert audit.idempotency_key == "retry-persistence-failure"
         assert (TEST_OWNER_ID, f"audit:{retry_id}") in repository._records
-    assert len(assets.deleted) == (1 if failure == "upload" else 2)
-    assert len(assets._assets) == (2 if failure == "cleanup" else 0)
+    # Scene, subject and final card share one blob name (layers are snapshots of it).
+    assert len(assets.deleted) == 1
+    assert len(assets._assets) == (1 if failure == "cleanup" else 0)
+    assert bool(assets._snapshots) == (failure == "cleanup")
     assert "PRIVATE-" not in caplog.text + response.text
     if failure == "cleanup":
         assert "compensation-failed" in caplog.text
@@ -1993,6 +1995,162 @@ def test_failed_retry_compensation_does_not_remove_concurrent_success(monkeypatc
         )
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("contender", ["retry", "delete"])
+def test_concurrent_retry_has_one_winner_and_leaves_no_orphaned_assets(
+    monkeypatch: pytest.MonkeyPatch, contender: str
+) -> None:
+    async def scenario() -> None:
+        services = build_services(monkeypatch)
+        repository = InMemorySharedCardAuditRepository()
+        services.card_repository = services.audit_repository = repository
+        assets = services.asset_store
+        service = CardGenerationService(services)
+        owner = AuthenticatedOwner(
+            owner_id=TEST_OWNER_ID,
+            tenant_id=None,
+            object_id=None,
+            subject="test",
+            display_name=None,
+            email=None,
+        )
+        partial = await service.generate_card(
+            owner=owner,
+            prompt="A safe fantasy guardian [[mock:image-500]]",
+            idempotency_key="race-retry-initial",
+            request_id="initial",
+            client_ip="127.0.0.1",
+        )
+        record = await repository.get(owner.owner_id, partial.cardId)
+        record.derived_art_prompt = "A safe original fantasy guardian"
+        original_upload = assets.upload
+        uploading: set[str] = set()
+        all_uploading, release = asyncio.Event(), asyncio.Event()
+
+        async def upload(name, payload, content_type):
+            uploading.add(name)
+            if len(uploading) == (2 if contender == "retry" else 1):
+                all_uploading.set()
+            await release.wait()
+            return await original_upload(name, payload, content_type)
+
+        monkeypatch.setattr(assets, "upload", upload)
+
+        async def retry(key):
+            return await service.retry_artwork(
+                owner=owner,
+                card_id=record.id,
+                idempotency_key=key,
+                request_id=key,
+                client_ip="127.0.0.1",
+            )
+
+        attempts = [asyncio.create_task(retry("race-retry-a"))]
+        if contender == "retry":
+            attempts.append(asyncio.create_task(retry("race-retry-b")))
+        await asyncio.wait_for(all_uploading.wait(), timeout=5)
+        if contender == "delete":
+            await repository.delete(owner.owner_id, record.id)
+        release.set()
+        results = await asyncio.gather(*attempts, return_exceptions=True)
+        current = await repository.get(owner.owner_id, record.id)
+        if contender == "delete":
+            (problem,) = results
+            assert isinstance(problem, ProblemDetails) and problem.status_code == 404
+            assert current is None
+            assert not assets._assets and not assets._snapshots
+            return
+        assert all(result.status == "completed" for result in results)
+        assert {result.cardId for result in results} == {record.id}
+        assert current.status == "completed"
+        assert set(assets._assets) == {current.blob_name}
+        assert set(assets._snapshots) <= {current.blob_name}
+        assert await service.fetch_image(owner, record.id) == await assets.download(
+            current.blob_name
+        )
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("scenario", ["awaiting", "raced", "legacy", "legacy_raced", "deleted"])
+def test_cosmos_retry_commit_only_replaces_a_card_still_awaiting_artwork(scenario: str) -> None:
+    from dataclasses import replace
+
+    from azure.core import MatchConditions
+    from azure.cosmos.exceptions import (
+        CosmosAccessConditionFailedError,
+        CosmosResourceExistsError,
+        CosmosResourceNotFoundError,
+    )
+
+    from app.generation import AzureCosmosCardRepository
+
+    awaiting = StoredCard(
+        id="card-1",
+        document_type="card",
+        owner_id=TEST_OWNER_ID,
+        request_id="initial",
+        idempotency_key="initial",
+        request_hash="hash",
+        status="awaiting_artwork_retry",
+    )
+    ours = replace(awaiting, status="completed", request_id="ours", blob_name="ours.png")
+    theirs = replace(awaiting, status="completed", request_id="theirs", blob_name="theirs.png")
+
+    class Container:
+        def __init__(self) -> None:
+            self.documents: dict[str, dict] = {}
+            self.concurrent_write = scenario.endswith("raced")
+
+        def put(self, record: StoredCard, document_id: str) -> None:
+            self.documents[document_id] = record.to_document() | {
+                "id": document_id,
+                "_etag": uuid4().hex,
+            }
+
+        def race(self) -> None:
+            if self.concurrent_write:
+                self.concurrent_write = False
+                self.put(theirs, f"card:{awaiting.id}")
+
+        async def read_item(self, item, *, partition_key):
+            assert partition_key == TEST_OWNER_ID
+            if item not in self.documents:
+                raise CosmosResourceNotFoundError(status_code=404)
+            return dict(self.documents[item])
+
+        async def create_item(self, body):
+            self.race()
+            if body["id"] in self.documents:
+                raise CosmosResourceExistsError(status_code=409)
+            self.documents[body["id"]] = body | {"_etag": uuid4().hex}
+
+        async def replace_item(self, item, body, *, etag, match_condition):
+            assert match_condition == MatchConditions.IfNotModified
+            self.race()
+            if self.documents[item]["_etag"] != etag:
+                raise CosmosAccessConditionFailedError(status_code=412)
+            self.documents[item] = body | {"_etag": uuid4().hex}
+
+    container = Container()
+    if scenario in {"awaiting", "raced"}:
+        container.put(awaiting, f"card:{awaiting.id}")
+    elif scenario.startswith("legacy"):
+        container.put(awaiting, awaiting.id)
+    repository = AzureCosmosCardRepository.__new__(AzureCosmosCardRepository)
+    repository._container = container
+
+    committed = asyncio.run(repository.complete_retry(ours))
+    stored = container.documents.get(f"card:{awaiting.id}")
+    if scenario in {"awaiting", "legacy"}:
+        assert committed is ours
+        assert stored["status"] == "completed" and stored["requestId"] == "ours"
+    elif scenario == "deleted":
+        assert committed is None and not container.documents
+    else:
+        assert committed is None
+        assert stored["status"] == "completed" and stored["requestId"] == "theirs"
 
 
 def test_concurrent_duplicates_do_not_duplicate_model_calls(

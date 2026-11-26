@@ -73,6 +73,7 @@ class LibraryCardDetail:
     completed_at_display: str | None
     abilities_embedded: bool = False
     card_frame_composed: bool = False
+    type_line: str | None = None
 
 
 class CardLibraryService:
@@ -118,7 +119,7 @@ class CardLibraryService:
         )
 
     async def _build_detail(self, record: StoredCard) -> LibraryCardDetail:
-        payload = CardPayload.model_validate(record.validated_payload or {})
+        payload = record.card_payload()
         return LibraryCardDetail(
             card_id=record.id,
             name=payload.name,
@@ -129,7 +130,8 @@ class CardLibraryService:
             attack=payload.attack,
             health=payload.health,
             rules_text=payload.rulesText,
-            abilities=payload.abilities,
+            abilities=payload.printed_abilities(),
+            type_line=payload.printed_type(),
             flavor_text=payload.flavorText,
             art_brief=payload.artBrief,
             prompt=record.prompt,

@@ -716,7 +716,7 @@ def test_invalid_direction_does_not_generate_or_update_profile(authenticated_cli
     )
     assert response.status_code == 422
     assert 'id="creative-direction"' not in response.text
-    assert "watercolor textures" not in response.text
+    assert "Anime storybook style" not in response.text
     assert not client.app.state.services.card_repository._records
     after = asyncio.run(client.app.state.services.profile_repository.get(TEST_OWNER_ID))
     assert after.revision == before.revision
