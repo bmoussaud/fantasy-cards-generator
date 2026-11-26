@@ -46,7 +46,7 @@ from app.health import (
     NotApplicableHealthProbe,
 )
 from app.problems import ProblemDetails
-from app.settings import AppSettings, RateLimitSettings
+from app.settings import AppSettings, RateLimitSettings, parse_image_size
 from app.telemetry import (
     add_event,
     instrument_generation,
@@ -1507,9 +1507,10 @@ class MockAIClient:
                 labels=labels,
             ),
             metadata=ModelMetadata(
-                provider="azure-openai",
-                deployment=self.settings.foundry_image_deployment or "mock-gpt-image-2",
-                model="gpt-image-2",
+                provider="azure-mai" if self.settings.uses_mai_image else "azure-openai",
+                deployment=self.settings.foundry_image_deployment
+                or f"mock-{self.settings.foundry_image_model}",
+                model=self.settings.foundry_image_model,
                 mode="mock",
             ),
             usage=usage,
@@ -1543,6 +1544,24 @@ class AzureFoundryAIClient:
         self.settings = settings
         self._credential = _default_azure_credential()
 
+    @property
+    def applies_image_quality(self) -> bool:
+        # MAI image APIs document no quality parameter.
+        return not self.settings.uses_mai_image
+
+    @property
+    def supports_subject_extraction(self) -> bool:
+        # Subject extraction relies on the gpt-image transparent-background edit.
+        return not self.settings.uses_mai_image
+
+    def _image_metadata(self) -> ModelMetadata:
+        return ModelMetadata(
+            provider="azure-mai" if self.settings.uses_mai_image else "azure-openai",
+            deployment=self.settings.foundry_image_deployment or "",
+            model=self.settings.foundry_image_model,
+            mode="live",
+        )
+
     async def _access_token(self) -> str:
         token = await asyncio.to_thread(
             self._credential.get_token,
@@ -1561,16 +1580,31 @@ class AzureFoundryAIClient:
         if quality not in {"low", "medium", "high"}:
             raise ValueError(f"image_quality must be low, medium, or high; got {quality!r}")
         started_at = time.perf_counter()
-        response = await self._post(
-            f"/openai/deployments/{self.settings.foundry_image_deployment}/images/generations",
-            {
-                "prompt": art_prompt,
-                "size": self.settings.image_size,
-                "quality": quality,
-            },
-            api_version="2025-04-01-preview",
-            service_name="foundry-image",
-        )
+        if self.settings.uses_mai_image:
+            width, height = parse_image_size(self.settings.image_size)
+            response = await self._post(
+                "/mai/v1/images/generations",
+                {
+                    "model": self.settings.foundry_image_deployment,
+                    "prompt": art_prompt,
+                    "width": width,
+                    "height": height,
+                },
+                api_version=None,
+                base_url=self.settings.foundry_image_endpoint,
+                service_name="foundry-image",
+            )
+        else:
+            response = await self._post(
+                f"/openai/deployments/{self.settings.foundry_image_deployment}/images/generations",
+                {
+                    "prompt": art_prompt,
+                    "size": self.settings.image_size,
+                    "quality": quality,
+                },
+                api_version="2025-04-01-preview",
+                service_name="foundry-image",
+            )
         data = response.get("data") or []
         if not data:
             raise UpstreamServiceError("foundry-image", "Image generation returned no data.")
@@ -1591,12 +1625,7 @@ class AzureFoundryAIClient:
                 content_type="image/png",
                 revised_prompt=first.get("revised_prompt"),
             ),
-            metadata=ModelMetadata(
-                provider="azure-openai",
-                deployment=self.settings.foundry_image_deployment or "",
-                model="gpt-image-2",
-                mode="live",
-            ),
+            metadata=self._image_metadata(),
             usage=usage,
         )
 
@@ -1613,29 +1642,62 @@ class AzureFoundryAIClient:
         if quality not in {"low", "medium", "high"}:
             raise ValueError(f"image_quality must be low, medium, or high; got {quality!r}")
         started_at = time.perf_counter()
-        reference_image = _prepare_reference_image_for_edit(reference_image)
-        response = await self._post_multipart(
-            f"/openai/deployments/{self.settings.foundry_image_deployment}/images/edits",
-            data={
-                "prompt": art_prompt,
-                "size": self.settings.image_size,
-                "quality": quality,
-                **(
-                    {"background": "transparent", "output_format": "png"}
-                    if transparent_background
-                    else {}
-                ),
-            },
-            files={
-                "image": (
-                    reference_image.filename or "reference-image",
-                    reference_image.content,
-                    reference_image.content_type,
+        if self.settings.uses_mai_image:
+            if transparent_background:
+                raise UpstreamServiceError(
+                    "foundry-image",
+                    "Transparent-background edits are not supported by the MAI image client.",
+                    status_code=400,
+                    retryable=False,
+                    error_code="unsupported_operation",
                 )
-            },
-            api_version="2025-04-01-preview",
-            service_name="foundry-image",
-        )
+            # MAI edits take JPEG or PNG references and no quality field. The edits doc omits
+            # width/height, but MAI-Image-2.7 accepted them in a live DEV probe (1024x1536 PNG).
+            reference_image = _prepare_reference_image_for_edit(reference_image, allow_webp=False)
+            width, height = parse_image_size(self.settings.image_size)
+            response = await self._post_multipart(
+                "/mai/v1/images/edits",
+                data={
+                    "model": self.settings.foundry_image_deployment or "",
+                    "prompt": art_prompt,
+                    "width": str(width),
+                    "height": str(height),
+                },
+                files={
+                    "image": (
+                        reference_image.filename or "reference-image",
+                        reference_image.content,
+                        reference_image.content_type,
+                    )
+                },
+                api_version=None,
+                base_url=self.settings.foundry_image_endpoint,
+                service_name="foundry-image",
+            )
+        else:
+            reference_image = _prepare_reference_image_for_edit(reference_image)
+            response = await self._post_multipart(
+                f"/openai/deployments/{self.settings.foundry_image_deployment}/images/edits",
+                data={
+                    "prompt": art_prompt,
+                    "size": self.settings.image_size,
+                    "quality": quality,
+                    **(
+                        {"background": "transparent", "output_format": "png"}
+                        if transparent_background
+                        else {}
+                    ),
+                },
+                files={
+                    "image": (
+                        reference_image.filename or "reference-image",
+                        reference_image.content,
+                        reference_image.content_type,
+                    )
+                },
+                api_version="2025-04-01-preview",
+                service_name="foundry-image",
+            )
         data = response.get("data") or []
         if not data:
             raise UpstreamServiceError("foundry-image", "Image edit returned no data.")
@@ -1656,12 +1718,7 @@ class AzureFoundryAIClient:
                 content_type="image/png",
                 revised_prompt=first.get("revised_prompt"),
             ),
-            metadata=ModelMetadata(
-                provider="azure-openai",
-                deployment=self.settings.foundry_image_deployment or "",
-                model="gpt-image-2",
-                mode="live",
-            ),
+            metadata=self._image_metadata(),
             usage=usage,
         )
 
@@ -1686,8 +1743,9 @@ class AzureFoundryAIClient:
         path: str,
         payload: dict[str, Any],
         *,
-        api_version: str,
+        api_version: str | None,
         service_name: str,
+        base_url: str | None = None,
     ) -> dict[str, Any]:
         token = await self._access_token()
         headers = {
@@ -1695,11 +1753,11 @@ class AzureFoundryAIClient:
             "Content-Type": "application/json",
         }
         async with httpx.AsyncClient(
-            base_url=self.settings.foundry_endpoint,
+            base_url=base_url or self.settings.foundry_endpoint,
             timeout=None,
         ) as client:
             response = await client.post(
-                f"{path}?api-version={api_version}",
+                _versioned_path(path, api_version),
                 headers=headers,
                 json=payload,
             )
@@ -1721,19 +1779,20 @@ class AzureFoundryAIClient:
         *,
         data: dict[str, str],
         files: dict[str, tuple[str, bytes, str]],
-        api_version: str,
+        api_version: str | None,
         service_name: str,
+        base_url: str | None = None,
     ) -> dict[str, Any]:
         token = await self._access_token()
         headers = {
             "Authorization": "Bearer " + token,
         }
         async with httpx.AsyncClient(
-            base_url=self.settings.foundry_endpoint,
+            base_url=base_url or self.settings.foundry_endpoint,
             timeout=None,
         ) as client:
             response = await client.post(
-                f"{path}?api-version={api_version}",
+                _versioned_path(path, api_version),
                 headers=headers,
                 data=data,
                 files=files,
@@ -1758,17 +1817,22 @@ class AzureFoundryAIClient:
         return response.json()
 
 
-def _prepare_reference_image_for_edit(reference: ReferenceImageUpload) -> ReferenceImageUpload:
+def _versioned_path(path: str, api_version: str | None) -> str:
+    return path if api_version is None else f"{path}?api-version={api_version}"
+
+
+def _prepare_reference_image_for_edit(
+    reference: ReferenceImageUpload, *, allow_webp: bool = True
+) -> ReferenceImageUpload:
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)
             with Image.open(BytesIO(reference.content)) as image:
                 image.load()
-                expected_type = {
-                    "PNG": "image/png",
-                    "JPEG": "image/jpeg",
-                    "WEBP": "image/webp",
-                }.get(image.format or "")
+                accepted_types = {"PNG": "image/png", "JPEG": "image/jpeg"}
+                if allow_webp:
+                    accepted_types["WEBP"] = "image/webp"
+                expected_type = accepted_types.get(image.format or "")
                 if expected_type == reference.content_type and image.mode in {"RGB", "RGBA"}:
                     return reference
                 working = ImageOps.exif_transpose(image)
@@ -2413,7 +2477,7 @@ class CardGenerationService:
                     service_name="foundry-image",
                     request_id=request_id,
                     detail_prompt=derived_art_prompt,
-                    detail_quality=image_quality,
+                    detail_quality=self._image_detail_quality(image_quality),
                 )
             else:
                 image_result = await self._retry_upstream(
@@ -2427,7 +2491,7 @@ class CardGenerationService:
                     request_id=request_id,
                     on_foundry_image_failure="error",
                     detail_prompt=derived_art_prompt,
-                    detail_quality=image_quality,
+                    detail_quality=self._image_detail_quality(image_quality),
                     detail_mode="edit",
                 )
             record_token_usage("image", image_result.usage)
@@ -2787,7 +2851,7 @@ class CardGenerationService:
                 service_name="foundry-image",
                 request_id=request_id,
                 detail_prompt=record.derived_art_prompt,
-                detail_quality=retry_quality,
+                detail_quality=self._image_detail_quality(retry_quality),
             )
             record_token_usage("image", image_result.usage)
         except _GenerationRefusal:
@@ -2886,6 +2950,11 @@ class CardGenerationService:
         )
         return self._as_response(completed)
 
+    def _image_detail_quality(self, requested: str) -> str:
+        if getattr(self.services.ai_client, "applies_image_quality", True):
+            return requested
+        return "not_applicable"
+
     async def _extract_subject(
         self,
         payload: CardPayload,
@@ -2902,7 +2971,11 @@ class CardGenerationService:
             self.services.settings.retry.image_timeout_seconds,
             deadline - time.monotonic() - reserve,
         )
-        if operation is None or timeout <= 0:
+        if (
+            operation is None
+            or not getattr(self.services.ai_client, "supports_subject_extraction", True)
+            or timeout <= 0
+        ):
             safe_log("image.extraction_skipped", request_id=request_id)
             return None
         prompt = derive_subject_prompt(payload)

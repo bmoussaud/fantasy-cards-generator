@@ -534,9 +534,35 @@ Additional operational settings:
 - `AUDIT_RETENTION_DAYS`
 - `IMAGE_SIZE`
 - `IMAGE_QUALITY`
+- `FOUNDRY_IMAGE_MODEL`, `FOUNDRY_IMAGE_ENDPOINT`
 - `SAVED_PHOTO_MAX_COUNT`
 - `SAVED_PHOTO_MAX_BYTES`
 - `SAVED_PHOTO_THUMBNAIL_SIZE`
+
+### Image model selection
+
+`FOUNDRY_IMAGE_MODEL` selects the image client: `gpt-image-2` (default) or
+`MAI-Image-2.7`. No other value is accepted, and there is no fallback between
+models: a failing MAI call surfaces as the usual image error or refusal.
+
+| Setting | `gpt-image-2` | `MAI-Image-2.7` |
+| --- | --- | --- |
+| Endpoint | `FOUNDRY_ENDPOINT` | `FOUNDRY_IMAGE_ENDPOINT` (required, `https://<account>.services.ai.azure.com`); text and moderation endpoints are unchanged |
+| Generation | `POST /openai/deployments/{deployment}/images/generations?api-version=2025-04-01-preview`, JSON `prompt`/`size`/`quality` | `POST /mai/v1/images/generations`, JSON `model`/`prompt`/`width`/`height`, no `api-version` |
+| Reference edit | multipart `images/edits` with `size`, `quality` and optional transparency | multipart `/mai/v1/images/edits` with `model`/`prompt`/`width`/`height`/`image`; WEBP references are converted to PNG |
+| Default `IMAGE_SIZE` | `1024x1536` | `1104x928`; each side ≥ 768 px and at most 1,572,864 pixels |
+| `IMAGE_QUALITY` | Sent | Not sent; telemetry records `not_applicable`, the card keeps the requested value |
+| Subject extraction (`portrait-debordant@1` retries) | Transparent-background edit | Skipped: this adapter does not request transparent-background edits; the scene is kept alone |
+
+Authentication is the app managed identity's Entra token for
+`https://cognitiveservices.azure.com/.default`; no key is used. The MAI account
+and its inference role assignment are managed outside this template. MAI responses
+carry no token usage, so image usage records zero tokens and only latency.
+`FOUNDRY_IMAGE_MODEL`, `FOUNDRY_IMAGE_ENDPOINT` and `FOUNDRY_MAI_IMAGE_DEPLOYMENT`
+(default `MAI-Image-2.7`) feed the matching Bicep parameters. The MAI edits
+reference documents no `width`/`height`; MAI-Image-2.7 accepted them in a DEV
+probe that returned a 1024×1536 PNG. Learn publishes no pixel ceiling for 2.7;
+the 1,572,864-pixel limit is the largest size verified on DEV.
 
 Startup validates local settings and mandatory telemetry. Dependency readiness
 then validates the exact agent name/version, active hosted version status,

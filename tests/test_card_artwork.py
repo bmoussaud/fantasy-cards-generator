@@ -948,7 +948,9 @@ def test_released_hosted_output_beyond_recipe_bounds_falls_back_to_legacy_layout
     asyncio.run(services.agent_client.aclose())
 
 
-@pytest.mark.parametrize("outcome", ["success", "unsupported", "timeout", "opaque", "refused"])
+@pytest.mark.parametrize(
+    "outcome", ["success", "unsupported", "timeout", "opaque", "refused", "skipped"]
+)
 def test_historical_pending_extraction_recomposition_and_deletion(
     authenticated_client, monkeypatch, outcome
 ):
@@ -988,6 +990,10 @@ def test_historical_pending_extraction_recomposition_and_deletion(
 
     monkeypatch.setattr(services.ai_client, "generate_image", image)
     monkeypatch.setattr(services.ai_client, "extract_subject", extract, raising=False)
+    if outcome == "skipped":
+        # MAI-Image-2.7 has no transparent-background edit, so retries keep the scene only.
+        monkeypatch.setattr(services.ai_client, "supports_subject_extraction", False, raising=False)
+    expected_calls = 0 if outcome == "skipped" else 1
     _, form = generate_selected(client, direction="[[mock:image-500]]")
     (pending,) = asyncio.run(services.card_repository.list_by_owner(TEST_OWNER_ID))
     pending.artwork_layout = "portrait_debordant_v1"
@@ -998,7 +1004,7 @@ def test_historical_pending_extraction_recomposition_and_deletion(
         f"/api/v1/cards/{pending.id}/artwork/retry",
         json={"csrfToken": form["csrf_token"], "idempotencyKey": uuid4().hex},
     )
-    assert len(calls) == 1
+    assert len(calls) == expected_calls
     records = asyncio.run(services.card_repository.list_by_owner(TEST_OWNER_ID))
     if outcome == "refused":
         assert response.status_code == 422 and not services.asset_store._assets
@@ -1021,7 +1027,7 @@ def test_historical_pending_extraction_recomposition_and_deletion(
     assert restored.artwork_assets == record.artwork_assets
     composed = asyncio.run(generation.recompose_stored_card(restored, services.asset_store))
     assert composed == client.get(record.image_url_path).content
-    assert len(calls) == 1
+    assert len(calls) == expected_calls
     deleted = client.delete(
         f"/api/v1/cards/{record.id}", headers={"x-csrf-token": form["csrf_token"]}
     )

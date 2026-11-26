@@ -482,6 +482,14 @@ def test_real_image_retry_records_attempts_not_failed_content(monkeypatch, expor
     assert "PRIVATE-ERROR" not in repr(exported.get_finished_spans())
 
 
+def test_mai_image_detail_marks_quality_not_applicable(monkeypatch, exported):
+    services, _, _, _ = stack(monkeypatch)
+    services.ai_client.applies_image_quality = False
+    assert asyncio.run(generate(CardGenerationService(services))).status == "completed"
+    (image,) = [r for r in content(exported) if r["stage"] == "image"]
+    assert '"quality":"not_applicable"' in image["input"]["text"].replace(" ", "")
+
+
 def test_concurrent_single_flight_does_not_duplicate_content(monkeypatch, exported):
     services, _, _, calls = stack(monkeypatch)
     service = CardGenerationService(services)

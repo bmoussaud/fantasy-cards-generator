@@ -2951,6 +2951,164 @@ def test_foundry_image_throttling_preserves_only_bounded_retry_delay(
     assert "NEVER-EXPOSE-payload" not in str(caught.value)
 
 
+def _mai_client(monkeypatch: pytest.MonkeyPatch, handler) -> AzureFoundryAIClient:
+    monkeypatch.setenv("FOUNDRY_IMAGE_MODEL", "MAI-Image-2.7")
+    monkeypatch.setenv("FOUNDRY_IMAGE_ENDPOINT", "https://mai.example")
+    monkeypatch.setenv("FOUNDRY_IMAGE_DEPLOYMENT", "MAI-Image-2.7")
+    monkeypatch.setenv("IMAGE_QUALITY", "high")
+    real_async_client = httpx.AsyncClient
+
+    def build_client(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_async_client(*args, **kwargs)
+
+    monkeypatch.setattr(generation_module.httpx, "AsyncClient", build_client)
+    client = AzureFoundryAIClient(load_app_settings())
+    client._credential = SimpleNamespace(
+        get_token=lambda *_args, **_kwargs: SimpleNamespace(token="mai-token")
+    )
+    return client
+
+
+def test_mai_image_generation_posts_documented_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(
+            200, json={"data": [{"b64_json": base64.b64encode(VALID_PNG_BYTES).decode()}]}
+        )
+
+    client = _mai_client(monkeypatch, handler)
+    result = asyncio.run(client.generate_image("A radiant knight.", request_id="req-mai"))
+
+    (request,) = captured
+    assert str(request.url) == "https://mai.example/mai/v1/images/generations"
+    assert request.headers["Authorization"] == "Bearer mai-token"
+    assert json.loads(request.content) == {
+        "model": "MAI-Image-2.7",
+        "prompt": "A radiant knight.",
+        "width": 1104,
+        "height": 928,
+    }
+    assert result.image.content == VALID_PNG_BYTES
+    assert result.metadata.provider == "azure-mai"
+    assert result.metadata.model == "MAI-Image-2.7"
+    assert result.metadata.deployment == "MAI-Image-2.7"
+    assert result.usage.totalTokens == 0
+    assert not client.applies_image_quality
+    assert not client.supports_subject_extraction
+
+
+def test_mai_image_edit_sends_png_reference_with_size_without_quality(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(
+            200, json={"data": [{"b64_json": base64.b64encode(VALID_PNG_BYTES).decode()}]}
+        )
+
+    client = _mai_client(monkeypatch, handler)
+    webp = BytesIO()
+    Image.new("RGB", (32, 48), "navy").save(webp, format="WEBP")
+    reference = ReferenceImageUpload(
+        content=webp.getvalue(), content_type="image/webp", filename="synthetic.webp"
+    )
+    with pytest.raises(UpstreamServiceError) as caught:
+        asyncio.run(
+            client.generate_image_edit(
+                "Cut out the subject.",
+                reference_image=reference,
+                request_id="req-mai-transparent",
+                transparent_background=True,
+            )
+        )
+    assert caught.value.error_code == "unsupported_operation"
+    assert not caught.value.retryable and not captured
+
+    asyncio.run(
+        client.generate_image_edit(
+            "A radiant knight.", reference_image=reference, request_id="req-mai-edit"
+        )
+    )
+    (request,) = captured
+    assert str(request.url) == "https://mai.example/mai/v1/images/edits"
+    multipart = BytesParser(policy=policy.default).parsebytes(
+        b"Content-Type: " + request.headers["Content-Type"].encode() + b"\r\n\r\n" + request.content
+    )
+    parts = {
+        part.get_param("name", header="content-disposition"): part
+        for part in multipart.iter_parts()
+    }
+    assert set(parts) == {"model", "prompt", "width", "height", "image"}
+    assert parts["model"].get_content() == "MAI-Image-2.7"
+    assert (parts["width"].get_content(), parts["height"].get_content()) == ("1104", "928")
+    assert parts["image"].get_content_type() == "image/png"
+    with Image.open(BytesIO(parts["image"].get_content())) as converted:
+        assert converted.format == "PNG"
+
+
+@pytest.mark.parametrize(
+    ("status", "code", "retryable", "refusal"),
+    [(429, "RateLimitReached", True, False), (400, "content_filter", False, True)],
+)
+def test_mai_image_errors_keep_retry_and_refusal_semantics(
+    monkeypatch: pytest.MonkeyPatch, status: int, code: str, retryable: bool, refusal: bool
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status,
+            headers={"Retry-After": "30"},
+            json={"error": {"code": code, "message": "NEVER-EXPOSE-mai"}},
+        )
+
+    client = _mai_client(monkeypatch, handler)
+    with pytest.raises(UpstreamServiceError) as caught:
+        asyncio.run(client.generate_image("A fantasy portrait.", request_id="req-mai-error"))
+    assert caught.value.status_code == status
+    assert caught.value.error_code == code
+    assert caught.value.retryable is retryable
+    assert generation_module._is_image_policy_refusal(caught.value.error_code) is refusal
+    assert "NEVER-EXPOSE-mai" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("env", "message"),
+    [
+        ({"FOUNDRY_IMAGE_MODEL": "MAI-Image-2.6"}, "FOUNDRY_IMAGE_MODEL"),
+        ({"FOUNDRY_IMAGE_MODEL": "MAI-Image-2.7-Flash"}, "FOUNDRY_IMAGE_MODEL"),
+        ({"FOUNDRY_IMAGE_ENDPOINT": ""}, "FOUNDRY_IMAGE_ENDPOINT"),
+        ({"FOUNDRY_IMAGE_ENDPOINT": "http://mai.example"}, "FOUNDRY_IMAGE_ENDPOINT"),
+        ({"IMAGE_SIZE": "1024x512"}, ">= 768"),
+        ({"IMAGE_SIZE": "1536x1536"}, "1,572,864"),
+        ({"IMAGE_SIZE": "large"}, "IMAGE_SIZE"),
+    ],
+)
+def test_mai_image_settings_reject_unsupported_configuration(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, str], message: str
+) -> None:
+    monkeypatch.setenv("FOUNDRY_IMAGE_MODEL", "MAI-Image-2.7")
+    monkeypatch.setenv("FOUNDRY_IMAGE_ENDPOINT", "https://mai.example")
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    with pytest.raises(SettingsError, match=message):
+        load_app_settings()
+
+
+def test_image_size_default_follows_selected_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert load_app_settings().image_size == "1024x1536"
+    monkeypatch.setenv("FOUNDRY_IMAGE_MODEL", "MAI-Image-2.7")
+    monkeypatch.setenv("FOUNDRY_IMAGE_ENDPOINT", "https://mai.example")
+    assert load_app_settings().image_size == "1104x928"
+    monkeypatch.setenv("IMAGE_SIZE", "1024x1536")
+    assert load_app_settings().image_size == "1024x1536"
+
+
 @pytest.mark.parametrize("valid_image", [True, False])
 def test_image_file_rejection_records_only_bounded_encoding_diagnostics(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, valid_image: bool

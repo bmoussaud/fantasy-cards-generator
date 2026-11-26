@@ -169,6 +169,19 @@ param aiFoundryImageDeploymentSkuName string = 'GlobalStandard'
 @description('Azure AI Foundry capacity units for the image deployment. Verify against live quota before deployment.')
 param aiFoundryImageDeploymentCapacity int = 1
 
+@allowed([
+  'gpt-image-2'
+  'MAI-Image-2.7'
+])
+@description('Image model family called by the web app. MAI-Image-2.7 uses foundryImageEndpoint; its deployment and the web identity inference role on that resource are managed outside this template.')
+param foundryImageModel string = 'gpt-image-2'
+
+@description('Foundry resource base URL for MAI image inference, for example https://<resource>.services.ai.azure.com. Required only for MAI-Image-2.7.')
+param foundryImageEndpoint string = ''
+
+@description('Deployment name of MAI-Image-2.7 on foundryImageEndpoint.')
+param foundryMaiImageDeploymentName string = 'MAI-Image-2.7'
+
 @description('Persistence mode for the app runtime.')
 param persistenceMode string = 'azure'
 
@@ -268,8 +281,8 @@ param overallTimeoutSeconds string = '225'
 @description('Sanitized audit retention in days.')
 param auditRetentionDays int = 30
 
-@description('Requested image size for artwork generation.')
-param imageSize string = '1024x1536'
+@description('Requested image size for artwork generation. Empty selects the model default: 1024x1536 for gpt-image-2, 1104x928 for MAI-Image-2.7.')
+param imageSize string = ''
 
 @description('Requested image quality for artwork generation. Valid values are "low", "medium", and "high".')
 param imageQuality string = 'medium'
@@ -356,6 +369,12 @@ var namePrefix = 'fcag'
 var deployerPrincipalId = deployer().objectId
 var resourceToken = toLower('${namePrefix}-${environmentName}')
 var telemetryEnvironmentName = environmentName == 'prod' ? 'production' : 'development'
+var usesMaiImage = foundryImageModel == 'MAI-Image-2.7'
+var resolvedFoundryImageDeployment = usesMaiImage ? foundryMaiImageDeploymentName : aiFoundryImageDeploymentName
+var resolvedImageSize = !empty(trim(imageSize)) ? trim(imageSize) : (usesMaiImage ? '1104x928' : '1024x1536')
+var validatedFoundryImageEndpoint = usesMaiImage && !startsWith(trim(foundryImageEndpoint), 'https://')
+  ? fail('FOUNDRY_IMAGE_ENDPOINT must be an https:// Foundry resource URL when FOUNDRY_IMAGE_MODEL is MAI-Image-2.7.')
+  : trim(foundryImageEndpoint)
 var uniqueToken = uniqueString(subscription().id, resourceGroup().id)
 var logAnalyticsName = take('${resourceToken}-law', 63)
 var appInsightsName = take('${resourceToken}-appi', 63)
@@ -514,7 +533,9 @@ module containerApps './modules/container-apps.bicep' = {
     contentSafetyMaxViolenceSeverity: contentSafetyMaxViolenceSeverity
     foundryApiVersion: '2025-03-01-preview'
     foundryEndpoint: 'https://${aiFoundryAccountName}.cognitiveservices.azure.com/'
-    foundryImageDeployment: aiFoundryImageDeploymentName
+    foundryImageDeployment: resolvedFoundryImageDeployment
+    foundryImageEndpoint: validatedFoundryImageEndpoint
+    foundryImageModel: foundryImageModel
     foundryProjectEndpoint: aiFoundryProjectEndpoint
     foundryAgentName: foundryAgentName
     foundryAgentVersion: foundryAgentVersion
@@ -524,7 +545,7 @@ module containerApps './modules/container-apps.bicep' = {
     healthzCosmosTimeoutMs: healthzCosmosTimeoutMs
     imageMaxRetries: imageMaxRetries
     imageTimeoutSeconds: imageTimeoutSeconds
-    imageSize: imageSize
+    imageSize: resolvedImageSize
     imageQuality: imageQuality
     keyVaultUri: security.outputs.keyVaultUri
     location: location

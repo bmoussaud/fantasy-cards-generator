@@ -5,8 +5,8 @@
   "metadata": {
     "_generator": {
       "name": "bicep",
-      "version": "0.45.15.27210",
-      "templateHash": "13823931049413105920"
+      "version": "0.48.1.52935",
+      "templateHash": "11386897693919801420"
     }
   },
   "parameters": {
@@ -138,6 +138,17 @@
       ],
       "metadata": {
         "description": "Explicit LinkedIn OIDC pilot feature flag. Disabled by default in every environment."
+      }
+    },
+    "profileEnrichmentEnabled": {
+      "type": "string",
+      "defaultValue": "false",
+      "allowedValues": [
+        "false",
+        "true"
+      ],
+      "metadata": {
+        "description": "Public Web Search profile suggestions. Disabled by default in every environment."
       }
     },
     "linkedinClientId": {
@@ -353,6 +364,31 @@
         "description": "Azure AI Foundry capacity units for the image deployment. Verify against live quota before deployment."
       }
     },
+    "foundryImageModel": {
+      "type": "string",
+      "defaultValue": "gpt-image-2",
+      "allowedValues": [
+        "gpt-image-2",
+        "MAI-Image-2.7"
+      ],
+      "metadata": {
+        "description": "Image model family called by the web app. MAI-Image-2.7 uses foundryImageEndpoint; its deployment and the web identity inference role on that resource are managed outside this template."
+      }
+    },
+    "foundryImageEndpoint": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Foundry resource base URL for MAI image inference, for example https://<resource>.services.ai.azure.com. Required only for MAI-Image-2.7."
+      }
+    },
+    "foundryMaiImageDeploymentName": {
+      "type": "string",
+      "defaultValue": "MAI-Image-2.7",
+      "metadata": {
+        "description": "Deployment name of MAI-Image-2.7 on foundryImageEndpoint."
+      }
+    },
     "persistenceMode": {
       "type": "string",
       "defaultValue": "azure",
@@ -550,9 +586,9 @@
     },
     "imageSize": {
       "type": "string",
-      "defaultValue": "1024x1536",
+      "defaultValue": "",
       "metadata": {
-        "description": "Requested image size for artwork generation."
+        "description": "Requested image size for artwork generation. Empty selects the model default: 1024x1536 for gpt-image-2, 1104x928 for MAI-Image-2.7."
       }
     },
     "imageQuality": {
@@ -718,6 +754,10 @@
     "deployerPrincipalId": "[deployer().objectId]",
     "resourceToken": "[toLower(format('{0}-{1}', variables('namePrefix'), parameters('environmentName')))]",
     "telemetryEnvironmentName": "[if(equals(parameters('environmentName'), 'prod'), 'production', 'development')]",
+    "usesMaiImage": "[equals(parameters('foundryImageModel'), 'MAI-Image-2.7')]",
+    "resolvedFoundryImageDeployment": "[if(variables('usesMaiImage'), parameters('foundryMaiImageDeploymentName'), parameters('aiFoundryImageDeploymentName'))]",
+    "resolvedImageSize": "[if(not(empty(trim(parameters('imageSize')))), trim(parameters('imageSize')), if(variables('usesMaiImage'), '1104x928', '1024x1536'))]",
+    "validatedFoundryImageEndpoint": "[if(and(variables('usesMaiImage'), not(startsWith(trim(parameters('foundryImageEndpoint')), 'https://'))), fail('FOUNDRY_IMAGE_ENDPOINT must be an https:// Foundry resource URL when FOUNDRY_IMAGE_MODEL is MAI-Image-2.7.'), trim(parameters('foundryImageEndpoint')))]",
     "uniqueToken": "[uniqueString(subscription().id, resourceGroup().id)]",
     "logAnalyticsName": "[take(format('{0}-law', variables('resourceToken')), 63)]",
     "appInsightsName": "[take(format('{0}-appi', variables('resourceToken')), 63)]",
@@ -778,8 +818,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.45.15.27210",
-              "templateHash": "204244536197432026"
+              "version": "0.48.1.52935",
+              "templateHash": "2515700935134065404"
             }
           },
           "parameters": {
@@ -926,8 +966,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.45.15.27210",
-              "templateHash": "15553515758241974833"
+              "version": "0.48.1.52935",
+              "templateHash": "10480556431467718754"
             }
           },
           "parameters": {
@@ -1064,8 +1104,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.45.15.27210",
-              "templateHash": "12188138088829919156"
+              "version": "0.48.1.52935",
+              "templateHash": "5623978920671018254"
             }
           },
           "parameters": {
@@ -1268,8 +1308,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.45.15.27210",
-              "templateHash": "4999513817385126442"
+              "version": "0.48.1.52935",
+              "templateHash": "4802508193833333642"
             }
           },
           "parameters": {
@@ -1503,8 +1543,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.45.15.27210",
-              "templateHash": "15937404824358156258"
+              "version": "0.48.1.52935",
+              "templateHash": "5186865504771781883"
             }
           },
           "parameters": {
@@ -1630,8 +1670,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.45.15.27210",
-              "templateHash": "17905176878991898590"
+              "version": "0.48.1.52935",
+              "templateHash": "13490723203446678873"
             }
           },
           "parameters": {
@@ -1760,8 +1800,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.45.15.27210",
-              "templateHash": "18036984284647648963"
+              "version": "0.48.1.52935",
+              "templateHash": "7527775004712189305"
             }
           },
           "parameters": {
@@ -1851,6 +1891,9 @@
           "linkedinOidcEnabled": {
             "value": "[parameters('linkedinOidcEnabled')]"
           },
+          "profileEnrichmentEnabled": {
+            "value": "[parameters('profileEnrichmentEnabled')]"
+          },
           "linkedinPictureHostAllowlist": {
             "value": "[parameters('linkedinPictureHostAllowlist')]"
           },
@@ -1885,7 +1928,13 @@
             "value": "[format('https://{0}.cognitiveservices.azure.com/', variables('aiFoundryAccountName'))]"
           },
           "foundryImageDeployment": {
-            "value": "[parameters('aiFoundryImageDeploymentName')]"
+            "value": "[variables('resolvedFoundryImageDeployment')]"
+          },
+          "foundryImageEndpoint": {
+            "value": "[variables('validatedFoundryImageEndpoint')]"
+          },
+          "foundryImageModel": {
+            "value": "[parameters('foundryImageModel')]"
           },
           "foundryProjectEndpoint": {
             "value": "[variables('aiFoundryProjectEndpoint')]"
@@ -1915,7 +1964,7 @@
             "value": "[parameters('imageTimeoutSeconds')]"
           },
           "imageSize": {
-            "value": "[parameters('imageSize')]"
+            "value": "[variables('resolvedImageSize')]"
           },
           "imageQuality": {
             "value": "[parameters('imageQuality')]"
@@ -1999,8 +2048,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.45.15.27210",
-              "templateHash": "14246840701166605217"
+              "version": "0.48.1.52935",
+              "templateHash": "8558253887216257629"
             }
           },
           "parameters": {
@@ -2146,6 +2195,17 @@
                 "description": "Explicit LinkedIn OIDC pilot feature flag injected as LINKEDIN_OIDC_ENABLED."
               }
             },
+            "profileEnrichmentEnabled": {
+              "type": "string",
+              "defaultValue": "false",
+              "allowedValues": [
+                "false",
+                "true"
+              ],
+              "metadata": {
+                "description": "Public Web Search profile suggestions injected as PROFILE_ENRICHMENT_ENABLED."
+              }
+            },
             "linkedinClientId": {
               "type": "string",
               "defaultValue": "",
@@ -2213,6 +2273,24 @@
               "defaultValue": "gpt-image-2",
               "metadata": {
                 "description": "Azure AI Foundry image deployment injected as FOUNDRY_IMAGE_DEPLOYMENT."
+              }
+            },
+            "foundryImageModel": {
+              "type": "string",
+              "defaultValue": "gpt-image-2",
+              "allowedValues": [
+                "gpt-image-2",
+                "MAI-Image-2.7"
+              ],
+              "metadata": {
+                "description": "Image model family injected as FOUNDRY_IMAGE_MODEL."
+              }
+            },
+            "foundryImageEndpoint": {
+              "type": "string",
+              "defaultValue": "",
+              "metadata": {
+                "description": "Optional MAI image inference base URL injected as FOUNDRY_IMAGE_ENDPOINT when set."
               }
             },
             "foundryAgentName": {
@@ -2523,7 +2601,7 @@
             "foundryAgentConfigurationIsComplete": "[and(and(variables('hasFoundryAgentName'), variables('hasFoundryAgentVersion')), variables('hasFoundryAgentExpectedVersion'))]",
             "validatedFoundryAgentConfiguration": "[if(and(equals(variables('hasFoundryAgentName'), variables('hasFoundryAgentVersion')), equals(variables('hasFoundryAgentVersion'), variables('hasFoundryAgentExpectedVersion'))), createObject('name', trim(parameters('foundryAgentName')), 'version', trim(parameters('foundryAgentVersion')), 'expectedVersion', trim(parameters('foundryAgentExpectedVersion'))), fail('FOUNDRY_AGENT_NAME, FOUNDRY_AGENT_VERSION, and FOUNDRY_AGENT_EXPECTED_VERSION must either all be set or all be empty during the initial placeholder provision.'))]",
             "foundryAgentEnv": "[if(variables('foundryAgentConfigurationIsComplete'), createArray(createObject('name', 'FOUNDRY_AGENT_NAME', 'value', variables('validatedFoundryAgentConfiguration').name), createObject('name', 'FOUNDRY_AGENT_VERSION', 'value', variables('validatedFoundryAgentConfiguration').version), createObject('name', 'FOUNDRY_AGENT_EXPECTED_VERSION', 'value', variables('validatedFoundryAgentConfiguration').expectedVersion)), createArray())]",
-            "containerAppEnv": "[concat(createArray(createObject('name', 'APPLICATIONINSIGHTS_CONNECTION_STRING', 'secretRef', 'applicationinsights-connection-string'), createObject('name', 'TELEMETRY_ENABLED', 'value', 'true'), createObject('name', 'FCG_AGENT_TRACE_ENABLED', 'value', parameters('agentTraceEnabled')), createObject('name', 'AZURE_EXPERIMENTAL_ENABLE_GENAI_TRACING', 'value', 'true'), createObject('name', 'APP_ENV', 'value', parameters('deploymentEnvironment')), createObject('name', 'TELEMETRY_SAMPLING_RATIO', 'value', parameters('telemetrySamplingRatio')), createObject('name', 'OTEL_SERVICE_NAME', 'value', parameters('telemetryServiceName')), createObject('name', 'OTEL_RESOURCE_ATTRIBUTES', 'value', format('deployment.environment.name={0},cloud.platform=azure_container_apps', parameters('telemetryEnvironmentName'))), createObject('name', 'OTEL_TRACES_SAMPLER', 'value', 'parentbased_trace_id_ratio'), createObject('name', 'OTEL_TRACES_SAMPLER_ARG', 'value', parameters('telemetrySamplingRatio')), createObject('name', 'PERSISTENCE_MODE', 'value', parameters('persistenceMode')), createObject('name', 'FOUNDRY_ENDPOINT', 'value', parameters('foundryEndpoint')), createObject('name', 'FOUNDRY_PROJECT_ENDPOINT', 'value', parameters('foundryProjectEndpoint')), createObject('name', 'FOUNDRY_API_VERSION', 'value', parameters('foundryApiVersion')), createObject('name', 'FOUNDRY_IMAGE_DEPLOYMENT', 'value', parameters('foundryImageDeployment')), createObject('name', 'FOUNDRY_AGENT_API_VERSION', 'value', parameters('foundryAgentApiVersion')), createObject('name', 'FOUNDRY_AGENT_TIMEOUT_SECONDS', 'value', parameters('foundryAgentTimeoutSeconds')), createObject('name', 'COSMOS_ENDPOINT', 'value', parameters('cosmosEndpoint')), createObject('name', 'COSMOS_DATABASE_NAME', 'value', parameters('cosmosDatabaseName')), createObject('name', 'COSMOS_CONTAINER_NAME', 'value', parameters('cosmosContainerName')), createObject('name', 'BLOB_ENDPOINT', 'value', parameters('blobEndpoint')), createObject('name', 'BLOB_CONTAINER_NAME', 'value', parameters('blobContainerName')), createObject('name', 'PROFILE_PHOTOS_CONTAINER_NAME', 'value', parameters('profilePhotosContainerName')), createObject('name', 'CONTENT_SAFETY_ENDPOINT', 'value', parameters('contentSafetyEndpoint')), createObject('name', 'CONTENT_SAFETY_API_VERSION', 'value', parameters('contentSafetyApiVersion')), createObject('name', 'CONTENT_SAFETY_MAX_HATE_SEVERITY', 'value', string(parameters('contentSafetyMaxHateSeverity'))), createObject('name', 'CONTENT_SAFETY_MAX_SELF_HARM_SEVERITY', 'value', string(parameters('contentSafetyMaxSelfHarmSeverity'))), createObject('name', 'CONTENT_SAFETY_MAX_SEXUAL_SEVERITY', 'value', string(parameters('contentSafetyMaxSexualSeverity'))), createObject('name', 'CONTENT_SAFETY_MAX_VIOLENCE_SEVERITY', 'value', string(parameters('contentSafetyMaxViolenceSeverity'))), createObject('name', 'HEALTHZ_COSMOS_TIMEOUT_MS', 'value', string(parameters('healthzCosmosTimeoutMs'))), createObject('name', 'HEALTHZ_BLOB_TIMEOUT_MS', 'value', string(parameters('healthzBlobTimeoutMs'))), createObject('name', 'MODERATION_SERVICE', 'value', parameters('moderationService')), createObject('name', 'MODERATION_POLICY_NAME', 'value', parameters('moderationPolicyName')), createObject('name', 'RATE_LIMIT_USER_REQUESTS', 'value', string(parameters('rateLimitUserRequests'))), createObject('name', 'RATE_LIMIT_USER_WINDOW_SECONDS', 'value', string(parameters('rateLimitUserWindowSeconds'))), createObject('name', 'RATE_LIMIT_IP_REQUESTS', 'value', string(parameters('rateLimitIpRequests'))), createObject('name', 'RATE_LIMIT_IP_WINDOW_SECONDS', 'value', string(parameters('rateLimitIpWindowSeconds'))), createObject('name', 'TRUSTED_PROXY_HOPS', 'value', string(parameters('trustedProxyHops'))), createObject('name', 'UPSTREAM_MAX_RETRIES', 'value', string(parameters('upstreamMaxRetries'))), createObject('name', 'IMAGE_MAX_RETRIES', 'value', string(parameters('imageMaxRetries'))), createObject('name', 'UPSTREAM_BASE_BACKOFF_SECONDS', 'value', parameters('upstreamBaseBackoffSeconds')), createObject('name', 'TEXT_TIMEOUT_SECONDS', 'value', parameters('textTimeoutSeconds')), createObject('name', 'IMAGE_TIMEOUT_SECONDS', 'value', parameters('imageTimeoutSeconds')), createObject('name', 'OVERALL_TIMEOUT_SECONDS', 'value', parameters('overallTimeoutSeconds')), createObject('name', 'AUDIT_RETENTION_DAYS', 'value', string(parameters('auditRetentionDays'))), createObject('name', 'IMAGE_SIZE', 'value', parameters('imageSize')), createObject('name', 'IMAGE_QUALITY', 'value', parameters('imageQuality')), createObject('name', 'SAVED_PHOTO_MAX_COUNT', 'value', string(parameters('savedPhotoMaxCount'))), createObject('name', 'SAVED_PHOTO_MAX_BYTES', 'value', parameters('savedPhotoMaxBytes')), createObject('name', 'SAVED_PHOTO_THUMBNAIL_SIZE', 'value', string(parameters('savedPhotoThumbnailSize'))), createObject('name', 'KEY_VAULT_URI', 'value', parameters('keyVaultUri')), createObject('name', 'LINKEDIN_OIDC_ENABLED', 'value', parameters('linkedinOidcEnabled')), createObject('name', 'LINKEDIN_CLIENT_ID', 'value', parameters('linkedinClientId')), createObject('name', 'LINKEDIN_REDIRECT_URI', 'value', parameters('linkedinRedirectUri')), createObject('name', 'LINKEDIN_PILOT_OWNER_ALLOWLIST', 'value', parameters('linkedinPilotOwnerAllowlist')), createObject('name', 'LINKEDIN_PICTURE_HOST_ALLOWLIST', 'value', parameters('linkedinPictureHostAllowlist'))), if(not(empty(parameters('appSessionSecretKeyValue'))), createArray(createObject('name', 'APP_SESSION_SECRET_KEY', 'secretRef', 'app-session-secret-key')), createArray()), if(not(empty(parameters('entraClientId'))), createArray(createObject('name', 'ENTRA_CLIENT_ID', 'value', parameters('entraClientId'))), createArray()), if(not(empty(parameters('entraClientSecretValue'))), createArray(createObject('name', 'ENTRA_CLIENT_SECRET', 'secretRef', 'entra-client-secret')), createArray()), if(not(empty(parameters('linkedinClientSecretValue'))), createArray(createObject('name', 'LINKEDIN_CLIENT_SECRET', 'secretRef', 'linkedin-client-secret')), createArray()), if(not(empty(parameters('entraRedirectUri'))), createArray(createObject('name', 'ENTRA_REDIRECT_URI', 'value', parameters('entraRedirectUri'))), createArray()), if(not(empty(parameters('entraPostLogoutRedirectUri'))), createArray(createObject('name', 'ENTRA_POST_LOGOUT_REDIRECT_URI', 'value', parameters('entraPostLogoutRedirectUri'))), createArray()), variables('foundryAgentEnv'))]"
+            "containerAppEnv": "[concat(createArray(createObject('name', 'APPLICATIONINSIGHTS_CONNECTION_STRING', 'secretRef', 'applicationinsights-connection-string'), createObject('name', 'TELEMETRY_ENABLED', 'value', 'true'), createObject('name', 'FCG_AGENT_TRACE_ENABLED', 'value', parameters('agentTraceEnabled')), createObject('name', 'AZURE_EXPERIMENTAL_ENABLE_GENAI_TRACING', 'value', 'true'), createObject('name', 'APP_ENV', 'value', parameters('deploymentEnvironment')), createObject('name', 'TELEMETRY_SAMPLING_RATIO', 'value', parameters('telemetrySamplingRatio')), createObject('name', 'OTEL_SERVICE_NAME', 'value', parameters('telemetryServiceName')), createObject('name', 'OTEL_RESOURCE_ATTRIBUTES', 'value', format('deployment.environment.name={0},cloud.platform=azure_container_apps', parameters('telemetryEnvironmentName'))), createObject('name', 'OTEL_TRACES_SAMPLER', 'value', 'parentbased_trace_id_ratio'), createObject('name', 'OTEL_TRACES_SAMPLER_ARG', 'value', parameters('telemetrySamplingRatio')), createObject('name', 'PERSISTENCE_MODE', 'value', parameters('persistenceMode')), createObject('name', 'FOUNDRY_ENDPOINT', 'value', parameters('foundryEndpoint')), createObject('name', 'FOUNDRY_PROJECT_ENDPOINT', 'value', parameters('foundryProjectEndpoint')), createObject('name', 'FOUNDRY_API_VERSION', 'value', parameters('foundryApiVersion')), createObject('name', 'FOUNDRY_IMAGE_DEPLOYMENT', 'value', parameters('foundryImageDeployment')), createObject('name', 'FOUNDRY_IMAGE_MODEL', 'value', parameters('foundryImageModel')), createObject('name', 'FOUNDRY_AGENT_API_VERSION', 'value', parameters('foundryAgentApiVersion')), createObject('name', 'FOUNDRY_AGENT_TIMEOUT_SECONDS', 'value', parameters('foundryAgentTimeoutSeconds')), createObject('name', 'PROFILE_ENRICHMENT_ENABLED', 'value', parameters('profileEnrichmentEnabled')), createObject('name', 'COSMOS_ENDPOINT', 'value', parameters('cosmosEndpoint')), createObject('name', 'COSMOS_DATABASE_NAME', 'value', parameters('cosmosDatabaseName')), createObject('name', 'COSMOS_CONTAINER_NAME', 'value', parameters('cosmosContainerName')), createObject('name', 'BLOB_ENDPOINT', 'value', parameters('blobEndpoint')), createObject('name', 'BLOB_CONTAINER_NAME', 'value', parameters('blobContainerName')), createObject('name', 'PROFILE_PHOTOS_CONTAINER_NAME', 'value', parameters('profilePhotosContainerName')), createObject('name', 'CONTENT_SAFETY_ENDPOINT', 'value', parameters('contentSafetyEndpoint')), createObject('name', 'CONTENT_SAFETY_API_VERSION', 'value', parameters('contentSafetyApiVersion')), createObject('name', 'CONTENT_SAFETY_MAX_HATE_SEVERITY', 'value', string(parameters('contentSafetyMaxHateSeverity'))), createObject('name', 'CONTENT_SAFETY_MAX_SELF_HARM_SEVERITY', 'value', string(parameters('contentSafetyMaxSelfHarmSeverity'))), createObject('name', 'CONTENT_SAFETY_MAX_SEXUAL_SEVERITY', 'value', string(parameters('contentSafetyMaxSexualSeverity'))), createObject('name', 'CONTENT_SAFETY_MAX_VIOLENCE_SEVERITY', 'value', string(parameters('contentSafetyMaxViolenceSeverity'))), createObject('name', 'HEALTHZ_COSMOS_TIMEOUT_MS', 'value', string(parameters('healthzCosmosTimeoutMs'))), createObject('name', 'HEALTHZ_BLOB_TIMEOUT_MS', 'value', string(parameters('healthzBlobTimeoutMs'))), createObject('name', 'MODERATION_SERVICE', 'value', parameters('moderationService')), createObject('name', 'MODERATION_POLICY_NAME', 'value', parameters('moderationPolicyName')), createObject('name', 'RATE_LIMIT_USER_REQUESTS', 'value', string(parameters('rateLimitUserRequests'))), createObject('name', 'RATE_LIMIT_USER_WINDOW_SECONDS', 'value', string(parameters('rateLimitUserWindowSeconds'))), createObject('name', 'RATE_LIMIT_IP_REQUESTS', 'value', string(parameters('rateLimitIpRequests'))), createObject('name', 'RATE_LIMIT_IP_WINDOW_SECONDS', 'value', string(parameters('rateLimitIpWindowSeconds'))), createObject('name', 'TRUSTED_PROXY_HOPS', 'value', string(parameters('trustedProxyHops'))), createObject('name', 'UPSTREAM_MAX_RETRIES', 'value', string(parameters('upstreamMaxRetries'))), createObject('name', 'IMAGE_MAX_RETRIES', 'value', string(parameters('imageMaxRetries'))), createObject('name', 'UPSTREAM_BASE_BACKOFF_SECONDS', 'value', parameters('upstreamBaseBackoffSeconds')), createObject('name', 'TEXT_TIMEOUT_SECONDS', 'value', parameters('textTimeoutSeconds')), createObject('name', 'IMAGE_TIMEOUT_SECONDS', 'value', parameters('imageTimeoutSeconds')), createObject('name', 'OVERALL_TIMEOUT_SECONDS', 'value', parameters('overallTimeoutSeconds')), createObject('name', 'AUDIT_RETENTION_DAYS', 'value', string(parameters('auditRetentionDays'))), createObject('name', 'IMAGE_SIZE', 'value', parameters('imageSize')), createObject('name', 'IMAGE_QUALITY', 'value', parameters('imageQuality')), createObject('name', 'SAVED_PHOTO_MAX_COUNT', 'value', string(parameters('savedPhotoMaxCount'))), createObject('name', 'SAVED_PHOTO_MAX_BYTES', 'value', parameters('savedPhotoMaxBytes')), createObject('name', 'SAVED_PHOTO_THUMBNAIL_SIZE', 'value', string(parameters('savedPhotoThumbnailSize'))), createObject('name', 'KEY_VAULT_URI', 'value', parameters('keyVaultUri')), createObject('name', 'LINKEDIN_OIDC_ENABLED', 'value', parameters('linkedinOidcEnabled')), createObject('name', 'LINKEDIN_CLIENT_ID', 'value', parameters('linkedinClientId')), createObject('name', 'LINKEDIN_REDIRECT_URI', 'value', parameters('linkedinRedirectUri')), createObject('name', 'LINKEDIN_PILOT_OWNER_ALLOWLIST', 'value', parameters('linkedinPilotOwnerAllowlist')), createObject('name', 'LINKEDIN_PICTURE_HOST_ALLOWLIST', 'value', parameters('linkedinPictureHostAllowlist'))), if(not(empty(trim(parameters('foundryImageEndpoint')))), createArray(createObject('name', 'FOUNDRY_IMAGE_ENDPOINT', 'value', trim(parameters('foundryImageEndpoint')))), createArray()), if(not(empty(parameters('appSessionSecretKeyValue'))), createArray(createObject('name', 'APP_SESSION_SECRET_KEY', 'secretRef', 'app-session-secret-key')), createArray()), if(not(empty(parameters('entraClientId'))), createArray(createObject('name', 'ENTRA_CLIENT_ID', 'value', parameters('entraClientId'))), createArray()), if(not(empty(parameters('entraClientSecretValue'))), createArray(createObject('name', 'ENTRA_CLIENT_SECRET', 'secretRef', 'entra-client-secret')), createArray()), if(not(empty(parameters('linkedinClientSecretValue'))), createArray(createObject('name', 'LINKEDIN_CLIENT_SECRET', 'secretRef', 'linkedin-client-secret')), createArray()), if(not(empty(parameters('entraRedirectUri'))), createArray(createObject('name', 'ENTRA_REDIRECT_URI', 'value', parameters('entraRedirectUri'))), createArray()), if(not(empty(parameters('entraPostLogoutRedirectUri'))), createArray(createObject('name', 'ENTRA_POST_LOGOUT_REDIRECT_URI', 'value', parameters('entraPostLogoutRedirectUri'))), createArray()), variables('foundryAgentEnv'))]"
           },
           "resources": [
             {
@@ -2734,8 +2812,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.45.15.27210",
-              "templateHash": "1227320756293365038"
+              "version": "0.48.1.52935",
+              "templateHash": "9073322433933333318"
             }
           },
           "parameters": {
@@ -3275,8 +3353,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.45.15.27210",
-              "templateHash": "10724111127732990745"
+              "version": "0.48.1.52935",
+              "templateHash": "9547675085113855273"
             }
           },
           "parameters": {
@@ -3508,8 +3586,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.45.15.27210",
-              "templateHash": "13427901244984523192"
+              "version": "0.48.1.52935",
+              "templateHash": "4280878645865235857"
             }
           },
           "parameters": {
@@ -3683,8 +3761,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.45.15.27210",
-              "templateHash": "9509362034116693422"
+              "version": "0.48.1.52935",
+              "templateHash": "10857049757394211512"
             }
           },
           "parameters": {
@@ -7897,8 +7975,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.45.15.27210",
-              "templateHash": "10753811517175570161"
+              "version": "0.48.1.52935",
+              "templateHash": "7820631110746129745"
             }
           },
           "parameters": {
@@ -8268,8 +8346,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.45.15.27210",
-              "templateHash": "1630020994503054976"
+              "version": "0.48.1.52935",
+              "templateHash": "6829451698028775588"
             }
           },
           "parameters": {
@@ -8713,8 +8791,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.45.15.27210",
-              "templateHash": "4062779255774458396"
+              "version": "0.48.1.52935",
+              "templateHash": "14976935346501314981"
             }
           },
           "parameters": {
@@ -8853,8 +8931,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.45.15.27210",
-              "templateHash": "16431383122271112693"
+              "version": "0.48.1.52935",
+              "templateHash": "17156145824803637407"
             }
           },
           "parameters": {

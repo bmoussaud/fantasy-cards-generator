@@ -205,7 +205,12 @@ def test_generation_runtime_env_vars_are_wired_from_bicep_outputs() -> None:
     assert "foundryProjectEndpoint: aiFoundryProjectEndpoint" in main_bicep
     assert "contentSafetyEndpoint: resolvedContentSafetyEndpoint" in main_bicep
     assert "foundryTextDeployment:" not in main_bicep
-    assert "foundryImageDeployment: aiFoundryImageDeploymentName" in main_bicep
+    assert "foundryImageDeployment: resolvedFoundryImageDeployment" in main_bicep
+    assert "foundryImageModel: foundryImageModel" in main_bicep
+    assert "foundryImageEndpoint: validatedFoundryImageEndpoint" in main_bicep
+    assert "imageSize: resolvedImageSize" in main_bicep
+    assert "name: 'FOUNDRY_IMAGE_MODEL'" in container_apps_bicep
+    assert "name: 'FOUNDRY_IMAGE_ENDPOINT'" in container_apps_bicep
     assert "cosmosEndpoint: 'https://${cosmosAccountName}.documents.azure.com:443/'" in main_bicep
     assert (
         "blobEndpoint: 'https://${storageAccountName}.blob.${environment().suffixes.storage}/'"

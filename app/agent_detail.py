@@ -406,7 +406,7 @@ class QueryProjection(Closed):
 
 class ImageInputProjection(Closed):
     artPrompt: str = Field(min_length=1, max_length=1000)
-    quality: Literal["low", "medium", "high"]
+    quality: Literal["low", "medium", "high", "not_applicable"]
     mode: Literal["generate", "edit"]
 
 
