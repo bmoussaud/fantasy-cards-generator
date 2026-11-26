@@ -232,6 +232,48 @@ Or via the root orchestrator with approval gates:
 ./deploy.sh agent --environment prod --approve-change --approve-prod
 ```
 
+### DEV in Sweden Central alongside the existing DEV (issue #194)
+
+The same IaC recreates DEV in a separate resource group without changing the
+existing DEV. Use a separate checkout or worktree so its `.azure/` state stays
+isolated. The azd environment can keep the logical name `dev`, but never copy
+the old DEV's `.azure/dev/.env` (images, agent triplet, secrets).
+
+```bash
+azd env new dev
+azd env set AZURE_SUBSCRIPTION_ID <bmoussaudms-subscription-id>
+azd env set AZURE_LOCATION swedencentral
+azd env set AZURE_RESOURCE_GROUP rg-fcag-dev-swedencentral
+# Separate Entra registration so the old DEV callbacks are not overwritten.
+azd env set ENTRA_APP_UNIQUE_NAME fantasy-cards-generator-dev-swedencentral
+# MAI on the IaC-managed Foundry account, selected by default; GPT stays deployed.
+azd env set AI_FOUNDRY_MAI_IMAGE_DEPLOYMENT_ENABLED true
+azd env set FOUNDRY_IMAGE_MODEL MAI-Image-2.7
+azd env set IMAGE_SIZE 1024x1536
+azd env set CARD_ORCHESTRATOR_ENABLE_PREREQUISITES true
+azd env set CARD_ORCHESTRATOR_CREATE_REGISTRY_CONNECTION true
+azd provision --preview   # review: only creations in the new group
+azd up
+```
+
+| Setting | Default | Effect |
+|---|---|---|
+| `AI_FOUNDRY_MAI_IMAGE_DEPLOYMENT_ENABLED` | `false` | Deploys `MAI-Image-2.7` (format `Microsoft`, `GlobalStandard`) on the managed account after `gpt-image-2`. |
+| `AI_FOUNDRY_MAI_IMAGE_MODEL_VERSION` | `2026-11-02` | MAI model version; verify against the live catalog. |
+| `AI_FOUNDRY_MAI_IMAGE_DEPLOYMENT_CAPACITY` | `1` | MAI capacity; verify against subscription quota. |
+| `FOUNDRY_IMAGE_ENDPOINT` | empty | Optional override. Empty with MAI selected and deployed resolves to `https://<managed-account>.services.ai.azure.com`; empty with MAI selected but not deployed still fails provisioning. |
+| `IMAGE_SIZE` | empty | Empty keeps the model default (`1104x928` MAI, `1024x1536` GPT). |
+| `ENTRA_APP_UNIQUE_NAME` | empty | Empty keeps `fantasy-cards-generator-<env>`; set a distinct value for a coexisting environment. |
+
+The web identity already holds `Cognitive Services User` on the managed account,
+which covers MAI inference without an extra role. Switching to GPT image is an
+explicit operator change (`azd env set FOUNDRY_IMAGE_MODEL gpt-image-2` then
+`azd provision`); there is no automatic fallback. `GlobalStandard` can process
+inference outside Sweden or the EU, so this placement is not an inference
+residency guarantee. Cutover, rollback, and retirement of the old DEV follow
+[the implementation plan](../docs/dev-sweden-central-implementation-plan.md)
+and require separate authorization.
+
 ### Targeted deployments
 
 Both services can be deployed independently from the repository root:

@@ -77,6 +77,21 @@
     "foundryMaiImageDeploymentName": {
       "value": "${FOUNDRY_MAI_IMAGE_DEPLOYMENT=MAI-Image-2.7}"
     },
+    "aiFoundryMaiImageDeploymentEnabled": {
+      "value": "${AI_FOUNDRY_MAI_IMAGE_DEPLOYMENT_ENABLED=false}"
+    },
+    "aiFoundryMaiImageModelVersion": {
+      "value": "${AI_FOUNDRY_MAI_IMAGE_MODEL_VERSION=2026-11-02}"
+    },
+    "aiFoundryMaiImageDeploymentCapacity": {
+      "value": "${AI_FOUNDRY_MAI_IMAGE_DEPLOYMENT_CAPACITY=1}"
+    },
+    "imageSize": {
+      "value": "${IMAGE_SIZE=}"
+    },
+    "entraAppRegistrationUniqueName": {
+      "value": "${ENTRA_APP_UNIQUE_NAME=}"
+    },
     "contentSafetyEndpoint": {
       "value": "${CONTENT_SAFETY_ENDPOINT=}"
     },

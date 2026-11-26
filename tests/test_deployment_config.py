@@ -219,6 +219,94 @@ def test_generation_runtime_env_vars_are_wired_from_bicep_outputs() -> None:
     assert "trustedProxyHops: trustedProxyHops" in main_bicep
 
 
+def _compiled_main_template() -> dict:
+    return json.loads((REPO_ROOT / "infra" / "main.json").read_text())
+
+
+def _nested_resource(template: dict, module_name: str, name_parameter: str) -> dict:
+    module_template = template["resources"][module_name]["properties"]["template"]
+    expected_name = (
+        f"[format('{{0}}/{{1}}', parameters('accountName'), parameters('{name_parameter}'))]"
+    )
+    return next(r for r in module_template["resources"] if r["name"] == expected_name)
+
+
+def test_mai_image_deployment_is_opt_in_on_the_managed_foundry_account() -> None:
+    parameters = json.loads((REPO_ROOT / "infra" / "main.parameters.json").read_text())[
+        "parameters"
+    ]
+    compiled = _compiled_main_template()
+    mai = _nested_resource(compiled, "aiFoundry", "maiImageDeploymentName")
+    module_parameters = compiled["resources"]["aiFoundry"]["properties"]["parameters"]
+
+    assert parameters["aiFoundryMaiImageDeploymentEnabled"]["value"] == (
+        "${AI_FOUNDRY_MAI_IMAGE_DEPLOYMENT_ENABLED=false}"
+    )
+    assert compiled["parameters"]["aiFoundryMaiImageDeploymentEnabled"]["defaultValue"] is False
+    assert mai["condition"] == "[parameters('maiImageDeploymentEnabled')]"
+    assert mai["dependsOn"][-1] == (
+        "[resourceId('Microsoft.CognitiveServices/accounts/deployments', "
+        "parameters('accountName'), parameters('imageDeploymentName'))]"
+    )
+    assert mai["properties"]["model"] == {
+        "format": "[parameters('maiImageModelFormat')]",
+        "name": "[parameters('maiImageModelName')]",
+        "version": "[parameters('maiImageModelVersion')]",
+    }
+    assert compiled["parameters"]["aiFoundryMaiImageModelFormat"]["defaultValue"] == "Microsoft"
+    assert compiled["parameters"]["aiFoundryMaiImageModelVersion"]["defaultValue"] == ("2026-11-02")
+    # The web app reads the same deployment name that the IaC creates.
+    assert module_parameters["maiImageDeploymentName"] == {
+        "value": "[parameters('foundryMaiImageDeploymentName')]"
+    }
+    assert "parameters('foundryMaiImageDeploymentName')" in (
+        compiled["variables"]["resolvedFoundryImageDeployment"]
+    )
+    # Existing GPT image deployment stays declared and selectable.
+    gpt_image = _nested_resource(compiled, "aiFoundry", "imageDeploymentName")
+    assert gpt_image["properties"]["model"]["format"] == "OpenAI"
+    assert "condition" not in gpt_image
+
+
+def test_mai_image_endpoint_defaults_to_managed_account_only_when_mai_is_deployed() -> None:
+    variables = _compiled_main_template()["variables"]
+
+    assert variables["effectiveFoundryImageEndpoint"] == (
+        "[if(and(and(empty(trim(parameters('foundryImageEndpoint'))), "
+        "variables('usesMaiImage')), parameters('aiFoundryMaiImageDeploymentEnabled')), "
+        "format('https://{0}.services.ai.azure.com', variables('aiFoundryAccountName')), "
+        "trim(parameters('foundryImageEndpoint')))]"
+    )
+    # A MAI selection without an https endpoint still fails closed.
+    assert variables["validatedFoundryImageEndpoint"].startswith(
+        "[if(and(variables('usesMaiImage'), "
+        "not(startsWith(variables('effectiveFoundryImageEndpoint'), 'https://'))), fail("
+    )
+
+
+def test_image_size_and_entra_unique_name_are_operator_settable_with_unchanged_defaults() -> None:
+    parameters = json.loads((REPO_ROOT / "infra" / "main.parameters.json").read_text())[
+        "parameters"
+    ]
+    compiled = _compiled_main_template()
+    registration = compiled["resources"]["appRegistration"]["properties"]["parameters"]
+
+    # Empty IMAGE_SIZE keeps the per-model default resolved in Bicep.
+    assert parameters["imageSize"]["value"] == "${IMAGE_SIZE=}"
+    assert compiled["variables"]["resolvedImageSize"].startswith(
+        "[if(not(empty(trim(parameters('imageSize')))), trim(parameters('imageSize')),"
+    )
+    assert parameters["entraAppRegistrationUniqueName"]["value"] == "${ENTRA_APP_UNIQUE_NAME=}"
+    assert compiled["variables"]["resolvedEntraAppRegistrationUniqueName"] == (
+        "[if(empty(trim(parameters('entraAppRegistrationUniqueName'))), "
+        "take(format('fantasy-cards-generator-{0}', parameters('environmentName')), 64), "
+        "take(trim(parameters('entraAppRegistrationUniqueName')), 64))]"
+    )
+    assert registration["appUniqueName"] == {
+        "value": "[variables('resolvedEntraAppRegistrationUniqueName')]"
+    }
+
+
 def test_linkedin_pilot_configuration_is_disabled_and_secret_safe() -> None:
     main_bicep = (REPO_ROOT / "infra" / "main.bicep").read_text()
     main_parameters = json.loads((REPO_ROOT / "infra" / "main.parameters.json").read_text())
