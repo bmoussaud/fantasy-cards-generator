@@ -268,6 +268,33 @@
                     </select>
                     <p class="field__hint">Choose a visual style optimized for MAI Image 2.7.</p>
                 </div>
+                <fieldset class="field accent-palette" aria-describedby="accent-choice-hint">
+                    <legend class="field__label">Accent color</legend>
+                    <div class="accent-palette__options">
+                        {% for choice in accent_choices %}
+                            <label class="accent-palette__choice">
+                                <input
+                                    type="radio"
+                                    name="accent_choice"
+                                    value="{{ choice.id }}"
+                                    {% if choice.id == selected_accent_choice %}checked{% endif %}
+                                />
+                                <span
+                                    class="accent-palette__swatch{% if not choice.color %} accent-palette__swatch--random{% endif %}"
+                                    {% if choice.color %}style="--accent-choice: {{ choice.color }}"{% endif %}
+                                    aria-hidden="true"
+                                ></span>
+                                <span>
+                                    <strong>{{ choice.title }}</strong>
+                                    {% if choice.color %}<small>{{ choice.color }}</small>{% endif %}
+                                </span>
+                            </label>
+                        {% endfor %}
+                    </div>
+                    <p class="field__hint" id="accent-choice-hint">
+                        Random keeps the AI-proposed color and applies the existing palette normalization.
+                    </p>
+                </fieldset>
                 <div class="field">
                     <label class="field__label" for="creative-direction">
                         Additional creative direction (optional)

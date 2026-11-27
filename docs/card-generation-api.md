@@ -127,9 +127,14 @@ art-direction menu and the existing photo picker. The initial catalog contains
 `paper_arcana` (default), `engraved_legends`, and `paper_cut_myths`; only these
 short identifiers are submitted by the browser. Their MAI Image 2.7 prompts remain
 server-side. An optional additional direction (0–200 characters) lets the user add
-scene, mood, palette, or character details without replacing the selected style. Generator
-preselects the first three saved expertise entries (or all if fewer). Only
-Up to three checked entries become named abilities, in saved profile order, with an
+scene, mood, palette, or character details without replacing the selected style.
+The accent-color menu exposes the canonical ivory, blue, rose, green, violet,
+and gold palette. `random` is the default: the hosted agent proposes `accentColor`
+and the existing recipe normalization maps it to the canonical palette. An explicit
+selection overrides the agent value before both the MAI image prompt and deterministic
+card-frame composition. Generator preselects the first three saved expertise entries
+(or all if fewer). Up to three checked entries become named abilities, in saved
+profile order, with an
 agent-written explanation for each. The same abilities appear in the generation
 result and My Cards. Clearing all checkboxes leaves the printed ability panel empty;
 `rulesText` remains available in the API/semantic HTML but is never drawn on the card.
@@ -291,8 +296,9 @@ identity, professional title, current role, explicit expertise, optional recent-
 optional additional creative direction. The complete canonical context is moderated and
 used for request hashing and idempotency. The selected art-style identifier is also
 part of the request hash, and both the selected style prompt and the moderated
-additional direction are explicitly included in the derived image prompt. Profile
-validation reserves enough room
+additional direction are explicitly included in the derived image prompt.
+Explicit accent selections are also part of the request hash; `random` remains
+equivalent to the historical agent-selected behavior. Profile validation reserves enough room
 for the full 200-character direction, including its label and separators, so any
 valid direction fits. The profile is also moderated before it is saved; refusal
 preserves the prior saved version.

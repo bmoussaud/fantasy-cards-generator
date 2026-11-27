@@ -151,6 +151,7 @@ def test_structured_profile_form_generates_card(
             "post_excerpt": ["I explored how agent workflows can keep human review visible."],
             "creative_direction": "A precise arcane systems commander",
             "art_style": "engraved_legends",
+            "accent_choice": "rose",
             "creation_draft_id": extract_hidden_value(
                 page.text,
                 "creation_draft_id",
@@ -163,6 +164,10 @@ def test_structured_profile_form_generates_card(
 
     assert response.status_code == 200
     assert 'class="card-face__name"' in response.text
+    stored = next(iter(authenticated_client.app.state.services.card_repository._records.values()))
+    assert stored.card_style is not None
+    assert stored.card_style.accent == "#BB5073"
+    assert "echo #BB5073" in (stored.derived_art_prompt or "")
 
 
 def test_profile_keeps_expertise_hint_without_generator_interpretation_paragraph(
@@ -1491,6 +1496,12 @@ def test_prompt_normalization_and_hash_use_the_same_boundary_value() -> None:
     assert digest_generation_request(
         normalized, art_style="paper_arcana"
     ) != digest_generation_request(normalized, art_style="engraved_legends")
+    assert digest_generation_request(normalized, accent_choice="rose") != digest_generation_request(
+        normalized, accent_choice="blue"
+    )
+    assert digest_generation_request(
+        normalized, accent_choice="random"
+    ) == digest_generation_request(normalized)
     assert digest_generation_request(
         normalized, profile_inscription=inscription
     ) != digest_generation_request(

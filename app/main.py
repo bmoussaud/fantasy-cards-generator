@@ -36,6 +36,7 @@ from app.auth import (
     require_api_user,
     require_authenticated_user,
 )
+from app.card_styles import ACCENT_CHOICES, DEFAULT_ACCENT_CHOICE
 from app.creative_styles import CREATIVE_STYLES, DEFAULT_ART_STYLE
 from app.deletion import DeletionService
 from app.entra_profile import GRAPH_PROFILE_PHOTO_SCOPE, fetch_profile_photo
@@ -591,6 +592,8 @@ def create_app(services: AppServices | None = None) -> FastAPI:
                 generation_profile_revision=saved_profile.revision if saved_profile else None,
                 art_styles=CREATIVE_STYLES,
                 selected_art_style=DEFAULT_ART_STYLE,
+                accent_choices=ACCENT_CHOICES,
+                selected_accent_choice=DEFAULT_ACCENT_CHOICE,
                 profile_error=profile_error,
                 enrichment_available=enrichment_settings.available(auth_settings),
                 enrichment_result=enrichment_result,
@@ -2110,6 +2113,7 @@ def create_app(services: AppServices | None = None) -> FastAPI:
             options = ProfileGenerationOptions.model_validate(
                 {
                     "art_style": raw.get("art_style") or DEFAULT_ART_STYLE,
+                    "accent_choice": raw.get("accent_choice") or DEFAULT_ACCENT_CHOICE,
                     "creative_direction": raw.get("creative_direction"),
                 }
             )
@@ -2207,6 +2211,7 @@ def create_app(services: AppServices | None = None) -> FastAPI:
                 current_role=saved_profile.profile.current_role,
             ),
             art_style=options.art_style,
+            accent_choice=options.accent_choice,
             additional_direction=options.creative_direction,
         )
         if payload.creation_draft_id is not None and linkedin_transient_repository is not None:

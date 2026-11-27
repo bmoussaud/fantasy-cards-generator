@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import colorsys
 import re
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal, Self
@@ -27,6 +28,32 @@ IDENTITIES = {
     "violet": "#55446F",
     "gold": "#BE923E",
 }
+AccentChoiceId = Literal["random", "ivory", "blue", "rose", "green", "violet", "gold"]
+DEFAULT_ACCENT_CHOICE: AccentChoiceId = "random"
+
+
+@dataclass(frozen=True, slots=True)
+class AccentChoice:
+    id: AccentChoiceId
+    title: str
+    color: str | None
+
+
+ACCENT_CHOICES: tuple[AccentChoice, ...] = (
+    AccentChoice("random", "Random (AI selected)", None),
+    AccentChoice("ivory", "Ivory", IDENTITIES["ivory"]),
+    AccentChoice("blue", "Blue", IDENTITIES["blue"]),
+    AccentChoice("rose", "Rose", IDENTITIES["rose"]),
+    AccentChoice("green", "Green", IDENTITIES["green"]),
+    AccentChoice("violet", "Violet", IDENTITIES["violet"]),
+    AccentChoice("gold", "Gold", IDENTITIES["gold"]),
+)
+
+
+def accent_choice_color(choice: AccentChoiceId | None) -> str | None:
+    if choice in {None, "random"}:
+        return None
+    return IDENTITIES[choice]
 
 
 class RecipeField(BaseModel):
