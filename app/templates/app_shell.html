@@ -256,8 +256,21 @@
                 </fieldset>
                 {% endif %}
                 <div class="field">
+                    <label class="field__label" for="art-style">
+                        Art direction
+                    </label>
+                    <select class="field__control" id="art-style" name="art_style">
+                        {% for style in art_styles %}
+                            <option value="{{ style.id }}" {% if style.id == selected_art_style %}selected{% endif %}>
+                                {{ style.title }}
+                            </option>
+                        {% endfor %}
+                    </select>
+                    <p class="field__hint">Choose a visual style optimized for MAI Image 2.7.</p>
+                </div>
+                <div class="field">
                     <label class="field__label" for="creative-direction">
-                        Creative direction (optional)
+                        Additional creative direction (optional)
                     </label>
                     <textarea
                         class="field__control"
@@ -265,7 +278,8 @@
                         name="creative_direction"
                         rows="3"
                         maxlength="200"
-                    >{{ creative_direction | default("Anime storybook style, waist-up: smiling wizard, round glasses, shoulder-length dark hair, deep-blue cloak with gold trim, glowing blue orb staff, triangle-emblem medallion, misty sky-blue clouds.") }}</textarea>
+                        placeholder="Add scene, mood, palette or character details."
+                    >{{ creative_direction | default("") }}</textarea>
                 </div>
                 <fieldset class="reference-photo-section">
                     <legend class="field__label">Reference photos</legend>
