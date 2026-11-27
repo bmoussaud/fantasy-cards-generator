@@ -2,14 +2,18 @@
 # Preserve the currently deployed web image across ordinary azd provision runs.
 set -eu
 
-resource_group="$(
+if ! resource_group="$(
   AZURE_DEV_USER_AGENT=microsoft_foundry_skill \
-    azd env get-value AZURE_RESOURCE_GROUP 2>/dev/null || true
-)"
-container_app="$(
+    azd env get-value AZURE_RESOURCE_GROUP 2>/dev/null
+)"; then
+  resource_group=''
+fi
+if ! container_app="$(
   AZURE_DEV_USER_AGENT=microsoft_foundry_skill \
-    azd env get-value AZURE_CONTAINER_APP_NAME 2>/dev/null || true
-)"
+    azd env get-value AZURE_CONTAINER_APP_NAME 2>/dev/null
+)"; then
+  container_app=''
+fi
 
 if [ -z "$resource_group" ] || [ -z "$container_app" ]; then
   exit 0

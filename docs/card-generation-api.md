@@ -17,6 +17,15 @@ Authenticated photo-library endpoints live under `/my/...`:
 
 HTMX/UI routes live under `/ui/...` and are intentionally UI-coupled.
 
+The separate Sweden Central DEV for #194 selects `MAI-Image-2.7` on its own
+Foundry account and configures `IMAGE_SIZE=1024x1536`. Its image endpoint is
+derived from that account when the operator leaves the override empty.
+`gpt-image-2` remains deployed there as an explicitly selected operator
+alternative, never an automatic error, timeout, or moderation fallback.
+This changes deployment configuration, not the API or UI request contract.
+See the [execution record](dev-sweden-central-implementation-plan.md) for
+live acceptance evidence and outstanding checks.
+
 ## Correlation
 
 Clients may send `X-Request-ID` using 1–64 ASCII letters, digits, dots,

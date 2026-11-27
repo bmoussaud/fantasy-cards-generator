@@ -75,6 +75,27 @@ WEB-owned and are not sent to the hosted generation stage.
 
 ## Infrastructure overview
 
+### Separate Sweden Central DEV
+
+The #194 target is a fresh deployment in `rg-fcag-dev-swedencentral` in
+subscription `bmoussaudms`, with no historical Cosmos or Blob data copied.
+Its regional resources are provisioned in `swedencentral`; private DNS zones,
+action groups, and the platform-created smart detection rule are global.
+Cosmos, Blob, and Key Vault retain disabled public network access and approved
+private endpoints linked to the target VNet. Foundry account
+`aifcagdevb2omlw6njwv2y` owns the single project `fantasy-cards-dev`,
+the hosted orchestrator, and all three required deployments: `gpt-5-5`
+(`DataZoneStandard`), `MAI-Image-2.7`, and `gpt-image-2` (both `GlobalStandard`).
+Global image inference is not a Sweden/EU processing-residency guarantee.
+
+The target has a separate Entra registration, so the historical callbacks and
+credentials remain unchanged. Detail tracing is explicitly disabled in both
+target runtimes pending the existing privacy rollout evidence; baseline
+monitoring remains enabled. Historical APIM, Foundry models, WebIQ and Monitor
+resources with active or unknown consumers are not target dependencies by
+assumption and remain untouched. The [execution record](dev-sweden-central-implementation-plan.md)
+distinguishes provisioning evidence from runtime acceptance and rollback.
+
 [![Infrastructure, identities and private data services](images/architecture-overview.png)](images/architecture-overview.svg)
 
 The second draw.io page retains the broader infrastructure view, including

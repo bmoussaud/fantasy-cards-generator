@@ -81,6 +81,27 @@ Webhook `serviceUri` values must not contain credentials or secret query paramet
 Use an approved, authenticated routing service. After deployment, use the Azure
 Monitor Action Group test function and confirm receipt before relying on alerts.
 
+## Sweden Central DEV qualification
+
+On 2026-11-27, the separate `rg-fcag-dev-swedencentral` deployment was checked
+live. Its workspace `fcag-dev-law` retains 30 days with a 0.25 GB/day cap.
+The enabled `fcg-dev-healthz` availability test targets the new Sweden Central
+FQDN. Aggregate queries confirmed ingestion into `AppRequests`,
+`AppDependencies`, and `AppAvailabilityResults`; this is baseline telemetry,
+not proof that application-owned agent detail events are exported.
+
+All 12 scheduled-query rules remain disabled. Both target Action Groups
+(`fcg-dev-operations-ag`, `fcg-agent-dev-ag`) are disabled with no email
+receivers. No notification delivery or failure-trigger exercise is claimed.
+The target remains dashboard-only until approved receivers and alert
+activation are configured and tested.
+
+`FCG_AGENT_TRACE_ENABLED=false` is a target-specific temporary privacy
+setting in both WEB and the hosted agent, pending rollout evidence. It does
+not disable baseline instrumentation. The historical environment's tracing
+settings were not changed. See the [execution record](dev-sweden-central-implementation-plan.md#resultat-dexecution-au-27-novembre-2026)
+for the deployed resources, live acceptance evidence, and rollback limits.
+
 ## SLO baseline and alerts
 
 These conservative defaults are parameters in Bicep:

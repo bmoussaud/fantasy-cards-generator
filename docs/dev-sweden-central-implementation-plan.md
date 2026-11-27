@@ -3,9 +3,135 @@
 **Issue :** [#194](https://github.com/bmoussaud/fantasy-cards-generator/issues/194)  
 **Responsable :** @bmoussaud  
 **Date :** 26 novembre 2026  
-**Révision étudiée :** `6b67f2acccfad043cf305506008fdd62080cd3c8`  
-**Statut :** implémentation demandée ; qualification et revues indépendantes en
-attente. Aucun preview ni déploiement n'est autorisé par cette demande.
+**Révision initialement étudiée :** `6b67f2acccfad043cf305506008fdd62080cd3c8`
+**Statut au 27 novembre 2026 :** execution autorisee explicitement par le
+demandeur en conversation : « continue l'implemenation de #194 sans t'arreter ,
+tu peux supprimer l'ancienne configuration et ensuite deployer la nouvelle ».
+Cette autorisation remplace les restrictions documentaires d'execution
+ci-dessous, qui decrivent le contexte historique. Les donnees et ressources
+historiques ou a consommateurs inconnus restent preservees jusqu'a qualification
+de la nouvelle cible ; aucun retrait en bloc du groupe East US 2.
+
+La revue independante architecture/reseau, identite/authentification et
+donnees/confidentialite a ete realisee par un agent specialise le 27 novembre :
+aucun defaut IaC bloquant confirme, qualification live encore requise. Ce n'est
+pas une approbation humaine. Le detail tracing est explicitement desactive dans
+les deux runtimes de la seule nouvelle cible, en attente des preuves privacy
+de rollout ; le monitoring de base reste actif.
+
+Checkout verifie egal au dernier `origin/main`, `6895d078`. Quotas directs dans
+`bmoussaudms` : MAI 7/12, GPT Image 0/4, texte DataZoneStandard 2/667.
+`azd provision --preview` a reussi pour `rg-fcag-dev-swedencentral`, avec les
+creations cibles attendues et sans suppression historique. Le preview cree
+effectivement le groupe vide : il n'est pas strictement sans effet Azure.
+Premier blocage de bootstrap identifie : azd 1.37.3 ecrit l'erreur de cle absente
+sur stdout ; le hook de preservation d'image la prenait pour un nom d'app.
+
+## Resultat d'execution au 27 novembre 2026
+
+Le nouveau DEV est deploye et fonctionnel. La recette backend reelle est
+positive ; l'acceptation complete, la bascule des consommateurs et le retrait
+historique ne sont pas declares termines.
+
+| Element | Etat observe |
+|---|---|
+| Abonnement / groupe | `bmoussaudms` (`b8ff3e15-7e2d-4fac-a773-992fb59ccedd`) / `rg-fcag-dev-swedencentral` |
+| WEB | [Nouveau DEV](https://fcag-dev-app.kindocean-dbb3f1f0.swedencentral.azurecontainerapps.io), revision `fcag-dev-app--azd-1795762963`, Healthy, 100 % du trafic de cette app |
+| Foundry | Compte `aifcagdevb2omlw6njwv2y`, projet `fantasy-cards-dev`, endpoint `https://aifcagdevb2omlw6njwv2y.services.ai.azure.com/api/projects/fantasy-cards-dev` |
+| Agent | `card-orchestrator:1` actif, endpoint epingle a cette version, artifact `6895d078172cfec5333c6a9bf381c4002be05357` |
+| Texte | `gpt-5-5` : `gpt-5.5`, version `2026-04-24`, `DataZoneStandard`, capacite 10, Succeeded |
+| Image par defaut | `MAI-Image-2.7`, format `Microsoft`, version `2026-11-02`, `GlobalStandard`, capacite 1, Succeeded |
+| Alternative explicite | `gpt-image-2`, version `2026-04-21`, `GlobalStandard`, capacite 1, Succeeded |
+| Donnees neuves | Cosmos `fcag-dev-cosmos-b2omlw6njwv2y`, Storage `stfcagdevb2omlw6njwv2y` ; aucune copie historique |
+| Entra distinct | `fantasy-cards-generator-dev-swedencentral`, client `5f098190-ae7e-4cb6-9724-e552e977829a`, callback sur le nouveau FQDN |
+| Monitoring | `fcag-dev-law`, `fcag-dev-appi`, sonde `fcg-dev-healthz` active ; voir [operational-monitoring.md](operational-monitoring.md#sweden-central-dev-qualification) |
+
+Toutes les ressources regionales du nouveau groupe relevent de Sweden Central.
+Les zones/liens DNS prives, Action Groups et la regle plateforme de detection
+d'anomalies sont globaux. Les SKU d'inference `GlobalStandard` ne constituent
+pas une garantie de traitement en Suede ou dans l'UE. Aucun embeddings n'a ete
+ajoute faute de dependance cible confirmee.
+
+### Configuration et sequence appliquees
+
+Contexte azd neuf et isole, nom logique `dev`, sans reprise de l'ancien etat.
+Les entrees importantes sont `AZURE_LOCATION=swedencentral`,
+`AZURE_RESOURCE_GROUP=rg-fcag-dev-swedencentral`,
+`ENTRA_APP_UNIQUE_NAME=fantasy-cards-generator-dev-swedencentral`,
+`AI_FOUNDRY_TEXT_DEPLOYMENT_SKU_NAME=DataZoneStandard`,
+`AI_FOUNDRY_MAI_IMAGE_DEPLOYMENT_ENABLED=true`,
+`FOUNDRY_IMAGE_MODEL=MAI-Image-2.7`, `IMAGE_SIZE=1024x1536`,
+`CARD_ORCHESTRATOR_ENABLE_PREREQUISITES=true` et
+`CARD_ORCHESTRATOR_CREATE_REGISTRY_CONNECTION=true`.
+`PROFILE_ENRICHMENT_ENABLED=true` est conserve ; LinkedIn OIDC reste desactive.
+L'endpoint image MAI est derive du nouveau compte.
+
+Sequence executee : preview autorise, provision, deploiement cible de
+`card-orchestrator`, second provision, package puis deploiement cible de
+`web-nat`. Les hooks existants ont cree les credentials de la nouvelle
+application Entra et conserve le triplet agent exact ; aucune valeur secrete
+n'est reproduite ici. Le second provision a preserve l'image WEB.
+
+Le seul correctif applicatif/deploiement supplementaire est dans
+`hooks/preserve_web_image.sh` : ignorer la sortie d'un `azd env get-value`
+qui echoue, meme si le diagnostic est sur stdout. La regression couvre ce cas
+pour chaque cle manquante, sans relacher l'echec ferme d'une recherche
+d'application existante. Pas de nouveau selecteur UI, de fallback ou de
+modification des contrats de generation.
+
+### Preuves de qualification et limites
+
+| Controle | Resultat et limite |
+|---|---|
+| Sante publique | `/livez` et `/healthz` HTTP 200 ; Cosmos, Blob et agent OK ; `/my/cards` anonyme HTTP 401 |
+| Premiere ecriture | Avant les donnees synthetiques : zero document Cosmos et zero blob de carte ; profil et cartes ensuite sauvegardes et relus |
+| Reseau de donnees | Cosmos, Blob et Key Vault : acces public desactive, endpoints prives approuves ; depuis ACA, Cosmos `10.42.2.6`, Blob `10.42.2.5` |
+| MAI sans photo | Carte `0c297d745dad2436ec9eb1fbd714ffa8`, anglaise, `cadre-classique@1`, expertises verbatim, PNG `1024x1536`, lecture par un autre owner impossible |
+| Photo de reference | Image synthetique sans photo personnelle : moderation Content Safety reelle, sauvegarde/relecture et miniature `133x200` ; generation MAI complete, carte `320133dd5e0a6c29f1a637a20ea2537c`, meme recette, expertises verbatim et PNG `1024x1536` |
+| GPT Image explicite | Vrai appel avec l'identite ACA et les settings explicitement remplaces dans le seul processus de qualification : `gpt-image-2`, mode live, PNG `1024x1536` ; le defaut de l'application deployee reste MAI. Ce controle n'est pas une bascule azd du service WEB |
+| Attribution modele | Metriques du nouveau compte : HTTP 200 pour `gpt-5-5` et `mai-image-2.7` pendant la premiere recette ; les retours du client confirment les appels suivants GPT/reference. Les metriques peuvent etre differees |
+| Entra | Formulaire/CSRF puis HTTP 302 vers `/organizations`, nouveau client/callback et PKCE S256. Connexion interactive validee par l'utilisateur le 2026-11-27 sur le nouveau FQDN (connexion, callback, pages protegees) ; aucun jeton ni cookie collecte |
+| Contrats d'echec | 39 tests cibles passent : MAI, absence de fallback, refus fournisseur et timeout. Validation simulee, pas une injection de panne dans Azure |
+| Bootstrap | 13 tests Linux de preprovision passent ; ensemble configuration Linux : 96 passes, 1 skip faute d'az CLI, 2 tests de compilation deselectionnes. Preview ARM et provisions reels ont exerce le template compile |
+| Style du correctif | Ruff et Black passent sur le fichier de test modifie |
+
+Ces recettes utilisent les vrais services de l'application depuis le conteneur
+ACA avec son identite managee et ses endpoints prives. Le parcours navigateur
+authentifie a ete valide separement par l'utilisateur. Les donnees de qualification sont
+synthetiques et sont conservees dans la nouvelle cible, pas dans l'historique.
+Les premiers essais supplementaires ont rencontre des erreurs transitoires
+ARM/DNS/jeton d'exec avant execution ; les essais finaux ci-dessus ont reussi.
+
+### Retour arriere et retrait differe
+
+L'ancien [DEV East US 2](https://fcag-dev-app.grayplant-3ea66a9e.eastus2.azurecontainerapps.io)
+reste disponible ; sa sante HTTP 200 a ete verifiee pendant la migration.
+Son application Entra, callbacks, stockages, modeles et etat azd n'ont pas ete
+remplaces. Le retour arriere consiste a rediriger les seuls consommateurs
+explicitement identifies vers cette URL, pas a changer la region du nouveau
+groupe. Les donnees creees dans le nouveau DEV ne reapparaissent pas dans
+l'ancien ; aucune recopie inverse n'est realisee ou promise.
+
+Aucun point d'entree DNS/vanity ou consommateur externe a basculer n'a ete
+identifie avec certitude. La publication du nouveau FQDN n'est pas une preuve
+de bascule de tous les utilisateurs. La connexion Entra interactive sur ce
+FQDN a ete validee par l'utilisateur ; la bascule qualifiee reste subordonnee
+a l'identification des consommateurs.
+
+`rg-fcag-dev` est mixte : APIM `fcaigateway` et Foundry
+`bmoussaud-2-resource` ont de l'activite mesuree, les consommateurs de WebIQ,
+des modeles supplementaires et des workspaces Monitor restent inconnus.
+Le groupe historique, ses donnees et ces ressources sont donc preserves.
+L'autorisation de supprimer l'ancienne configuration n'est pas interpretee
+comme une preuve d'inutilisation. Le retrait est reporte a une qualification
+ressource par ressource apres acceptation et verification du retour arriere.
+
+## Plan initial et constats historiques
+
+Les sections suivantes conservent le contexte de planification du 26 novembre.
+Leur statut d'autorisation, les ecarts IaC ensuite livres par #196/#197 et les
+limitations de tooling de cette ancienne session sont historiques ; les
+resultats d'execution ci-dessus font foi pour l'etat actuel.
 
 L'option A et les arbitrages consignés dans l'issue sont les entrées de ce plan.
 @bmoussaud a demandé l'implémentation et choisi `DataZoneStandard` pour le modèle
