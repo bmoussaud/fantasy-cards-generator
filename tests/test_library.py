@@ -51,6 +51,7 @@ def make_card(
         request_hash=f"hash-{card_id}",
         status=status,
         prompt=f"Prompt for {name}",
+        derived_art_prompt=f"Complete image prompt for {name}.",
         validated_payload={
             "schemaVersion": 1,
             "name": name,
@@ -225,6 +226,8 @@ def test_my_card_detail_renders_owned_card(monkeypatch: pytest.MonkeyPatch) -> N
     assert response.status_code == 200
     assert "Detail Ranger" in response.text
     assert "Prompt for Detail Ranger" in response.text
+    assert "Image model prompt" in response.text
+    assert "Complete image prompt for Detail Ranger." in response.text
     assert "moonlit precision" in response.text
     assert "/cards/detail-card/image" in response.text
     assert '<time datetime="2026-09-02T13:00:00Z">Sep 2, 2026, 1:00 PM UTC</time>' in response.text
@@ -254,6 +257,24 @@ def test_my_card_detail_omits_completed_date_when_missing(
     assert response.status_code == 200
     assert "Pending Ranger" in response.text
     assert "Completed" not in response.text
+
+
+def test_my_card_detail_omits_image_prompt_when_historical_card_has_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = make_authenticated_client(monkeypatch)
+    record = make_card(
+        owner_id=TEST_OWNER_ID,
+        card_id="historical-card",
+        name="Historical Ranger",
+    )
+    record.derived_art_prompt = None
+    store_card(client, record)
+
+    response = client.get("/my/cards/historical-card")
+
+    assert response.status_code == 200
+    assert "Image model prompt" not in response.text
 
 
 def test_my_card_detail_returns_404_for_other_users_card(

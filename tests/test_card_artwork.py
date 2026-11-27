@@ -237,16 +237,45 @@ def test_complete_card_rejects_line_expansion_before_canvas_allocation(monkeypat
         frame_artwork(source, [("A\n" * 39 + "AB", "B\n" * 89 + "AB")] * 5)
 
 
-def test_illustration_prompt_stays_below_limit_even_with_maximum_json_escaping():
+@pytest.mark.parametrize(
+    "art_style",
+    ["paper_arcana", "engraved_legends", "paper_cut_myths"],
+)
+def test_illustration_prompt_stays_below_limit_even_with_maximum_json_escaping(art_style):
     from tests.test_foundry_agent_client import valid_card
 
     card = generation.GeneratedCardModel.model_validate(valid_card() | {"artBrief": "\x00" * 300})
-    prompt = generation.derive_illustration_prompt(card)
+    prompt = generation.derive_illustration_prompt(
+        card,
+        art_style=art_style,
+        additional_direction="\x00" * 200,
+    )
     assert len(prompt) < 4000
     assert "\\u0000" * 300 in prompt
+    assert '"{}"'.format(" " * 200) in prompt
     # Ordinary full-length briefs must still fit the bounded image trace projection.
     plain = card.model_copy(update={"artBrief": "x" * 300})
-    assert len(generation.derive_illustration_prompt(plain)) <= 1000
+    prompt = generation.derive_illustration_prompt(
+        plain,
+        art_style=art_style,
+        additional_direction="A quiet moonlit forest.",
+    )
+    assert len(prompt) < 4000
+
+
+def test_illustration_prompt_applies_selected_style_and_additional_direction():
+    from app.creative_styles import creative_style_prompt
+    from tests.test_foundry_agent_client import valid_card
+
+    card = generation.GeneratedCardModel.model_validate(valid_card())
+    prompt = generation.derive_illustration_prompt(
+        card,
+        art_style="engraved_legends",
+        additional_direction="Silver moonlight over the forest.",
+    )
+
+    assert creative_style_prompt("engraved_legends") in prompt
+    assert '"Silver moonlight over the forest."' in prompt
 
 
 def test_classic_card_prints_and_displays_verbatim_french_expertise_on_retry(

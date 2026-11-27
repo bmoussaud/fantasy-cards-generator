@@ -150,6 +150,7 @@ def test_structured_profile_form_generates_card(
             "expertise": ["Container platforms", "Responsible AI"],
             "post_excerpt": ["I explored how agent workflows can keep human review visible."],
             "creative_direction": "A precise arcane systems commander",
+            "art_style": "engraved_legends",
             "creation_draft_id": extract_hidden_value(
                 page.text,
                 "creation_draft_id",
@@ -1487,6 +1488,9 @@ def test_prompt_normalization_and_hash_use_the_same_boundary_value() -> None:
     assert digest_generation_request(
         normalized, profile_inscription=inscription
     ) != digest_generation_request(normalized)
+    assert digest_generation_request(
+        normalized, art_style="paper_arcana"
+    ) != digest_generation_request(normalized, art_style="engraved_legends")
     assert digest_generation_request(
         normalized, profile_inscription=inscription
     ) != digest_generation_request(

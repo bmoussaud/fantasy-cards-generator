@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.creative_styles import DEFAULT_ART_STYLE, ArtStyleId
 from app.generation import _default_azure_credential, now_iso
 from app.problems import ProblemDetails
 from app.profile_enrichment_contract import validate_ability_descriptions
@@ -136,6 +137,7 @@ class ProfessionalProfile(BaseModel):
 
 
 class ProfileGenerationOptions(BaseModel):
+    art_style: ArtStyleId = DEFAULT_ART_STYLE
     creative_direction: str | None = Field(default=None, max_length=200)
 
     @field_validator("creative_direction", mode="before")

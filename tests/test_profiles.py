@@ -440,6 +440,13 @@ def test_generator_summarizes_saved_profile_without_editable_fields(authenticate
         assert excerpts[0] in text
         assert 'class="profile-summary__posts" open' not in text
     assert 'name="creative_direction"' in page.text
+    assert 'name="art_style"' in page.text
+    assert '<option value="paper_arcana" selected>' in page.text
+    assert '<option value="engraved_legends"' in page.text
+    assert '<option value="paper_cut_myths"' in page.text
+    assert "Paper Arcana" in page.text
+    assert "Engraved Legends" in page.text
+    assert "Paper-Cut Myths" in page.text
     assert 'name="saved_photo_id"' in page.text
     assert 'hx-post="/ui/cards/generate"' in page.text
     assert '<section id="generate-card" aria-label="Card generation">' in page.text
@@ -484,7 +491,7 @@ def test_generator_without_profile_links_to_editor_and_does_not_offer_generation
 
 
 @pytest.mark.parametrize("submitted", ["", "A quiet forest in ink.", "<moonlight> & silver"])
-def test_creative_direction_example_is_editable_without_overriding_explicit_values(
+def test_additional_creative_direction_is_empty_and_restores_explicit_values(
     authenticated_client, submitted
 ):
     save_test_profile(authenticated_client)
@@ -494,7 +501,7 @@ def test_creative_direction_example_is_editable_without_overriding_explicit_valu
     )
     initial = re.search(pattern, page.text, re.S)
     assert initial is not None
-    assert 0 < len(unescape(initial["value"])) <= 200
+    assert unescape(initial["value"]).strip() == ""
     for attribute in ("readonly", "disabled", "required"):
         assert attribute not in initial["attributes"]
     rendered = page.template.render({**page.context, "creative_direction": submitted})
@@ -717,6 +724,25 @@ def test_invalid_direction_does_not_generate_or_update_profile(authenticated_cli
     assert response.status_code == 422
     assert 'id="creative-direction"' not in response.text
     assert "Anime storybook style" not in response.text
+    assert not client.app.state.services.card_repository._records
+    after = asyncio.run(client.app.state.services.profile_repository.get(TEST_OWNER_ID))
+    assert after.revision == before.revision
+
+
+def test_invalid_art_style_does_not_generate_or_update_profile(authenticated_client):
+    client = authenticated_client
+    csrf = save_test_profile(client)
+    before = asyncio.run(client.app.state.services.profile_repository.get(TEST_OWNER_ID))
+    response = client.post(
+        "/ui/cards/generate",
+        data={
+            "csrf_token": csrf,
+            "art_style": "unknown_style",
+            "idempotency_key": uuid4().hex,
+        },
+        headers={"HX-Request": "true"},
+    )
+    assert response.status_code == 422
     assert not client.app.state.services.card_repository._records
     after = asyncio.run(client.app.state.services.profile_repository.get(TEST_OWNER_ID))
     assert after.revision == before.revision
