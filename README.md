@@ -111,6 +111,14 @@ generation flow, so the browser never talks to Blob Storage directly.
 
 ## Azure deployment
 
+The separate Sweden Central DEV for #194 uses
+`rg-fcag-dev-swedencentral` in `bmoussaudms`, not the historical `rg-fcag-dev`.
+Its isolated bootstrap and model settings are documented in
+[infra/README.md](infra/README.md#dev-in-sweden-central-alongside-the-existing-dev-issue-194).
+See the [migration execution record](docs/dev-sweden-central-implementation-plan.md)
+for verified deployment results, acceptance limits, and rollback. Do not copy
+the historical azd state or delete the mixed historical resource group.
+
 Provision the application with Azure Developer CLI:
 
 ```bash

@@ -259,6 +259,10 @@ azd env set CARD_ORCHESTRATOR_CREATE_REGISTRY_CONNECTION true
 These commands configure only the isolated azd environment. Review hook effects
 before an explicitly authorized `azd provision --preview`; provisioning and
 `azd up` require separate authorization after review.
+With azd 1.37.3, preview also creates the target resource group when absent:
+it is not strictly mutation-free. The image-preservation hook ignores failed
+`get-value` output, including missing-key diagnostics written to stdout, so a
+fresh bootstrap does not mistake an error message for an application name.
 
 | Setting | Default | Effect |
 |---|---|---|

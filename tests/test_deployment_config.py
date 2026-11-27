@@ -1523,6 +1523,7 @@ def test_preprovision_hook_skips_authentication_without_app_metadata(
     fake_azd.write_text(
         "#!/bin/sh\n"
         f'if [ "$3" = "{missing_key}" ]; then\n'
+        '  echo "ERROR: key not found in environment values"\n'
         "  exit 1\n"
         "fi\n"
         "echo resource-sentinel\n"
