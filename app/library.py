@@ -103,7 +103,7 @@ class CardLibraryService:
         payload = CardPayload.model_validate(record.validated_payload or {})
         return LibraryCardSummary(
             card_id=record.id,
-            name=payload.name,
+            name=record.printed_name(),
             card_type=payload.cardType,
             rarity=payload.rarity,
             status=record.status,
@@ -122,7 +122,7 @@ class CardLibraryService:
         payload = record.card_payload()
         return LibraryCardDetail(
             card_id=record.id,
-            name=payload.name,
+            name=record.printed_name(),
             card_type=payload.cardType,
             rarity=payload.rarity,
             status=record.status,
@@ -131,7 +131,7 @@ class CardLibraryService:
             health=payload.health,
             rules_text=payload.rulesText,
             abilities=payload.printed_abilities(),
-            type_line=payload.printed_type(),
+            type_line=record.printed_type(),
             flavor_text=payload.flavorText,
             art_brief=payload.artBrief,
             prompt=record.prompt,

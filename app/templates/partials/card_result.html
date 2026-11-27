@@ -11,6 +11,7 @@
         <span class="badge badge-type">
             {{ icons.type_icon(card.cardType) }}
             {{ card.typeLine or (card.cardType | capitalize) }}
+            {% if card.typeLine %}&middot; {{ card.cardType | capitalize }}{% endif %}
         </span>
         <span class="badge badge-rarity" data-rarity="{{ card.rarity }}">
             {{ icons.rarity_icon(card.rarity) }}

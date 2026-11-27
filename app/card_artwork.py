@@ -896,7 +896,7 @@ def _compose_classic(
     p, fonts = recipe.palette.fixed, recipe.typography
     _classic_label(draw, str(mana_cost), fonts.cost, height, frame.cost, p.ink, centered=True)
     _classic_label(draw, name, fonts.title, height, frame.title, p.ink, max_lines=2)
-    _classic_label(draw, type_line, fonts.type_line, height, frame.kind, p.ink)
+    _classic_label(draw, type_line, fonts.type_line, height, frame.kind, p.ink, max_lines=2)
     _classic_rules(draw, abilities, flavor_text, recipe, frame.rules, height)
     _classic_label(
         draw, f"{attack}/{health}", fonts.stats_value, height, frame.stats, p.ink, centered=True
@@ -960,11 +960,7 @@ def compose_card_artwork(
         or not 0 <= mana_cost <= 12
         or not 0 <= attack <= 20
         or not 1 <= health <= 20
-        or (
-            layout == "cadre_classique_v1"
-            and type_line is not None
-            and not 1 <= len(type_line) <= 80
-        )
+        or (type_line is not None and not 1 <= len(type_line) <= 120)
     ):
         raise ValueError("invalid_card_metadata")
     width, height = recipe.canvas.reference_px
@@ -1098,13 +1094,19 @@ def compose_card_artwork(
         (type_box[0] + 15, icon_y, type_box[0] + 15 + icon_size, icon_y + icon_size),
         accent,
     )
-    labels = {"hero": "Héros", "creature": "Créature", "artifact": "Artefact", "spell": "Sort"}
-    draw.text(
-        (type_box[0] + 28 + icon_size, (type_box[1] + type_box[3]) / 2),
-        labels[card_type],
-        font=_serif(typography.type_line, height),
-        fill=palette.ink,
-        anchor="lm",
+    _classic_label(
+        draw,
+        label,
+        typography.type_line,
+        height,
+        (
+            round(type_box[0] + 28 + icon_size),
+            type_box[1] + 5,
+            round(type_box[2] - icon_size - 25),
+            type_box[3] - 5,
+        ),
+        palette.ink,
+        max_lines=2,
     )
     emblem_x = type_box[2] - icon_size - 15
     finish = recipe.rarity[rarity]

@@ -129,6 +129,12 @@ Up to three checked entries become named abilities, in saved profile order, with
 agent-written explanation for each. The same abilities appear in the generation
 result and My Cards. Clearing all checkboxes leaves the printed ability panel empty;
 `rulesText` remains available in the API/semantic HTML but is never drawn on the card.
+Cards generated from the saved-profile UI print the profile's display name in the
+top plaque and its current role in the central type plaque. These exact values are
+stored in additive `profileInscription` metadata so artwork retries and My Cards
+keep the original inscription even if the profile changes later. Historical cards
+and public API generations without this metadata continue to use their generated
+card name and type line.
 This choice never edits the saved
 profile. If the profile changed since the page loaded, reload Generator before
 submitting the selection again. Generating named abilities requires a Hosted
@@ -165,8 +171,10 @@ The text specialist writes the effects in English. The card image, generation re
 and My Cards detail display each selected expertise name (`abilities[].name`)
 exactly as saved, in selection order, even when the name is not in English.
 The WEB still validates and moderates `inscription.abilityNames` for wire compatibility
-but does not use these labels for display. It uses `inscription.subtype` to print
-the type line, e.g. `Creature — Human Knight`. The hosted agent carries
+but does not use these labels for display. For profile-backed generation,
+`profileInscription.current_role` replaces the generated subtype on the printed card.
+Otherwise, the WEB uses `inscription.subtype` to print the type line, e.g.
+`Creature — Human Knight`. The hosted agent carries
 inscription and accent in optional metadata, not
 new keys in its strict wire card. Older agents still work: their existing labels
 are preserved without attempting an unverified translation. The current recipe
