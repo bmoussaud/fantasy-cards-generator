@@ -447,6 +447,18 @@ def test_generator_summarizes_saved_profile_without_editable_fields(authenticate
     assert "Paper Arcana" in page.text
     assert "Engraved Legends" in page.text
     assert "Paper-Cut Myths" in page.text
+    assert 'name="accent_choice"' in page.text
+    assert re.search(r'name="accent_choice"\s+value="random"\s+checked', page.text)
+    for choice, color in (
+        ("ivory", "#DDD3B5"),
+        ("blue", "#2860A0"),
+        ("rose", "#BB5073"),
+        ("green", "#35795A"),
+        ("violet", "#55446F"),
+        ("gold", "#BE923E"),
+    ):
+        assert f'value="{choice}"' in page.text
+        assert color in page.text
     assert 'name="saved_photo_id"' in page.text
     assert 'hx-post="/ui/cards/generate"' in page.text
     assert '<section id="generate-card" aria-label="Card generation">' in page.text
@@ -738,6 +750,25 @@ def test_invalid_art_style_does_not_generate_or_update_profile(authenticated_cli
         data={
             "csrf_token": csrf,
             "art_style": "unknown_style",
+            "idempotency_key": uuid4().hex,
+        },
+        headers={"HX-Request": "true"},
+    )
+    assert response.status_code == 422
+    assert not client.app.state.services.card_repository._records
+    after = asyncio.run(client.app.state.services.profile_repository.get(TEST_OWNER_ID))
+    assert after.revision == before.revision
+
+
+def test_invalid_accent_choice_does_not_generate_or_update_profile(authenticated_client):
+    client = authenticated_client
+    csrf = save_test_profile(client)
+    before = asyncio.run(client.app.state.services.profile_repository.get(TEST_OWNER_ID))
+    response = client.post(
+        "/ui/cards/generate",
+        data={
+            "csrf_token": csrf,
+            "accent_choice": "black",
             "idempotency_key": uuid4().hex,
         },
         headers={"HX-Request": "true"},

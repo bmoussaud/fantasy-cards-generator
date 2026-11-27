@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.card_styles import DEFAULT_ACCENT_CHOICE, AccentChoiceId
 from app.creative_styles import DEFAULT_ART_STYLE, ArtStyleId
 from app.generation import _default_azure_credential, now_iso
 from app.problems import ProblemDetails
@@ -138,6 +139,7 @@ class ProfessionalProfile(BaseModel):
 
 class ProfileGenerationOptions(BaseModel):
     art_style: ArtStyleId = DEFAULT_ART_STYLE
+    accent_choice: AccentChoiceId = DEFAULT_ACCENT_CHOICE
     creative_direction: str | None = Field(default=None, max_length=200)
 
     @field_validator("creative_direction", mode="before")

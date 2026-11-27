@@ -276,6 +276,7 @@ def test_illustration_prompt_applies_selected_style_and_additional_direction():
 
     assert creative_style_prompt("engraved_legends") in prompt
     assert '"Silver moonlight over the forest."' in prompt
+    assert "text.. " not in prompt
 
 
 def test_classic_card_prints_and_displays_verbatim_french_expertise_on_retry(
