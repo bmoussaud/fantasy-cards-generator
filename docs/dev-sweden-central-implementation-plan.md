@@ -90,14 +90,14 @@ modification des contrats de generation.
 | Photo de reference | Image synthetique sans photo personnelle : moderation Content Safety reelle, sauvegarde/relecture et miniature `133x200` ; generation MAI complete, carte `320133dd5e0a6c29f1a637a20ea2537c`, meme recette, expertises verbatim et PNG `1024x1536` |
 | GPT Image explicite | Vrai appel avec l'identite ACA et les settings explicitement remplaces dans le seul processus de qualification : `gpt-image-2`, mode live, PNG `1024x1536` ; le defaut de l'application deployee reste MAI. Ce controle n'est pas une bascule azd du service WEB |
 | Attribution modele | Metriques du nouveau compte : HTTP 200 pour `gpt-5-5` et `mai-image-2.7` pendant la premiere recette ; les retours du client confirment les appels suivants GPT/reference. Les metriques peuvent etre differees |
-| Entra | Formulaire/CSRF puis HTTP 302 vers `/organizations`, nouveau client/callback et PKCE S256 ; connexion interactive, echange du code et callback final non exerces |
+| Entra | Formulaire/CSRF puis HTTP 302 vers `/organizations`, nouveau client/callback et PKCE S256. Connexion interactive validee par l'utilisateur le 2026-11-27 sur le nouveau FQDN (connexion, callback, pages protegees) ; aucun jeton ni cookie collecte |
 | Contrats d'echec | 39 tests cibles passent : MAI, absence de fallback, refus fournisseur et timeout. Validation simulee, pas une injection de panne dans Azure |
 | Bootstrap | 13 tests Linux de preprovision passent ; ensemble configuration Linux : 96 passes, 1 skip faute d'az CLI, 2 tests de compilation deselectionnes. Preview ARM et provisions reels ont exerce le template compile |
 | Style du correctif | Ruff et Black passent sur le fichier de test modifie |
 
 Ces recettes utilisent les vrais services de l'application depuis le conteneur
-ACA avec son identite managee et ses endpoints prives. Elles ne constituent pas
-un parcours navigateur authentifie. Les donnees de qualification sont
+ACA avec son identite managee et ses endpoints prives. Le parcours navigateur
+authentifie a ete valide separement par l'utilisateur. Les donnees de qualification sont
 synthetiques et sont conservees dans la nouvelle cible, pas dans l'historique.
 Les premiers essais supplementaires ont rencontre des erreurs transitoires
 ARM/DNS/jeton d'exec avant execution ; les essais finaux ci-dessus ont reussi.
@@ -115,7 +115,8 @@ l'ancien ; aucune recopie inverse n'est realisee ou promise.
 Aucun point d'entree DNS/vanity ou consommateur externe a basculer n'a ete
 identifie avec certitude. La publication du nouveau FQDN n'est pas une preuve
 de bascule de tous les utilisateurs. La connexion Entra interactive sur ce
-FQDN reste un critere d'acceptation a exercer avant une bascule qualifiee.
+FQDN a ete validee par l'utilisateur ; la bascule qualifiee reste subordonnee
+a l'identification des consommateurs.
 
 `rg-fcag-dev` est mixte : APIM `fcaigateway` et Foundry
 `bmoussaud-2-resource` ont de l'activite mesuree, les consommateurs de WebIQ,
