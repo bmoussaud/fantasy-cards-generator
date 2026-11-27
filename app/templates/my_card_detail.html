@@ -89,6 +89,12 @@
                     </div>
                 {% endif %}
             </dl>
+            {% if card.image_prompt %}
+                <details class="detail-prompt">
+                    <summary>Image model prompt</summary>
+                    <pre>{{ card.image_prompt }}</pre>
+                </details>
+            {% endif %}
             <div class="stack-actions">
                 <form
                     method="post"

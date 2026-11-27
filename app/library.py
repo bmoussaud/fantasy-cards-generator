@@ -66,6 +66,7 @@ class LibraryCardDetail:
     flavor_text: str
     art_brief: str
     prompt: str | None
+    image_prompt: str | None
     image_url: str | None
     created_at: str
     completed_at: str | None
@@ -135,6 +136,7 @@ class CardLibraryService:
             flavor_text=payload.flavorText,
             art_brief=payload.artBrief,
             prompt=record.prompt,
+            image_prompt=record.derived_art_prompt,
             image_url=await self._resolve_image_url(record),
             created_at=record.created_at,
             completed_at=record.completed_at,
