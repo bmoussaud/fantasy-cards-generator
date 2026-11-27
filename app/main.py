@@ -45,6 +45,7 @@ from app.generation import (
     CardGenerateBody,
     CardGenerationService,
     CardResponseModel,
+    ProfileCardInscription,
     ReferenceImageUpload,
     client_ip_from_request,
     create_services,
@@ -2195,6 +2196,10 @@ def create_app(services: AppServices | None = None) -> FastAPI:
             image_quality=image_quality,
             reference_image=payload.reference_image,
             selected_expertise=selected_expertise,
+            profile_inscription=ProfileCardInscription(
+                display_name=saved_profile.profile.display_name,
+                current_role=saved_profile.profile.current_role,
+            ),
         )
         if payload.creation_draft_id is not None and linkedin_transient_repository is not None:
             await linkedin_transient_repository.delete_draft(

@@ -305,7 +305,8 @@ def test_classic_card_prints_and_displays_verbatim_french_expertise_on_retry(
     (record,) = asyncio.run(services.card_repository.list_by_owner(TEST_OWNER_ID))
     assert record.status == "completed" and record.card_style.accent == IDENTITIES["rose"]
     assert ABILITY_NAME in " ".join(drawn) and "Wild Ward" not in " ".join(drawn)
-    assert record.card_payload().printed_type() in drawn
+    assert record.printed_type() == "Platform architect"
+    assert record.printed_type() in drawn
     assert "Illus. Azure AI Foundry" in drawn
     for page in (
         client.post("/ui/cards/generate", data=form),
@@ -586,6 +587,7 @@ def test_real_private_image_bytes_metadata_and_accessible_rendering(
     source = artwork_bytes()
     moderated = False
     pairs = []
+    inscriptions = []
 
     async def image(*args, **kwargs):
         result = await original_image(*args, **kwargs)
@@ -601,6 +603,7 @@ def test_real_private_image_bytes_metadata_and_accessible_rendering(
         assert moderated
         assert content == source
         pairs.extend(abilities)
+        inscriptions.append((metadata["name"], metadata["type_line"]))
         return original_compose(content, abilities, **metadata)
 
     monkeypatch.setattr(services.ai_client, "generate_image", image)
@@ -616,7 +619,11 @@ def test_real_private_image_bytes_metadata_and_accessible_rendering(
     assert record.blob_content_type == "image/png"
     assert record.abilities_embedded == selected
     assert record.card_frame_composed
-    assert StoredCard.from_document(record.to_document()).abilities_embedded == selected
+    restored = StoredCard.from_document(record.to_document())
+    assert restored.abilities_embedded == selected
+    assert restored.printed_name() == "Ada Lovelace"
+    assert restored.printed_type() == "Platform architect"
+    assert inscriptions == [("Ada Lovelace", "Platform architect")]
     assert pairs == [
         (ability["name"], ability["description"])
         for ability in record.validated_payload["abilities"]
@@ -630,6 +637,8 @@ def test_real_private_image_bytes_metadata_and_accessible_rendering(
         client.get(f"/my/cards/{record.id}").text,
         client.post("/ui/cards/generate", data=payload).text,
     ):
+        assert "Ada Lovelace" in html
+        assert "Platform architect" in html
         assert ('class="card-face__rules card-face__rules--embedded"' in html) == selected
         assert 'class="card-face card-face--composed"' in html
         assert ("absorbs the next spell" in html) == selected
@@ -776,6 +785,41 @@ def recipe_card(*, cutout=None, rarity="rare", accent="#2F5DA8", abilities=None,
         card_style=CardStyle(recipe="portrait-debordant", accent=accent),
         subject_cutout=cutout,
     )
+
+
+@pytest.mark.parametrize(
+    ("layout", "recipe"),
+    [
+        ("cadre_classique_v1", "cadre-classique"),
+        ("portrait_debordant_v1", "portrait-debordant"),
+    ],
+)
+def test_recipe_prints_complete_profile_role_up_to_profile_limit(monkeypatch, layout, recipe):
+    role = ("Principal platform architect for resilient cloud systems " * 3)[:120].strip()
+    drawn = []
+    original_text = ImageDraw.ImageDraw.text
+
+    def text(draw, position, string, **kwargs):
+        drawn.append(string)
+        return original_text(draw, position, string, **kwargs)
+
+    monkeypatch.setattr(ImageDraw.ImageDraw, "text", text)
+    compose_card_artwork(
+        artwork_bytes(),
+        [("Marée guérisseuse", "Restaure deux points de vie à un allié.")],
+        name="Ada Lovelace",
+        card_type="hero",
+        rarity="rare",
+        mana_cost=4,
+        attack=3,
+        health=5,
+        flavor_text="",
+        layout=layout,
+        card_style=CardStyle(recipe=recipe, accent="#2F5DA8"),
+        type_line=role,
+    )
+
+    assert role.replace(" ", "") in "".join(drawn).replace(" ", "")
 
 
 def test_recipe_rejects_geometry_that_touches_identity_or_reorders_layers():

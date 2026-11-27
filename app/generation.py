@@ -192,6 +192,14 @@ class CardInscription(BaseModel):
     abilityNames: list[Annotated[str, Field(min_length=2, max_length=48)]] = Field(max_length=5)
 
 
+class ProfileCardInscription(BaseModel):
+    """User-owned profile labels printed on a generated card."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    display_name: str = Field(min_length=1, max_length=80)
+    current_role: str = Field(min_length=2, max_length=120)
+
+
 class CardTextFields(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -392,11 +400,26 @@ class StoredCard:
     artwork_layout: ArtworkLayout | None = None
     card_style: CardStyle | None = None
     inscription: CardInscription | None = None
+    profile_inscription: ProfileCardInscription | None = None
     artwork_assets: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def card_payload(self) -> CardPayload:
         return CardPayload.model_validate(
             (self.validated_payload or {}) | {"inscription": self.inscription}
+        )
+
+    def printed_name(self) -> str:
+        return (
+            self.profile_inscription.display_name
+            if self.profile_inscription is not None
+            else self.card_payload().name
+        )
+
+    def printed_type(self) -> str | None:
+        return (
+            self.profile_inscription.current_role
+            if self.profile_inscription is not None
+            else self.card_payload().printed_type()
         )
 
     @property
@@ -472,6 +495,8 @@ class StoredCard:
             document["card_style"] = self.card_style.model_dump()
         if self.inscription is not None:
             document["inscription"] = self.inscription.model_dump()
+        if self.profile_inscription is not None:
+            document["profileInscription"] = self.profile_inscription.model_dump()
         if self.artwork_assets:
             document["artworkAssets"] = self.artwork_assets
         return document
@@ -511,6 +536,11 @@ class StoredCard:
             inscription=(
                 CardInscription.model_validate(document["inscription"])
                 if document.get("inscription") is not None
+                else None
+            ),
+            profile_inscription=(
+                ProfileCardInscription.model_validate(document["profileInscription"])
+                if document.get("profileInscription") is not None
                 else None
             ),
             artwork_assets=dict(document.get("artworkAssets") or {}),
@@ -2019,13 +2049,17 @@ class CardGenerationService:
         image_quality: Literal["low", "medium", "high"] | None = None,
         reference_image: ReferenceImageUpload | None = None,
         selected_expertise: list[str] | None = None,
+        profile_inscription: ProfileCardInscription | None = None,
     ) -> CardResponseModel:
         resolved_quality: Literal["low", "medium", "high"] = (
             image_quality if image_quality is not None else self.services.settings.image_quality
         )
         normalized_prompt = normalize_prompt(prompt)
         request_hash = digest_generation_request(
-            normalized_prompt, reference_image, selected_expertise=selected_expertise
+            normalized_prompt,
+            reference_image,
+            selected_expertise=selected_expertise,
+            profile_inscription=profile_inscription,
         )
         card_id = deterministic_card_id(owner.owner_id, idempotency_key)
         existing = await self.services.card_repository.get(owner.owner_id, card_id)
@@ -2063,6 +2097,7 @@ class CardGenerationService:
                     request_hash=request_hash,
                     card_id=card_id,
                     selected_expertise=selected_expertise,
+                    profile_inscription=profile_inscription,
                 )
         except BaseException as exc:
             await self._finish_flight(flight_key, flight, error=exc)
@@ -2083,6 +2118,7 @@ class CardGenerationService:
         request_hash: str,
         card_id: str,
         selected_expertise: list[str] | None,
+        profile_inscription: ProfileCardInscription | None,
     ) -> CardResponseModel:
         try:
             await self._enforce_rate_limits(owner.owner_id, client_ip)
@@ -2112,6 +2148,7 @@ class CardGenerationService:
                     image_quality=image_quality,
                     reference_image=reference_image,
                     selected_expertise=selected_expertise,
+                    profile_inscription=profile_inscription,
                 ),
                 timeout=self.services.settings.retry.overall_timeout_seconds,
             )
@@ -2138,6 +2175,7 @@ class CardGenerationService:
                     image_quality=image_quality,
                     partial_reason="image_timeout",
                     artwork_layout=progress.artwork_layout,
+                    profile_inscription=profile_inscription,
                 )
                 return self._as_response(partial)
             problem = (
@@ -2347,6 +2385,7 @@ class CardGenerationService:
         image_quality: Literal["low", "medium", "high"],
         reference_image: ReferenceImageUpload | None = None,
         selected_expertise: list[str] | None = None,
+        profile_inscription: ProfileCardInscription | None = None,
     ) -> CardResponseModel:
         moderation: list[ModerationDecision] = []
         progress.stage = "pre-moderation"
@@ -2523,6 +2562,7 @@ class CardGenerationService:
                 partial_reason="image_failure",
                 image_quality=image_quality,
                 artwork_layout=artwork_layout,
+                profile_inscription=profile_inscription,
             )
             return self._as_response(partial)
 
@@ -2553,6 +2593,7 @@ class CardGenerationService:
             text_result=text_result,
             image_result=image_result,
             artwork_layout=artwork_layout,
+            profile_inscription=profile_inscription,
         )
         return self._as_response(completed)
 
@@ -3073,6 +3114,7 @@ class CardGenerationService:
         image_quality: Literal["low", "medium", "high"],
         partial_reason: str,
         artwork_layout: ArtworkLayout = DEFAULT_LAYOUT,
+        profile_inscription: ProfileCardInscription | None = None,
     ) -> StoredCard:
         replay = await self._claim_card_persistence(
             owner_id=owner.owner_id,
@@ -3104,6 +3146,7 @@ class CardGenerationService:
             image_quality=image_quality,
             artwork_layout=artwork_layout,
             inscription=validated_payload.inscription,
+            profile_inscription=profile_inscription,
             card_style=(
                 CardStyle(
                     accent=normalize_accent(
@@ -3159,6 +3202,7 @@ class CardGenerationService:
         existing_card: StoredCard | None = None,
         artwork_layout: ArtworkLayout | None = None,
         subject_result: AIImageResult | None = None,
+        profile_inscription: ProfileCardInscription | None = None,
     ) -> StoredCard:
         if existing_card is None:
             replay = await self._claim_card_persistence(
@@ -3174,6 +3218,9 @@ class CardGenerationService:
                 return replay
         # A failed retry must not delete or overwrite a concurrent attempt's asset.
         asset_id = card_id if existing_card is None else f"{card_id}-{uuid4().hex}"
+        printed_profile = (
+            existing_card.profile_inscription if existing_card is not None else profile_inscription
+        )
         blob_name = build_blob_name(owner.owner_id, asset_id)
         uploaded: list[str] = []
         blob_metadata: dict[str, Any] | None = None
@@ -3207,14 +3254,22 @@ class CardGenerationService:
                         compose_card_artwork,
                         image_content,
                         abilities,
-                        name=validated_payload.name,
+                        name=(
+                            printed_profile.display_name
+                            if printed_profile is not None
+                            else validated_payload.name
+                        ),
                         card_type=validated_payload.cardType,
                         rarity=validated_payload.rarity,
                         mana_cost=validated_payload.manaCost,
                         attack=validated_payload.attack,
                         health=validated_payload.health,
                         flavor_text=validated_payload.flavorText,
-                        type_line=validated_payload.printed_type(),
+                        type_line=(
+                            printed_profile.current_role
+                            if printed_profile is not None
+                            else validated_payload.printed_type()
+                        ),
                         layout=artwork_layout,
                         card_style=style,
                         subject_cutout=subject_result.image.content if subject_result else None,
@@ -3280,6 +3335,7 @@ class CardGenerationService:
                 artwork_layout=artwork_layout,
                 card_style=style if artwork_layout in RECIPE_LAYOUTS else None,
                 inscription=validated_payload.inscription,
+                profile_inscription=printed_profile,
                 artwork_assets=artwork_assets,
                 moderation=[item.model_dump() for item in moderation],
                 text_model=text_result.metadata.model_dump(),
@@ -3950,7 +4006,7 @@ class CardGenerationService:
             requestId=record.request_id,
             idempotencyKey=record.idempotency_key,
             ownerId=record.owner_id,
-            name=payload.name,
+            name=record.printed_name(),
             cardType=payload.cardType,
             rarity=payload.rarity,
             manaCost=payload.manaCost,
@@ -3959,7 +4015,7 @@ class CardGenerationService:
             rulesText=payload.rulesText,
             flavorText=payload.flavorText,
             abilities=payload.printed_abilities(),
-            typeLine=payload.printed_type(),
+            typeLine=record.printed_type(),
             abilitiesEmbedded=record.abilities_embedded,
             cardFrameComposed=record.card_frame_composed,
             imageUrl=record.image_url_path,
@@ -4143,14 +4199,14 @@ async def recompose_stored_card(record: StoredCard, asset_store: AbstractAssetSt
         compose_card_artwork,
         content,
         [(ability.name, ability.description) for ability in payload.printed_abilities()],
-        name=payload.name,
+        name=record.printed_name(),
         card_type=payload.cardType,
         rarity=payload.rarity,
         mana_cost=payload.manaCost,
         attack=payload.attack,
         health=payload.health,
         flavor_text=payload.flavorText,
-        type_line=payload.printed_type(),
+        type_line=record.printed_type(),
         layout=record.artwork_layout,
         card_style=record.card_style,
         subject_cutout=cutout,
@@ -4208,6 +4264,7 @@ def digest_generation_request(
     reference_image: ReferenceImageUpload | None = None,
     *,
     selected_expertise: list[str] | None = None,
+    profile_inscription: ProfileCardInscription | None = None,
 ) -> str:
     digest = hashlib.sha256()
     digest.update(prompt.encode("utf-8"))
@@ -4222,6 +4279,12 @@ def digest_generation_request(
         digest.update(b"\0expertise:")
         for expertise in selected_expertise:
             encoded = expertise.encode("utf-8")
+            digest.update(len(encoded).to_bytes(4, "big"))
+            digest.update(encoded)
+    if profile_inscription is not None:
+        digest.update(b"\0profile-inscription:")
+        for value in (profile_inscription.display_name, profile_inscription.current_role):
+            encoded = value.encode("utf-8")
             digest.update(len(encoded).to_bytes(4, "big"))
             digest.update(encoded)
     return digest.hexdigest()

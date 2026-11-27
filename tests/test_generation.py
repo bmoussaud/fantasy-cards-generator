@@ -31,6 +31,7 @@ from app.generation import (
     MockAgentClient,
     MockAIClient,
     ModerationDecision,
+    ProfileCardInscription,
     ReferenceImageUpload,
     StoredCard,
     UpstreamServiceError,
@@ -1477,9 +1478,21 @@ def test_card_generate_body_rejects_more_than_2500_characters() -> None:
 
 def test_prompt_normalization_and_hash_use_the_same_boundary_value() -> None:
     normalized = normalize_prompt("  " + ("x " * 12))
+    inscription = ProfileCardInscription(
+        display_name="Ada Lovelace", current_role="Platform architect"
+    )
 
     assert normalized == " ".join(["x"] * 12)
     assert digest_generation_request(normalized) == digest_generation_request(" ".join(["x"] * 12))
+    assert digest_generation_request(
+        normalized, profile_inscription=inscription
+    ) != digest_generation_request(normalized)
+    assert digest_generation_request(
+        normalized, profile_inscription=inscription
+    ) != digest_generation_request(
+        normalized,
+        profile_inscription=inscription.model_copy(update={"current_role": "Cloud architect"}),
+    )
     assert normalize_prompt("x" * 2500) == "x" * 2500
     with pytest.raises(ProblemDetails):
         normalize_prompt("x" * 11)
