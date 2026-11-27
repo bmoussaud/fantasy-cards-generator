@@ -547,7 +547,7 @@ models: a failing MAI call surfaces as the usual image error or refusal.
 
 | Setting | `gpt-image-2` | `MAI-Image-2.7` |
 | --- | --- | --- |
-| Endpoint | `FOUNDRY_ENDPOINT` | `FOUNDRY_IMAGE_ENDPOINT` (required, `https://<account>.services.ai.azure.com`); text and moderation endpoints are unchanged |
+| Endpoint | `FOUNDRY_ENDPOINT` | `FOUNDRY_IMAGE_ENDPOINT` (`https://<account>.services.ai.azure.com`; defaults to the managed account when `AI_FOUNDRY_MAI_IMAGE_DEPLOYMENT_ENABLED=true`); text and moderation endpoints are unchanged |
 | Generation | `POST /openai/deployments/{deployment}/images/generations?api-version=2025-04-01-preview`, JSON `prompt`/`size`/`quality` | `POST /mai/v1/images/generations`, JSON `model`/`prompt`/`width`/`height`, no `api-version` |
 | Reference edit | multipart `images/edits` with `size`, `quality` and optional transparency | multipart `/mai/v1/images/edits` with `model`/`prompt`/`width`/`height`/`image`; WEBP references are converted to PNG |
 | Default `IMAGE_SIZE` | `1024x1536` | `1104x928`; each side ≥ 768 px and at most 1,572,864 pixels |
@@ -555,8 +555,11 @@ models: a failing MAI call surfaces as the usual image error or refusal.
 | Subject extraction (`portrait-debordant@1` retries) | Transparent-background edit | Skipped: this adapter does not request transparent-background edits; the scene is kept alone |
 
 Authentication is the app managed identity's Entra token for
-`https://cognitiveservices.azure.com/.default`; no key is used. The MAI account
-and its inference role assignment are managed outside this template. MAI responses
+`https://cognitiveservices.azure.com/.default`; no key is used. With
+`AI_FOUNDRY_MAI_IMAGE_DEPLOYMENT_ENABLED=true`, Bicep deploys MAI on the managed
+Foundry account, where the app identity already holds `Cognitive Services User`.
+Otherwise the external MAI account and its inference role are managed outside
+this template. MAI responses
 carry no token usage, so image usage records zero tokens and only latency.
 `FOUNDRY_IMAGE_MODEL`, `FOUNDRY_IMAGE_ENDPOINT` and `FOUNDRY_MAI_IMAGE_DEPLOYMENT`
 (default `MAI-Image-2.7`) feed the matching Bicep parameters. The MAI edits

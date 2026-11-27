@@ -33,6 +33,9 @@ param entraAuthMode string = 'existing'
 @description('Display name used for the Microsoft Entra ID app registration when deployEntraAppRegistration is true.')
 param entraAppRegistrationName string = take('Fantasy Cards Generator (${toUpper(environmentName)})', 120)
 
+@description('Optional tenant-unique slug for the managed Entra app registration. Empty keeps fantasy-cards-generator-<environmentName>; set a distinct value when a second environment with the same name must not overwrite the first one\'s redirect URIs.')
+param entraAppRegistrationUniqueName string = ''
+
 @description('Description used for the Microsoft Entra ID app registration when deployEntraAppRegistration is true.')
 param entraAppRegistrationDescription string = 'Multi-tenant Microsoft Entra ID app registration for the fantasy-cards-generator web app.'
 
@@ -169,17 +172,35 @@ param aiFoundryImageDeploymentSkuName string = 'GlobalStandard'
 @description('Azure AI Foundry capacity units for the image deployment. Verify against live quota before deployment.')
 param aiFoundryImageDeploymentCapacity int = 1
 
+@description('Deploy MAI-Image-2.7 on the IaC-managed Foundry account alongside the GPT image deployment. Disabled by default; verify regional catalog and quota before enabling.')
+param aiFoundryMaiImageDeploymentEnabled bool = false
+
+@description('MAI image model name deployed when aiFoundryMaiImageDeploymentEnabled is true.')
+param aiFoundryMaiImageModelName string = 'MAI-Image-2.7'
+
+@description('MAI image model version. Verify against the live catalog before deployment.')
+param aiFoundryMaiImageModelVersion string = '2026-11-02'
+
+@description('ARM model format for the MAI image deployment.')
+param aiFoundryMaiImageModelFormat string = 'Microsoft'
+
+@description('SKU for the MAI image deployment. Verify against regional quota availability before deployment.')
+param aiFoundryMaiImageDeploymentSkuName string = 'GlobalStandard'
+
+@description('Capacity units for the MAI image deployment. Verify against live quota before deployment.')
+param aiFoundryMaiImageDeploymentCapacity int = 1
+
 @allowed([
   'gpt-image-2'
   'MAI-Image-2.7'
 ])
-@description('Image model family called by the web app. MAI-Image-2.7 uses foundryImageEndpoint; its deployment and the web identity inference role on that resource are managed outside this template.')
+@description('Image model family called by the web app. MAI-Image-2.7 uses foundryImageEndpoint, or the IaC-managed account when aiFoundryMaiImageDeploymentEnabled is true and no override is set.')
 param foundryImageModel string = 'gpt-image-2'
 
-@description('Foundry resource base URL for MAI image inference, for example https://<resource>.services.ai.azure.com. Required only for MAI-Image-2.7.')
+@description('Optional Foundry resource base URL override for MAI image inference, for example https://<resource>.services.ai.azure.com. Required for MAI-Image-2.7 unless aiFoundryMaiImageDeploymentEnabled is true.')
 param foundryImageEndpoint string = ''
 
-@description('Deployment name of MAI-Image-2.7 on foundryImageEndpoint.')
+@description('Deployment name of MAI-Image-2.7 on the MAI image endpoint.')
 param foundryMaiImageDeploymentName string = 'MAI-Image-2.7'
 
 @description('Persistence mode for the app runtime.')
@@ -372,10 +393,15 @@ var telemetryEnvironmentName = environmentName == 'prod' ? 'production' : 'devel
 var usesMaiImage = foundryImageModel == 'MAI-Image-2.7'
 var resolvedFoundryImageDeployment = usesMaiImage ? foundryMaiImageDeploymentName : aiFoundryImageDeploymentName
 var resolvedImageSize = !empty(trim(imageSize)) ? trim(imageSize) : (usesMaiImage ? '1104x928' : '1024x1536')
-var validatedFoundryImageEndpoint = usesMaiImage && !startsWith(trim(foundryImageEndpoint), 'https://')
-  ? fail('FOUNDRY_IMAGE_ENDPOINT must be an https:// Foundry resource URL when FOUNDRY_IMAGE_MODEL is MAI-Image-2.7.')
-  : trim(foundryImageEndpoint)
 var uniqueToken = uniqueString(subscription().id, resourceGroup().id)
+// Derive the endpoint only when MAI is deployed on the managed account, so an empty
+// override never silently targets an account without the MAI deployment.
+var effectiveFoundryImageEndpoint = empty(trim(foundryImageEndpoint)) && usesMaiImage && aiFoundryMaiImageDeploymentEnabled
+  ? 'https://${aiFoundryAccountName}.services.ai.azure.com'
+  : trim(foundryImageEndpoint)
+var validatedFoundryImageEndpoint = usesMaiImage && !startsWith(effectiveFoundryImageEndpoint, 'https://')
+  ? fail('FOUNDRY_IMAGE_ENDPOINT must be an https:// Foundry resource URL when FOUNDRY_IMAGE_MODEL is MAI-Image-2.7 and AI_FOUNDRY_MAI_IMAGE_DEPLOYMENT_ENABLED is false.')
+  : effectiveFoundryImageEndpoint
 var logAnalyticsName = take('${resourceToken}-law', 63)
 var appInsightsName = take('${resourceToken}-appi', 63)
 var keyVaultBase = replace(
@@ -466,6 +492,9 @@ var predictedContainerAppUrl = 'https://${containerAppName}.${containerAppsEnvir
 var deployedAuthRedirectUri = '${predictedContainerAppUrl}${entraRedirectPath}'
 var deployedPostLogoutRedirectUri = '${predictedContainerAppUrl}${entraPostLogoutRedirectPath}'
 var deployedLinkedInRedirectUri = '${predictedContainerAppUrl}/auth/linkedin/callback'
+var resolvedEntraAppRegistrationUniqueName = empty(trim(entraAppRegistrationUniqueName))
+  ? take('fantasy-cards-generator-${environmentName}', 64)
+  : take(trim(entraAppRegistrationUniqueName), 64)
 var resolvedContentSafetyEndpoint = empty(contentSafetyEndpoint) ? 'https://${aiFoundryAccountName}.cognitiveservices.azure.com/' : contentSafetyEndpoint
 
 module appRegistration './modules/app-registration.bicep' = if (deployEntraAppRegistration) {
@@ -473,7 +502,7 @@ module appRegistration './modules/app-registration.bicep' = if (deployEntraAppRe
   params: {
     appDescription: entraAppRegistrationDescription
     appName: entraAppRegistrationName
-    appUniqueName: take('fantasy-cards-generator-${environmentName}', 64)
+    appUniqueName: resolvedEntraAppRegistrationUniqueName
     redirectUris: [
       entraLocalRedirectUri
       deployedAuthRedirectUri
@@ -675,6 +704,13 @@ module aiFoundry './modules/ai-foundry.bicep' = {
     imageModelName: aiFoundryImageModelName
     imageModelVersion: aiFoundryImageModelVersion
     location: location
+    maiImageDeploymentCapacity: aiFoundryMaiImageDeploymentCapacity
+    maiImageDeploymentEnabled: aiFoundryMaiImageDeploymentEnabled
+    maiImageDeploymentName: foundryMaiImageDeploymentName
+    maiImageDeploymentSkuName: aiFoundryMaiImageDeploymentSkuName
+    maiImageModelFormat: aiFoundryMaiImageModelFormat
+    maiImageModelName: aiFoundryMaiImageModelName
+    maiImageModelVersion: aiFoundryMaiImageModelVersion
     projectDisplayName: '${aiFoundryProjectDisplayName} (${toUpper(environmentName)})'
     projectName: resolvedAiFoundryProjectName
     tags: tags

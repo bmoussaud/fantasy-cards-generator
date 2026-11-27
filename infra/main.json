@@ -6,7 +6,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.48.1.52935",
-      "templateHash": "11386897693919801420"
+      "templateHash": "9238533335170026325"
     }
   },
   "parameters": {
@@ -78,6 +78,13 @@
       "defaultValue": "[take(format('Fantasy Cards Generator ({0})', toUpper(parameters('environmentName'))), 120)]",
       "metadata": {
         "description": "Display name used for the Microsoft Entra ID app registration when deployEntraAppRegistration is true."
+      }
+    },
+    "entraAppRegistrationUniqueName": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Optional tenant-unique slug for the managed Entra app registration. Empty keeps fantasy-cards-generator-<environmentName>; set a distinct value when a second environment with the same name must not overwrite the first one's redirect URIs."
       }
     },
     "entraAppRegistrationDescription": {
@@ -364,6 +371,48 @@
         "description": "Azure AI Foundry capacity units for the image deployment. Verify against live quota before deployment."
       }
     },
+    "aiFoundryMaiImageDeploymentEnabled": {
+      "type": "bool",
+      "defaultValue": false,
+      "metadata": {
+        "description": "Deploy MAI-Image-2.7 on the IaC-managed Foundry account alongside the GPT image deployment. Disabled by default; verify regional catalog and quota before enabling."
+      }
+    },
+    "aiFoundryMaiImageModelName": {
+      "type": "string",
+      "defaultValue": "MAI-Image-2.7",
+      "metadata": {
+        "description": "MAI image model name deployed when aiFoundryMaiImageDeploymentEnabled is true."
+      }
+    },
+    "aiFoundryMaiImageModelVersion": {
+      "type": "string",
+      "defaultValue": "2026-11-02",
+      "metadata": {
+        "description": "MAI image model version. Verify against the live catalog before deployment."
+      }
+    },
+    "aiFoundryMaiImageModelFormat": {
+      "type": "string",
+      "defaultValue": "Microsoft",
+      "metadata": {
+        "description": "ARM model format for the MAI image deployment."
+      }
+    },
+    "aiFoundryMaiImageDeploymentSkuName": {
+      "type": "string",
+      "defaultValue": "GlobalStandard",
+      "metadata": {
+        "description": "SKU for the MAI image deployment. Verify against regional quota availability before deployment."
+      }
+    },
+    "aiFoundryMaiImageDeploymentCapacity": {
+      "type": "int",
+      "defaultValue": 1,
+      "metadata": {
+        "description": "Capacity units for the MAI image deployment. Verify against live quota before deployment."
+      }
+    },
     "foundryImageModel": {
       "type": "string",
       "defaultValue": "gpt-image-2",
@@ -372,21 +421,21 @@
         "MAI-Image-2.7"
       ],
       "metadata": {
-        "description": "Image model family called by the web app. MAI-Image-2.7 uses foundryImageEndpoint; its deployment and the web identity inference role on that resource are managed outside this template."
+        "description": "Image model family called by the web app. MAI-Image-2.7 uses foundryImageEndpoint, or the IaC-managed account when aiFoundryMaiImageDeploymentEnabled is true and no override is set."
       }
     },
     "foundryImageEndpoint": {
       "type": "string",
       "defaultValue": "",
       "metadata": {
-        "description": "Foundry resource base URL for MAI image inference, for example https://<resource>.services.ai.azure.com. Required only for MAI-Image-2.7."
+        "description": "Optional Foundry resource base URL override for MAI image inference, for example https://<resource>.services.ai.azure.com. Required for MAI-Image-2.7 unless aiFoundryMaiImageDeploymentEnabled is true."
       }
     },
     "foundryMaiImageDeploymentName": {
       "type": "string",
       "defaultValue": "MAI-Image-2.7",
       "metadata": {
-        "description": "Deployment name of MAI-Image-2.7 on foundryImageEndpoint."
+        "description": "Deployment name of MAI-Image-2.7 on the MAI image endpoint."
       }
     },
     "persistenceMode": {
@@ -757,8 +806,9 @@
     "usesMaiImage": "[equals(parameters('foundryImageModel'), 'MAI-Image-2.7')]",
     "resolvedFoundryImageDeployment": "[if(variables('usesMaiImage'), parameters('foundryMaiImageDeploymentName'), parameters('aiFoundryImageDeploymentName'))]",
     "resolvedImageSize": "[if(not(empty(trim(parameters('imageSize')))), trim(parameters('imageSize')), if(variables('usesMaiImage'), '1104x928', '1024x1536'))]",
-    "validatedFoundryImageEndpoint": "[if(and(variables('usesMaiImage'), not(startsWith(trim(parameters('foundryImageEndpoint')), 'https://'))), fail('FOUNDRY_IMAGE_ENDPOINT must be an https:// Foundry resource URL when FOUNDRY_IMAGE_MODEL is MAI-Image-2.7.'), trim(parameters('foundryImageEndpoint')))]",
     "uniqueToken": "[uniqueString(subscription().id, resourceGroup().id)]",
+    "effectiveFoundryImageEndpoint": "[if(and(and(empty(trim(parameters('foundryImageEndpoint'))), variables('usesMaiImage')), parameters('aiFoundryMaiImageDeploymentEnabled')), format('https://{0}.services.ai.azure.com', variables('aiFoundryAccountName')), trim(parameters('foundryImageEndpoint')))]",
+    "validatedFoundryImageEndpoint": "[if(and(variables('usesMaiImage'), not(startsWith(variables('effectiveFoundryImageEndpoint'), 'https://'))), fail('FOUNDRY_IMAGE_ENDPOINT must be an https:// Foundry resource URL when FOUNDRY_IMAGE_MODEL is MAI-Image-2.7 and AI_FOUNDRY_MAI_IMAGE_DEPLOYMENT_ENABLED is false.'), variables('effectiveFoundryImageEndpoint'))]",
     "logAnalyticsName": "[take(format('{0}-law', variables('resourceToken')), 63)]",
     "appInsightsName": "[take(format('{0}-appi', variables('resourceToken')), 63)]",
     "keyVaultBase": "[replace(format('kv{0}{1}{2}', variables('namePrefix'), parameters('environmentName'), variables('uniqueToken')), '-', '')]",
@@ -779,6 +829,7 @@
     "privateEndpointSubnetName": "private-endpoints",
     "natGatewayName": "[take(format('{0}-nat', variables('resourceToken')), 64)]",
     "natGatewayPublicIpName": "[take(format('{0}-nat-pip', variables('resourceToken')), 64)]",
+    "resolvedEntraAppRegistrationUniqueName": "[if(empty(trim(parameters('entraAppRegistrationUniqueName'))), take(format('fantasy-cards-generator-{0}', parameters('environmentName')), 64), take(trim(parameters('entraAppRegistrationUniqueName')), 64))]",
     "resolvedContentSafetyEndpoint": "[if(empty(parameters('contentSafetyEndpoint')), format('https://{0}.cognitiveservices.azure.com/', variables('aiFoundryAccountName')), parameters('contentSafetyEndpoint'))]"
   },
   "resources": {
@@ -1654,7 +1705,7 @@
             "value": "[parameters('entraAppRegistrationName')]"
           },
           "appUniqueName": {
-            "value": "[take(format('fantasy-cards-generator-{0}', parameters('environmentName')), 64)]"
+            "value": "[variables('resolvedEntraAppRegistrationUniqueName')]"
           },
           "redirectUris": {
             "value": [
@@ -2813,7 +2864,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.48.1.52935",
-              "templateHash": "9073322433933333318"
+              "templateHash": "3117546692703786251"
             }
           },
           "parameters": {
@@ -3008,7 +3059,7 @@
                   "content": {
                     "version": "KqlItem/1.0",
                     "title": "Requests: volume, failures, and latency percentiles",
-                    "query": "AppRequests\r\n| where AppRoleName == '{Service}'\r\n| summarize Requests=count(), Failures=countif(Success == false), p50=percentile(DurationMs, 50), p95=percentile(DurationMs, 95), p99=percentile(DurationMs, 99) by bin(TimeGenerated, 1h)\r\n| order by TimeGenerated asc\r\n",
+                    "query": "AppRequests\n| where AppRoleName == '{Service}'\n| summarize Requests=count(), Failures=countif(Success == false), p50=percentile(DurationMs, 50), p95=percentile(DurationMs, 95), p99=percentile(DurationMs, 99) by bin(TimeGenerated, 1h)\n| order by TimeGenerated asc\n",
                     "size": 0,
                     "queryType": 0,
                     "resourceType": "microsoft.operationalinsights/workspaces",
@@ -3021,7 +3072,7 @@
                   "content": {
                     "version": "KqlItem/1.0",
                     "title": "Dependencies: success and latency",
-                    "query": "AppDependencies\r\n| where AppRoleName == '{Service}'\r\n| summarize Calls=count(), Failures=countif(Success == false), Throttles=countif(ResultCode == \"429\"), p50=percentile(DurationMs, 50), p95=percentile(DurationMs, 95), p99=percentile(DurationMs, 99) by DependencyType, bin(TimeGenerated, 1h)\r\n| order by TimeGenerated desc\r\n",
+                    "query": "AppDependencies\n| where AppRoleName == '{Service}'\n| summarize Calls=count(), Failures=countif(Success == false), Throttles=countif(ResultCode == \"429\"), p50=percentile(DurationMs, 50), p95=percentile(DurationMs, 95), p99=percentile(DurationMs, 99) by DependencyType, bin(TimeGenerated, 1h)\n| order by TimeGenerated desc\n",
                     "size": 0,
                     "queryType": 0,
                     "resourceType": "microsoft.operationalinsights/workspaces"
@@ -3033,7 +3084,7 @@
                   "content": {
                     "version": "KqlItem/1.0",
                     "title": "Exceptions and bounded application errors",
-                    "query": "union isfuzzy=true\r\n  (AppExceptions | where AppRoleName == '{Service}' | project TimeGenerated, Signal=\"exception\", Type=ExceptionType, Severity=SeverityLevel),\r\n  (AppTraces | where AppRoleName == '{Service}' and SeverityLevel >= 3 | project TimeGenerated, Signal=\"trace\", Type=tostring(Properties[\"fcg.error_code\"]), Severity=SeverityLevel)\r\n| order by TimeGenerated desc\r\n| take 100\r\n",
+                    "query": "union isfuzzy=true\n  (AppExceptions | where AppRoleName == '{Service}' | project TimeGenerated, Signal=\"exception\", Type=ExceptionType, Severity=SeverityLevel),\n  (AppTraces | where AppRoleName == '{Service}' and SeverityLevel >= 3 | project TimeGenerated, Signal=\"trace\", Type=tostring(Properties[\"fcg.error_code\"]), Severity=SeverityLevel)\n| order by TimeGenerated desc\n| take 100\n",
                     "size": 0,
                     "queryType": 0,
                     "resourceType": "microsoft.operationalinsights/workspaces"
@@ -3045,7 +3096,7 @@
                   "content": {
                     "version": "KqlItem/1.0",
                     "title": "Generation, moderation, retries, persistence, and token aggregates",
-                    "query": "AppMetrics\r\n| where AppRoleName == '{Service}'\r\n| where Name startswith \"fcg.\"\r\n| extend Dimension = case(\r\n    Name in (\"fcg.generation.requests\", \"fcg.generation.duration\", \"fcg.artwork.retries\"), strcat(\"outcome=\", tostring(Properties[\"fcg.outcome\"])),\r\n    Name == \"fcg.generation.partial_results\", strcat(\"partial=\", tostring(Properties[\"fcg.partial_reason\"])),\r\n    Name in (\"fcg.dependency.attempts\", \"fcg.dependency.duration\"), strcat(\"dependency=\", tostring(Properties[\"fcg.dependency\"]), \";attempt=\", tostring(Properties[\"fcg.attempt\"]), \";outcome=\", tostring(Properties[\"fcg.outcome\"])),\r\n    Name in (\"fcg.dependency.throttles\", \"fcg.dependency.timeouts\"), strcat(\"dependency=\", tostring(Properties[\"fcg.dependency\"])),\r\n    Name == \"fcg.moderation.decisions\", strcat(\"stage=\", tostring(Properties[\"fcg.stage\"]), \";moderation=\", tostring(Properties[\"fcg.moderation_reason\"]), \";outcome=\", tostring(Properties[\"fcg.outcome\"])),\r\n    Name == \"fcg.persistence.operations\", strcat(\"store=\", tostring(Properties[\"fcg.store\"]), \";operation=\", tostring(Properties[\"fcg.persistence_operation\"]), \";outcome=\", tostring(Properties[\"fcg.outcome\"])),\r\n    Name == \"fcg.ai.tokens\", strcat(\"operation=\", tostring(Properties[\"fcg.operation\"]), \";token_type=\", tostring(Properties[\"fcg.token_type\"])),\r\n    \"aggregate\")\r\n| summarize Value=sum(Sum) by Name, Dimension, bin(TimeGenerated, 1h)\r\n| order by TimeGenerated desc\r\n",
+                    "query": "AppMetrics\n| where AppRoleName == '{Service}'\n| where Name startswith \"fcg.\"\n| extend Dimension = case(\n    Name in (\"fcg.generation.requests\", \"fcg.generation.duration\", \"fcg.artwork.retries\"), strcat(\"outcome=\", tostring(Properties[\"fcg.outcome\"])),\n    Name == \"fcg.generation.partial_results\", strcat(\"partial=\", tostring(Properties[\"fcg.partial_reason\"])),\n    Name in (\"fcg.dependency.attempts\", \"fcg.dependency.duration\"), strcat(\"dependency=\", tostring(Properties[\"fcg.dependency\"]), \";attempt=\", tostring(Properties[\"fcg.attempt\"]), \";outcome=\", tostring(Properties[\"fcg.outcome\"])),\n    Name in (\"fcg.dependency.throttles\", \"fcg.dependency.timeouts\"), strcat(\"dependency=\", tostring(Properties[\"fcg.dependency\"])),\n    Name == \"fcg.moderation.decisions\", strcat(\"stage=\", tostring(Properties[\"fcg.stage\"]), \";moderation=\", tostring(Properties[\"fcg.moderation_reason\"]), \";outcome=\", tostring(Properties[\"fcg.outcome\"])),\n    Name == \"fcg.persistence.operations\", strcat(\"store=\", tostring(Properties[\"fcg.store\"]), \";operation=\", tostring(Properties[\"fcg.persistence_operation\"]), \";outcome=\", tostring(Properties[\"fcg.outcome\"])),\n    Name == \"fcg.ai.tokens\", strcat(\"operation=\", tostring(Properties[\"fcg.operation\"]), \";token_type=\", tostring(Properties[\"fcg.token_type\"])),\n    \"aggregate\")\n| summarize Value=sum(Sum) by Name, Dimension, bin(TimeGenerated, 1h)\n| order by TimeGenerated desc\n",
                     "size": 0,
                     "queryType": 0,
                     "resourceType": "microsoft.operationalinsights/workspaces",
@@ -3058,7 +3109,7 @@
                   "content": {
                     "version": "KqlItem/1.0",
                     "title": "ACA revision, restart, and platform errors",
-                    "query": "[replace('ContainerAppSystemLogs_CL\r\n| where ContainerAppName_s == ''__CONTAINER_APP_NAME__''\r\n| where ''{Revision}'' == ''*'' or RevisionName_s == ''{Revision}''\r\n| where Reason_s in (\"Restarting\", \"Unhealthy\", \"HealthProbeFailed\") or Log_s has_any (\"restart\", \"unhealthy\", \"probe failed\")\r\n| project TimeGenerated, RevisionName_s, Reason_s, Log_s\r\n| order by TimeGenerated desc\r\n| take 100\r\n', '__CONTAINER_APP_NAME__', parameters('containerAppName'))]",
+                    "query": "[replace('ContainerAppSystemLogs_CL\n| where ContainerAppName_s == ''__CONTAINER_APP_NAME__''\n| where ''{Revision}'' == ''*'' or RevisionName_s == ''{Revision}''\n| where Reason_s in (\"Restarting\", \"Unhealthy\", \"HealthProbeFailed\") or Log_s has_any (\"restart\", \"unhealthy\", \"probe failed\")\n| project TimeGenerated, RevisionName_s, Reason_s, Log_s\n| order by TimeGenerated desc\n| take 100\n', '__CONTAINER_APP_NAME__', parameters('containerAppName'))]",
                     "size": 0,
                     "queryType": 0,
                     "resourceType": "microsoft.operationalinsights/workspaces"
@@ -3070,7 +3121,7 @@
                   "content": {
                     "version": "KqlItem/1.0",
                     "title": "Billable ingestion and daily-cap utilization",
-                    "query": "[replace(replace('Usage\r\n| where IsBillable == true\r\n| summarize BillableGB=sum(Quantity) / 1000.0 by bin(TimeGenerated, 1d)\r\n| extend DailyCapGB=__DAILY_QUOTA_GB__, CapUtilizationPercent=100.0 * BillableGB / __DAILY_QUOTA_GB__\r\n| order by TimeGenerated desc\r\n', '__DAILY_QUOTA_GB__', string(parameters('dailyQuotaGb'))), '__DAILY_QUOTA_GB__', string(parameters('dailyQuotaGb')))]",
+                    "query": "[replace(replace('Usage\n| where IsBillable == true\n| summarize BillableGB=sum(Quantity) / 1000.0 by bin(TimeGenerated, 1d)\n| extend DailyCapGB=__DAILY_QUOTA_GB__, CapUtilizationPercent=100.0 * BillableGB / __DAILY_QUOTA_GB__\n| order by TimeGenerated desc\n', '__DAILY_QUOTA_GB__', string(parameters('dailyQuotaGb'))), '__DAILY_QUOTA_GB__', string(parameters('dailyQuotaGb')))]",
                     "size": 0,
                     "queryType": 0,
                     "resourceType": "microsoft.operationalinsights/workspaces"
@@ -3083,14 +3134,14 @@
                 "[parameters('logAnalyticsWorkspaceResourceId')]"
               ]
             },
-            "availabilityQuery": "[format('AppAvailabilityResults\r\n| where Name == ''{0}'' and Success == false\r\n| summarize Failures=count()\r\n| where Failures >= {1}\r\n| project Breach=1\r\n', variables('availabilityTestName'), parameters('availabilityFailureThreshold'))]",
-            "requestFailureQuery": "[format('AppRequests\r\n| where AppRoleName == ''{0}''\r\n| summarize Total=count(), Failed=countif(Success == false or ResultCode startswith \"5\")\r\n| where Total >= {1} and (100.0 * Failed / Total) >= {2}\r\n| project Breach=1\r\n', parameters('serviceName'), parameters('requestTrafficFloor'), parameters('requestFailurePercentThreshold'))]",
-            "requestLatencyQuery": "[format('AppRequests\r\n| where AppRoleName == ''{0}''\r\n| summarize Total=count(), P95=percentile(DurationMs, 95)\r\n| where Total >= {1} and P95 >= {2}\r\n| project Breach=1\r\n', parameters('serviceName'), parameters('requestTrafficFloor'), parameters('requestP95LatencyMsThreshold'))]",
-            "dependencyFailureQuery": "[format('AppDependencies\r\n| where AppRoleName == ''{0}''\r\n| where Success == false or ResultCode in (\"408\", \"429\", \"504\")\r\n| summarize Failures=count()\r\n| where Failures >= {1}\r\n| project Breach=1\r\n', parameters('serviceName'), parameters('dependencyFailureThreshold'))]",
-            "exceptionQuery": "[format('AppExceptions\r\n| where AppRoleName == ''{0}''\r\n| summarize Exceptions=count()\r\n| where Exceptions >= {1}\r\n| project Breach=1\r\n', parameters('serviceName'), parameters('exceptionThreshold'))]",
-            "generationAdverseQuery": "[format('AppMetrics\r\n| where AppRoleName == ''{0}''\r\n| where (Name == \"fcg.generation.requests\" and tostring(Properties[\"fcg.outcome\"]) in (\"failed\", \"timed_out\", \"throttled\"))\r\n    or Name == \"fcg.generation.partial_results\"\r\n    or (Name == \"fcg.persistence.operations\" and tostring(Properties[\"fcg.outcome\"]) != \"completed\")\r\n| summarize AdverseOutcomes=sum(Sum)\r\n| where AdverseOutcomes >= {1}\r\n| project Breach=1\r\n', parameters('serviceName'), parameters('generationAdverseOutcomeThreshold'))]",
-            "containerRestartQuery": "[format('ContainerAppSystemLogs_CL\r\n| where ContainerAppName_s == ''{0}''\r\n| where Reason_s in (\"Restarting\", \"Unhealthy\", \"HealthProbeFailed\") or Log_s has_any (\"restart\", \"unhealthy\", \"probe failed\")\r\n| summarize RestartOrUnhealthyEvents=count()\r\n| where RestartOrUnhealthyEvents >= {1}\r\n| project Breach=1\r\n', parameters('containerAppName'), parameters('containerRestartThreshold'))]",
-            "ingestionCapQuery": "[format('Usage\r\n| where IsBillable == true\r\n| where TimeGenerated >= ago(24h)\r\n| summarize BillableGB=sum(Quantity) / 1000.0\r\n| where BillableGB >= ({0} * {1} / 100.0)\r\n| project Breach=1\r\n', parameters('dailyQuotaGb'), parameters('ingestionWarningPercent'))]",
+            "availabilityQuery": "[format('AppAvailabilityResults\n| where Name == ''{0}'' and Success == false\n| summarize Failures=count()\n| where Failures >= {1}\n| project Breach=1\n', variables('availabilityTestName'), parameters('availabilityFailureThreshold'))]",
+            "requestFailureQuery": "[format('AppRequests\n| where AppRoleName == ''{0}''\n| summarize Total=count(), Failed=countif(Success == false or ResultCode startswith \"5\")\n| where Total >= {1} and (100.0 * Failed / Total) >= {2}\n| project Breach=1\n', parameters('serviceName'), parameters('requestTrafficFloor'), parameters('requestFailurePercentThreshold'))]",
+            "requestLatencyQuery": "[format('AppRequests\n| where AppRoleName == ''{0}''\n| summarize Total=count(), P95=percentile(DurationMs, 95)\n| where Total >= {1} and P95 >= {2}\n| project Breach=1\n', parameters('serviceName'), parameters('requestTrafficFloor'), parameters('requestP95LatencyMsThreshold'))]",
+            "dependencyFailureQuery": "[format('AppDependencies\n| where AppRoleName == ''{0}''\n| where Success == false or ResultCode in (\"408\", \"429\", \"504\")\n| summarize Failures=count()\n| where Failures >= {1}\n| project Breach=1\n', parameters('serviceName'), parameters('dependencyFailureThreshold'))]",
+            "exceptionQuery": "[format('AppExceptions\n| where AppRoleName == ''{0}''\n| summarize Exceptions=count()\n| where Exceptions >= {1}\n| project Breach=1\n', parameters('serviceName'), parameters('exceptionThreshold'))]",
+            "generationAdverseQuery": "[format('AppMetrics\n| where AppRoleName == ''{0}''\n| where (Name == \"fcg.generation.requests\" and tostring(Properties[\"fcg.outcome\"]) in (\"failed\", \"timed_out\", \"throttled\"))\n    or Name == \"fcg.generation.partial_results\"\n    or (Name == \"fcg.persistence.operations\" and tostring(Properties[\"fcg.outcome\"]) != \"completed\")\n| summarize AdverseOutcomes=sum(Sum)\n| where AdverseOutcomes >= {1}\n| project Breach=1\n', parameters('serviceName'), parameters('generationAdverseOutcomeThreshold'))]",
+            "containerRestartQuery": "[format('ContainerAppSystemLogs_CL\n| where ContainerAppName_s == ''{0}''\n| where Reason_s in (\"Restarting\", \"Unhealthy\", \"HealthProbeFailed\") or Log_s has_any (\"restart\", \"unhealthy\", \"probe failed\")\n| summarize RestartOrUnhealthyEvents=count()\n| where RestartOrUnhealthyEvents >= {1}\n| project Breach=1\n', parameters('containerAppName'), parameters('containerRestartThreshold'))]",
+            "ingestionCapQuery": "[format('Usage\n| where IsBillable == true\n| where TimeGenerated >= ago(24h)\n| summarize BillableGB=sum(Quantity) / 1000.0\n| where BillableGB >= ({0} * {1} / 100.0)\n| project Breach=1\n', parameters('dailyQuotaGb'), parameters('ingestionWarningPercent'))]",
             "alertDefinitions": [
               {
                 "name": "availability",
@@ -8309,6 +8360,27 @@
           "location": {
             "value": "[parameters('location')]"
           },
+          "maiImageDeploymentCapacity": {
+            "value": "[parameters('aiFoundryMaiImageDeploymentCapacity')]"
+          },
+          "maiImageDeploymentEnabled": {
+            "value": "[parameters('aiFoundryMaiImageDeploymentEnabled')]"
+          },
+          "maiImageDeploymentName": {
+            "value": "[parameters('foundryMaiImageDeploymentName')]"
+          },
+          "maiImageDeploymentSkuName": {
+            "value": "[parameters('aiFoundryMaiImageDeploymentSkuName')]"
+          },
+          "maiImageModelFormat": {
+            "value": "[parameters('aiFoundryMaiImageModelFormat')]"
+          },
+          "maiImageModelName": {
+            "value": "[parameters('aiFoundryMaiImageModelName')]"
+          },
+          "maiImageModelVersion": {
+            "value": "[parameters('aiFoundryMaiImageModelVersion')]"
+          },
           "projectDisplayName": {
             "value": "[format('{0} ({1})', parameters('aiFoundryProjectDisplayName'), toUpper(parameters('environmentName')))]"
           },
@@ -8347,7 +8419,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.48.1.52935",
-              "templateHash": "6829451698028775588"
+              "templateHash": "7978693573288868392"
             }
           },
           "parameters": {
@@ -8506,6 +8578,55 @@
                 "description": "Capacity units for the image deployment. Confirm against real quota availability before production rollout."
               }
             },
+            "maiImageDeploymentEnabled": {
+              "type": "bool",
+              "defaultValue": false,
+              "metadata": {
+                "description": "Deploy the MAI image model on this account in addition to the GPT image deployment."
+              }
+            },
+            "maiImageDeploymentName": {
+              "type": "string",
+              "defaultValue": "MAI-Image-2.7",
+              "metadata": {
+                "description": "Deployment name for the MAI image model."
+              }
+            },
+            "maiImageModelName": {
+              "type": "string",
+              "defaultValue": "MAI-Image-2.7",
+              "metadata": {
+                "description": "MAI image model name to deploy. Verify availability in the target region and subscription before rollout."
+              }
+            },
+            "maiImageModelVersion": {
+              "type": "string",
+              "defaultValue": "2026-11-02",
+              "metadata": {
+                "description": "MAI image model version to deploy."
+              }
+            },
+            "maiImageModelFormat": {
+              "type": "string",
+              "defaultValue": "Microsoft",
+              "metadata": {
+                "description": "ARM model format for the MAI image deployment."
+              }
+            },
+            "maiImageDeploymentSkuName": {
+              "type": "string",
+              "defaultValue": "GlobalStandard",
+              "metadata": {
+                "description": "SKU name for the MAI image deployment."
+              }
+            },
+            "maiImageDeploymentCapacity": {
+              "type": "int",
+              "defaultValue": 1,
+              "metadata": {
+                "description": "Capacity units for the MAI image deployment. Confirm against real quota availability before rollout."
+              }
+            },
             "tags": {
               "type": "object",
               "defaultValue": {},
@@ -8598,6 +8719,27 @@
               "dependsOn": [
                 "[resourceId('Microsoft.CognitiveServices/accounts', parameters('accountName'))]",
                 "[resourceId('Microsoft.CognitiveServices/accounts/deployments', parameters('accountName'), parameters('textDeploymentName'))]"
+              ]
+            },
+            {
+              "condition": "[parameters('maiImageDeploymentEnabled')]",
+              "type": "Microsoft.CognitiveServices/accounts/deployments",
+              "apiVersion": "2025-06-01",
+              "name": "[format('{0}/{1}', parameters('accountName'), parameters('maiImageDeploymentName'))]",
+              "sku": {
+                "capacity": "[parameters('maiImageDeploymentCapacity')]",
+                "name": "[parameters('maiImageDeploymentSkuName')]"
+              },
+              "properties": {
+                "model": {
+                  "format": "[parameters('maiImageModelFormat')]",
+                  "name": "[parameters('maiImageModelName')]",
+                  "version": "[parameters('maiImageModelVersion')]"
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.CognitiveServices/accounts', parameters('accountName'))]",
+                "[resourceId('Microsoft.CognitiveServices/accounts/deployments', parameters('accountName'), parameters('imageDeploymentName'))]"
               ]
             },
             {
@@ -8746,6 +8888,10 @@
             "aiFoundryImageDeploymentName": {
               "type": "string",
               "value": "[parameters('imageDeploymentName')]"
+            },
+            "aiFoundryMaiImageDeploymentName": {
+              "type": "string",
+              "value": "[if(parameters('maiImageDeploymentEnabled'), parameters('maiImageDeploymentName'), '')]"
             }
           }
         }
@@ -8932,7 +9078,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.48.1.52935",
-              "templateHash": "17156145824803637407"
+              "templateHash": "9231811367377099628"
             }
           },
           "parameters": {
@@ -9100,7 +9246,7 @@
                   "content": {
                     "version": "KqlItem/1.0",
                     "title": "Invocation outcomes: completed, failed, timed_out, throttled",
-                    "query": "AppMetrics\r\n| where AppRoleName == '{AgentService}'\r\n| where Name == \"fcg.generation.requests\"\r\n| extend Outcome=tostring(Properties[\"fcg.outcome\"]), AgentVersion=tostring(Properties[\"fcg.agent_version\"])\r\n| where '{AgentVersion}' == '*' or AgentVersion == '{AgentVersion}'\r\n| summarize Invocations=sum(Sum) by Outcome, AgentVersion, bin(TimeGenerated, 1h)\r\n| order by TimeGenerated asc\r\n",
+                    "query": "AppMetrics\n| where AppRoleName == '{AgentService}'\n| where Name == \"fcg.generation.requests\"\n| extend Outcome=tostring(Properties[\"fcg.outcome\"]), AgentVersion=tostring(Properties[\"fcg.agent_version\"])\n| where '{AgentVersion}' == '*' or AgentVersion == '{AgentVersion}'\n| summarize Invocations=sum(Sum) by Outcome, AgentVersion, bin(TimeGenerated, 1h)\n| order by TimeGenerated asc\n",
                     "size": 0,
                     "queryType": 0,
                     "resourceType": "microsoft.operationalinsights/workspaces",
@@ -9113,7 +9259,7 @@
                   "content": {
                     "version": "KqlItem/1.0",
                     "title": "Overall invocation latency by outcome and hosted version",
-                    "query": "AppMetrics\r\n| where AppRoleName == '{AgentService}'\r\n| where Name == \"fcg.generation.duration\"\r\n| extend Outcome=tostring(Properties[\"fcg.outcome\"]), AgentVersion=tostring(Properties[\"fcg.agent_version\"])\r\n| where '{AgentVersion}' == '*' or AgentVersion == '{AgentVersion}'\r\n| summarize TotalMs=sum(Sum), MeasurementCount=sum(ItemCount) by Outcome, AgentVersion, bin(TimeGenerated, 1h)\r\n| extend AvgMs=TotalMs / MeasurementCount\r\n| order by TimeGenerated asc\r\n",
+                    "query": "AppMetrics\n| where AppRoleName == '{AgentService}'\n| where Name == \"fcg.generation.duration\"\n| extend Outcome=tostring(Properties[\"fcg.outcome\"]), AgentVersion=tostring(Properties[\"fcg.agent_version\"])\n| where '{AgentVersion}' == '*' or AgentVersion == '{AgentVersion}'\n| summarize TotalMs=sum(Sum), MeasurementCount=sum(ItemCount) by Outcome, AgentVersion, bin(TimeGenerated, 1h)\n| extend AvgMs=TotalMs / MeasurementCount\n| order by TimeGenerated asc\n",
                     "size": 0,
                     "queryType": 0,
                     "resourceType": "microsoft.operationalinsights/workspaces",
@@ -9126,7 +9272,7 @@
                   "content": {
                     "version": "KqlItem/1.0",
                     "title": "Model dependency latency and outcomes by bounded orchestration stage",
-                    "query": "AppMetrics\r\n| where AppRoleName == '{AgentService}'\r\n| where Name == \"fcg.dependency.duration\"\r\n| extend Stage=tostring(Properties[\"fcg.stage\"]), Provider=tostring(Properties[\"fcg.dependency\"]), Outcome=tostring(Properties[\"fcg.outcome\"]), AgentVersion=tostring(Properties[\"fcg.agent_version\"])\r\n| where '{AgentVersion}' == '*' or AgentVersion == '{AgentVersion}'\r\n| summarize TotalMs=sum(Sum), AttemptCount=sum(ItemCount) by Stage, Provider, Outcome, AgentVersion, bin(TimeGenerated, 1h)\r\n| extend AvgMs=TotalMs / AttemptCount\r\n| order by TimeGenerated desc\r\n",
+                    "query": "AppMetrics\n| where AppRoleName == '{AgentService}'\n| where Name == \"fcg.dependency.duration\"\n| extend Stage=tostring(Properties[\"fcg.stage\"]), Provider=tostring(Properties[\"fcg.dependency\"]), Outcome=tostring(Properties[\"fcg.outcome\"]), AgentVersion=tostring(Properties[\"fcg.agent_version\"])\n| where '{AgentVersion}' == '*' or AgentVersion == '{AgentVersion}'\n| summarize TotalMs=sum(Sum), AttemptCount=sum(ItemCount) by Stage, Provider, Outcome, AgentVersion, bin(TimeGenerated, 1h)\n| extend AvgMs=TotalMs / AttemptCount\n| order by TimeGenerated desc\n",
                     "size": 0,
                     "queryType": 0,
                     "resourceType": "microsoft.operationalinsights/workspaces"
@@ -9138,7 +9284,7 @@
                   "content": {
                     "version": "KqlItem/1.0",
                     "title": "Exceptions and bounded runtime errors",
-                    "query": "union isfuzzy=true\r\n  (AppExceptions | where AppRoleName == '{AgentService}' | project TimeGenerated, Signal=\"exception\", Type=ExceptionType, Severity=SeverityLevel),\r\n  (AppTraces | where AppRoleName == '{AgentService}' and SeverityLevel >= 3 | project TimeGenerated, Signal=\"trace\", Type=tostring(Properties[\"fcg.error_code\"]), Severity=SeverityLevel)\r\n| order by TimeGenerated desc\r\n| take 100\r\n",
+                    "query": "union isfuzzy=true\n  (AppExceptions | where AppRoleName == '{AgentService}' | project TimeGenerated, Signal=\"exception\", Type=ExceptionType, Severity=SeverityLevel),\n  (AppTraces | where AppRoleName == '{AgentService}' and SeverityLevel >= 3 | project TimeGenerated, Signal=\"trace\", Type=tostring(Properties[\"fcg.error_code\"]), Severity=SeverityLevel)\n| order by TimeGenerated desc\n| take 100\n",
                     "size": 0,
                     "queryType": 0,
                     "resourceType": "microsoft.operationalinsights/workspaces"
@@ -9150,7 +9296,7 @@
                   "content": {
                     "version": "KqlItem/1.0",
                     "title": "Moderation and safety signals",
-                    "query": "AppMetrics\r\n| where AppRoleName == '{AgentService}'\r\n| where Name == \"fcg.moderation.decisions\"\r\n| extend Stage=tostring(Properties[\"fcg.stage\"]), Reason=tostring(Properties[\"fcg.moderation_reason\"]), Outcome=tostring(Properties[\"fcg.outcome\"]), AgentVersion=tostring(Properties[\"fcg.agent_version\"])\r\n| where '{AgentVersion}' == '*' or AgentVersion == '{AgentVersion}'\r\n| summarize Decisions=sum(Sum) by Stage, Reason, Outcome, AgentVersion, bin(TimeGenerated, 1h)\r\n| order by TimeGenerated desc\r\n",
+                    "query": "AppMetrics\n| where AppRoleName == '{AgentService}'\n| where Name == \"fcg.moderation.decisions\"\n| extend Stage=tostring(Properties[\"fcg.stage\"]), Reason=tostring(Properties[\"fcg.moderation_reason\"]), Outcome=tostring(Properties[\"fcg.outcome\"]), AgentVersion=tostring(Properties[\"fcg.agent_version\"])\n| where '{AgentVersion}' == '*' or AgentVersion == '{AgentVersion}'\n| summarize Decisions=sum(Sum) by Stage, Reason, Outcome, AgentVersion, bin(TimeGenerated, 1h)\n| order by TimeGenerated desc\n",
                     "size": 0,
                     "queryType": 0,
                     "resourceType": "microsoft.operationalinsights/workspaces"
@@ -9162,7 +9308,7 @@
                   "content": {
                     "version": "KqlItem/1.0",
                     "title": "ACA container restart and unhealthy events",
-                    "query": "[replace('ContainerAppSystemLogs_CL\r\n| where ContainerAppName_s == ''__CONTAINER_APP_NAME__''\r\n| where Reason_s in (\"Restarting\", \"Unhealthy\", \"HealthProbeFailed\") or Log_s has_any (\"restart\", \"unhealthy\", \"probe failed\")\r\n| project TimeGenerated, RevisionName_s, Reason_s, Log_s\r\n| order by TimeGenerated desc\r\n| take 100\r\n', '__CONTAINER_APP_NAME__', parameters('containerAppName'))]",
+                    "query": "[replace('ContainerAppSystemLogs_CL\n| where ContainerAppName_s == ''__CONTAINER_APP_NAME__''\n| where Reason_s in (\"Restarting\", \"Unhealthy\", \"HealthProbeFailed\") or Log_s has_any (\"restart\", \"unhealthy\", \"probe failed\")\n| project TimeGenerated, RevisionName_s, Reason_s, Log_s\n| order by TimeGenerated desc\n| take 100\n', '__CONTAINER_APP_NAME__', parameters('containerAppName'))]",
                     "size": 0,
                     "queryType": 0,
                     "resourceType": "microsoft.operationalinsights/workspaces"
@@ -9175,10 +9321,10 @@
                 "[parameters('logAnalyticsWorkspaceResourceId')]"
               ]
             },
-            "invocationAdverseQuery": "[format('AppMetrics\r\n| where AppRoleName == ''{0}''\r\n| where Name == \"fcg.generation.requests\"\r\n| where tostring(Properties[\"fcg.outcome\"]) in (\"failed\", \"timed_out\", \"throttled\", \"held\", \"refused\", \"routing_defer\")\r\n| summarize AdverseOutcomes=sum(Sum)\r\n| where AdverseOutcomes >= {1}\r\n| project Breach=1\r\n', parameters('agentServiceName'), parameters('invocationAdverseThreshold'))]",
-            "modelThrottleQuery": "[format('AppMetrics\r\n| where AppRoleName == ''{0}''\r\n| where Name == \"fcg.dependency.attempts\"\r\n| where tostring(Properties[\"fcg.dependency\"]) == \"foundry_text\"\r\n| where tostring(Properties[\"fcg.outcome\"]) == \"throttled\"\r\n| summarize Throttles=sum(Sum)\r\n| where Throttles >= {1}\r\n| project Breach=1\r\n', parameters('agentServiceName'), parameters('modelThrottleThreshold'))]",
-            "dependencyFailureQuery": "[format('AppMetrics\r\n| where AppRoleName == ''{0}''\r\n| where Name == \"fcg.dependency.attempts\"\r\n| where tostring(Properties[\"fcg.dependency\"]) == \"foundry_text\"\r\n| where tostring(Properties[\"fcg.outcome\"]) in (\"failed\", \"timed_out\")\r\n| summarize DependencyFailures=sum(Sum)\r\n| where DependencyFailures >= {1}\r\n| project Breach=1\r\n', parameters('agentServiceName'), parameters('dependencyFailureThreshold'))]",
-            "containerRestartQuery": "[format('ContainerAppSystemLogs_CL\r\n| where ContainerAppName_s == ''{0}''\r\n| where Reason_s in (\"Restarting\", \"Unhealthy\", \"HealthProbeFailed\") or Log_s has_any (\"restart\", \"unhealthy\", \"probe failed\")\r\n| summarize RestartOrUnhealthyEvents=count()\r\n| where RestartOrUnhealthyEvents >= {1}\r\n| project Breach=1\r\n', parameters('containerAppName'), parameters('containerRestartThreshold'))]",
+            "invocationAdverseQuery": "[format('AppMetrics\n| where AppRoleName == ''{0}''\n| where Name == \"fcg.generation.requests\"\n| where tostring(Properties[\"fcg.outcome\"]) in (\"failed\", \"timed_out\", \"throttled\", \"held\", \"refused\", \"routing_defer\")\n| summarize AdverseOutcomes=sum(Sum)\n| where AdverseOutcomes >= {1}\n| project Breach=1\n', parameters('agentServiceName'), parameters('invocationAdverseThreshold'))]",
+            "modelThrottleQuery": "[format('AppMetrics\n| where AppRoleName == ''{0}''\n| where Name == \"fcg.dependency.attempts\"\n| where tostring(Properties[\"fcg.dependency\"]) == \"foundry_text\"\n| where tostring(Properties[\"fcg.outcome\"]) == \"throttled\"\n| summarize Throttles=sum(Sum)\n| where Throttles >= {1}\n| project Breach=1\n', parameters('agentServiceName'), parameters('modelThrottleThreshold'))]",
+            "dependencyFailureQuery": "[format('AppMetrics\n| where AppRoleName == ''{0}''\n| where Name == \"fcg.dependency.attempts\"\n| where tostring(Properties[\"fcg.dependency\"]) == \"foundry_text\"\n| where tostring(Properties[\"fcg.outcome\"]) in (\"failed\", \"timed_out\")\n| summarize DependencyFailures=sum(Sum)\n| where DependencyFailures >= {1}\n| project Breach=1\n', parameters('agentServiceName'), parameters('dependencyFailureThreshold'))]",
+            "containerRestartQuery": "[format('ContainerAppSystemLogs_CL\n| where ContainerAppName_s == ''{0}''\n| where Reason_s in (\"Restarting\", \"Unhealthy\", \"HealthProbeFailed\") or Log_s has_any (\"restart\", \"unhealthy\", \"probe failed\")\n| summarize RestartOrUnhealthyEvents=count()\n| where RestartOrUnhealthyEvents >= {1}\n| project Breach=1\n', parameters('containerAppName'), parameters('containerRestartThreshold'))]",
             "alertDefinitions": [
               {
                 "name": "agent-invocation-adverse",

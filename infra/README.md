@@ -232,6 +232,55 @@ Or via the root orchestrator with approval gates:
 ./deploy.sh agent --environment prod --approve-change --approve-prod
 ```
 
+### DEV in Sweden Central alongside the existing DEV (issue #194)
+
+The same IaC recreates DEV in a separate resource group without changing the
+existing DEV. Use a separate checkout or worktree so its `.azure/` state stays
+isolated. The azd environment can keep the logical name `dev`, but never copy
+the old DEV's `.azure/dev/.env` (images, agent triplet, secrets).
+
+```bash
+azd env new dev
+azd env set AZURE_SUBSCRIPTION_ID <bmoussaudms-subscription-id>
+azd env set AZURE_LOCATION swedencentral
+azd env set AZURE_RESOURCE_GROUP rg-fcag-dev-swedencentral
+# Separate Entra registration so the old DEV callbacks are not overwritten.
+azd env set ENTRA_APP_UNIQUE_NAME fantasy-cards-generator-dev-swedencentral
+# Use the available Data Zone quota for the text deployment in this DEV only.
+azd env set AI_FOUNDRY_TEXT_DEPLOYMENT_SKU_NAME DataZoneStandard
+# MAI on the IaC-managed Foundry account, selected by default; GPT stays deployed.
+azd env set AI_FOUNDRY_MAI_IMAGE_DEPLOYMENT_ENABLED true
+azd env set FOUNDRY_IMAGE_MODEL MAI-Image-2.7
+azd env set IMAGE_SIZE 1024x1536
+azd env set CARD_ORCHESTRATOR_ENABLE_PREREQUISITES true
+azd env set CARD_ORCHESTRATOR_CREATE_REGISTRY_CONNECTION true
+```
+
+These commands configure only the isolated azd environment. Review hook effects
+before an explicitly authorized `azd provision --preview`; provisioning and
+`azd up` require separate authorization after review.
+
+| Setting | Default | Effect |
+|---|---|---|
+| `AI_FOUNDRY_TEXT_DEPLOYMENT_SKU_NAME` | `GlobalStandard` | SKU for the text deployment; use `DataZoneStandard` for the target DEV. |
+| `AI_FOUNDRY_MAI_IMAGE_DEPLOYMENT_ENABLED` | `false` | Deploys `MAI-Image-2.7` (format `Microsoft`, `GlobalStandard`) on the managed account after `gpt-image-2`. |
+| `AI_FOUNDRY_MAI_IMAGE_MODEL_VERSION` | `2026-11-02` | MAI model version; verify against the live catalog. |
+| `AI_FOUNDRY_MAI_IMAGE_DEPLOYMENT_CAPACITY` | `1` | MAI capacity; verify against subscription quota. |
+| `FOUNDRY_IMAGE_ENDPOINT` | empty | Optional override. Empty with MAI selected and deployed resolves to `https://<managed-account>.services.ai.azure.com`; empty with MAI selected but not deployed still fails provisioning. |
+| `IMAGE_SIZE` | empty | Empty keeps the model default (`1104x928` MAI, `1024x1536` GPT). |
+| `ENTRA_APP_UNIQUE_NAME` | empty | Empty keeps `fantasy-cards-generator-<env>`; set a distinct value for a coexisting environment. |
+
+The web identity already holds `Cognitive Services User` on the managed account,
+which covers MAI inference without an extra role. Switching to GPT image is an
+explicit operator change (`azd env set FOUNDRY_IMAGE_MODEL gpt-image-2` then
+`azd provision`); there is no automatic fallback. The text model's
+`DataZoneStandard` SKU does not guarantee processing within Sweden. Both image
+deployments remain `GlobalStandard`, which can process inference outside Sweden
+or the EU, so this placement is not a whole-application residency guarantee.
+Cutover, rollback, and retirement of the old DEV follow
+[the implementation plan](../docs/dev-sweden-central-implementation-plan.md)
+and require separate authorization.
+
 ### Targeted deployments
 
 Both services can be deployed independently from the repository root:
@@ -320,9 +369,10 @@ azd up
 ```
 
 The text deployment capacity default is environment-specific: dev uses 10
-`GlobalStandard` capacity units, while prod remains at 1 until separately
-reviewed. For a dev-only repair that must not reprovision the application or
-other shared resources, preview and deploy
+capacity units, while prod remains at 1 until separately reviewed. The SKU
+defaults to `GlobalStandard`; the Sweden Central DEV configuration above
+explicitly selects `DataZoneStandard`. For a dev-only repair that must not
+reprovision the application or other shared resources, preview and deploy
 [`text-model-capacity.bicep`](./text-model-capacity.bicep) at resource-group
 scope. The leaf updates only the existing text deployment and pins its current
 model, version, SKU, Responsible AI policy, and version-upgrade policy. It has

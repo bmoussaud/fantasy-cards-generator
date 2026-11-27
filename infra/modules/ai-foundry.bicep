@@ -77,6 +77,27 @@ param imageDeploymentSkuName string = 'GlobalStandard'
 @description('Capacity units for the image deployment. Confirm against real quota availability before production rollout.')
 param imageDeploymentCapacity int = 1
 
+@description('Deploy the MAI image model on this account in addition to the GPT image deployment.')
+param maiImageDeploymentEnabled bool = false
+
+@description('Deployment name for the MAI image model.')
+param maiImageDeploymentName string = 'MAI-Image-2.7'
+
+@description('MAI image model name to deploy. Verify availability in the target region and subscription before rollout.')
+param maiImageModelName string = 'MAI-Image-2.7'
+
+@description('MAI image model version to deploy.')
+param maiImageModelVersion string = '2026-11-02'
+
+@description('ARM model format for the MAI image deployment.')
+param maiImageModelFormat string = 'Microsoft'
+
+@description('SKU name for the MAI image deployment.')
+param maiImageDeploymentSkuName string = 'GlobalStandard'
+
+@description('Capacity units for the MAI image deployment. Confirm against real quota availability before rollout.')
+param maiImageDeploymentCapacity int = 1
+
 @description('Optional tags shared by Azure AI Foundry resources.')
 param tags object = {}
 
@@ -141,6 +162,26 @@ resource imageModelDeployment 'Microsoft.CognitiveServices/accounts/deployments@
       format: 'OpenAI'
       name: imageModelName
       version: imageModelVersion
+    }
+  }
+}
+
+// Serialized after the GPT image deployment to avoid concurrent deployment conflicts on the account.
+resource maiImageModelDeployment 'Microsoft.CognitiveServices/accounts/deployments@2025-06-01' = if (maiImageDeploymentEnabled) {
+  parent: foundryAccount
+  name: maiImageDeploymentName
+  dependsOn: [
+    imageModelDeployment
+  ]
+  sku: {
+    capacity: maiImageDeploymentCapacity
+    name: maiImageDeploymentSkuName
+  }
+  properties: {
+    model: {
+      format: maiImageModelFormat
+      name: maiImageModelName
+      version: maiImageModelVersion
     }
   }
 }
@@ -254,3 +295,4 @@ output aiFoundryProjectResourceId string = aiFoundryProject.id
 output aiFoundryProjectPrincipalId string = aiFoundryProject.identity.principalId
 output aiFoundryTextDeploymentName string = textDeploymentName
 output aiFoundryImageDeploymentName string = imageDeploymentName
+output aiFoundryMaiImageDeploymentName string = maiImageDeploymentEnabled ? maiImageModelDeployment.name : ''
