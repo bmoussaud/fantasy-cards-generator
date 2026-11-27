@@ -231,6 +231,30 @@ def _nested_resource(template: dict, module_name: str, name_parameter: str) -> d
     return next(r for r in module_template["resources"] if r["name"] == expected_name)
 
 
+def test_foundry_text_sku_is_configurable_through_azd_without_changing_image_skus() -> None:
+    parameters = json.loads((REPO_ROOT / "infra" / "main.parameters.json").read_text())[
+        "parameters"
+    ]
+    compiled = _compiled_main_template()
+    module_parameters = compiled["resources"]["aiFoundry"]["properties"]["parameters"]
+    text = _nested_resource(compiled, "aiFoundry", "textDeploymentName")
+    image = _nested_resource(compiled, "aiFoundry", "imageDeploymentName")
+    mai = _nested_resource(compiled, "aiFoundry", "maiImageDeploymentName")
+
+    assert parameters["aiFoundryTextDeploymentSkuName"]["value"] == (
+        "${AI_FOUNDRY_TEXT_DEPLOYMENT_SKU_NAME=GlobalStandard}"
+    )
+    assert compiled["parameters"]["aiFoundryTextDeploymentSkuName"]["defaultValue"] == (
+        "GlobalStandard"
+    )
+    assert module_parameters["textDeploymentSkuName"]["value"] == (
+        "[parameters('aiFoundryTextDeploymentSkuName')]"
+    )
+    assert text["sku"]["name"] == "[parameters('textDeploymentSkuName')]"
+    assert image["sku"]["name"] == "[parameters('imageDeploymentSkuName')]"
+    assert mai["sku"]["name"] == "[parameters('maiImageDeploymentSkuName')]"
+
+
 def test_mai_image_deployment_is_opt_in_on_the_managed_foundry_account() -> None:
     parameters = json.loads((REPO_ROOT / "infra" / "main.parameters.json").read_text())[
         "parameters"
